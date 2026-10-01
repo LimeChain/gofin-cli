@@ -1,0 +1,36 @@
+# Isolated Ethereum regression verification
+
+Run the deployed-contract integration harness from the repository root:
+
+```sh
+npm ci
+npx tsx scripts/fork-verification.ts
+```
+
+The script uses Foundry Anvil at `~/.foundry/bin/anvil`. Set `FIN_ANVIL_PATH` to another installed executable when needed. The verified tool version is Anvil `1.6.0-nightly`, commit `099390013af6606c37c2034413d59b4b698b307d`. It starts its own node on `127.0.0.1:18545`; that port must be free. Node 22.13 or newer is required for the operation store.
+
+The fixture is an Ethereum mainnet fork pinned to block **26099326**, hash `0xe24db6a0bd48918550f6a7c35c0e129172816d1f6641ac16a37459627551f7bf`, timestamp `1790880107`, through the [official public dRPC Ethereum endpoint](https://drpc.org/docs/ethereum-api), `https://eth.drpc.org`. The earlier PublicNode run succeeded while the block was recent; its anonymous endpoint later returned HTTP 403 requiring authenticated archive access. The harness retains the same block and hash and uses the verified public archive alternative. Upstream availability and archived-state access are prerequisites. Every pool, reserve, balance, quote, and oracle read comes from the local fork. Anvil advances subsequent transaction blocks by 12 seconds so the fixture's timestamp and oracle freshness checks remain reproducible.
+
+The harness generates two ephemeral synthetic signers and sets their local native balances to `0.024 ETH` and `0.001 ETH`. It verifies the localhost URL and `anvil_metadata` fork identity before setup and each signature. It does not read `.context/.ai.env`, use production credentials, broadcast to mainnet, or fund the fixture through an exchange. An injected fake authorizer exists only in this guarded script. It is useful for execution regressions and proves neither Touch ID nor credential isolation.
+
+The concrete protocol choices are the original Uniswap v3 SwapRouter's `exactInputSingle`, QuoterV2, and the Aave v3 Ethereum Pool. Deployed addresses come from Fin's mainnet configuration. WETH and USDC are representative fixtures, with decimals and contract code read from the fork. Allowances use exact finite amounts and are independent Fin operations. Repay-all uses `uint256.max` for variable debt with a finite Pool allowance no greater than the explicit `maxAmount`, so accrued debt can be cleared within the approved spending cap. Withdrawals use exact bounded amounts; refreshed dust cleanup is a separate write with a separate mock approval.
+
+The sequence exercises native and ERC-20 transfers and returns, ETH wrapping, Uniswap forward and reverse swaps, Aave supply, collateral toggles, variable borrowing, accrued-debt repayment, principal withdrawal and exact dust cleanup, restoration of all test-modified allowances, and WETH unwrapping. Each successful request is repeated with the same identity and checked to return the same operation and transaction hash. Native amounts, token transfers, swap output bounds, Aave events and post-state, gas, receipt identity and confirmations are reconciled by the adapter.
+
+The real RunCoordinator, BudgetGuard and exact-unit inventory ledger govern every fork write with `liveTestOnly` enabled in this isolated harness. The plan allocates the two native holdings, reserves $4 for borrowed proceeds and $30 from the source funds for complete return costs, and records the complete unwind before execution. Current allocation prices are checked before approval and submission. Each completed write must settle its inventory reservation before the next write. The coordinator must independently finish with `restored`, no pending inventory, and no financial differences. Three additional requests prove rejection before any mock approval or transaction: an untracked recipient, spending authority exceeding current selected token holdings, and a movement invading the funded return-cost reserve.
+
+Each run writes a timestamped detailed result to ignored `.context/test-runs/fork-<UTC timestamp>.json`, so later failures cannot overwrite successful evidence. `.context/fork-verification.json` contains the latest result and its archived report path. Reports include initial/final balances and positions, operation outcomes and transaction hashes, gas costs, the fixture version, the complete plan and ledger, and explicit coordinator restoration status. A failed or unresolved financial operation makes the run fail. Accrued supply dust is reported as incomplete restoration; it is never treated as a completed round trip. The cleanup path must produce zero test-created debt and supply and restore allowances before restoration can pass. Fork success is separate from the production-account/mainnet acceptance required by the [live-test contract](README.md#live-test-contract).
+
+Verified again on **1 October 2026 at 22:30 UTC (2 October in the local timezone)** after the exact supply-backing fix: 24 Fin writes completed and their duplicate logical requests returned the existing operation/transaction. The deterministic 12-second block fixture needed two additional exact dust withdrawals. Final WETH and USDC wallet holdings, Aave supplied units and variable debt, and all four test-modified allowances were zero. Recipient account allocation reconciled exactly after its gas costs. Source allocation reconciled after recorded gas and the reverse-swap/net-interest cost. Synthetic initial allocation was $67.831, with $3 borrowed temporarily. The report recorded total gas of `0.002828205402979452 ETH` and residual reverse-swap/net-interest cost of `0.000000400424974183 ETH`; these are observed fixture costs, not future mainnet estimates.
+
+An intervening run failed after nine synthetic writes because inventory tracked supplied underlying instead of exact aToken backing; collateral authorization stopped before submission. That run remains failed. The reviewed revision-5 supply proof now verifies the underlying transfer, Supply and Mint events, historical scaled balances, mint and normalized-income indices, and observed backing using exact deployed floor arithmetic. A different revision, missing proof, or unrelated position decrease remains unresolved. The later successful run exercises this fix; isolated node disposal never counts as financial restoration.
+
+Exit codes are `0` for successful operation verification with complete synthetic restoration, `1` for a failure, and `2` when the operations succeed but supply restoration remains unresolved. Public-node access or a changed Foundry/RPC behavior can block reproduction; do not replace the pinned environment with current mainnet data silently.
+
+Run deterministic mocked failure checks separately:
+
+```sh
+npx tsx --test tests/ethereum.test.ts
+```
+
+Those cover precision errors, wrong chain, price freshness and unavailable prices, spender authority and exposure valuation, fees, slippage/expiry/allowance failures, reserve caps and paused/frozen markets, bounded accrued repayment, signing mismatches, missing protected signing, durable identity before broadcast, timeouts, canonical receipts, insufficient confirmations, mismatched effects, and remaining debt. The mocked suite does not stand in for deployed-contract or biometric verification.

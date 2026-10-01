@@ -1,0 +1,70 @@
+# Foundational verification — 1–2 October 2026
+
+The foundational implementation is working, with automated financial and security regressions. **Complete production acceptance remains pending.** This report distinguishes implementation, isolated tests, production reads, real financial writes, and human biometric verification. Restoring a failed attempt does not turn its unexecuted acceptance cases into passes.
+
+## Implemented and reproducible
+
+The TypeScript CLI uses shared strict schemas and adapter discovery, durable SQLite identities, exact-unit inventory and custody/conversion provenance, fresh independent USD valuation, complete baseline snapshots, and explicit return plans. Binance supports main-authorized SPOT consolidation, withdrawals and deposits. Ethereum supports wallets, Uniswap v3 and Aave v3. Every supported product write goes through the protected broker and a fresh native Touch ID approval, including finite allowances and cleanup. Architecture and extension decisions are recorded in [the implementation plan](../implementation-plan.md).
+
+Run `npm ci`, `npm run check`, `npm run format:check`, `npm run build`, and `npm test`. The final source passes **328 automated tests, with zero failures or skips**, plus strict source checks, build and formatting. The native hardened build and read-only Touch ID probe also pass. Automated fixtures use synthetic identities/signers and no production credentials or financial submissions. They cover strict discovery/validation, quantities and aliases, real endpoint shapes, fee/minimum/permission/Travel Rule failures, all-market Aave exposure, oracle freshness, reserve eligibility and health, exact approved transaction payloads, malformed/unrelated receipts, canonical finality, response loss, restart, duplicate prevention, partial consolidation, unknown outcomes, limits, provenance and restoration refusal. CI repeats the source/build/fixture checks on macOS.
+
+Fee headroom remains within the caller's explicit total fee ceiling and the originally approved caps. Confirmed costs replace maximum fee reservations only after exact inventory settlement; pending and unknown outcomes keep their full reserves. Conditional withdrawal preparation may prove funding from selected child balances, but cannot authorize a write before actual consolidation is observed. Return completion requires usable exchange credit and validated scoped inventory effects; transient reads or mismatched evidence remain reconcilable through the original identity. Operation status and inventory/USD settlement commit atomically, with regression coverage for restart and database rollback. Definitive Binance failures can permit restoration only after matching validated settlement and an exact independent baseline.
+
+## Production reads and financial allocation
+
+Ethereum chain ID 1, configured trusted public RPCs, native/WETH/USDC holdings, all Aave reserves and relevant allowances were observed privately. Uniswap forward/inverse quotes, Aave eligibility/liquidity/caps, projected health, token identity and observed USD prices passed read-only preflight. Baselines, exact account mappings, operation identities and full evidence remain in ignored private files; this report contains no credentials, wallet addresses, account emails or unredacted account balances.
+
+Binance authenticated production access works after the user's IP update. Master/child hierarchy, current API permissions, exact V4 child asset fields, balances, orders and funding histories, Ethereum USDC deposit instructions, network minimums/fees and a NIL Travel Rule questionnaire were read successfully. The earlier -2015 access error is resolved. The provided child email is configured privately. A fresh complete read-only snapshot has no pending movements. Conditional Binance funding preparation now succeeds with zero financial writes, a fee-inclusive source ceiling of $10 and at most five submissions including a bounded return retry. Exact venue balances retain any subatomic residual separately from the conservative Ethereum-unit spendable projection; residual changes cannot pass restoration.
+
+The selected cumulative native pool is capped at **$65**, including gas consumed in earlier restored attempts. The temporary borrowed-proceeds reserve is **$4** and the Binance source reserve is **$10**: **$79 total** before further price checks. The Ethereum attempt funds **$47** of its selected native pool for the full planned unwind and a bounded recovery transaction. Gas is part of selected funds, rather than an extra allocation. Each write revalues its movement, maximum fees and whole allocation; **$100 per movement and total allocation are enforced**.
+
+The user explicitly authorized a temporary mainnet testing phase without Touch ID. Its ignored lead-owned runner uses the actual adapters, operation engine, coordinator and inventory checks. This phase provides no biometric or protected credential-boundary evidence and adds no product flag or environment approval bypass.
+
+## Real Ethereum attempts and restoration
+
+Three partial production attempts completed eight total writes: wrapping, one finite router allowance, its revocation, and unwrapping. Each successful action was repeated with its original request identity and reused the existing transaction. Independent final snapshots and inventory checks reported restored for every attempt, with no open debt, supply, modified allowances, pending financial outcomes or unexplained differences.
+
+| Attempt | Forward failure | Completed writes | Confirmed gas |
+|---|---|---:|---:|
+| 1 | Swap preview exceeded the original $0.75 fee ceiling; no swap submitted. | 4 | 0.000472386693585586 ETH |
+| 2 | Fee conditions exceeded the approved cap before signing; no approval submitted. | 2 | 0.000074633220074478 ETH |
+| 3 | A canonical zero priority fee decoded as an absent field and failed strict signing comparison; no approval broadcast. | 2 | 0.000043270975569550 ETH |
+
+These consumed **0.000590290889229614 ETH** in confirmed gas. All costs were reconciled from the original canonical transaction identities and charged to the cumulative selected pool. The first failed fee ceiling remains a verified guardrail failure; the later zero-field and headroom defects were fixed and regression tested. Unsubmitted failures were never described as completed movements.
+
+The fourth attempt completed **17 mainnet writes and 17 duplicate checks**, with the forward sequence and full unwind independently restored. It wrapped ETH, swapped WETH for USDC, supplied WETH, disabled and re-enabled collateral, borrowed USDC, repaid the complete accrued debt, withdrew principal and two exact dust amounts, reversed the swap, restored allowances and unwrapped WETH. All 67 discovered Aave reserves and the four profile allowances were checked at finish; debt, supply, modified allowances, pending outcomes, inventory reservations and unexplained differences were zero.
+
+The reverse-swap preview initially failed its slippage bound before submission. A deliberate new request with a fresh quote resumed cleanup after a process restart; it did not resubmit an uncertain transaction. A slow zero-tip approval was reconciled through its original transaction identity without replacement or rebroadcast. The final reverse swap, allowance revocation and unwrapping exercised the new 0.01 gwei priority-fee floor. Earlier writes used the preceding implementation. Subsequent exact venue precision, Aave mint-backing and terminal recovery changes are separately regression verified below; the production run does not claim to exercise code added afterward.
+
+Attempt four consumed **0.000736553849350802 ETH** in confirmed gas. Its combined conversion/protocol economic effect was a net **0.000001204473004102 ETH gain**, including market, swap-fee, supply-yield and debt-interest effects rather than claiming those costs were zero. Its native balance decreased by **0.000735349376346700 ETH**. Across all four attempts, **25 writes and 25 duplicate checks** completed, confirmed gas totaled **0.001326844738580416 ETH**, and the native balance decreased by **0.001325640265576314 ETH** after all assets and positions were returned. The largest fee-inclusive preview was **$12.633507** across all attempts (**$12.111658** in attempt four), within the movement and cumulative allocation limits. No real financial cleanup remains outstanding.
+
+## Isolated integration and human boundary
+
+An earlier deployed-contract mainnet fork completed 24 writes and their duplicate checks, including native/ERC20 returns, swaps, Aave supply/collateral/borrow/repay, exact dust withdrawals, allowance restoration and unwrapping. It restored the synthetic allocation with zero debt/supply and reconciled costs. This successful run predates subsequent safety fixes. Later attempts encountered public RPC HTTP 403/408 before writes; a further run reached nine synthetic writes and exposed an exact Aave supply-mint backing discrepancy before collateral authorization. That failed run was not accepted as restored. The deployed revision-5 arithmetic is now proved exactly, including its underlying debit, scaled mint, index and observed position backing. A fresh fork run completed 24 writes, 24 original-identity duplicate checks and three preapproval guard rejections, then independently restored the entire synthetic baseline with no differences. Its recorded gas was 0.002828205402979452 ETH and its net conversion/interest cost was 0.000000400424974183 ETH. The failed run remains recorded as failed; the subsequent pass demonstrates the fix. See [the fork environment and evidence](../testing/fork.md); the earlier pass does not establish current production acceptance.
+
+The native helper builds with hardened runtime and its read-only probe reports Touch ID available, with **no approval requested**. Synthetic decline/binding/expiry/replay and source-mode-denial tests pass. Human acceptance/decline, per-cleanup prompts, administrator installation, and actual installed signer/credential bypass checks remain unrun. The originally supplied plaintext credential file remains agent-readable during the explicitly authorized phase. Credential isolation requires human provisioning and removal of readable copies; earlier access cannot be retroactively protected. Follow [protected setup](../security.md).
+
+## Acceptance coverage
+
+| Cases | Observed evidence | Remaining acceptance |
+|---|---|---|
+| C01–C03, C10 | CLI discovery/schema/preview and strict validation fixtures pass; production reads pass. | Fresh-agent installed-skill journey remains unrun. |
+| C04–C05, C09, E11 | Synthetic denial, binding, expiry, replay and source-mode rejection pass. | Human biometric and installed credential/signer boundary remain unrun. |
+| C06–C08, E10 | Original identities reused for 25 mainnet writes; cleanup resumed after restart. Controlled response loss and concurrent requests pass in fixtures. | Real biometric approvals remain unrun; no deliberate production response-loss test. |
+| B01 | Production hierarchy, balances, permissions, deposit route and funding reads pass. | Reads do not establish executable withdrawal access. |
+| B02–B05, B11, E12 | Funding/return implementation and controlled accounting fixtures; bounded production preparation passes. | Exchange financial round trip blocked by withdrawal access; two-child case lacks the second child; Kraken is unimplemented. |
+| B06–B10 | Controlled partial failures, original-identity reconciliation, pending credit, precision/permission failures and exact cleanup refusal pass. | These failure cases have not been induced in production. |
+| E01–E02 | Mainnet discovery passes; native/ERC20 transfer returns pass on the isolated fork. | Production recipient return signer missing. |
+| E03–E07, E13 | Complete mainnet financial sequence and restoration under the explicitly authorized temporary non-biometric phase; current fork covers exact supply backing. | Full acceptance still requires protected per-write human approval. |
+| E08–E09, C11 | Automated failure/limit/restoration guards pass; mainnet fee/slippage failures stopped before submission and all real costs reconciled. | Revert/unknown outcomes are controlled-test evidence; broader and biometric acceptance remain pending. |
+
+## Blocked and unrun acceptance
+
+- Binance's production address list did not contain the configured USDC/Ethereum receiving wallet as whitelisted. Whitelisting or confirmation that API withdrawals outside that list are allowed is required before consolidation/withdrawal. No Binance financial write has occurred.
+- A second production receiving-wallet return signer is unavailable; native/ERC20 wallet-to-wallet live round trips remain blocked. Self transfers remain rejected.
+- Only one child account is configured. Two-child consolidation and partial live redistribution are unrun; isolated failure/recovery fixtures cover their accounting behavior.
+- The combined exchange→wallet→protocol→exchange round trip and installed biometric security cases remain pending. No incomplete cleanup can count as a pass.
+
+The practical beta also rejects sub-authorized funding, unsupported Travel Rule questionnaires, unreviewed asset valuation/fee behavior, and native Binance batch/internal payouts without a reviewed trace verifier. Its verification profile uses scoped representative assets/spenders and isolated Aave positions. Broader CCXT/Kraken/Derive/Solana/Jupiter/Kamino delivery inventory remains visible but unimplemented; bridges, Lighter, MCP and unattended approval remain deferred. Distinct configured Binance credential handles must be mapped to distinct physical master accounts during provisioning.
+
+This commit reports a foundation and its actual evidence. Complete acceptance requires the blocked access/signers and the user's joint Touch ID session. That session must refresh the private snapshot, prices and unwind plan, retain the original cumulative test budget including earlier costs, and approve each concrete write and cleanup separately.

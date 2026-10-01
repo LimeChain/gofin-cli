@@ -1,1 +1,9 @@
 .context/
+node_modules/
+dist/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.DS_Store
+native/.build/
+coverage/
