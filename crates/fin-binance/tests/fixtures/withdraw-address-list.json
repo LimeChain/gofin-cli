@@ -1,0 +1,31 @@
+[
+  {
+    "address": "0x1111111111111111111111111111111111111111",
+    "addressTag": "",
+    "coin": "ETH",
+    "name": "synthetic-wallet",
+    "network": "ETH",
+    "origin": "synthetic",
+    "originType": "others",
+    "whiteStatus": true
+  },
+  {
+    "address": "0x2222222222222222222222222222222222222222",
+    "addressTag": null,
+    "coin": "ETH",
+    "name": "synthetic-missing-status",
+    "network": "ETH",
+    "origin": "synthetic",
+    "originType": 1
+  },
+  {
+    "address": "0x3333333333333333333333333333333333333333",
+    "addressTag": "",
+    "coin": "ETH",
+    "name": "synthetic-malformed-status",
+    "network": "ETH",
+    "origin": "synthetic",
+    "originType": "others",
+    "whiteStatus": "true"
+  }
+]

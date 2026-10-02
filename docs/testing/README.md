@@ -1,6 +1,20 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Existing TS results are in the [foundation report](../reports/foundation.md). Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. Proposed Rust commands and tests become runnable only when implemented.
+These are acceptance specifications, not claims that every case passed. Existing TS results are in the [foundation report](../reports/foundation.md). Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. The Rust CLI and workspace tests are implemented; use its installed discovery for current schemas instead of the historical TS syntax.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+sh scripts/verify-rust-fork.sh
+```
+
+The default workspace tests are offline and synthetic. The separately invoked
+fork script requires Anvil, fetches a fixed public Ethereum block, and uses only
+synthetic local keys behind loopback/chain/block guards. It does not load private
+configuration or broadcast to production. Node disposal after a failure does not
+establish financial restoration. Actual human checks are in the
+[Rust handoff checklist](rust-human-handoff.md).
 
 ## Rust implementation and later human verification
 
@@ -11,7 +25,7 @@ The agreed order is to finish the Rust implementation and reproducible verificat
 - Record Rust toolchain/dependency versions, commit, compiled artifact layout, build/install procedure, and actual test commands. Default tests use unmistakably synthetic credentials and never load production keys or submit mainnet transactions.
 - Port meaningful financial regression cases from TS: exact quantities and asset/account identities, permission/fee/price limits, receipt proof, debt/accrual/rounding, provenance, full restoration, response loss, concurrency, restart, and duplicate prevention. TS results are behavioral references, not Rust passes.
 - Verify the typed effect boundary and atomic ledger/terminal settlement, including confirmed failures with spent costs and mismatched evidence retaining reservations. Test migrations and adapter/evidence versions with persisted pending identities; no upgrade may invent a replacement request or replay a write.
-- Verify pinned CCXT Rust authentication/funding mappings and exact decimal-string request/response paths. Verify Alloy preparation/fillers and the actual signed envelope against the fixed approved payload. No policy/financial quantity may depend on a floating-point round trip.
+- Verify the implemented Binance HTTP funding mappings, HMAC/RSA/Ed25519 signatures, and exact decimal-string request/response paths. This beta uses typed fixed REST endpoints rather than a Rust CCXT dependency. Verify Alloy preparation and the actual signed envelope against the fixed approved payload. No policy/financial quantity may depend on a floating-point round trip.
 - Complete offline CLI/schema/example/onboarding tests, synthetic terminal enrollment and configuration authorization tests, secret redaction, cancellation, permission failures, no-TTY/agent invocation refusal, service lifecycle, and unavailable OS-provider behavior.
 - Record a fresh-agent guidance rehearsal using installed help/schema only, with no inherited private configuration or chat context. Synthetic enrollment and a rehearsal do not establish actual human credential isolation.
 - Execute a recorded fixed mainnet fork with local synthetic signers, independent local/fork identity checks before signing, failure injection, duplicate/restart checks, and complete synthetic restoration. Do not silently change the fixed environment or use a real key because a fixture failed.

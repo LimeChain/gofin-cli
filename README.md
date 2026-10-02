@@ -10,21 +10,77 @@ Fin combines exchange and on-chain order-book trading, wallets and DeFi, and sha
 - Open source; license selection is pending.
 - First write experience: interactive macOS with fresh Touch ID authorization for every write.
 
-## Current status
+## Rust implementation in progress
+
+The compiled workspace now contains the public `fin` client, protected broker,
+exact-unit financial domain, durable SQLite engine, Binance funding adapter,
+Ethereum wallet/Uniswap/Aave adapter, and macOS authorization and credential
+providers. Offline onboarding discovery works before installation or accounts.
+End-to-end Rust acceptance is still in progress: conditional unwind planning,
+fork round trips, production/mainnet verification, human onboarding, and Touch ID
+must be reported separately. Historical TypeScript results do not establish Rust
+results. The [Rust verification report](docs/reports/rust-foundation.md) records
+the current passes, failures and outstanding checks.
+
+Build and discover without credentials:
+
+```sh
+cargo build --locked -p fin-cli -p fin-broker
+cargo run --locked -p fin-cli -- --help
+cargo run --locked -p fin-cli -- capabilities --json
+cargo run --locked -p fin-cli -- explain connections.add --json
+cargo run --locked -p fin-cli -- schema connections.add --json
+cargo test --locked --workspace
+```
+
+The toolchain is pinned in `rust-toolchain.toml`; runtime users need no Rust,
+Node.js, or npm. Build an inspectable local macOS bundle with
+`sh scripts/package-rust-macos.sh /absolute/path/to/new-fin-bundle`. The human
+reviews the bundle and runs `./fin setup` in a fresh macOS Terminal, then clears
+cached administration with `sudo -K`. The initial installer preserves and refuses
+an existing installation/journal. A public curl installer or notarized release
+has not been published. See [the bundle instructions](packaging/README.md).
+
+The human enrolls connections through the installed CLI:
+
+```sh
+fin connections add --provider binance --name main --role main --credential-type ed25519
+fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
+fin connections list --json
+fin doctor --json
+```
+
+Binance accepts HMAC, RSA, and Ed25519 credentials. Only public metadata belongs in arguments. The installed protected process reads
+keys in a guarded hidden terminal prompt, performs read-only checks, and asks for
+independent configuration approval before activation. Updates rotate credentials
+while preserving physical identity and account relationships. Each financial
+write still needs its own fresh approval. Agent terminals, secret-bearing JSON,
+raw signing, and authentication-disable switches are unavailable.
+
+The client uses `fin read OP --input JSON`, `fin preview OP --input JSON`,
+`fin execute OP --input JSON --id LOGICAL_ID --run RUN_ID`, `fin status ID`, and
+`fin operations`. Discover exact schemas instead of reusing the legacy examples
+below. Reconcile the original logical ID after an uncertain response; do not
+create a replacement write. The acceptance profile requires a broker-captured
+baseline, selected allocations, a funded return plan, and exact restoration net
+of proved costs. Production tests retain the $100 movement and total allocation
+limits.
+
+## Historical TypeScript foundation
 
 The foundational TypeScript CLI, durable execution engine, Binance SPOT funding adapter, and Ethereum wallet/Uniswap v3/Aave v3 adapter are implemented. A native macOS Touch ID helper and protected root-owned broker installer are included. **Production financial acceptance is still pending:** live reads, fixtures, fork execution, biometric approval, credential isolation, and live writes are reported separately in [the verification report](docs/reports/foundation.md).
 
 The current protected broker runs the $100 acceptance-verification profile. This is a test guard, not a permanent global Fin product limit. The remaining CCXT/protocol/network inventory stays visible through capability discovery; it is not silently described as implemented.
 
-## Next implementation: compiled Rust
+## Agreed Rust architecture
 
-The agreed next implementation is Rust. Follow the [Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md): one public `fin` CLI, a protected local execution role, typed application/network boundaries, verified financial effects, and an OS-specific `fin-authorization` crate containing the macOS Swift helper. Setup is bundled with Fin; the human runs installation and credential enrollment in their own terminal. Custom credential-entry windows and a `.pkg` installer are not required for the beta.
+The implementation follows the [Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md): one public `fin` CLI, a protected local execution role, typed application/network boundaries, verified financial effects, and an OS-specific `fin-authorization` crate containing the macOS Swift helper. Setup is bundled with Fin; the human runs installation and credential enrollment in their own terminal. Custom credential-entry windows and a `.pkg` installer are not required for the beta.
 
-An LLM must be able to discover how to guide the human through setup and later credential changes using help, explanation, and schemas before a broker or credentials exist. `fin setup`, `fin daemon ...`, and `fin connections add/list/update/remove` are **proposed Rust commands, not available in the TS build below**. Normal agent requests cannot collect secrets or approve configuration/financial writes.
+An LLM discovers setup and later credential changes using help, explanation, and schemas before a broker or credentials exist. `fin setup`, `fin daemon ...`, and `fin connections add/list/update/remove` are Rust commands; they are absent from the historical TS build below. Normal agent requests cannot collect secrets or approve configuration/financial writes.
 
 Delivery is staged: implement Rust and complete reproducible automated/fork verification first; deliver a concrete checklist for the user's subsequent onboarding, credential-boundary, and Touch ID session. Human and production/mainnet acceptance remain pending until actually verified. Existing TS financial results do not establish Rust results. See [verification stages](docs/testing/README.md#rust-implementation-and-later-human-verification).
 
-## Install and discover the current TypeScript foundation
+## Install and discover the historical TypeScript foundation
 
 Use Node **22.13 or later** (SQLite support required), npm, and macOS for the native approval component. Development reads and automated tests run without live credentials.
 
@@ -49,7 +105,7 @@ fin preview wallet.wrap --config .context/connections.json --input '{"wallet":"m
 
 An insufficient balance, unsupported behavior, missing oracle, stale price, failed simulation, or increased execution bound blocks the write. A preview contains checks actually performed and explicit limitations; it is not financial authorization.
 
-## Human setup and writes
+## Historical TypeScript setup and writes
 
 Build the native helper with `sh native/build.sh`. Follow [protected setup](docs/security.md) for the human-admin installation, private provisioning, removal of agent-readable credential copies, and actual biometric/bypass checks. Neither source mode nor a CLI/environment flag can approve a live write. The agent-facing CLI never receives unrestricted signing credentials or signed transactions.
 

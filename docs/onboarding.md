@@ -1,6 +1,6 @@
 # Terminal onboarding and agent discovery
 
-**Agreed direction: 2 October 2026. Status: Rust implementation requirements.** The current TS foundation supports financial help/schema/explanation and connection listing. It does not implement `fin setup`, daemon management, or an interactive connection-enrollment wizard. Every command below is proposed until the Rust implementation and its help advertise it.
+**Agreed direction: 2 October 2026. Status: Rust implementation and human acceptance contract.** The compiled Rust CLI now advertises setup, daemon management and repeatable protected terminal enrollment. Automated/offline evidence and actual human installation/Touch ID results are reported separately. The historical TS foundation does not establish Rust onboarding or credential isolation.
 
 ## Required experience
 
@@ -19,7 +19,7 @@ Setup and subsequent connection management are terminal-driven. Do not require c
 
 A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
 
-Proposed public commands:
+Implemented public command families (inspect their help for required arguments):
 
 ```text
 fin setup
@@ -28,7 +28,7 @@ fin daemon status
 fin daemon stop
 fin connections add
 fin connections list --json
-fin connections update CONNECTION
+fin connections update --provider PROVIDER --name CONNECTION
 fin connections remove CONNECTION
 ```
 
@@ -36,7 +36,7 @@ Adding, replacing, or removing supported credentials later must use the same pro
 
 ## Guided credential enrollment
 
-`fin connections add` prompts for provider, connection name, role/relationships, network or wallet type, and credential type. Safe metadata can be supplied as documented flags; secret fields are collected only by the protected enrollment component in a human-controlled terminal. Do not put API/private keys in flags, JSON command input, environment variables exposed to the agent, stdout, help examples, or logs. A masked prompt in an agent-controlled PTY is not an approved enrollment channel; no-TTY/agent-tool invocation must return an actionable human-interaction requirement before collecting secrets.
+The first Rust beta supplies safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. It does not implement a metadata prompt wizard: a bare add/update command is incomplete. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. Ethereum uses `--network ethereum:1` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
 
 Examples of provider-specific prompts:
 
@@ -52,13 +52,13 @@ Store credentials through a broker-controlled backend and return a stable opaque
 
 Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
 
-On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed enrollment must leave no partial trusted connection and no persistent reusable approval. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection.
+On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed validation during addition leaves no active connection or reusable approval. Cancellation or failed validation during rotation preserves the prior active connection; an uncertain configuration commit requires inspection and preservation of the possible new active key. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection.
 
 ## Discovery before onboarding
 
 Help, explain, schemas, examples, and validation use the same command and connection definitions. Discovery must function without a broker, credentials, administrator permission, or a completed setup. It must identify the installed implementation version and distinguish proposed/unsupported coverage from available commands.
 
-Proposed inspection commands:
+Offline inspection commands:
 
 ```text
 fin --help

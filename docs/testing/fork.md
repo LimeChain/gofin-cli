@@ -1,5 +1,32 @@
 # Isolated Ethereum regression verification
 
+## Rust harness
+
+From the repository root, run:
+
+```sh
+sh scripts/verify-rust-fork.sh
+```
+
+The script compiles the ignored Rust integration test, starts its own Anvil on
+`127.0.0.1:8545`, and verifies chain 1, block 26099326 and the fixed hash below.
+An occupied port or unavailable archive stops the test. It uses only public
+synthetic keys and a temporary journal; it never reads production credentials
+or sends a transaction to mainnet. Evidence is saved under ignored
+`work/rust-fork.*` directories.
+
+The test plans 22 individually bounded writes covering two-wallet native and
+ERC-20 returns, wrapping, Uniswap swaps, Aave supply/collateral/borrow, an actual
+one-hour fork debt accrual, full repayment/withdrawal, allowance restoration,
+and unwrapping. It checks duplicate identities without extra authorization,
+signature or dispatch, recovery through the durable broker journal, and an
+independent final snapshot. The shared run ledger must finish `restored` with
+zero differences. Failed preflight or incomplete cleanup is a failed attempt;
+stopping its node provides no restoration evidence. Current Rust results are in
+the [Rust report](../reports/rust-foundation.md).
+
+## Historical TypeScript harness
+
 Run the deployed-contract integration harness from the repository root:
 
 ```sh

@@ -1,0 +1,1145 @@
+//! Reviewed Binance SPOT funding endpoint boundary.
+//!
+//! The adapter exposes a closed endpoint enum instead of a caller-selected
+//! method/path pair. Credentials, request signing and HTTP live outside this
+//! crate and are supplied by the protected broker through [`BinanceTransport`].
+
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use num_bigint::BigUint;
+use num_traits::Zero;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+pub mod adapter;
+pub use adapter::*;
+
+pub const MAX_DECIMAL_SCALE: u32 = 36;
+const TRANSFER_ID_PREFIX: &str = "fin";
+const WITHDRAW_ID_PREFIX: &str = "fin";
+
+/// An exact, unsigned base-10 quantity. The original scale is kept because
+/// exchange observations may be more precise than the eventual chain unit.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExactDecimal {
+    coefficient: BigUint,
+    scale: u32,
+}
+
+impl ExactDecimal {
+    pub fn parse(value: &str) -> Result<Self, BinanceError> {
+        if value.is_empty() || value.starts_with('-') || value.starts_with('+') {
+            return Err(BinanceError::InvalidDecimal);
+        }
+        let mut parts = value.split('.');
+        let whole = parts.next().ok_or(BinanceError::InvalidDecimal)?;
+        let fraction = parts.next().unwrap_or("");
+        if parts.next().is_some()
+            || whole.is_empty()
+            || (whole.len() > 1 && whole.starts_with('0'))
+            || !whole.bytes().all(|b| b.is_ascii_digit())
+            || !fraction.bytes().all(|b| b.is_ascii_digit())
+            || value.ends_with('.')
+            || fraction.len() > MAX_DECIMAL_SCALE as usize
+        {
+            return Err(BinanceError::InvalidDecimal);
+        }
+        let digits = format!("{whole}{fraction}");
+        let coefficient =
+            BigUint::parse_bytes(digits.as_bytes(), 10).ok_or(BinanceError::InvalidDecimal)?;
+        Ok(Self {
+            coefficient,
+            scale: fraction.len() as u32,
+        })
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            coefficient: BigUint::zero(),
+            scale: 0,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.coefficient.is_zero()
+    }
+
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    pub(crate) fn coefficient_for_scale(&self, scale: u32) -> BigUint {
+        debug_assert!(scale >= self.scale);
+        &self.coefficient * ten_pow(scale - self.scale)
+    }
+
+    pub(crate) fn from_coefficient(coefficient: BigUint, scale: u32) -> Result<Self, BinanceError> {
+        if scale > MAX_DECIMAL_SCALE {
+            return Err(BinanceError::InvalidDecimal);
+        }
+        Ok(Self { coefficient, scale })
+    }
+
+    pub fn checked_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let scale = self.scale.max(other.scale);
+        let lhs = &self.coefficient * ten_pow(scale - self.scale);
+        let rhs = &other.coefficient * ten_pow(scale - other.scale);
+        lhs.cmp(&rhs)
+    }
+
+    pub fn is_multiple_of(&self, increment: &Self) -> bool {
+        if increment.is_zero() {
+            return false;
+        }
+        let scale = self.scale.max(increment.scale);
+        let lhs = &self.coefficient * ten_pow(scale - self.scale);
+        let rhs = &increment.coefficient * ten_pow(scale - increment.scale);
+        (&lhs % &rhs).is_zero()
+    }
+
+    pub fn canonical(&self) -> String {
+        if self.scale == 0 {
+            return self.coefficient.to_string();
+        }
+        let raw = self.coefficient.to_string();
+        let scale = self.scale as usize;
+        let padded = if raw.len() <= scale {
+            format!("{}{}", "0".repeat(scale + 1 - raw.len()), raw)
+        } else {
+            raw
+        };
+        let split = padded.len() - scale;
+        let whole = &padded[..split];
+        let frac = padded[split..].trim_end_matches('0');
+        if frac.is_empty() {
+            whole.to_owned()
+        } else {
+            format!("{whole}.{frac}")
+        }
+    }
+}
+
+impl TryFrom<String> for ExactDecimal {
+    type Error = BinanceError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<ExactDecimal> for String {
+    fn from(value: ExactDecimal) -> Self {
+        value.canonical()
+    }
+}
+
+fn ten_pow(power: u32) -> BigUint {
+    BigUint::from(10u8).pow(power)
+}
+
+/// Opaque, stable id sent to Binance and stored in Fin's pre-dispatch journal.
+/// It is deterministically derived from the existing logical request identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClientIdentity(String);
+
+impl ClientIdentity {
+    pub fn transfer(request_id: &str) -> Result<Self, BinanceError> {
+        Self::derive("binance.transfer", request_id, TRANSFER_ID_PREFIX)
+    }
+
+    pub fn withdrawal(request_id: &str) -> Result<Self, BinanceError> {
+        Self::derive("binance.withdraw", request_id, WITHDRAW_ID_PREFIX)
+    }
+
+    fn derive(operation: &str, request_id: &str, prefix: &str) -> Result<Self, BinanceError> {
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(BinanceError::InvalidIdentity);
+        }
+        let mut hash = Sha256::new();
+        hash.update(operation.as_bytes());
+        hash.update(b":");
+        hash.update(request_id.as_bytes());
+        let digest = hex::encode(hash.finalize());
+        Ok(Self(format!("{prefix}{}", &digest[..29])))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The exact method/path allowlist Fin supports. There is no arbitrary signed
+/// method or path surface here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BinanceEndpoint {
+    ApiRestrictions,
+    Account,
+    SubAccountList,
+    SubAccountSpotAssets,
+    CapitalConfig,
+    DepositAddress,
+    WithdrawAddressList,
+    DepositHistory,
+    WithdrawalHistory,
+    UniversalTransferHistory,
+    UniversalTransfer,
+    StandardWithdrawal,
+    TravelRuleRequirements,
+}
+
+impl BinanceEndpoint {
+    pub fn method_path(self) -> (&'static str, &'static str) {
+        match self {
+            Self::ApiRestrictions => ("GET", "/sapi/v1/account/apiRestrictions"),
+            Self::Account => ("GET", "/api/v3/account"),
+            Self::SubAccountList => ("GET", "/sapi/v1/sub-account/list"),
+            Self::SubAccountSpotAssets => ("GET", "/sapi/v4/sub-account/assets"),
+            Self::CapitalConfig => ("GET", "/sapi/v1/capital/config/getall"),
+            Self::DepositAddress => ("GET", "/sapi/v1/capital/deposit/address"),
+            Self::WithdrawAddressList => ("GET", "/sapi/v1/capital/withdraw/address/list"),
+            Self::DepositHistory => ("GET", "/sapi/v1/capital/deposit/hisrec"),
+            Self::WithdrawalHistory => ("GET", "/sapi/v1/capital/withdraw/history"),
+            Self::UniversalTransferHistory => ("GET", "/sapi/v1/sub-account/universalTransfer"),
+            Self::UniversalTransfer => ("POST", "/sapi/v1/sub-account/universalTransfer"),
+            Self::StandardWithdrawal => ("POST", "/sapi/v1/capital/withdraw/apply"),
+            Self::TravelRuleRequirements => {
+                ("GET", "/sapi/v1/localentity/questionnaire-requirements")
+            }
+        }
+    }
+}
+
+/// Finite parameters are assembled from endpoint-specific builders. Values
+/// remain decimal or identifiers strings at the signing boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BinanceRequest {
+    pub endpoint: BinanceEndpoint,
+    pub params: Vec<Param>,
+}
+
+impl BinanceRequest {
+    pub fn new(endpoint: BinanceEndpoint) -> Self {
+        Self {
+            endpoint,
+            params: Vec::new(),
+        }
+    }
+
+    pub fn push(mut self, key: &'static str, value: impl Into<String>) -> Self {
+        self.params.push(Param {
+            key: key.to_owned(),
+            value: value.into(),
+        });
+        self
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.params
+            .iter()
+            .find(|param| param.key == key)
+            .map(|param| param.value.as_str())
+    }
+
+    pub fn validate(&self) -> Result<(), BinanceError> {
+        let keys: Vec<&str> = self.params.iter().map(|p| p.key.as_str()).collect();
+        let unique: std::collections::BTreeSet<&str> = keys.iter().copied().collect();
+        if unique.len() != keys.len() {
+            return Err(BinanceError::DuplicateParameter);
+        }
+        let (required, allowed): (&[&str], &[&str]) = match self.endpoint {
+            BinanceEndpoint::ApiRestrictions
+            | BinanceEndpoint::Account
+            | BinanceEndpoint::CapitalConfig
+            | BinanceEndpoint::WithdrawAddressList
+            | BinanceEndpoint::TravelRuleRequirements => (&[], &["recvWindow"]),
+            BinanceEndpoint::SubAccountList => (&[], &["email", "page", "limit", "recvWindow"]),
+            BinanceEndpoint::SubAccountSpotAssets => (&["email"], &["email", "recvWindow"]),
+            BinanceEndpoint::DepositAddress => {
+                (&["coin", "network"], &["coin", "network", "recvWindow"])
+            }
+            BinanceEndpoint::DepositHistory | BinanceEndpoint::WithdrawalHistory => (
+                &["startTime", "endTime"],
+                &[
+                    "coin",
+                    "startTime",
+                    "endTime",
+                    "offset",
+                    "limit",
+                    "txId",
+                    "withdrawOrderId",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::UniversalTransferHistory => (
+                &["startTime", "endTime"],
+                &[
+                    "startTime",
+                    "endTime",
+                    "page",
+                    "limit",
+                    "clientTranId",
+                    "fromEmail",
+                    "toEmail",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::UniversalTransfer => (
+                &[
+                    "asset",
+                    "amount",
+                    "fromAccountType",
+                    "toAccountType",
+                    "clientTranId",
+                ],
+                &[
+                    "asset",
+                    "amount",
+                    "fromAccountType",
+                    "toAccountType",
+                    "clientTranId",
+                    "fromEmail",
+                    "toEmail",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::StandardWithdrawal => (
+                &[
+                    "coin",
+                    "withdrawOrderId",
+                    "network",
+                    "address",
+                    "amount",
+                    "walletType",
+                ],
+                &[
+                    "coin",
+                    "withdrawOrderId",
+                    "network",
+                    "address",
+                    "amount",
+                    "walletType",
+                    "recvWindow",
+                ],
+            ),
+        };
+        if required.iter().any(|key| self.get(key).is_none()) {
+            return Err(BinanceError::MissingParameter);
+        }
+        if self
+            .params
+            .iter()
+            .any(|param| !allowed.contains(&param.key.as_str()))
+        {
+            return Err(BinanceError::UnsupportedParameter);
+        }
+        if matches!(self.endpoint, BinanceEndpoint::UniversalTransfer) {
+            let amount = ExactDecimal::parse(self.get("amount").unwrap())?;
+            if amount.is_zero()
+                || self.get("fromAccountType") != Some("SPOT")
+                || self.get("toAccountType") != Some("SPOT")
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
+            if self.get("fromEmail").is_none() == self.get("toEmail").is_none() {
+                return Err(BinanceError::InvalidRequest);
+            }
+        }
+        if matches!(self.endpoint, BinanceEndpoint::StandardWithdrawal)
+            && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
+                || self.get("network") != Some("ETH")
+                || self.get("walletType") != Some("0"))
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Param {
+    pub key: String,
+    pub value: String,
+}
+
+/// The broker-owned implementation receives the endpoint as a closed enum,
+/// resolves a credential handle and signer internally, signs the exact encoded
+/// parameter string, and returns unnormalized JSON. Adapters never hold keys.
+#[async_trait]
+pub trait BinanceTransport: Send + Sync {
+    async fn request(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+    ) -> Result<Value, TransportError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransportError {
+    Unavailable,
+    RateLimited,
+    PermissionDenied,
+    InvalidResponse,
+    Timeout,
+    Rejected,
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "Binance request unavailable",
+            Self::RateLimited => "Binance rate limited the request",
+            Self::PermissionDenied => "Binance request permission denied",
+            Self::InvalidResponse => "Binance returned an invalid response",
+            Self::Timeout => "Binance request timed out",
+            Self::Rejected => "Binance rejected the request",
+        })
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BinanceError {
+    InvalidDecimal,
+    InvalidIdentity,
+    MissingParameter,
+    DuplicateParameter,
+    InvalidRequest,
+    UnsupportedParameter,
+    InvalidResponse,
+}
+
+impl fmt::Display for BinanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidDecimal => "invalid exact decimal",
+            Self::InvalidIdentity => "invalid logical request identity",
+            Self::MissingParameter => "required Binance parameter is missing",
+            Self::DuplicateParameter => "duplicate Binance parameter",
+            Self::InvalidRequest => "invalid Binance funding request",
+            Self::UnsupportedParameter => "unsupported Binance endpoint parameter",
+            Self::InvalidResponse => "invalid Binance response",
+        })
+    }
+}
+
+impl std::error::Error for BinanceError {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct CredentialHandle(String);
+
+impl CredentialHandle {
+    pub fn new(handle: impl Into<String>) -> Result<Self, BinanceError> {
+        let handle = handle.into();
+        if handle.is_empty() || handle.len() > 128 {
+            return Err(BinanceError::InvalidIdentity);
+        }
+        Ok(Self(handle))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BinanceSignature(String);
+
+impl BinanceSignature {
+    pub fn from_provider(signature: impl Into<String>) -> Self {
+        Self(signature.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Narrow broker boundary for signing Binance's exact URL-encoded preimage.
+/// Private key bytes remain inside the provider implementation.
+#[async_trait]
+pub trait BinanceSigner: Send + Sync {
+    async fn api_key(&self, credential: &CredentialHandle) -> Result<String, TransportError>;
+    async fn sign(
+        &self,
+        credential: &CredentialHandle,
+        encoded_parameters: &[u8],
+    ) -> Result<BinanceSignature, TransportError>;
+}
+
+/// Configurable endpoint family is intentionally absent: the transport must
+/// derive its URL solely from `BinanceEndpoint::method_path()`.
+pub fn signed_preimage(params: &[Param]) -> Vec<u8> {
+    params
+        .iter()
+        .map(|param| {
+            format!(
+                "{}={}",
+                percent_encode(&param.key),
+                percent_encode(&param.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+        .into_bytes()
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UniversalTransferIntent {
+    pub asset: String,
+    pub amount: ExactDecimal,
+    pub from_email: Option<String>,
+    pub to_email: Option<String>,
+    pub client_id: ClientIdentity,
+}
+
+impl UniversalTransferIntent {
+    pub fn request(&self) -> Result<BinanceRequest, BinanceError> {
+        let mut request = BinanceRequest::new(BinanceEndpoint::UniversalTransfer)
+            .push("asset", self.asset.clone())
+            .push("amount", self.amount.canonical())
+            .push("fromAccountType", "SPOT")
+            .push("toAccountType", "SPOT")
+            .push("clientTranId", self.client_id.as_str());
+        if let Some(email) = &self.from_email {
+            request = request.push("fromEmail", email.clone());
+        }
+        if let Some(email) = &self.to_email {
+            request = request.push("toEmail", email.clone());
+        }
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardWithdrawalIntent {
+    pub coin: String,
+    pub amount: ExactDecimal,
+    pub address: String,
+    pub client_id: ClientIdentity,
+}
+
+impl StandardWithdrawalIntent {
+    pub fn request(&self) -> Result<BinanceRequest, BinanceError> {
+        let request = BinanceRequest::new(BinanceEndpoint::StandardWithdrawal)
+            .push("coin", self.coin.clone())
+            .push("withdrawOrderId", self.client_id.as_str())
+            .push("network", "ETH")
+            .push("address", self.address.clone())
+            .push("amount", self.amount.canonical())
+            .push("walletType", "0");
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryWindow {
+    pub start_time_ms: u64,
+    pub end_time_ms: u64,
+}
+
+impl HistoryWindow {
+    pub fn request(
+        &self,
+        endpoint: BinanceEndpoint,
+        coin: Option<&str>,
+        identity: Option<&ClientIdentity>,
+    ) -> Result<BinanceRequest, BinanceError> {
+        if self.start_time_ms > self.end_time_ms {
+            return Err(BinanceError::InvalidRequest);
+        }
+        let mut request = BinanceRequest::new(endpoint)
+            .push("startTime", self.start_time_ms.to_string())
+            .push("endTime", self.end_time_ms.to_string());
+        if let Some(coin) = coin {
+            request = request.push("coin", coin);
+        }
+        match endpoint {
+            BinanceEndpoint::UniversalTransferHistory => {
+                request = request.push("page", "1").push("limit", "500");
+                if let Some(id) = identity {
+                    request = request.push("clientTranId", id.as_str());
+                }
+            }
+            BinanceEndpoint::DepositHistory | BinanceEndpoint::WithdrawalHistory => {
+                request = request.push("offset", "0").push("limit", "1000");
+                if let Some(id) = identity {
+                    if endpoint == BinanceEndpoint::WithdrawalHistory {
+                        request = request.push("withdrawOrderId", id.as_str());
+                    } else {
+                        return Err(BinanceError::InvalidRequest);
+                    }
+                }
+            }
+            _ => return Err(BinanceError::InvalidRequest),
+        }
+        request.validate()?;
+        Ok(request)
+    }
+}
+
+/// Exact financial fields are deserialized only from venue decimal strings.
+/// Serde will reject JSON numeric values instead of accepting a rounded float.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct VenueDecimal(pub ExactDecimal);
+
+impl TryFrom<String> for VenueDecimal {
+    type Error = BinanceError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        ExactDecimal::parse(&value).map(Self)
+    }
+}
+
+impl From<VenueDecimal> for String {
+    fn from(value: VenueDecimal) -> Self {
+        value.0.canonical()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SpotBalanceRow {
+    pub asset: String,
+    pub free: ExactDecimal,
+    pub locked: ExactDecimal,
+    #[serde(default)]
+    pub freeze: Option<ExactDecimal>,
+    #[serde(default)]
+    pub withdrawing: Option<ExactDecimal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SpotBalancesResponse {
+    pub balances: Vec<SpotBalanceRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ApiRestrictions {
+    #[serde(default)]
+    #[serde(rename = "enableReading")]
+    pub enable_reading: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "enableWithdrawals")]
+    pub enable_withdrawals: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "enableInternalTransfer")]
+    pub enable_internal_transfer: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "permitsUniversalTransfer")]
+    pub permits_universal_transfer: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "ipRestrict")]
+    pub ip_restrict: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "enableSpotAndMarginTrading")]
+    pub enable_spot_and_margin_trading: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct TransferHistoryResponse {
+    #[serde(rename = "totalCount")]
+    pub total_count: Option<u64>,
+    #[serde(default)]
+    pub result: Vec<TransferHistoryRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct TransferHistoryRow {
+    #[serde(rename = "tranId")]
+    pub tran_id: VenueIdentifier,
+    #[serde(default, rename = "clientTranId")]
+    pub client_tran_id: Option<String>,
+    pub asset: String,
+    pub amount: ExactDecimal,
+    #[serde(rename = "fromAccountType")]
+    pub from_account_type: String,
+    #[serde(rename = "toAccountType")]
+    pub to_account_type: String,
+    #[serde(rename = "fromEmail")]
+    pub from_email: Option<String>,
+    #[serde(rename = "toEmail")]
+    pub to_email: Option<String>,
+    pub status: String,
+    #[serde(rename = "createTimeStamp")]
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FundingCompleteTime {
+    UnixMillis(u64),
+    UtcText(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct FundingHistoryRow {
+    pub id: VenueIdentifier,
+    pub coin: String,
+    pub amount: ExactDecimal,
+    #[serde(default)]
+    #[serde(rename = "transactionFee")]
+    pub transaction_fee: Option<ExactDecimal>,
+    pub network: Option<String>,
+    pub address: Option<String>,
+    #[serde(rename = "addressTag")]
+    pub address_tag: Option<String>,
+    #[serde(rename = "txId")]
+    pub tx_id: Option<String>,
+    pub status: u64,
+    #[serde(rename = "withdrawOrderId")]
+    pub withdraw_order_id: Option<String>,
+    #[serde(rename = "insertTime")]
+    pub insert_time: Option<u64>,
+    #[serde(rename = "applyTime")]
+    pub apply_time: Option<String>,
+    #[serde(rename = "completeTime")]
+    pub complete_time: Option<FundingCompleteTime>,
+    #[serde(rename = "confirmTimes")]
+    pub confirm_times: Option<String>,
+    #[serde(rename = "travelRuleStatus")]
+    pub travel_rule_status: Option<u64>,
+    #[serde(rename = "transferType")]
+    pub transfer_type: Option<u8>,
+    #[serde(rename = "walletType")]
+    pub wallet_type: Option<u8>,
+}
+
+impl FundingHistoryRow {
+    pub fn has_valid_deposit_complete_time(&self) -> bool {
+        matches!(
+            self.complete_time,
+            None | Some(FundingCompleteTime::UnixMillis(_))
+        )
+    }
+
+    pub fn has_valid_withdrawal_complete_time(&self) -> bool {
+        match &self.complete_time {
+            None => true,
+            Some(FundingCompleteTime::UtcText(value)) => {
+                chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                    .is_ok_and(|parsed| parsed.format("%Y-%m-%d %H:%M:%S").to_string() == *value)
+            }
+            Some(FundingCompleteTime::UnixMillis(_)) => false,
+        }
+    }
+
+    pub fn usable_deposit_credit(&self) -> bool {
+        self.status == 1 && self.travel_rule_status.is_none_or(|status| status == 0)
+    }
+
+    pub fn locked_deposit_credit(&self) -> bool {
+        self.status == 6
+    }
+
+    pub fn completed_external_withdrawal(&self) -> bool {
+        self.status == 6 && self.transfer_type == Some(0) && self.wallet_type == Some(0)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CapitalConfigCurrency {
+    pub coin: String,
+    #[serde(rename = "withdrawAllEnable")]
+    pub withdraw_all_enable: Option<bool>,
+    #[serde(rename = "depositAllEnable")]
+    pub deposit_all_enable: Option<bool>,
+    #[serde(default)]
+    #[serde(rename = "networkList")]
+    pub network_list: Vec<CapitalNetwork>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CapitalNetwork {
+    pub network: String,
+    pub coin: String,
+    #[serde(rename = "depositEnable")]
+    pub deposit_enable: Option<bool>,
+    #[serde(rename = "withdrawEnable")]
+    pub withdraw_enable: Option<bool>,
+    #[serde(rename = "withdrawIntegerMultiple")]
+    pub withdraw_integer_multiple: Option<ExactDecimal>,
+    #[serde(rename = "withdrawFee")]
+    pub withdraw_fee: Option<ExactDecimal>,
+    #[serde(rename = "withdrawMin")]
+    pub withdraw_min: Option<ExactDecimal>,
+    #[serde(rename = "withdrawMax")]
+    pub withdraw_max: Option<ExactDecimal>,
+    #[serde(rename = "depositDust")]
+    pub deposit_dust: Option<ExactDecimal>,
+    #[serde(rename = "minConfirm")]
+    pub min_confirm: Option<u64>,
+    #[serde(rename = "unLockConfirm")]
+    pub unlock_confirm: Option<u64>,
+    #[serde(rename = "withdrawTag")]
+    pub withdraw_tag: Option<bool>,
+    pub busy: Option<bool>,
+    #[serde(rename = "contractAddress")]
+    pub contract_address: Option<String>,
+    pub denomination: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct DepositAddress {
+    pub coin: Option<String>,
+    pub address: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    pub network: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WithdrawWhitelistStatus {
+    Enabled,
+    Disabled,
+    #[default]
+    Unknown,
+}
+
+/// Binance currently documents originType as a string. Preserve older
+/// numeric responses without coercion so callers can retain either observed
+/// wire representation exactly.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum WithdrawAddressOriginType {
+    Label(String),
+    LegacyCode(u64),
+}
+
+fn deserialize_whitelist_status<'de, D>(
+    deserializer: D,
+) -> Result<WithdrawWhitelistStatus, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Bool(true) => WithdrawWhitelistStatus::Enabled,
+        Value::Bool(false) => WithdrawWhitelistStatus::Disabled,
+        _ => WithdrawWhitelistStatus::Unknown,
+    })
+}
+
+/// One row from Binance's fixed withdrawal-address allowlist endpoint.
+/// Addresses are operational data and callers must avoid logging them.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WithdrawAddressListEntry {
+    pub address: String,
+    #[serde(default, rename = "addressTag")]
+    pub address_tag: Option<String>,
+    pub coin: Option<String>,
+    pub name: Option<String>,
+    pub network: Option<String>,
+    pub origin: Option<String>,
+    #[serde(rename = "originType")]
+    pub origin_type: Option<WithdrawAddressOriginType>,
+    #[serde(
+        default,
+        rename = "whiteStatus",
+        deserialize_with = "deserialize_whitelist_status"
+    )]
+    pub whitelist_status: WithdrawWhitelistStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct TravelRuleRequirements {
+    #[serde(rename = "questionnaireCountryCode")]
+    pub questionnaire_country_code: String,
+}
+
+/// Parse one financial response type while rejecting unexpected/non-string
+/// amounts. The resulting error deliberately excludes server response text.
+pub fn parse_response<T: for<'de> Deserialize<'de>>(raw: Value) -> Result<T, BinanceError> {
+    serde_json::from_value(raw).map_err(|_| BinanceError::InvalidResponse)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct VenueIdentifier(String);
+
+impl VenueIdentifier {
+    pub fn parse(value: &Value) -> Result<Self, BinanceError> {
+        let text = match value {
+            Value::String(value) => value.clone(),
+            Value::Number(value) => {
+                if let Some(number) = value.as_u64() {
+                    number.to_string()
+                } else if let Some(number) = value.as_i64() {
+                    if number < 0 {
+                        return Err(BinanceError::InvalidResponse);
+                    }
+                    number.to_string()
+                } else {
+                    return Err(BinanceError::InvalidResponse);
+                }
+            }
+            _ => return Err(BinanceError::InvalidResponse),
+        };
+        if text.is_empty() || text.len() > 160 {
+            return Err(BinanceError::InvalidResponse);
+        }
+        Ok(Self(text))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for VenueIdentifier {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SubAccountListResponse {
+    #[serde(default, rename = "subAccounts")]
+    pub sub_accounts: Vec<SubAccountRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SubAccountRecord {
+    pub email: String,
+    #[serde(rename = "isFreeze")]
+    pub is_freeze: Option<bool>,
+    pub is_master: Option<bool>,
+    #[serde(default, rename = "subAccountId")]
+    pub sub_account_id: Option<VenueIdentifier>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DepositCreditState {
+    pub credited: bool,
+    pub locked: bool,
+}
+
+impl From<&FundingHistoryRow> for DepositCreditState {
+    fn from(row: &FundingHistoryRow) -> Self {
+        Self {
+            credited: row.usable_deposit_credit(),
+            locked: row.locked_deposit_credit(),
+        }
+    }
+}
+
+/// Output redaction helper: retain only an explicit, reviewed set of funding
+/// fields. The raw API response must never be persisted or emitted wholesale.
+pub fn redact_funding_row(row: &FundingHistoryRow) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.id.as_str(),
+        "coin": row.coin,
+        "amount": row.amount.canonical(),
+        "transactionFee": row.transaction_fee.as_ref().map(ExactDecimal::canonical),
+        "network": row.network,
+        "address": row.address,
+        "addressTag": row.address_tag,
+        "txId": row.tx_id,
+        "status": row.status,
+        "withdrawOrderId": row.withdraw_order_id,
+        "insertTime": row.insert_time,
+        "applyTime": row.apply_time,
+        "completeTime": row.complete_time,
+        "confirmTimes": row.confirm_times,
+        "travelRuleStatus": row.travel_rule_status,
+        "transferType": row.transfer_type,
+        "walletType": row.wallet_type
+    })
+}
+
+/// Signed Binance REST transport. A broker-owned signer and credential handle
+/// are injected; this type never loads a key or accepts an arbitrary URL path.
+pub struct BinanceHttpTransport {
+    client: reqwest::Client,
+    base_url: String,
+    signer: Arc<dyn BinanceSigner>,
+    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
+    recv_window_ms: u64,
+}
+
+impl BinanceHttpTransport {
+    pub fn new(
+        base_url: impl Into<String>,
+        signer: Arc<dyn BinanceSigner>,
+    ) -> Result<Self, BinanceError> {
+        Self::with_clock(base_url, signer, || {
+            chrono::Utc::now().timestamp_millis().max(0) as u64
+        })
+    }
+
+    pub fn with_clock(
+        base_url: impl Into<String>,
+        signer: Arc<dyn BinanceSigner>,
+        now_ms: impl Fn() -> u64 + Send + Sync + 'static,
+    ) -> Result<Self, BinanceError> {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let parsed = reqwest::Url::parse(&base_url).map_err(|_| BinanceError::InvalidRequest)?;
+        let loopback = parsed
+            .host_str()
+            .map(|host| host == "localhost" || host == "127.0.0.1" || host == "[::1]")
+            .unwrap_or(false);
+        if parsed.query().is_some()
+            || parsed.fragment().is_some()
+            || (parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback))
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        let host = parsed
+            .host_str()
+            .unwrap_or_default()
+            .trim_matches(['[', ']']);
+        let trusted_binance_host = matches!(
+            host,
+            "api.binance.com"
+                | "api-gcp.binance.com"
+                | "api1.binance.com"
+                | "api2.binance.com"
+                | "api3.binance.com"
+                | "api4.binance.com"
+        );
+        if !loopback
+            && (!trusted_binance_host
+                || parsed.port().is_some_and(|port| port != 443)
+                || !matches!(parsed.path(), "" | "/"))
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|_| BinanceError::InvalidRequest)?;
+        Ok(Self {
+            client,
+            base_url,
+            signer,
+            now_ms: Arc::new(now_ms),
+            recv_window_ms: 5000,
+        })
+    }
+
+    pub fn with_recv_window_ms(mut self, recv_window_ms: u64) -> Result<Self, BinanceError> {
+        if recv_window_ms == 0 || recv_window_ms > 60_000 {
+            return Err(BinanceError::InvalidRequest);
+        }
+        self.recv_window_ms = recv_window_ms;
+        Ok(self)
+    }
+
+    fn signed_params(&self, request: &BinanceRequest) -> Vec<Param> {
+        let mut params = request.params.clone();
+        if !params.iter().any(|param| param.key == "recvWindow") {
+            params.push(Param {
+                key: "recvWindow".into(),
+                value: self.recv_window_ms.to_string(),
+            });
+        }
+        params.push(Param {
+            key: "timestamp".into(),
+            value: (self.now_ms)().to_string(),
+        });
+        params
+    }
+}
+
+#[async_trait]
+impl BinanceTransport for BinanceHttpTransport {
+    async fn request(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+    ) -> Result<Value, TransportError> {
+        request
+            .validate()
+            .map_err(|_| TransportError::InvalidResponse)?;
+        let (method, path) = request.endpoint.method_path();
+        let params = self.signed_params(&request);
+        let preimage = signed_preimage(&params);
+        let signature = self.signer.sign(credential, &preimage).await?;
+        let api_key = self.signer.api_key(credential).await?;
+        if api_key.is_empty() || api_key.contains(['\r', '\n']) {
+            return Err(TransportError::PermissionDenied);
+        }
+        let signature_param = format!("signature={}", percent_encode(signature.as_str()));
+        let mut url = format!("{}{}", self.base_url, path);
+        let builder = if method == "GET" {
+            url.push('?');
+            url.push_str(
+                std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
+            );
+            url.push('&');
+            url.push_str(&signature_param);
+            self.client.get(url)
+        } else if method == "POST" {
+            let body = format!(
+                "{}&{}",
+                std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
+                signature_param
+            );
+            self.client
+                .post(url)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(body)
+        } else {
+            return Err(TransportError::InvalidResponse);
+        };
+        let response = builder
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    TransportError::Timeout
+                } else {
+                    TransportError::Unavailable
+                }
+            })?;
+        let status = response.status();
+        if status.as_u16() == 429 || status.as_u16() == 418 {
+            return Err(TransportError::RateLimited);
+        }
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| TransportError::InvalidResponse)?;
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(TransportError::PermissionDenied);
+        }
+        if !status.is_success()
+            || value
+                .get("code")
+                .and_then(Value::as_i64)
+                .is_some_and(|code| code < 0)
+        {
+            return Err(TransportError::Rejected);
+        }
+        Ok(value)
+    }
+}

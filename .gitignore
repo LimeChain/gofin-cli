@@ -7,3 +7,5 @@ dist/
 .DS_Store
 native/.build/
 coverage/
+target/
+work/

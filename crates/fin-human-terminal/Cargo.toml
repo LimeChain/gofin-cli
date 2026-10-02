@@ -1,0 +1,14 @@
+[package]
+name = "fin-human-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fin-domain.workspace = true
+libc.workspace = true
+zeroize.workspace = true
+signal-hook = "0.3.18"
+
+[lints]
+workspace = true

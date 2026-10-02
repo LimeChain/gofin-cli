@@ -1,0 +1,476 @@
+//! Protected in-process storage. The client protocol has no secret-export method.
+//! Based on a reviewed Ogi Spark/GLM draft; buffers and partial writes fail closed.
+use fin_domain::{FinError, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    fmt,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+const CREDENTIAL_DIR: &str = "/Library/Fin/private/credentials";
+const MAX_BYTES: usize = 32_768;
+fn error(code: &str, message: &str) -> FinError {
+    FinError::new(
+        code,
+        "credentials",
+        message,
+        "Run protected connection enrollment in your own human terminal.",
+    )
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SecretMaterial {
+    BinanceHmac {
+        api_key: String,
+        secret: String,
+    },
+    BinanceRsa {
+        api_key: String,
+        private_key: String,
+    },
+    BinanceEd25519 {
+        api_key: String,
+        private_key: String,
+    },
+    EthereumPrivateKey {
+        private_key: String,
+    },
+}
+impl fmt::Debug for SecretMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretMaterial(<redacted>)")
+    }
+}
+impl SecretMaterial {
+    pub fn validate_present(&self) -> Result<()> {
+        let valid = match self {
+            Self::BinanceHmac { api_key, secret } => !api_key.is_empty() && !secret.is_empty(),
+            Self::BinanceRsa {
+                api_key,
+                private_key,
+            } => !api_key.is_empty() && private_key.contains("PRIVATE KEY"),
+            Self::BinanceEd25519 {
+                api_key,
+                private_key,
+            } => {
+                use ed25519_dalek::pkcs8::DecodePrivateKey;
+                !api_key.is_empty()
+                    && ed25519_dalek::SigningKey::from_pkcs8_pem(private_key).is_ok()
+            }
+            Self::EthereumPrivateKey { private_key } => {
+                let raw = private_key.strip_prefix("0x").unwrap_or(private_key);
+                raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(error(
+                "INVALID_CREDENTIAL",
+                "The required credential format is invalid.",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct CredentialRef(String);
+impl CredentialRef {
+    pub fn new(value: &str) -> Result<Self> {
+        let parsed = uuid::Uuid::parse_str(value).map_err(|_| {
+            error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The credential handle is invalid.",
+            )
+        })?;
+        if parsed.hyphenated().to_string() != value {
+            return Err(error(
+                "INVALID_CREDENTIAL_REFERENCE",
+                "The credential handle is not canonical.",
+            ));
+        }
+        Ok(Self(value.into()))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl<'de> Deserialize<'de> for CredentialRef {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Self::new(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct TrustedCredentialStore {
+    dir: PathBuf,
+}
+impl TrustedCredentialStore {
+    pub fn open() -> Result<Self> {
+        fin_authorization::validate_installation()?;
+        let dir = PathBuf::from(CREDENTIAL_DIR);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+            if !dir.try_exists().map_err(|_| {
+                error(
+                    "CREDENTIAL_STORE_UNAVAILABLE",
+                    "The protected store is unavailable.",
+                )
+            })? {
+                fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&dir)
+                    .map_err(|_| {
+                        error(
+                            "CREDENTIAL_STORE_UNAVAILABLE",
+                            "The protected store could not be created.",
+                        )
+                    })?;
+                sync_dir(dir.parent().expect("fixed parent"))?;
+            }
+            let meta = fs::symlink_metadata(&dir).map_err(|_| {
+                error(
+                    "CREDENTIAL_STORE_UNAVAILABLE",
+                    "The protected store is unavailable.",
+                )
+            })?;
+            if !meta.is_dir()
+                || meta.file_type().is_symlink()
+                || meta.uid() != 0
+                || meta.mode() & 0o777 != 0o700
+            {
+                return Err(error(
+                    "UNSAFE_CREDENTIAL_STORE",
+                    "The credential directory is not a protected root-owned directory.",
+                ));
+            }
+            reject_acl(&dir)?;
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(error(
+                "CREDENTIAL_STORE_UNAVAILABLE",
+                "Protected credential storage is unavailable on this platform.",
+            ));
+        }
+        Ok(Self { dir })
+    }
+    pub fn put(&self, material: &SecretMaterial) -> Result<CredentialRef> {
+        fin_authorization::validate_installation()?;
+        material.validate_present()?;
+        write_material(&self.dir, material)
+    }
+    pub fn with_material<T>(
+        &self,
+        reference: &CredentialRef,
+        callback: impl FnOnce(&SecretMaterial) -> Result<T>,
+    ) -> Result<T> {
+        fin_authorization::validate_installation()?;
+        let path = self.path_for(reference);
+        fin_authorization::validate_metadata(&path, true)?;
+        reject_acl(&path)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let file = options.open(&path).map_err(|_| {
+            error(
+                "CREDENTIAL_UNAVAILABLE",
+                "The protected credential could not be opened.",
+            )
+        })?;
+        let metadata = file.metadata().map_err(|_| {
+            error(
+                "CREDENTIAL_UNAVAILABLE",
+                "The protected credential could not be inspected.",
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != 0 || metadata.mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
+                return Err(error(
+                    "UNSAFE_CREDENTIAL",
+                    "The protected credential has unsafe ownership, permissions, or links.",
+                ));
+            }
+        }
+        if !metadata.is_file() || metadata.len() > MAX_BYTES as u64 {
+            return Err(error(
+                "INVALID_CREDENTIAL",
+                "The protected credential is not a bounded regular file.",
+            ));
+        }
+        let mut bytes = Zeroizing::new(Vec::new());
+        file.take(MAX_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                error(
+                    "CREDENTIAL_UNAVAILABLE",
+                    "The protected credential could not be read.",
+                )
+            })?;
+        if bytes.len() > MAX_BYTES {
+            return Err(error(
+                "INVALID_CREDENTIAL",
+                "The protected credential exceeded its size limit.",
+            ));
+        }
+        let material: SecretMaterial = serde_json::from_slice(&bytes).map_err(|_| {
+            error(
+                "INVALID_CREDENTIAL",
+                "The protected credential format is invalid.",
+            )
+        })?;
+        material.validate_present()?;
+        callback(&material)
+    }
+    pub fn remove(&self, reference: &CredentialRef) -> Result<()> {
+        fin_authorization::validate_installation()?;
+        let path = self.path_for(reference);
+        fin_authorization::validate_metadata(&path, true)?;
+        reject_acl(&path)?;
+        fs::remove_file(path).map_err(|_| {
+            error(
+                "CREDENTIAL_REMOVE_FAILED",
+                "The protected credential could not be removed.",
+            )
+        })?;
+        sync_dir(&self.dir)
+    }
+    /// Internal recovery inventory; never exposed through the client protocol.
+    pub fn references(&self) -> Result<Vec<CredentialRef>> {
+        fin_authorization::validate_installation()?;
+        let mut references = Vec::new();
+        for entry in fs::read_dir(&self.dir).map_err(|_| {
+            error(
+                "CREDENTIAL_STORE_UNAVAILABLE",
+                "The protected credential inventory is unavailable.",
+            )
+        })? {
+            let entry = entry.map_err(|_| {
+                error(
+                    "CREDENTIAL_STORE_UNAVAILABLE",
+                    "The credential inventory could not be inspected.",
+                )
+            })?;
+            let name = entry.file_name();
+            let raw = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+                .ok_or_else(|| {
+                    error(
+                        "UNSAFE_CREDENTIAL_STORE",
+                        "The protected store contains an unexpected file.",
+                    )
+                })?;
+            let reference = CredentialRef::new(raw)?;
+            fin_authorization::validate_metadata(&entry.path(), true)?;
+            references.push(reference);
+        }
+        references.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(references)
+    }
+    fn path_for(&self, reference: &CredentialRef) -> PathBuf {
+        self.dir.join(format!("{}.json", reference.as_str()))
+    }
+}
+
+fn write_material(dir: &Path, material: &SecretMaterial) -> Result<CredentialRef> {
+    let bytes = Zeroizing::new(
+        serde_json::to_vec(material)
+            .map_err(|_| error("INVALID_CREDENTIAL", "The credential could not be encoded."))?,
+    );
+    if bytes.len() > MAX_BYTES {
+        return Err(error(
+            "INVALID_CREDENTIAL",
+            "The credential exceeded its size limit.",
+        ));
+    }
+    let reference = CredentialRef::new(&uuid::Uuid::new_v4().hyphenated().to_string())?;
+    let path = dir.join(format!("{}.json", reference.as_str()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut file = options.open(&path).map_err(|_| {
+        error(
+            "CREDENTIAL_SAVE_FAILED",
+            "The protected credential could not be created.",
+        )
+    })?;
+    let save = (|| {
+        file.write_all(&bytes).map_err(|_| {
+            error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected credential could not be written.",
+            )
+        })?;
+        file.sync_all().map_err(|_| {
+            error(
+                "CREDENTIAL_SAVE_FAILED",
+                "The protected credential could not be synchronized.",
+            )
+        })?;
+        sync_dir(dir)
+    })();
+    if let Err(error) = save {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        let _ = sync_dir(dir);
+        return Err(error);
+    }
+    Ok(reference)
+}
+fn sync_dir(dir: &Path) -> Result<()> {
+    File::open(dir).and_then(|f| f.sync_all()).map_err(|_| {
+        error(
+            "CREDENTIAL_STORE_SYNC_FAILED",
+            "The protected store could not be synchronized.",
+        )
+    })
+}
+fn reject_acl(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(|_| {
+                error(
+                    "UNSAFE_CREDENTIAL_STORE",
+                    "Credential ACL protections could not be verified.",
+                )
+            })?;
+        if !output.status.success()
+            || String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.trim_start()
+                    .split_once(':')
+                    .is_some_and(|(number, _)| {
+                        !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
+                    })
+            })
+        {
+            return Err(error(
+                "UNSAFE_CREDENTIAL_STORE",
+                "Extended credential ACLs are not permitted.",
+            ));
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn synthetic_ed25519_pkcs8_is_typed_validated_and_redacted() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+        let material = SecretMaterial::BinanceEd25519 {
+            api_key: "SYNTHETIC-ED25519-API-KEY".into(),
+            private_key: pem.to_string(),
+        };
+        material.validate_present().unwrap();
+        let debug = format!("{material:?}");
+        assert!(!debug.contains("SYNTHETIC") && !debug.contains("PRIVATE KEY"));
+        let encoded = serde_json::to_string(&material).unwrap();
+        let decoded: SecretMaterial = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, SecretMaterial::BinanceEd25519 { .. }));
+        let invalid = SecretMaterial::BinanceEd25519 {
+            api_key: "SYNTHETIC-ED25519-API-KEY".into(),
+            private_key:
+                "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-INVALID\n-----END PRIVATE KEY-----".into(),
+        };
+        let error = invalid.validate_present().unwrap_err();
+        assert_eq!(error.code, "INVALID_CREDENTIAL");
+        assert!(!error.to_string().contains("SYNTHETIC"));
+    }
+    #[test]
+    fn debug_and_bad_input_errors_never_echo_secret_values() {
+        let sentinel = "SYNTHETIC-NEVER-A-REAL-SECRET";
+        let material = SecretMaterial::EthereumPrivateKey {
+            private_key: sentinel.into(),
+        };
+        assert!(!format!("{material:?}").contains(sentinel));
+        assert!(
+            !material
+                .validate_present()
+                .unwrap_err()
+                .to_string()
+                .contains(sentinel)
+        );
+    }
+    #[test]
+    fn references_are_opaque_canonical_non_paths() {
+        for bad in [
+            "../secret",
+            "/tmp/key",
+            "not-a-uuid",
+            "550E8400-E29B-41D4-A716-446655440000",
+        ] {
+            assert!(CredentialRef::new(bad).is_err());
+        }
+        assert!(CredentialRef::new("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(serde_json::from_str::<CredentialRef>("\"../secret\"").is_err());
+    }
+    #[test]
+    fn unknown_secret_fields_are_rejected() {
+        assert!(
+            serde_json::from_str::<SecretMaterial>(
+                r#"{"type":"binance_hmac","api_key":"SYNTHETIC","secret":"SYNTHETIC","extra":true}"#
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn synthetic_store_files_use_new_private_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let material = SecretMaterial::BinanceHmac {
+            api_key: "SYNTHETIC-KEY".into(),
+            secret: "SYNTHETIC-SECRET".into(),
+        };
+        let first = write_material(dir.path(), &material).unwrap();
+        let second = write_material(dir.path(), &material).unwrap();
+        assert_ne!(first, second);
+        let path = dir.path().join(format!("{}.json", first.as_str()));
+        let value: SecretMaterial = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(matches!(value, SecretMaterial::BinanceHmac { .. }));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o600);
+        }
+    }
+    #[test]
+    fn oversize_synthetic_material_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let material = SecretMaterial::BinanceHmac {
+            api_key: "SYNTHETIC".into(),
+            secret: "S".repeat(MAX_BYTES),
+        };
+        assert!(write_material(dir.path(), &material).is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}

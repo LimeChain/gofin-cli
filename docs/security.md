@@ -1,14 +1,47 @@
 # Protected execution and Touch ID
 
-## Rust setup and authorization direction
+## Current Rust implementation and evidence limits
 
-The [Rust architecture](rust-architecture.md) and [terminal onboarding contract](onboarding.md) define the next implementation. They are requirements, not verified Rust behavior. Setup is bundled with Fin; the human runs initial installation and later credential enrollment in their own terminal. No custom credential-entry windows or signed `.pkg` release are required for the beta. The agent can discover safe setup instructions before a broker exists, but cannot collect credentials through its PTY, supply secret-bearing normal JSON requests, or authorize itself.
+The Rust workspace now implements the fixed root broker, native authorization,
+protected credential storage, offline discovery, and terminal-driven enrollment.
+Build the reviewed local bundle with `sh scripts/package-rust-macos.sh` and follow
+[its human setup instructions](../packaging/README.md). The installer enables
+launchd socket activation rather than a permanently restarting service.
+
+The normal client contains no exchange, wallet signing, or credential SDK. It
+replaces itself with fresh `sudo -k` execution of the fixed installed broker for
+enrollment. The broker independently checks its installation, kernel process
+lineage into macOS Terminal, foreground terminal ownership, exclusive input, and
+open terminal readers before hidden capture. Input buffers are bounded and
+zeroized; cancellation restores terminal settings. Other terminal apps, remote
+sessions, and multiplexers are unsupported by this initial provider.
+
+Enrollment uses read-only authentication/identity checks and separate native
+configuration approval. Binance account UID is obtained from the account endpoint;
+the usual main-authorized child list attests email but does not reliably attest
+the child UID/email association, so the approval explicitly requires human
+confirmation of that mapping. Updates preserve physical identity and account
+relationships. Active runs, malformed records, and unresolved movements refuse
+configuration mutation. A durable approved-attempt audit does not imply activation:
+the atomically installed configuration determines the active key references.
+
+Synthetic tests establish rejection logic and exact nonce/hash/expiry checks.
+They do **not** establish actual terminal isolation, native Touch ID, root
+installation, or mainnet settlement. Existing agent-readable credentials remain
+outside the protected boundary until the human removes all such copies. Terminal
+checks do not revoke old disclosures or protect a session where an agent has
+GUI automation, keylogging, root, or control of the human terminal. Those human
+checks remain pending; the historical TS evidence below is separate.
+
+## Agreed Rust setup and authorization contract
+
+The [Rust architecture](rust-architecture.md) and [terminal onboarding contract](onboarding.md) define the implemented foundation contract. They are requirements, not evidence that the real human path has passed. Setup is bundled with Fin; the human runs initial installation and later credential enrollment in their own terminal. No custom credential-entry windows or signed `.pkg` release are required for the beta. The agent can discover safe setup instructions before a broker exists, but cannot collect credentials through its PTY, supply secret-bearing normal JSON requests, or authorize itself.
 
 The Rust authorization boundary belongs in `fin-authorization`: broker-generated exact challenges, trusted operation presentation, OS authentication, verified nonce/hash/expiry, and single-use approval. Bundle the compiled Swift helper behind the macOS provider. Keep native prompts and only the trusted display necessary for approval; an agent's terminal explanation cannot replace independent exact-operation review. Define other OS providers without silent authentication fallback or an untested production-write claim. Enrollment/storage belong in `fin-credentials`, with human-authorized configuration changes separate from financial approval.
 
 Protected installation may use a reviewed administrator setup script and OS service management. Running an ordinary same-user daemon or hiding input alone does not prove isolation. Service startup grants no spending authority. Evaluate least-privilege service ownership during the port and verify the actual terminal input, private channel, code/library integrity, credential access, and agent privilege boundary. Human-terminal provisioning must deliver secrets directly to the protected component, never through the untrusted client, its logs, or its environment.
 
-The next implementation stage finishes code and automated/fork verification, then hands off real onboarding, credential-bypass, and biometric checks to the human. Until run, report those checks as pending/not run. Existing TS availability probes and financial tests do not establish Rust acceptance. Production/mainnet verification and complete cleanup still follow the [live-test contract](testing/README.md#live-test-contract).
+The current implementation stage finishes automated/fork verification, then hands off real onboarding, credential-bypass, and biometric checks to the human. Until run, report those checks as pending/not run. Existing TS availability probes and financial tests do not establish Rust acceptance. Production/mainnet verification and complete cleanup still follow the [live-test contract](testing/README.md#live-test-contract).
 
 ## Existing TypeScript prototype
 

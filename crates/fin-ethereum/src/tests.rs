@@ -1,0 +1,3558 @@
+use super::*;
+use abi::*;
+use fin_evm::{
+    EvmRpc,
+    alloy::{
+        primitives::{
+            B256, I256,
+            aliases::{U40, U80},
+        },
+        sol_types::{SolCall, SolEvent, SolValue},
+    },
+    hex_bytes, hex_quantity, quantity,
+};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+
+fn addr(n: u64) -> Address {
+    Address::from_word(B256::from(U256::from(n).to_be_bytes::<32>()))
+}
+fn ray() -> U256 {
+    pow10(27).unwrap()
+}
+fn abi_value<T: SolValue>(value: T) -> Value {
+    json!(hex_bytes(&value.abi_encode()))
+}
+#[derive(Clone, Default)]
+struct AtBlock {
+    scaled_supply: U256,
+    scaled_debt: U256,
+    income: U256,
+    debt_index: U256,
+    supply_previous: U256,
+    debt_previous: U256,
+    collateral: bool,
+    stable_debt: U256,
+}
+struct Fixture {
+    latest: AtomicU64,
+    states: Mutex<std::collections::BTreeMap<u64, AtBlock>>,
+    tx: Mutex<Option<FrozenTransaction>>,
+    receipt: Mutex<Value>,
+    paused: Mutex<bool>,
+    frozen: Mutex<bool>,
+    erc20_false: Mutex<bool>,
+    allowance: Mutex<U256>,
+    nonce: AtomicU64,
+    chain: AtomicU64,
+    calls: Mutex<Vec<String>>,
+    missing_selector: Mutex<Option<[u8; 4]>>,
+    other_revision_reserve: Mutex<bool>,
+    other_revision_balance: Mutex<U256>,
+    selected_revision: AtomicU64,
+    cash_override: Mutex<Option<U256>>,
+    cash_by_owner: Mutex<std::collections::BTreeMap<Address, U256>>,
+    other_stable: AtomicU64,
+    include_weth: Mutex<bool>,
+    feed_updated_at: Mutex<Option<u64>>,
+    call_overrides: Mutex<std::collections::BTreeMap<[u8; 4], Value>>,
+    simulation_override: Mutex<Option<Value>>,
+    simulation_failure: Mutex<bool>,
+}
+impl Fixture {
+    fn new() -> Self {
+        let mut states = std::collections::BTreeMap::new();
+        states.insert(
+            20,
+            AtBlock {
+                income: ray() + U256::from(1),
+                debt_index: ray() + U256::from(1),
+                ..Default::default()
+            },
+        );
+        Self {
+            latest: AtomicU64::new(20),
+            states: Mutex::new(states),
+            tx: Mutex::new(None),
+            receipt: Mutex::new(Value::Null),
+            paused: Mutex::new(false),
+            frozen: Mutex::new(false),
+            erc20_false: Mutex::new(false),
+            allowance: Mutex::new(U256::from(10_000_000_000u64)),
+            nonce: AtomicU64::new(0),
+            chain: AtomicU64::new(1),
+            calls: Mutex::new(Vec::new()),
+            missing_selector: Mutex::new(None),
+            other_revision_reserve: Mutex::new(false),
+            other_revision_balance: Mutex::new(U256::ZERO),
+            selected_revision: AtomicU64::new(5),
+            cash_override: Mutex::new(None),
+            cash_by_owner: Mutex::new(std::collections::BTreeMap::new()),
+            other_stable: AtomicU64::new(777),
+            include_weth: Mutex::new(false),
+            feed_updated_at: Mutex::new(None),
+            call_overrides: Mutex::new(std::collections::BTreeMap::new()),
+            simulation_override: Mutex::new(None),
+            simulation_failure: Mutex::new(false),
+        }
+    }
+    fn state(&self, tag: &Value) -> AtBlock {
+        let block = tag
+            .as_str()
+            .filter(|s| *s != "latest")
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(self.latest.load(Ordering::SeqCst));
+        self.states
+            .lock()
+            .unwrap()
+            .range(..=block)
+            .next_back()
+            .unwrap()
+            .1
+            .clone()
+    }
+    fn post(&self, height: u64, state: AtBlock) {
+        self.states.lock().unwrap().insert(height, state);
+        self.latest.store(height + 1, Ordering::SeqCst);
+    }
+    fn set_receipt(&self, binding: &Binding, height: u64, logs: Vec<Value>) {
+        *self.tx.lock().unwrap() = Some(binding.transaction.clone());
+        *self.receipt.lock().unwrap() = json!({"transactionHash":txhash(),"blockHash":blockhash(height),"blockNumber":format!("{height:#x}"),"status":"0x1","gasUsed":"0x10000","effectiveGasPrice":"0x989680","logs":logs});
+    }
+}
+fn txhash() -> String {
+    format!("0x{}", "ab".repeat(32))
+}
+
+#[tokio::test]
+async fn external_funding_proves_net_credit_and_checks_finality_before_revert() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let mut v = input();
+    v["token"] = json!(lower_address(addr(101)));
+    v["amount"] = json!("1");
+    v["recipient"] = json!(lower_address(addr(2)));
+    let p = a.prepare("wallet.transfer", &v).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding).unwrap();
+    let asset = a.asset(&lower_address(addr(101)), 6);
+    let target = lower_address(addr(1));
+    let q = U256::from(1_000_000);
+    rpc.latest.store(22, Ordering::SeqCst);
+    rpc.set_receipt(
+        &b,
+        21,
+        vec![event(
+            addr(101),
+            Erc20::Transfer {
+                from: addr(2),
+                to: addr(1),
+                value: q,
+            },
+            21,
+        )],
+    );
+    let good = a
+        .verify_external_credit(&txhash(), &target, &asset, "1", "1", 2)
+        .await
+        .unwrap();
+    assert_eq!(good.status, Status::Completed);
+    assert_eq!(good.amount_atoms, Some(quantity(q)));
+    rpc.set_receipt(
+        &b,
+        21,
+        vec![event(
+            addr(101),
+            Erc20::Transfer {
+                from: addr(1),
+                to: addr(1),
+                value: q,
+            },
+            21,
+        )],
+    );
+    assert_eq!(
+        a.verify_external_credit(&txhash(), &target, &asset, "1", "1", 2)
+            .await
+            .unwrap_err()
+            .code,
+        "FUNDING_AMOUNT_MISMATCH"
+    );
+    rpc.receipt.lock().unwrap()["status"] = json!("0x0");
+    rpc.latest.store(21, Ordering::SeqCst);
+    assert_eq!(
+        a.verify_external_credit(&txhash(), &target, &asset, "1", "1", 2)
+            .await
+            .unwrap()
+            .status,
+        Status::Pending
+    );
+    rpc.latest.store(22, Ordering::SeqCst);
+    assert_eq!(
+        a.verify_external_credit(&txhash(), &target, &asset, "1", "1", 2)
+            .await
+            .unwrap()
+            .status,
+        Status::Failed
+    );
+    assert_eq!(
+        a.verify_external_credit(&txhash(), &target, &asset, "1", "1", 1)
+            .await
+            .unwrap_err()
+            .code,
+        "FINALITY_LIMIT"
+    );
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .contains(&"eth_sendRawTransaction".into())
+    );
+}
+#[tokio::test]
+async fn collateral_requires_matching_event_and_inclusion_state() {
+    let rpc = Arc::new(Fixture::new());
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_supply: U256::from(1_000_000),
+            income: ray(),
+            debt_index: ray(),
+            supply_previous: ray(),
+            collateral: true,
+            ..Default::default()
+        },
+    );
+    let a = adapter(rpc.clone());
+    let p = a
+        .prepare("aave.collateral", &aave_input("aave.collateral"))
+        .await
+        .unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    rpc.post(
+        21,
+        AtBlock {
+            scaled_supply: U256::from(1_000_000),
+            income: ray(),
+            debt_index: ray(),
+            supply_previous: ray(),
+            collateral: false,
+            ..Default::default()
+        },
+    );
+    rpc.set_receipt(&b, 21, vec![]);
+    let r = record(p);
+    assert_eq!(
+        a.reconcile(&r).await.unwrap_err().code,
+        "COLLATERAL_PROOF_MISMATCH"
+    );
+    rpc.set_receipt(
+        &b,
+        21,
+        vec![event(
+            addr(300),
+            Pool::ReserveUsedAsCollateralDisabled {
+                reserve: addr(101),
+                user: addr(1),
+            },
+            21,
+        )],
+    );
+    let done = a.reconcile(&r).await.unwrap();
+    assert_eq!(done.status, Status::Completed);
+    assert!(
+        done.verified
+            .unwrap()
+            .effects
+            .iter()
+            .any(|e| matches!(e,FinancialEffect::AuthorityChange{after,..} if after=="false"))
+    );
+}
+
+#[tokio::test]
+async fn wallet_transfer_wrap_unwrap_and_approval_require_exact_original_effects() {
+    for operation in [
+        "wallet.transfer",
+        "wallet.wrap",
+        "wallet.unwrap",
+        "wallet.approve",
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        let a = adapter(rpc.clone());
+        let mut v = input();
+        v["amount"] = json!("0.001");
+        if matches!(operation, "wallet.transfer" | "wallet.approve") {
+            v["token"] = json!(lower_address(addr(101)));
+            v["amount"] = json!("1");
+        }
+        if operation == "wallet.transfer" {
+            v["recipient"] = json!(lower_address(addr(2)))
+        }
+        if operation == "wallet.approve" {
+            v["spender"] = json!(lower_address(addr(300)))
+        }
+        let p = a.prepare(operation, &v).await.unwrap();
+        let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+        let q = fin_evm::u256(&b.units).unwrap();
+        let logs = match operation {
+            "wallet.transfer" => vec![event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(1),
+                    to: addr(2),
+                    value: q,
+                },
+                21,
+            )],
+            "wallet.wrap" => vec![event(
+                addr(100),
+                Weth::Deposit {
+                    dst: addr(1),
+                    wad: q,
+                },
+                21,
+            )],
+            "wallet.unwrap" => vec![event(
+                addr(100),
+                Weth::Withdrawal {
+                    src: addr(1),
+                    wad: q,
+                },
+                21,
+            )],
+            _ => {
+                *rpc.allowance.lock().unwrap() = q;
+                vec![event(
+                    addr(101),
+                    Erc20::Approval {
+                        owner: addr(1),
+                        spender: addr(300),
+                        value: q,
+                    },
+                    21,
+                )]
+            }
+        };
+        rpc.latest.store(22, Ordering::SeqCst);
+        rpc.set_receipt(&b, 21, Vec::new());
+        let r = record(p);
+        assert!(a.reconcile(&r).await.is_err());
+        rpc.set_receipt(&b, 21, logs);
+        let done = a.reconcile(&r).await.unwrap();
+        assert_eq!(done.status, Status::Completed);
+        assert!(done.verified.unwrap().effects.len() >= 2);
+    }
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let mut v = input();
+    v["token"] = json!("native");
+    v["amount"] = json!("0.001");
+    v["recipient"] = json!(lower_address(addr(2)));
+    let p = a.prepare("wallet.transfer", &v).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    rpc.latest.store(22, Ordering::SeqCst);
+    rpc.set_receipt(&b, 21, vec![]);
+    assert_eq!(
+        a.reconcile(&record(p)).await.unwrap().status,
+        Status::Completed
+    );
+}
+#[tokio::test]
+async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowance() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let mut v = input();
+    v["token_in"] = json!(lower_address(addr(100)));
+    v["token_out"] = json!(lower_address(addr(101)));
+    v["amount"] = json!("0.001");
+    v["recipient"] = json!(lower_address(addr(1)));
+    v["min_output"] = json!("2.97");
+    v["slippage_bps"] = json!(100);
+    v["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
+    *rpc.allowance.lock().unwrap() = U256::MAX;
+    assert_eq!(
+        a.prepare("uniswap.swap", &v).await.unwrap_err().code,
+        "ALLOWANCE_INSUFFICIENT"
+    );
+    *rpc.allowance.lock().unwrap() = U256::from(10_000_000_000_000_000u64);
+    let p = a.prepare("uniswap.swap", &v).await.unwrap();
+    assert_eq!(
+        p.valuation.as_ref().unwrap().movement_usd_micros,
+        Quantity::from_u64(3_000_000)
+    );
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    assert_eq!(b.fee_tier, Some(500));
+    let q = fin_evm::u256(&b.units).unwrap();
+    let logs = |out| {
+        vec![
+            event(
+                addr(500),
+                UniswapPool::Swap {
+                    sender: addr(470),
+                    recipient: addr(1),
+                    amount0: I256::from_raw(q),
+                    amount1: -I256::from_raw(out),
+                    sqrtPriceX96: Default::default(),
+                    liquidity: 1,
+                    tick: Default::default(),
+                },
+                21,
+            ),
+            event(
+                addr(100),
+                Erc20::Transfer {
+                    from: addr(1),
+                    to: addr(500),
+                    value: q,
+                },
+                21,
+            ),
+            event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(500),
+                    to: addr(1),
+                    value: out,
+                },
+                21,
+            ),
+        ]
+    };
+    rpc.latest.store(22, Ordering::SeqCst);
+    rpc.set_receipt(&b, 21, logs(U256::from(2_000_000)));
+    let r = record(p);
+    assert_eq!(
+        a.reconcile(&r).await.unwrap_err().code,
+        "SWAP_PROOF_MISMATCH"
+    );
+    rpc.set_receipt(&b, 21, logs(U256::from(3_000_000)));
+    assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
+}
+fn blockhash(n: u64) -> String {
+    format!("{:#x}", B256::from(U256::from(n).to_be_bytes::<32>()))
+}
+fn event<E: SolEvent>(emitter: Address, e: E, height: u64) -> Value {
+    let log = e.encode_log_data();
+    json!({"address":lower_address(emitter),"topics":log.topics().iter().map(|t|format!("{t:#x}")).collect::<Vec<_>>(),"data":hex_bytes(&log.data),"removed":false,"transactionHash":txhash(),"blockHash":blockhash(height),"blockNumber":format!("{height:#x}")})
+}
+#[async_trait]
+impl EvmRpc for Fixture {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.calls.lock().unwrap().push(method.into());
+        let latest = self.latest.load(Ordering::SeqCst);
+        Ok(match method {
+            "eth_chainId" => json!(format!("{:#x}", self.chain.load(Ordering::SeqCst))),
+            "eth_blockNumber" => json!(format!("{latest:#x}")),
+            "eth_getBlockByNumber" => {
+                let n = params[0]
+                    .as_str()
+                    .filter(|s| *s != "latest")
+                    .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
+                    .unwrap_or(latest);
+                json!({"hash":blockhash(n),"number":format!("{n:#x}"),"baseFeePerGas":"0x1"})
+            }
+            "eth_getCode" => json!(if [addr(1), addr(2)]
+                .contains(&address(params[0].as_str().unwrap())?)
+            {
+                "0x"
+            } else {
+                "0x6000"
+            }),
+            "eth_getBalance" => json!("0xde0b6b3a7640000"),
+            "eth_getTransactionCount" => json!(format!("{:#x}", self.nonce.load(Ordering::SeqCst))),
+            "eth_estimateGas" => json!("0x186a0"),
+            "eth_maxPriorityFeePerGas" => json!("0x989680"),
+            "eth_getTransactionReceipt" => self.receipt.lock().unwrap().clone(),
+            "eth_getTransactionByHash" => {
+                let locked = self.tx.lock().unwrap();
+                let t = locked.as_ref().expect("test sets original transaction");
+                let r = self.receipt.lock().unwrap();
+                json!({"hash":txhash(),"from":t.sender,"to":t.to,"nonce":format!("{:#x}",t.nonce),"chainId":format!("{:#x}",t.chain_id),"type":"0x2","gas":format!("{:#x}",t.gas),"value":hex_quantity(fin_evm::u256(&t.value)?),"input":t.calldata,"maxFeePerGas":hex_quantity(fin_evm::u256(&t.max_fee_per_gas)?),"maxPriorityFeePerGas":hex_quantity(fin_evm::u256(&t.max_priority_fee_per_gas)?),"accessList":[],"blockHash":r["blockHash"],"blockNumber":r["blockNumber"]})
+            }
+            "eth_call" => {
+                if params[0].get("from").is_some() {
+                    if *self.simulation_failure.lock().unwrap() {
+                        return Err(FinError::new(
+                            "SYNTHETIC_SIMULATION_FAILED",
+                            "simulation",
+                            "Isolated executable call simulation failed.",
+                            "Inspect fixture.",
+                        ));
+                    }
+                    if let Some(value) = self.simulation_override.lock().unwrap().clone() {
+                        return Ok(value);
+                    }
+                }
+                let data = fin_evm::rpc_bytes(&params[0]["data"])?;
+                if data.is_empty() {
+                    return Ok(json!("0x"));
+                }
+                let selector: [u8; 4] = data[..4].try_into().unwrap();
+                if *self.missing_selector.lock().unwrap() == Some(selector) {
+                    return Err(FinError::new(
+                        "SYNTHETIC_REQUIRED_READ_FAILED",
+                        "read",
+                        "Isolated required read failed.",
+                        "Inspect fixture.",
+                    ));
+                }
+                if let Some(value) = self.call_overrides.lock().unwrap().get(&selector).cloned() {
+                    return Ok(value);
+                }
+                let to = address(params[0]["to"].as_str().unwrap())?;
+                let s = self.state(&params[1]);
+                let token = if to == addr(100) { WETH } else { USDC };
+                let supplied = anchors::backing(s.scaled_supply, s.income, &PositionKind::Supply)?;
+                let debt =
+                    anchors::backing(s.scaled_debt, s.debt_index, &PositionKind::VariableDebt)?;
+                match selector {
+                    Erc20::decimalsCall::SELECTOR => {
+                        abi_value(U256::from(if token == WETH { 18u8 } else { 6u8 }))
+                    }
+                    Erc20::symbolCall::SELECTOR => {
+                        abi_value(if token == WETH { "WETH" } else { "USDC" }.to_string())
+                    }
+                    Erc20::balanceOfCall::SELECTOR => {
+                        abi_value(if to == addr(111) || to == addr(121) {
+                            *self.other_revision_balance.lock().unwrap()
+                        } else if to == addr(110) {
+                            supplied
+                        } else if to == addr(120) {
+                            debt
+                        } else if Erc20::balanceOfCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .owner
+                            == addr(110)
+                        {
+                            pow10(18)?
+                        } else {
+                            self.cash_by_owner
+                                .lock()
+                                .unwrap()
+                                .get(
+                                    &Erc20::balanceOfCall::abi_decode_validate(&data)
+                                        .unwrap()
+                                        .owner,
+                                )
+                                .copied()
+                                .unwrap_or(self.cash_override.lock().unwrap().unwrap_or(pow10(18)?))
+                        })
+                    }
+                    Erc20::totalSupplyCall::SELECTOR => abi_value(U256::from(1_000_000_000u64)),
+                    Erc20::allowanceCall::SELECTOR => abi_value(*self.allowance.lock().unwrap()),
+                    Erc20::transferCall::SELECTOR | Erc20::approveCall::SELECTOR => {
+                        abi_value(!*self.erc20_false.lock().unwrap())
+                    }
+                    Pool::ADDRESSES_PROVIDERCall::SELECTOR => abi_value(addr(200)),
+                    AddressesProvider::getPoolCall::SELECTOR => abi_value(addr(300)),
+                    AddressesProvider::getPriceOracleCall::SELECTOR => abi_value(addr(400)),
+                    AddressesProvider::getPoolDataProviderCall::SELECTOR => abi_value(addr(210)),
+                    Pool::getReservesListCall::SELECTOR => {
+                        abi_value(if *self.include_weth.lock().unwrap() {
+                            vec![addr(100), addr(101), addr(102)]
+                        } else {
+                            vec![addr(101), addr(102)]
+                        })
+                    }
+                    DataProvider::getReserveConfigurationDataCall::SELECTOR => abi_value((
+                        U256::from(
+                            if DataProvider::getReserveConfigurationDataCall::abi_decode_validate(
+                                &data,
+                            )
+                            .unwrap()
+                            .asset
+                                == addr(100)
+                            {
+                                18
+                            } else {
+                                6
+                            },
+                        ),
+                        U256::from(8000),
+                        U256::from(8500),
+                        U256::from(10500),
+                        U256::from(1000),
+                        true,
+                        true,
+                        false,
+                        true,
+                        *self.frozen.lock().unwrap(),
+                    )),
+                    DataProvider::getReserveTokensAddressesCall::SELECTOR => {
+                        let call =
+                            DataProvider::getReserveTokensAddressesCall::abi_decode_validate(&data)
+                                .unwrap();
+                        if call.asset == addr(102) && *self.other_revision_reserve.lock().unwrap() {
+                            abi_value((addr(111), addr(115), addr(121)))
+                        } else {
+                            abi_value((addr(110), addr(115), addr(120)))
+                        }
+                    }
+                    DataProvider::getReserveCapsCall::SELECTOR => {
+                        abi_value((U256::ZERO, U256::ZERO))
+                    }
+                    DataProvider::getPausedCall::SELECTOR => {
+                        abi_value(*self.paused.lock().unwrap())
+                    }
+                    DataProvider::getUserReserveDataCall::SELECTOR => {
+                        let call = DataProvider::getUserReserveDataCall::abi_decode_validate(&data)
+                            .unwrap();
+                        let other =
+                            call.asset == addr(102) && *self.other_revision_reserve.lock().unwrap();
+                        let other_units = *self.other_revision_balance.lock().unwrap();
+                        abi_value((
+                            if other { other_units } else { supplied },
+                            if call.asset == addr(102) {
+                                U256::from(self.other_stable.load(Ordering::SeqCst))
+                            } else {
+                                s.stable_debt
+                            },
+                            if other { other_units } else { debt },
+                            U256::ZERO,
+                            if other { other_units } else { s.scaled_debt },
+                            U256::ZERO,
+                            U256::ZERO,
+                            U40::ZERO,
+                            s.collateral,
+                        ))
+                    }
+                    Pool::getUserAccountDataCall::SELECTOR => abi_value((
+                        U256::from(100_000_000_000u64),
+                        U256::ZERO,
+                        U256::from(80_000_000_000u64),
+                        U256::from(8500),
+                        U256::from(8000),
+                        U256::MAX,
+                    )),
+                    AToken::ATOKEN_REVISIONCall::SELECTOR
+                    | AToken::DEBT_TOKEN_REVISIONCall::SELECTOR => {
+                        abi_value(U256::from(if to == addr(111) || to == addr(121) {
+                            4
+                        } else {
+                            self.selected_revision.load(Ordering::SeqCst)
+                        }))
+                    }
+                    AToken::scaledBalanceOfCall::SELECTOR => {
+                        abi_value(if to == addr(111) || to == addr(121) {
+                            *self.other_revision_balance.lock().unwrap()
+                        } else if to == addr(110) {
+                            s.scaled_supply
+                        } else {
+                            s.scaled_debt
+                        })
+                    }
+                    AToken::getPreviousIndexCall::SELECTOR => abi_value(if to == addr(110) {
+                        s.supply_previous
+                    } else {
+                        s.debt_previous
+                    }),
+                    Pool::getReserveNormalizedIncomeCall::SELECTOR => abi_value(s.income),
+                    Pool::getReserveNormalizedVariableDebtCall::SELECTOR => abi_value(s.debt_index),
+                    Oracle::BASE_CURRENCYCall::SELECTOR => abi_value(Address::ZERO),
+                    Oracle::BASE_CURRENCY_UNITCall::SELECTOR => abi_value(U256::from(100_000_000)),
+                    Oracle::getAssetPriceCall::SELECTOR => {
+                        let call = Oracle::getAssetPriceCall::abi_decode_validate(&data).unwrap();
+                        abi_value(U256::from(if call.asset == addr(100) {
+                            300_000_000_000u64
+                        } else {
+                            100_000_000u64
+                        }))
+                    }
+                    Oracle::getSourceOfAssetCall::SELECTOR => abi_value(addr(410)),
+                    PriceFeed::latestRoundDataCall::SELECTOR => abi_value((
+                        U80::from(1),
+                        I256::from_raw(U256::from(100_000_000)),
+                        U256::ZERO,
+                        U256::from(
+                            self.feed_updated_at
+                                .lock()
+                                .unwrap()
+                                .unwrap_or(chrono::Utc::now().timestamp() as u64),
+                        ),
+                        U80::from(1),
+                    )),
+                    Factory::getPoolCall::SELECTOR => {
+                        let call = Factory::getPoolCall::abi_decode_validate(&data).unwrap();
+                        abi_value(if call.fee.to::<u32>() == 500 {
+                            addr(500)
+                        } else {
+                            Address::ZERO
+                        })
+                    }
+                    Quoter::quoteExactInputSingleCall::SELECTOR => abi_value((
+                        U256::from(3_000_000),
+                        fin_evm::alloy::primitives::aliases::U160::ZERO,
+                        0u32,
+                        U256::from(100000),
+                    )),
+                    Weth::depositCall::SELECTOR
+                    | Weth::withdrawCall::SELECTOR
+                    | Pool::supplyCall::SELECTOR
+                    | Pool::borrowCall::SELECTOR
+                    | Pool::setUserUseReserveAsCollateralCall::SELECTOR => json!("0x"),
+                    Router::exactInputSingleCall::SELECTOR => abi_value(U256::from(3_000_000)),
+                    Pool::repayCall::SELECTOR => abi_value(U256::from(1_000_000)),
+                    Pool::withdrawCall::SELECTOR => {
+                        let q = Pool::withdrawCall::abi_decode_validate(&data)
+                            .unwrap()
+                            .amount;
+                        abi_value(if q == U256::MAX { supplied } else { q })
+                    }
+                    _ => {
+                        return Err(FinError::validation(format!(
+                            "Unimplemented isolated selector {}",
+                            hex::encode(selector)
+                        )));
+                    }
+                }
+            }
+            "eth_sendRawTransaction" => {
+                return Err(FinError::validation(
+                    "Protocol fixtures must never dispatch.",
+                ));
+            }
+            _ => return Err(FinError::validation("Unimplemented isolated RPC method.")),
+        })
+    }
+}
+fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
+    let config = EthereumConfig {
+        weth: lower_address(addr(100)),
+        snapshot_tokens: vec![lower_address(addr(101))],
+        uniswap: UniswapConfig {
+            factory: lower_address(addr(450)),
+            quoter: lower_address(addr(460)),
+            router: lower_address(addr(470)),
+        },
+        aave: AaveConfig {
+            pool: lower_address(addr(300)),
+            oracle: lower_address(addr(400)),
+        },
+        ..Default::default()
+    };
+    EthereumAdapter::new(
+        config,
+        vec![WalletConnection {
+            name: "synthetic".into(),
+            address: lower_address(addr(1)),
+            signing_enabled: true,
+        }],
+        Arc::new(EvmRuntime::new(rpc, 1, None)),
+    )
+    .unwrap()
+}
+fn input() -> Value {
+    json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"isolated-request","max_fee_eth":"0.001"})
+}
+fn swap_input() -> Value {
+    let mut value = input();
+    value.as_object_mut().unwrap().extend(
+        json!({
+            "token_in":lower_address(addr(100)), "token_out":lower_address(addr(101)),
+            "amount":"0.001", "recipient":lower_address(addr(1)),
+            "min_output":"2.97", "slippage_bps":100,
+            "deadline":chrono::Utc::now().timestamp() as u64+120,
+            "max_fee_eth":"0.0001",
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    value
+}
+fn synthetic_route_context(
+    baseline: StateSnapshot,
+    allocations: Vec<ResourceAmount>,
+) -> ReturnRouteContext {
+    ReturnRouteContext {
+        projected: ProjectedState {
+            cash: baseline
+                .state
+                .holdings
+                .iter()
+                .map(|holding| ProjectedCash {
+                    resource: holding.resource.clone(),
+                    asset: holding.amount.asset.clone(),
+                    amount: QuantityInterval {
+                        minimum: holding.amount.atoms.clone(),
+                        maximum: holding.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            positions: baseline
+                .state
+                .positions
+                .iter()
+                .map(|position| ProjectedPosition {
+                    resource: position.resource.clone(),
+                    position: position.position.clone(),
+                    asset: position.amount.asset.clone(),
+                    position_kind: position.kind.clone(),
+                    amount: QuantityInterval {
+                        minimum: position.amount.atoms.clone(),
+                        maximum: position.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            authorities: baseline.state.authorities.clone(),
+        },
+        baseline,
+        allocations,
+        step_index: 0,
+        prior_proofs: vec![],
+        remaining_cost_budget_usd_micros: Quantity::from_u64(10_000_000),
+        asset_prices: vec![],
+    }
+}
+
+#[tokio::test]
+async fn failed_zero_malformed_quotes_and_foreign_swap_recipient_fail_before_simulation() {
+    for case in 0..4 {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+        let mut a = adapter(rpc.clone());
+        a.config.snapshot_tokens.push(lower_address(addr(100)));
+        let baseline = a.read_snapshot().await.unwrap();
+        let context = synthetic_route_context(
+            baseline,
+            vec![
+                ResourceAmount {
+                    resource: resource(1, addr(1)),
+                    amount: amount(&a.native_asset(), exact("0.001", 18).unwrap()),
+                },
+                ResourceAmount {
+                    resource: resource(1, addr(1)),
+                    amount: amount(
+                        &a.asset(&lower_address(addr(100)), 18),
+                        exact("0.001", 18).unwrap(),
+                    ),
+                },
+            ],
+        );
+        let mut request = swap_input();
+        let expected = if case == 3 {
+            "SWAP_RECIPIENT_UNSUPPORTED"
+        } else {
+            "QUOTE_UNAVAILABLE"
+        };
+        match case {
+            0 => {
+                *rpc.missing_selector.lock().unwrap() =
+                    Some(Quoter::quoteExactInputSingleCall::SELECTOR)
+            }
+            1 => {
+                rpc.call_overrides.lock().unwrap().insert(
+                    Quoter::quoteExactInputSingleCall::SELECTOR,
+                    abi_value((
+                        U256::ZERO,
+                        fin_evm::alloy::primitives::aliases::U160::ZERO,
+                        0u32,
+                        U256::from(100000),
+                    )),
+                );
+            }
+            2 => {
+                rpc.call_overrides
+                    .lock()
+                    .unwrap()
+                    .insert(Quoter::quoteExactInputSingleCall::SELECTOR, json!("0x"));
+            }
+            3 => request["recipient"] = json!(lower_address(addr(2))),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            a.prepare("uniswap.swap", &request).await.unwrap_err().code,
+            expected,
+            "ordinary case {case}"
+        );
+        assert_eq!(
+            a.preflight_return_route("uniswap.swap", &request, &context)
+                .await
+                .unwrap_err()
+                .code,
+            expected,
+            "route case {case}"
+        );
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_estimateGas" || method == "eth_sendRawTransaction")
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_malformed_and_below_minimum_simulations_never_become_swap_previews() {
+    for (case, expected) in [
+        (0, "SYNTHETIC_SIMULATION_FAILED"),
+        (1, "SIMULATION_RETURN_INVALID"),
+        (2, "SWAP_SIMULATION_LIMIT"),
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+        match case {
+            0 => *rpc.simulation_failure.lock().unwrap() = true,
+            1 => *rpc.simulation_override.lock().unwrap() = Some(json!("0x")),
+            2 => *rpc.simulation_override.lock().unwrap() = Some(abi_value(U256::from(2_000_000))),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            adapter(rpc.clone())
+                .prepare("uniswap.swap", &swap_input())
+                .await
+                .unwrap_err()
+                .code,
+            expected
+        );
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .contains(&"eth_sendRawTransaction".into())
+        );
+        if case == 0 {
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .contains(&"eth_estimateGas".into())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn changed_quote_simulation_nonce_chain_and_frozen_calldata_invalidate_old_preview() {
+    for (case, expected) in [
+        (0, "QUOTE_UNAVAILABLE"),
+        (1, "SLIPPAGE_LIMIT"),
+        (2, "SWAP_SIMULATION_LIMIT"),
+        (3, "NONCE_CHANGED"),
+        (4, "WRONG_CHAIN"),
+        (5, "BINDING_CHANGED"),
+        (6, "WRONG_CHAIN"),
+        (7, "ORACLE_STALE"),
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+        let a = adapter(rpc.clone());
+        let preview = a.prepare("uniswap.swap", &swap_input()).await.unwrap();
+        let original = preview.binding.clone();
+        let mut candidate = preview.clone();
+        match case {
+            0 => {
+                *rpc.missing_selector.lock().unwrap() =
+                    Some(Quoter::quoteExactInputSingleCall::SELECTOR);
+            }
+            1 => {
+                rpc.call_overrides.lock().unwrap().insert(
+                    Quoter::quoteExactInputSingleCall::SELECTOR,
+                    abi_value((
+                        U256::from(2_500_000),
+                        fin_evm::alloy::primitives::aliases::U160::ZERO,
+                        0u32,
+                        U256::from(100000),
+                    )),
+                );
+            }
+            2 => {
+                *rpc.simulation_override.lock().unwrap() = Some(abi_value(U256::from(2_000_000)));
+            }
+            3 => rpc.nonce.store(1, Ordering::SeqCst),
+            4 => rpc.chain.store(2, Ordering::SeqCst),
+            5 => candidate.binding["transaction"]["calldata"] = json!("0x1234"),
+            6 => candidate.binding["transaction"]["chain_id"] = json!(2),
+            7 => {
+                *rpc.feed_updated_at.lock().unwrap() =
+                    Some(chrono::Utc::now().timestamp() as u64 + 60);
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            a.revalidate(&candidate).await.unwrap_err().code,
+            expected,
+            "case {case}"
+        );
+        assert_eq!(preview.binding, original);
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .contains(&"eth_sendRawTransaction".into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn production_oracle_rejects_future_stale_incomplete_negative_and_zero_feeds() {
+    let timestamp = chrono::Utc::now().timestamp() as u64;
+    for case in 0..7 {
+        let rpc = Arc::new(Fixture::new());
+        let (answer, updated, answered) = match case {
+            0 => (
+                I256::from_raw(U256::from(100_000_000)),
+                timestamp + 60,
+                U80::from(1),
+            ),
+            1 => (
+                I256::from_raw(U256::from(100_000_000)),
+                timestamp - 86_401,
+                U80::from(1),
+            ),
+            2 => (
+                I256::from_raw(U256::from(100_000_000)),
+                timestamp,
+                U80::ZERO,
+            ),
+            3 => (I256::ZERO, timestamp, U80::from(1)),
+            4 => (-I256::from_raw(U256::from(1)), timestamp, U80::from(1)),
+            5 => (I256::from_raw(U256::from(100_000_000)), 0, U80::from(1)),
+            _ => (
+                I256::from_raw(U256::from(100_000_000)),
+                timestamp,
+                U80::from(1),
+            ),
+        };
+        rpc.call_overrides.lock().unwrap().insert(
+            PriceFeed::latestRoundDataCall::SELECTOR,
+            abi_value((
+                U80::from(1),
+                answer,
+                U256::ZERO,
+                U256::from(updated),
+                answered,
+            )),
+        );
+        if case == 6 {
+            rpc.call_overrides
+                .lock()
+                .unwrap()
+                .insert(Oracle::getAssetPriceCall::SELECTOR, abi_value(U256::ZERO));
+        }
+        let error = adapter(rpc.clone())
+            .quote_usd(&lower_address(addr(101)), Quantity::from_u64(1_000_000))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            if case == 6 {
+                "ORACLE_PRICE_INVALID"
+            } else {
+                "ORACLE_STALE"
+            },
+            "case {case}"
+        );
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_estimateGas" || method == "eth_sendRawTransaction")
+        );
+    }
+}
+fn aave_input(op: &str) -> Value {
+    let mut v = input();
+    v["token"] = json!(lower_address(addr(101)));
+    if op == "aave.collateral" {
+        v["enabled"] = json!(false)
+    } else {
+        v["amount"] = json!("1")
+    }
+    if op == "aave.borrow" {
+        v["min_health_factor"] = json!("1.5")
+    }
+    if op == "aave.withdraw" {
+        v["recipient"] = json!(lower_address(addr(1)))
+    }
+    v
+}
+fn record(preview: PreparedOperation) -> OperationRecord {
+    let b: Binding = serde_json::from_value(preview.binding.clone()).unwrap();
+    let submission = Submission {
+        kind: "ethereum".into(),
+        reference: txhash(),
+        data: json!({"transaction":b.transaction,"metadata":{"operation":preview.operation,"resource":b.resource}}),
+    };
+    OperationRecord {
+        id: "isolated-op".into(),
+        request_id: "isolated-request".into(),
+        fingerprint: "isolated".into(),
+        fingerprint_version: 1,
+        operation: preview.operation.clone(),
+        input: preview.input.clone(),
+        status: Status::Submitted,
+        created_at: now(),
+        updated_at: now(),
+        preview: Some(preview),
+        approval: None,
+        submission: Some(submission),
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    }
+}
+
+#[test]
+fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
+    let defs = operation_definitions();
+    assert_eq!(defs.len(), 17);
+    let transfer = defs.iter().find(|d| d.name == "wallet.transfer").unwrap();
+    assert_eq!(transfer.input_schema["additionalProperties"], json!(false));
+    assert!(transfer.input_schema["properties"].get("enabled").is_none());
+    let mut bad = input();
+    bad["amount"] = json!("1");
+    bad["enabled"] = json!(true);
+    assert!(request::parse("wallet.wrap", &bad).is_err());
+    for bad in ["1e-6", "-1", "00.1", "0.0000001", "1."] {
+        assert!(exact(bad, 6).is_err())
+    }
+}
+#[test]
+fn revision_five_rounding_is_proved_and_not_a_tolerance() {
+    let q = Quantity::from_u64(1_000_000);
+    let index = quantity(ray() + U256::from(1));
+    let p = proof::revision_five_backing(
+        q.clone(),
+        Quantity::zero(),
+        Quantity::from_u64(999999),
+        Quantity::zero(),
+        index.clone(),
+        index,
+    )
+    .unwrap();
+    assert_eq!(p.rounding_loss, Quantity::from_u64(1));
+    assert_eq!(p.backed_principal, Quantity::from_u64(999999));
+    assert!(
+        proof::revision_five_backing(
+            q,
+            Quantity::zero(),
+            Quantity::from_u64(1000000),
+            Quantity::zero(),
+            quantity(ray() + U256::from(1)),
+            quantity(ray() + U256::from(1))
+        )
+        .is_err()
+    );
+    assert!(
+        proof::revision_five_backing(
+            Quantity::new(U256::MAX.to_string()).unwrap(),
+            Quantity::zero(),
+            Quantity::from_u64(1),
+            Quantity::zero(),
+            quantity(ray()),
+            quantity(ray())
+        )
+        .is_err()
+    );
+}
+#[test]
+fn partial_repayments_carry_unpaid_interest_and_rounding_without_double_cost() {
+    let (first_cost, interest, rounding) = proof::settle_debt_costs(
+        U256::from(900),
+        U256::ZERO,
+        U256::from(1),
+        U256::from(100),
+        U256::from(99),
+    )
+    .unwrap();
+    assert_eq!(first_cost, U256::from(100));
+    assert_eq!(interest, U256::from(801));
+    assert_eq!(rounding, U256::from(1));
+    let (second_cost, interest, rounding) = proof::settle_debt_costs(
+        U256::ZERO,
+        interest,
+        rounding,
+        U256::from(1802),
+        U256::from(1802),
+    )
+    .unwrap();
+    assert_eq!(first_cost + second_cost, U256::from(902));
+    assert_eq!(interest, U256::ZERO);
+    assert_eq!(rounding, U256::ZERO);
+    assert!(
+        proof::settle_debt_costs(
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+            U256::from(1),
+            U256::from(2)
+        )
+        .is_err()
+    );
+}
+#[tokio::test]
+async fn complete_snapshot_includes_unrequested_reserve_stable_debt_and_fails_closed_on_missing_read()
+ {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let s = a.read_snapshot().await.unwrap();
+    assert!(s.complete);
+    assert_eq!(s.state.positions.len(), 6);
+    assert!(s.coverage.contains(&resource(1, addr(1)).0));
+    assert!(
+        s.state.positions.iter().any(
+            |p| p.kind == PositionKind::StableDebt && p.amount.atoms == Quantity::from_u64(777)
+        )
+    );
+    assert_eq!(s.state.holdings.len(), 2);
+    assert_eq!(s.state.authorities.len(), 4);
+    *rpc.missing_selector.lock().unwrap() = Some(DataProvider::getUserReserveDataCall::SELECTOR);
+    assert_eq!(
+        a.read_snapshot().await.unwrap_err().code,
+        "SYNTHETIC_REQUIRED_READ_FAILED"
+    );
+}
+
+/// Synthetic transport instrumentation only: no sockets, keys or external RPC.
+struct SnapshotProbeRpc {
+    inner: Arc<Fixture>,
+    active: Arc<AtomicUsize>,
+    peak: AtomicUsize,
+    requests: Mutex<Vec<(String, Value)>>,
+    headers: AtomicUsize,
+    header_failure: AtomicU64,
+    pending_nonce: AtomicU64,
+}
+struct SnapshotReadGuard(Arc<AtomicUsize>);
+impl Drop for SnapshotReadGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl SnapshotProbeRpc {
+    fn new(inner: Arc<Fixture>) -> Self {
+        Self {
+            inner,
+            active: Arc::new(AtomicUsize::new(0)),
+            peak: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
+            headers: AtomicUsize::new(0),
+            header_failure: AtomicU64::new(0),
+            pending_nonce: AtomicU64::new(u64::MAX),
+        }
+    }
+}
+#[async_trait]
+impl EvmRpc for SnapshotProbeRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _guard = SnapshotReadGuard(self.active.clone());
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.requests
+            .lock()
+            .unwrap()
+            .push((method.into(), params.clone()));
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if method == "eth_getBlockByNumber" {
+            let nth = self.headers.fetch_add(1, Ordering::SeqCst) + 1;
+            // Initial header, one shared anchor header, then the uncached final
+            // recheck. Reorg/pruning appears only at the final transport fetch.
+            if nth >= 3 {
+                match self.header_failure.load(Ordering::SeqCst) {
+                    1 => return Ok(json!({"hash":blockhash(999),"number":"0x14"})),
+                    2 => return Ok(Value::Null),
+                    _ => {}
+                }
+            }
+        }
+        if method == "eth_getTransactionCount" && params[1] == "pending" {
+            let nonce = self.pending_nonce.load(Ordering::SeqCst);
+            if nonce != u64::MAX {
+                return Ok(json!(format!("{nonce:#x}")));
+            }
+        }
+        self.inner.request(method, params).await
+    }
+}
+fn probe_adapter(probe: Arc<SnapshotProbeRpc>, wallet_count: u64) -> EthereumAdapter {
+    let mut a = adapter(probe.inner.clone());
+    for n in 1..wallet_count {
+        a.wallets.push(WalletConnection {
+            name: format!("synthetic-{n}"),
+            address: lower_address(addr(n + 1)),
+            signing_enabled: false,
+        });
+    }
+    a.runtime = Arc::new(EvmRuntime::new(probe, 1, None));
+    a
+}
+fn snapshot_financial_output(mut snapshot: StateSnapshot) -> Value {
+    snapshot.observed_at.clear();
+    for position in &mut snapshot.state.positions {
+        if let Some(anchor) = &mut position.anchor {
+            anchor.observed_at.clear();
+        }
+    }
+    serde_json::to_value(snapshot).unwrap()
+}
+#[tokio::test]
+async fn concurrent_snapshot_preserves_all_ordered_financial_and_backing_evidence_with_bounded_reads()
+ {
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let s = states.get_mut(&20).unwrap();
+        s.scaled_supply = U256::from(1000);
+        s.scaled_debt = U256::from(2000);
+    }
+    let serial = Arc::new(SnapshotProbeRpc::new(rpc.clone()));
+    let concurrent = Arc::new(SnapshotProbeRpc::new(rpc));
+    let expected = probe_adapter(serial, 8).capture_snapshot(1).await.unwrap();
+    let actual = probe_adapter(concurrent.clone(), 8)
+        .read_snapshot()
+        .await
+        .unwrap();
+    assert!(actual.complete);
+    assert_eq!(actual.state.holdings.len(), 16);
+    assert_eq!(actual.state.positions.len(), 48);
+    assert_eq!(actual.state.authorities.len(), 32);
+    assert_eq!(actual.coverage.len(), 8);
+    assert_eq!(
+        snapshot_financial_output(expected),
+        snapshot_financial_output(actual)
+    );
+    assert!(concurrent.peak.load(Ordering::SeqCst) > 1);
+    assert!(concurrent.peak.load(Ordering::SeqCst) <= snapshot::SNAPSHOT_CONCURRENCY);
+    assert_eq!(concurrent.active.load(Ordering::SeqCst), 0);
+    let requests = concurrent.requests.lock().unwrap();
+    let mut pinned = std::collections::BTreeSet::new();
+    for (method, params) in requests.iter() {
+        if matches!(
+            method.as_str(),
+            "eth_call" | "eth_getCode" | "eth_getBalance" | "eth_getTransactionCount"
+        ) && params[1] == "0x14"
+        {
+            assert!(
+                pinned.insert(format!("{method}:{params}")),
+                "duplicate pinned transport read: {method}"
+            );
+        }
+        if method == "eth_getCode" {
+            assert_eq!(params[1], "0x14");
+        }
+        assert_ne!(method, "eth_sendRawTransaction");
+        assert_ne!(method, "eth_estimateGas");
+    }
+    // Header cache must not swallow the start/final canonical transport checks.
+    assert_eq!(concurrent.headers.load(Ordering::SeqCst), 3);
+}
+#[tokio::test]
+async fn concurrent_snapshot_rejects_final_reorg_or_missing_header_after_cached_anchor_reads() {
+    for failure in [1, 2] {
+        let probe = Arc::new(SnapshotProbeRpc::new(Arc::new(Fixture::new())));
+        probe.header_failure.store(failure, Ordering::SeqCst);
+        assert_eq!(
+            probe_adapter(probe.clone(), 4)
+                .read_snapshot()
+                .await
+                .unwrap_err()
+                .code,
+            "SNAPSHOT_CHANGED"
+        );
+        assert_eq!(probe.headers.load(Ordering::SeqCst), 3);
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    }
+}
+#[tokio::test]
+async fn failed_concurrent_snapshot_drains_readers_and_new_capture_retries_required_evidence() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.missing_selector.lock().unwrap() = Some(DataProvider::getUserReserveDataCall::SELECTOR);
+    let probe = Arc::new(SnapshotProbeRpc::new(rpc.clone()));
+    let a = probe_adapter(probe.clone(), 8);
+    assert_eq!(
+        a.read_snapshot().await.unwrap_err().code,
+        "SYNTHETIC_REQUIRED_READ_FAILED"
+    );
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    *rpc.missing_selector.lock().unwrap() = None;
+    let restored = a.read_snapshot().await.unwrap();
+    assert!(restored.complete);
+    assert_eq!(restored.state.positions.len(), 48);
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn concurrent_snapshot_retains_pending_nonce_classification_and_does_not_cache_across_captures()
+ {
+    let probe = Arc::new(SnapshotProbeRpc::new(Arc::new(Fixture::new())));
+    let a = probe_adapter(probe.clone(), 2);
+    let initial = a.read_snapshot().await.unwrap();
+    assert!(initial.complete);
+    probe.pending_nonce.store(1, Ordering::SeqCst);
+    let pending = a.read_snapshot().await.unwrap();
+    assert!(!pending.complete);
+    assert_eq!(pending.pending.len(), 2);
+    assert_eq!(pending.pending, pending.state.in_flight);
+    assert_eq!(pending.state.holdings, initial.state.holdings);
+    assert_eq!(pending.state.authorities, initial.state.authorities);
+    assert_eq!(pending.state.positions.len(), initial.state.positions.len());
+    let requests = probe.requests.lock().unwrap();
+    for wallet in &a.wallets {
+        for tag in ["0x14", "pending"] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(method, p)| method == "eth_getTransactionCount"
+                        && p[0] == wallet.address
+                        && p[1] == tag)
+                    .count(),
+                2
+            );
+        }
+    }
+}
+#[tokio::test]
+async fn snapshot_coverage_is_stable_across_blocks_while_anchor_evidence_remains_fresh() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let initial = a.read_snapshot().await.unwrap();
+    rpc.latest.store(23, Ordering::SeqCst);
+    let final_state = a.read_snapshot().await.unwrap();
+    assert_eq!(initial.coverage, vec![resource(1, addr(1)).0]);
+    assert_eq!(initial.coverage, final_state.coverage);
+    assert_eq!(initial.state.holdings, final_state.state.holdings);
+    assert_eq!(initial.state.authorities, final_state.state.authorities);
+    assert_eq!(
+        initial.state.positions.len(),
+        final_state.state.positions.len()
+    );
+    for (before, after) in initial
+        .state
+        .positions
+        .iter()
+        .zip(&final_state.state.positions)
+    {
+        assert_eq!(
+            (
+                &before.resource,
+                &before.position,
+                &before.kind,
+                &before.amount,
+                &before.scaled_receipt
+            ),
+            (
+                &after.resource,
+                &after.position,
+                &after.kind,
+                &after.amount,
+                &after.scaled_receipt
+            )
+        );
+        if let (Some(previous), Some(current)) = (&before.anchor, &after.anchor) {
+            assert_eq!(previous.evidence["block"], json!(20));
+            assert_eq!(current.evidence["block"], json!(23));
+            assert_eq!(previous.evidence["block_hash"], json!(blockhash(20)));
+            assert_eq!(current.evidence["block_hash"], json!(blockhash(23)));
+        }
+    }
+    assert!(initial.complete && final_state.complete);
+}
+#[tokio::test]
+async fn zero_other_revision_is_observed_without_authorizing_its_math_or_hiding_nonzero_claims() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.other_revision_reserve.lock().unwrap() = true;
+    let a = adapter(rpc.clone());
+    let snapshot = a.read_snapshot().await.unwrap();
+    assert!(snapshot.complete);
+    let other = snapshot
+        .state
+        .positions
+        .iter()
+        .filter(|p| {
+            p.amount.asset.reference == lower_address(addr(102))
+                && p.kind != PositionKind::StableDebt
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(other.len(), 2);
+    for p in other {
+        let anchor = p.anchor.as_ref().unwrap();
+        assert!(anchor.principal.atoms.is_zero());
+        assert_eq!(
+            anchor.evidence["method"],
+            json!("aave-zero-observed-backing")
+        );
+        let token = a.token(&lower_address(addr(102)), Some(20)).await.unwrap();
+        let receipt = if p.kind == PositionKind::Supply {
+            addr(111)
+        } else {
+            addr(121)
+        };
+        a.validate_anchor(anchor, &token, addr(1), receipt)
+            .await
+            .unwrap();
+        let mut forged = anchor.clone();
+        forged.principal.atoms = Quantity::from_u64(1);
+        assert!(
+            a.validate_anchor(&forged, &token, addr(1), receipt)
+                .await
+                .is_err()
+        );
+    }
+    // Observation is not a reviewed-write claim, even when the source is empty.
+    rpc.selected_revision.store(4, Ordering::SeqCst);
+    assert_eq!(
+        a.prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap_err()
+            .code,
+        "ATOKEN_REVISION_UNSUPPORTED"
+    );
+    assert_eq!(
+        a.prepare("aave.borrow", &aave_input("aave.borrow"))
+            .await
+            .unwrap_err()
+            .code,
+        "DEBT_REVISION_UNSUPPORTED"
+    );
+    rpc.selected_revision.store(5, Ordering::SeqCst);
+    *rpc.other_revision_balance.lock().unwrap() = U256::from(1);
+    assert_eq!(
+        a.read_snapshot().await.unwrap_err().code,
+        "TOKEN_REVISION_UNSUPPORTED"
+    );
+}
+#[tokio::test]
+async fn protocol_prerequisites_reject_paused_frozen_false_erc20_and_nonce_changes() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    *rpc.paused.lock().unwrap() = true;
+    assert_eq!(
+        a.prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap_err()
+            .code,
+        "RESERVE_UNAVAILABLE"
+    );
+    *rpc.paused.lock().unwrap() = false;
+    *rpc.frozen.lock().unwrap() = true;
+    assert_eq!(
+        a.prepare("aave.supply", &aave_input("aave.supply"))
+            .await
+            .unwrap_err()
+            .code,
+        "RESERVE_FROZEN"
+    );
+    *rpc.frozen.lock().unwrap() = false;
+    let mut v = input();
+    v["token"] = json!(lower_address(addr(101)));
+    v["amount"] = json!("1");
+    v["recipient"] = json!(lower_address(addr(2)));
+    *rpc.erc20_false.lock().unwrap() = true;
+    assert_eq!(
+        a.prepare("wallet.transfer", &v).await.unwrap_err().code,
+        "ERC20_RETURN_FALSE"
+    );
+    *rpc.erc20_false.lock().unwrap() = false;
+    let p = a.prepare("wallet.transfer", &v).await.unwrap();
+    rpc.nonce.store(1, Ordering::SeqCst);
+    assert_eq!(a.revalidate(&p).await.unwrap_err().code, "NONCE_CHANGED");
+}
+#[tokio::test]
+async fn supply_proves_exact_mint_loss_and_rejects_forged_mint_then_recovers_same_hash() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let p = a
+        .prepare("aave.supply", &aave_input("aave.supply"))
+        .await
+        .unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let q = U256::from(1_000_000);
+    let scaled = q - U256::from(1);
+    let index = ray() + U256::from(1);
+    rpc.post(
+        21,
+        AtBlock {
+            scaled_supply: scaled,
+            income: index,
+            debt_index: index,
+            supply_previous: index,
+            collateral: true,
+            ..Default::default()
+        },
+    );
+    let logs = |mint_value| {
+        vec![
+            event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(1),
+                    to: addr(110),
+                    value: q,
+                },
+                21,
+            ),
+            event(
+                addr(300),
+                Pool::Supply {
+                    reserve: addr(101),
+                    user: addr(1),
+                    onBehalfOf: addr(1),
+                    amount: q,
+                    referralCode: 0,
+                },
+                21,
+            ),
+            event(
+                addr(110),
+                AToken::Mint {
+                    caller: addr(1),
+                    onBehalfOf: addr(1),
+                    value: mint_value,
+                    balanceIncrease: U256::ZERO,
+                    index,
+                },
+                21,
+            ),
+            event(
+                addr(110),
+                Erc20::Transfer {
+                    from: Address::ZERO,
+                    to: addr(1),
+                    value: scaled,
+                },
+                21,
+            ),
+        ]
+    };
+    rpc.set_receipt(&b, 21, logs(q));
+    let record = record(p);
+    assert_eq!(
+        a.reconcile(&record).await.unwrap_err().code,
+        "SUPPLY_PROOF_MISMATCH"
+    );
+    rpc.set_receipt(&b, 21, logs(scaled));
+    let done = a.reconcile(&record).await.unwrap();
+    assert_eq!(done.status, Status::Completed);
+    let proof = done.verified.unwrap();
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,treatment:CostTreatment::IncludedInDebit,..} if amount.atoms==Quantity::from_u64(1))));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms==Quantity::from_u64(999999))));
+    assert_eq!(proof.submission.reference, txhash());
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .contains(&"eth_sendRawTransaction".into())
+    );
+}
+
+#[tokio::test]
+async fn bounded_all_requires_attached_exact_cap_and_freezes_complete_cash() {
+    for op in [
+        "wallet.unwrap",
+        "uniswap.swap",
+        "aave.withdraw",
+        "aave.repay",
+    ] {
+        let d = operation_definitions()
+            .into_iter()
+            .find(|d| d.name == op)
+            .unwrap();
+        assert!(d.input_schema["properties"].get("max_amount").is_some());
+    }
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let mut v = input();
+    v["amount"] = json!("all");
+    assert!(a.prepare("wallet.unwrap", &v).await.is_err());
+    v["max_amount"] = json!("0.5");
+    assert_eq!(
+        a.prepare("wallet.unwrap", &v).await.unwrap_err().code,
+        "SWEEP_MAXIMUM"
+    );
+    v["max_amount"] = json!("2");
+    let p = a.prepare("wallet.unwrap", &v).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    assert!(b.all_amount);
+    assert_eq!(b.units, Quantity::from_decimal("1", 18).unwrap());
+    *rpc.cash_override.lock().unwrap() = Some(pow10(18).unwrap() + U256::from(1));
+    assert_eq!(a.revalidate(&p).await.unwrap_err().code, "BINDING_CHANGED");
+    v["amount"] = json!("1");
+    assert!(request::parse("wallet.unwrap", &v).is_err());
+    v["amount"] = json!("all");
+    v.as_object_mut().unwrap().remove("max_amount");
+    assert!(request::parse("wallet.wrap", &v).is_err());
+    v["max_amount"] = json!(U256::MAX.to_string());
+    assert!(a.prepare("wallet.unwrap", &v).await.is_err());
+    *rpc.cash_override.lock().unwrap() = Some(U256::from(3_000_000));
+    let mut swap = input();
+    swap["amount"] = json!("all");
+    swap["max_amount"] = json!("10");
+    swap["token_in"] = json!(lower_address(addr(101)));
+    swap["token_out"] = json!(lower_address(addr(100)));
+    swap["recipient"] = json!(lower_address(addr(1)));
+    swap["min_output"] = json!("0.000000000003");
+    swap["slippage_bps"] = json!(0);
+    swap["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
+    let p = a.prepare("uniswap.swap", &swap).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    assert_eq!(b.units, Quantity::from_u64(3_000_000));
+    *rpc.cash_override.lock().unwrap() = Some(U256::from(3_000_001));
+    assert_eq!(a.revalidate(&p).await.unwrap_err().code, "BINDING_CHANGED");
+}
+#[tokio::test]
+async fn bounded_withdraw_all_requires_exact_complete_scaled_close_and_finite_credit() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let q = U256::from(999999);
+    rpc.states
+        .lock()
+        .unwrap()
+        .get_mut(&20)
+        .unwrap()
+        .scaled_supply = q;
+    let mut v = aave_input("aave.withdraw");
+    v["amount"] = json!("all");
+    v["max_amount"] = json!("1.02");
+    let p = a.prepare("aave.withdraw", &v).await.unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let calldata = fin_evm::rpc_bytes(&json!(b.transaction.calldata)).unwrap();
+    assert_eq!(
+        Pool::withdrawCall::abi_decode_validate(&calldata)
+            .unwrap()
+            .amount,
+        U256::MAX
+    );
+    let logs = vec![
+        event(
+            addr(300),
+            Pool::Withdraw {
+                reserve: addr(101),
+                user: addr(1),
+                to: addr(1),
+                amount: q,
+            },
+            21,
+        ),
+        event(
+            addr(101),
+            Erc20::Transfer {
+                from: addr(110),
+                to: addr(1),
+                value: q,
+            },
+            21,
+        ),
+    ];
+    rpc.post(
+        21,
+        AtBlock {
+            income: ray() + U256::from(1),
+            debt_index: ray() + U256::from(1),
+            scaled_supply: U256::from(1),
+            ..Default::default()
+        },
+    );
+    rpc.set_receipt(&b, 21, logs.clone());
+    let record = record(p);
+    assert!(a.reconcile(&record).await.is_err());
+    rpc.states
+        .lock()
+        .unwrap()
+        .get_mut(&21)
+        .unwrap()
+        .scaled_supply = U256::ZERO;
+    let proof = a.reconcile(&record).await.unwrap().verified.unwrap();
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::PositionChange{anchor:Some(a),..} if a.principal.atoms.is_zero()&&a.scaled_receipt.as_ref().unwrap().is_zero())));
+    rpc.receipt.lock().unwrap()["logs"] = json!([
+        event(
+            addr(300),
+            Pool::Withdraw {
+                reserve: addr(101),
+                user: addr(1),
+                to: addr(1),
+                amount: U256::from(1_020_001)
+            },
+            21
+        ),
+        event(
+            addr(101),
+            Erc20::Transfer {
+                from: addr(110),
+                to: addr(1),
+                value: U256::from(1_020_001)
+            },
+            21
+        ),
+    ]);
+    assert_eq!(
+        a.reconcile(&record).await.unwrap_err().code,
+        "WITHDRAW_MAXIMUM"
+    );
+}
+#[tokio::test]
+async fn withdrawal_credits_exact_proved_yield_and_closes_scaled_claim() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let old = ray() + U256::from(1);
+    let scaled = U256::from(999999);
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_supply: scaled,
+            income: old,
+            debt_index: old,
+            supply_previous: old,
+            collateral: true,
+            ..Default::default()
+        },
+    );
+    let token = a.token(&lower_address(addr(101)), Some(20)).await.unwrap();
+    let anchor = a
+        .make_anchor(
+            &token,
+            addr(1),
+            addr(110),
+            PositionKind::Supply,
+            20,
+            U256::ZERO,
+        )
+        .await
+        .unwrap();
+    let index = ray() + ray() / U256::from(1000);
+    rpc.states.lock().unwrap().insert(
+        22,
+        AtBlock {
+            scaled_supply: scaled,
+            income: index,
+            debt_index: old,
+            supply_previous: old,
+            collateral: true,
+            ..Default::default()
+        },
+    );
+    rpc.latest.store(22, Ordering::SeqCst);
+    let mut v = aave_input("aave.withdraw");
+    v["amount"] = json!("1.000998");
+    let p = a
+        .prepare_with_context(
+            "aave.withdraw",
+            &v,
+            &PreparationContext {
+                positions: vec![anchor],
+            },
+        )
+        .await
+        .unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let q = U256::from(1_000_998);
+    rpc.post(
+        23,
+        AtBlock {
+            income: index,
+            debt_index: old,
+            supply_previous: index,
+            ..Default::default()
+        },
+    );
+    rpc.set_receipt(
+        &b,
+        23,
+        vec![
+            event(
+                addr(300),
+                Pool::Withdraw {
+                    reserve: addr(101),
+                    user: addr(1),
+                    to: addr(1),
+                    amount: q,
+                },
+                23,
+            ),
+            event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(110),
+                    to: addr(1),
+                    value: q,
+                },
+                23,
+            ),
+        ],
+    );
+    let proof = a.reconcile(&record(p)).await.unwrap().verified.unwrap();
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Accrual{position_kind:PositionKind::Supply,delta,..} if delta.as_str()=="999")));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.is_zero()&&anchor.scaled_receipt.as_ref().unwrap().is_zero())));
+    assert!(proof.effects.iter().any(
+        |e| matches!(e,FinancialEffect::UsableCredit{amount,..} if amount.atoms==quantity(q))
+    ));
+}
+#[tokio::test]
+async fn borrow_ceil_rounding_is_deferred_and_repay_proves_interest_once() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let p = a
+        .prepare("aave.borrow", &aave_input("aave.borrow"))
+        .await
+        .unwrap();
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let q = U256::from(1_000_000);
+    let index = ray() + U256::from(1);
+    rpc.post(
+        21,
+        AtBlock {
+            scaled_debt: q,
+            income: index,
+            debt_index: index,
+            debt_previous: index,
+            ..Default::default()
+        },
+    );
+    rpc.set_receipt(
+        &b,
+        21,
+        vec![
+            event(
+                addr(300),
+                Pool::Borrow {
+                    reserve: addr(101),
+                    user: addr(1),
+                    onBehalfOf: addr(1),
+                    amount: q,
+                    interestRateMode: 2,
+                    borrowRate: U256::from(1),
+                    referralCode: 0,
+                },
+                21,
+            ),
+            event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(110),
+                    to: addr(1),
+                    value: q,
+                },
+                21,
+            ),
+            event(
+                addr(120),
+                AToken::Mint {
+                    caller: addr(1),
+                    onBehalfOf: addr(1),
+                    value: q + U256::from(1),
+                    balanceIncrease: U256::ZERO,
+                    index,
+                },
+                21,
+            ),
+            event(
+                addr(120),
+                Erc20::Transfer {
+                    from: Address::ZERO,
+                    to: addr(1),
+                    value: q + U256::from(1),
+                },
+                21,
+            ),
+        ],
+    );
+    let proof = a.reconcile(&record(p)).await.unwrap().verified.unwrap();
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Accrual{position_kind:PositionKind::VariableDebt,delta,..} if delta.as_str()=="1")));
+    assert!(!proof.effects.iter().any(|e| matches!(
+        e,
+        FinancialEffect::Cost {
+            treatment: CostTreatment::IncludedInDebit,
+            ..
+        }
+    )));
+    let anchor = proof
+        .effects
+        .into_iter()
+        .find_map(|e| {
+            if let FinancialEffect::DebtChange { anchor, .. } = e {
+                anchor
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(anchor.principal.atoms, quantity(q + U256::from(1)));
+    let new_index = ray() + ray() / U256::from(1000);
+    rpc.states.lock().unwrap().insert(
+        23,
+        AtBlock {
+            scaled_debt: q,
+            income: index,
+            debt_index: new_index,
+            debt_previous: index,
+            ..Default::default()
+        },
+    );
+    rpc.latest.store(23, Ordering::SeqCst);
+    *rpc.allowance.lock().unwrap() = U256::from(1_010_000);
+    let mut v = aave_input("aave.repay");
+    v["amount"] = json!("all");
+    v["max_amount"] = json!("1.01");
+    let p = a
+        .prepare_with_context(
+            "aave.repay",
+            &v,
+            &PreparationContext {
+                positions: vec![anchor],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(p.intent.expected.iter().any(|expected| matches!(
+        expected,
+        EffectConstraint::Accrual {
+            position_kind: PositionKind::VariableDebt,
+            maximum_change,
+            ..
+        } if maximum_change == &Quantity::from_u64(1_010_000)
+    )));
+    let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+    let paid = U256::from(1_001_000);
+    rpc.post(
+        24,
+        AtBlock {
+            income: index,
+            debt_index: new_index,
+            debt_previous: new_index,
+            ..Default::default()
+        },
+    );
+    rpc.set_receipt(
+        &b,
+        24,
+        vec![
+            event(
+                addr(300),
+                Pool::Repay {
+                    reserve: addr(101),
+                    user: addr(1),
+                    repayer: addr(1),
+                    amount: paid,
+                    useATokens: false,
+                },
+                24,
+            ),
+            event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(1),
+                    to: addr(110),
+                    value: paid,
+                },
+                24,
+            ),
+        ],
+    );
+    let proof = a.reconcile(&record(p)).await.unwrap().verified.unwrap();
+    assert!(
+        proof
+            .effects
+            .iter()
+            .any(|e| matches!(e,FinancialEffect::Accrual{delta,..} if delta.as_str()=="999"))
+    );
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Cost{amount,treatment:CostTreatment::IncludedInDebit,..} if amount.atoms==Quantity::from_u64(1000))));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::DebtChange{anchor:Some(anchor),delta,..} if anchor.principal.atoms.is_zero()&&delta.as_str()=="-1001000")));
+}
+#[tokio::test]
+async fn wrong_anchor_resource_or_untracked_scaled_change_is_rejected_before_submission() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let token = a.token(&lower_address(addr(101)), Some(20)).await.unwrap();
+    let mut anchor = a
+        .make_anchor(
+            &token,
+            addr(1),
+            addr(110),
+            PositionKind::Supply,
+            20,
+            U256::ZERO,
+        )
+        .await
+        .unwrap();
+    anchor.principal.atoms = Quantity::from_u64(1);
+    assert_eq!(
+        a.prepare_with_context(
+            "aave.supply",
+            &aave_input("aave.supply"),
+            &PreparationContext {
+                positions: vec![anchor]
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "ANCHOR_PROOF_MISMATCH"
+    );
+    let anchor = a
+        .make_anchor(
+            &token,
+            addr(1),
+            addr(110),
+            PositionKind::Supply,
+            20,
+            U256::ZERO,
+        )
+        .await
+        .unwrap();
+    rpc.states.lock().unwrap().insert(
+        21,
+        AtBlock {
+            scaled_supply: U256::from(1),
+            income: ray(),
+            debt_index: ray(),
+            supply_previous: ray(),
+            ..Default::default()
+        },
+    );
+    rpc.latest.store(21, Ordering::SeqCst);
+    assert_eq!(
+        a.prepare_with_context(
+            "aave.supply",
+            &aave_input("aave.supply"),
+            &PreparationContext {
+                positions: vec![anchor]
+            }
+        )
+        .await
+        .unwrap_err()
+        .code,
+        "POSITION_PRINCIPAL_CHANGED"
+    );
+}
+
+fn apply_test_plan(context: &mut ReturnRouteContext, mut proof: ReturnRouteProof) {
+    // Mirror the broker's one-time cost projection: merge principal cash legs,
+    // then widen their lower bound by AdditionalDebit fees. IncludedInDebit
+    // costs already belong to those principal legs and never debit cash twice.
+    let mut deltas = std::collections::BTreeMap::new();
+    for effect in &proof.effects {
+        if let ProjectedEffect::CashDelta {
+            resource,
+            asset,
+            minimum_delta,
+            maximum_delta,
+        } = effect
+        {
+            let entry = deltas
+                .entry((resource.clone(), asset.clone()))
+                .or_insert_with(|| {
+                    (
+                        SignedQuantity::new("0").unwrap().integer(),
+                        SignedQuantity::new("0").unwrap().integer(),
+                    )
+                });
+            entry.0 += minimum_delta.integer();
+            entry.1 += maximum_delta.integer();
+        }
+    }
+    for cost in &proof.intent.maximum_costs {
+        if cost.treatment != CostTreatment::AdditionalDebit {
+            continue;
+        }
+        let AccountingLocation::Cash { resource } = &cost.location else {
+            panic!("AdditionalDebit must have an exact cash source");
+        };
+        let entry = deltas
+            .entry((resource.clone(), cost.amount.asset.clone()))
+            .or_insert_with(|| {
+                (
+                    SignedQuantity::new("0").unwrap().integer(),
+                    SignedQuantity::new("0").unwrap().integer(),
+                )
+            });
+        entry.0 += SignedQuantity::negative(&cost.amount.atoms).integer();
+    }
+    proof
+        .effects
+        .retain(|effect| !matches!(effect, ProjectedEffect::CashDelta { .. }));
+    proof.effects.extend(
+        deltas
+            .into_iter()
+            .map(
+                |((resource, asset), (minimum, maximum))| ProjectedEffect::CashDelta {
+                    resource,
+                    asset,
+                    minimum_delta: SignedQuantity::new(minimum.to_string()).unwrap(),
+                    maximum_delta: SignedQuantity::new(maximum.to_string()).unwrap(),
+                },
+            ),
+    );
+    for effect in &proof.effects {
+        match effect {
+            ProjectedEffect::CashDelta {
+                resource,
+                asset,
+                minimum_delta,
+                maximum_delta,
+            } => {
+                let row_index = context
+                    .projected
+                    .cash
+                    .iter()
+                    .position(|p| p.resource == *resource && p.asset == *asset)
+                    .unwrap_or_else(|| {
+                        context.projected.cash.push(ProjectedCash {
+                            resource: resource.clone(),
+                            asset: asset.clone(),
+                            amount: QuantityInterval {
+                                minimum: Quantity::zero(),
+                                maximum: Quantity::zero(),
+                            },
+                        });
+                        context.projected.cash.len() - 1
+                    });
+                let row = &mut context.projected.cash[row_index];
+                let apply = |q: &Quantity, d: &SignedQuantity| {
+                    if d.is_negative() {
+                        q.checked_sub(&d.magnitude()).unwrap()
+                    } else {
+                        q.checked_add(&d.magnitude()).unwrap()
+                    }
+                };
+                row.amount.minimum = apply(&row.amount.minimum, minimum_delta);
+                row.amount.maximum = apply(&row.amount.maximum, maximum_delta);
+            }
+            ProjectedEffect::PositionDelta {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+            } => {
+                let row = context
+                    .projected
+                    .positions
+                    .iter_mut()
+                    .find(|p| {
+                        p.resource == *resource
+                            && p.position == *position
+                            && p.asset == *asset
+                            && p.position_kind == *position_kind
+                    })
+                    .unwrap();
+                let apply = |q: &Quantity, d: &SignedQuantity| {
+                    if d.is_negative() {
+                        q.checked_sub(&d.magnitude()).unwrap()
+                    } else {
+                        q.checked_add(&d.magnitude()).unwrap()
+                    }
+                };
+                row.amount.minimum = apply(&row.amount.minimum, minimum_delta);
+                row.amount.maximum = apply(&row.amount.maximum, maximum_delta);
+            }
+            ProjectedEffect::AuthorityValue {
+                resource,
+                authority,
+                value,
+            } => {
+                context
+                    .projected
+                    .authorities
+                    .iter_mut()
+                    .find(|a| a.resource == *resource && a.authority == *authority)
+                    .unwrap()
+                    .value = value.clone();
+            }
+            ProjectedEffect::CashSweep {
+                resource, asset, ..
+            } => {
+                context
+                    .projected
+                    .cash
+                    .iter_mut()
+                    .find(|p| p.resource == *resource && p.asset == *asset)
+                    .unwrap()
+                    .amount = QuantityInterval {
+                    minimum: Quantity::zero(),
+                    maximum: Quantity::zero(),
+                };
+            }
+            ProjectedEffect::PositionClose {
+                resource,
+                position,
+                position_kind,
+                asset,
+                ..
+            } => {
+                context
+                    .projected
+                    .positions
+                    .iter_mut()
+                    .find(|p| {
+                        p.resource == *resource
+                            && p.position == *position
+                            && p.position_kind == *position_kind
+                            && p.asset == *asset
+                    })
+                    .unwrap()
+                    .amount = QuantityInterval {
+                    minimum: Quantity::zero(),
+                    maximum: Quantity::zero(),
+                };
+            }
+        }
+    }
+    context.prior_proofs.push(proof);
+    context.step_index += 1;
+}
+#[tokio::test]
+async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_cash() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.cash_override.lock().unwrap() = Some(U256::ZERO);
+    rpc.other_stable.store(0, Ordering::SeqCst);
+    *rpc.include_weth.lock().unwrap() = true;
+    let mut a = adapter(rpc.clone());
+    a.config.snapshot_tokens.push(lower_address(addr(100)));
+    let baseline = a.read_snapshot().await.unwrap();
+    let mut context = ReturnRouteContext {
+        projected: ProjectedState {
+            cash: baseline
+                .state
+                .holdings
+                .iter()
+                .map(|p| ProjectedCash {
+                    resource: p.resource.clone(),
+                    asset: p.amount.asset.clone(),
+                    amount: QuantityInterval {
+                        minimum: p.amount.atoms.clone(),
+                        maximum: p.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            positions: baseline
+                .state
+                .positions
+                .iter()
+                .map(|p| ProjectedPosition {
+                    resource: p.resource.clone(),
+                    position: p.position.clone(),
+                    asset: p.amount.asset.clone(),
+                    position_kind: p.kind.clone(),
+                    amount: QuantityInterval {
+                        minimum: p.amount.atoms.clone(),
+                        maximum: p.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            authorities: baseline.state.authorities.clone(),
+        },
+        allocations: vec![ResourceAmount {
+            resource: resource(1, addr(1)),
+            amount: amount(&a.native_asset(), exact("0.02", 18).unwrap()),
+        }],
+        baseline,
+        step_index: 0,
+        prior_proofs: vec![],
+        remaining_cost_budget_usd_micros: Quantity::from_u64(30_000_000),
+        asset_prices: vec![],
+    };
+    let mk = |extra: Value| {
+        let mut v = input();
+        v["max_fee_eth"] = json!("0.0001");
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v
+    };
+    let weth = lower_address(addr(100));
+    let usdc = lower_address(addr(101));
+    let wrap = mk(json!({"amount":"0.01"}));
+    let mut insufficient_fee = wrap.clone();
+    insufficient_fee["max_fee_eth"] = json!("0.00000000000001");
+    assert_eq!(
+        a.preflight_return_route("wallet.wrap", &insufficient_fee, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_FEE_TOO_LOW"
+    );
+    let mut unselected = context.clone();
+    unselected.allocations[0].amount.atoms = Quantity::from_decimal("0.001", 18).unwrap();
+    assert!(
+        a.preflight_return_route("wallet.wrap", &wrap, &unselected)
+            .await
+            .is_err()
+    );
+    let proof = a
+        .preflight_return_route("wallet.wrap", &wrap, &context)
+        .await
+        .unwrap();
+    assert_eq!(proof.input_hash, binding_hash(&wrap).unwrap());
+    assert_eq!(
+        proof.evidence["method"],
+        json!("conditional-ethereum-route-v1")
+    );
+    assert!(
+        proof.evidence["unmet_execution_dependencies"]
+            .as_str()
+            .unwrap()
+            .contains("not current holdings")
+    );
+    assert!(proof.effects.iter().any(|effect| matches!(effect,
+        ProjectedEffect::CashDelta {asset,minimum_delta,maximum_delta,..}
+            if asset.reference == "native"
+                && minimum_delta.as_str() == "-10000000000000000"
+                && minimum_delta == maximum_delta
+    )));
+    apply_test_plan(&mut context, proof);
+    let native_projection = context
+        .projected
+        .cash
+        .iter()
+        .find(|row| row.asset.reference == "native")
+        .unwrap();
+    let initial_native = context
+        .baseline
+        .state
+        .holdings
+        .iter()
+        .find(|row| row.amount.asset.reference == "native")
+        .unwrap();
+    assert_eq!(
+        initial_native
+            .amount
+            .atoms
+            .checked_sub(&native_projection.amount.minimum)
+            .unwrap(),
+        Quantity::from_decimal("0.0101", 18).unwrap()
+    );
+    assert_eq!(
+        initial_native
+            .amount
+            .atoms
+            .checked_sub(&native_projection.amount.maximum)
+            .unwrap(),
+        Quantity::from_decimal("0.01", 18).unwrap()
+    );
+    let q = "0.003333333333333333";
+    let swap = mk(
+        json!({"token_in":weth,"token_out":usdc,"amount":q,"min_output":"2.985","slippage_bps":50,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
+    );
+    assert_eq!(
+        a.preflight_return_route("uniswap.swap", &swap, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_ALLOWANCE_UNFUNDED"
+    );
+    let approve = mk(json!({"token":weth,"spender":a.config.uniswap.router,"amount":q}));
+    let proof = a
+        .preflight_return_route("wallet.approve", &approve, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let proof = a
+        .preflight_return_route("uniswap.swap", &swap, &context)
+        .await
+        .unwrap();
+    assert!(
+        proof.evidence["output_cap_semantics"]
+            .as_str()
+            .unwrap()
+            .contains("NOT an enforced")
+    );
+    apply_test_plan(&mut context, proof);
+    let supply_q = "0.006666666666666667";
+    let approve = mk(json!({"token":weth,"spender":a.config.aave.pool,"amount":supply_q}));
+    let proof = a
+        .preflight_return_route("wallet.approve", &approve, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let supply = mk(json!({"token":weth,"amount":supply_q}));
+    rpc.selected_revision.store(4, Ordering::SeqCst);
+    assert_eq!(
+        a.preflight_return_route("aave.supply", &supply, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "TOKEN_REVISION_UNSUPPORTED"
+    );
+    rpc.selected_revision.store(5, Ordering::SeqCst);
+    let proof = a
+        .preflight_return_route("aave.supply", &supply, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let borrow = mk(json!({"token":usdc,"amount":"1","min_health_factor":"1.5"}));
+    let proof = a
+        .preflight_return_route("aave.borrow", &borrow, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let withdraw = mk(
+        json!({"token":weth,"amount":"all","max_amount":"0.0074","recipient":lower_address(addr(1))}),
+    );
+    assert_eq!(
+        a.preflight_return_route("aave.withdraw", &withdraw, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_DEBT_UNCLOSED"
+    );
+    let approve_repay = mk(json!({"token":usdc,"spender":a.config.aave.pool,"amount":"1.02"}));
+    let proof = a
+        .preflight_return_route("wallet.approve", &approve_repay, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let too_small_repay = mk(json!({"token":usdc,"amount":"all","max_amount":"1"}));
+    assert_eq!(
+        a.preflight_return_route("aave.repay", &too_small_repay, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_CLOSE_UNBOUNDED"
+    );
+    let repay = mk(json!({"token":usdc,"amount":"all","max_amount":"1.02"}));
+    let proof = a
+        .preflight_return_route("aave.repay", &repay, &context)
+        .await
+        .unwrap();
+    let finite_repay_cap = Quantity::from_u64(1_020_000);
+    assert!(proof.intent.expected.iter().any(|expected| matches!(
+        expected,
+        EffectConstraint::Accrual {
+            position_kind: PositionKind::VariableDebt,
+            maximum_change,
+            ..
+        } if maximum_change == &finite_repay_cap
+    )));
+    assert!(proof.intent.maximum_costs.iter().any(|cost| {
+        cost.amount.asset.reference == usdc
+            && cost.amount.atoms == finite_repay_cap
+            && cost.treatment == CostTreatment::IncludedInDebit
+    }));
+
+    // Fresh execution preview after index accrual has a larger physical debt
+    // than run.begin observed, but the repay-all accrual envelope remains the
+    // exact finite close cap shared by the stored route proof.
+    let original_state = rpc.states.lock().unwrap().get(&20).cloned().unwrap();
+    let original_allowance = *rpc.allowance.lock().unwrap();
+    let original_cash = *rpc.cash_override.lock().unwrap();
+    *rpc.allowance.lock().unwrap() = U256::from(1_020_000);
+    *rpc.cash_override.lock().unwrap() = Some(U256::from(1_020_000));
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_debt: U256::from(1_000_000),
+            income: ray(),
+            debt_index: ray() + ray() / U256::from(100),
+            debt_previous: ray(),
+            ..Default::default()
+        },
+    );
+    let accrued_snapshot = a.read_snapshot().await.unwrap();
+    let accrued_context = PreparationContext {
+        positions: accrued_snapshot
+            .state
+            .positions
+            .into_iter()
+            .filter_map(|position| position.anchor)
+            .collect(),
+    };
+    let accrued_preview = a
+        .prepare_with_context("aave.repay", &repay, &accrued_context)
+        .await
+        .unwrap();
+    assert!(
+        accrued_preview
+            .intent
+            .expected
+            .iter()
+            .any(|expected| matches!(
+                expected,
+                EffectConstraint::Accrual {
+                    position_kind: PositionKind::VariableDebt,
+                    maximum_change,
+                    ..
+                } if maximum_change == &finite_repay_cap
+            ))
+    );
+    assert!(accrued_preview.intent.maximum_costs.iter().any(|cost| {
+        cost.amount.asset.reference == usdc
+            && cost.amount.atoms == finite_repay_cap
+            && cost.treatment == CostTreatment::IncludedInDebit
+    }));
+
+    // Partial repayment retains its distinct envelope: the installment may
+    // be smaller than the accrued debt left outstanding after it.
+    let partial_repay = mk(json!({"token":usdc,"amount":"0.5"}));
+    *rpc.simulation_override.lock().unwrap() = Some(abi_value(U256::from(500_000)));
+    let partial_preview = a
+        .prepare_with_context("aave.repay", &partial_repay, &accrued_context)
+        .await
+        .unwrap();
+    assert!(
+        partial_preview
+            .intent
+            .expected
+            .iter()
+            .any(|expected| matches!(
+                expected,
+                EffectConstraint::Accrual {
+                    position_kind: PositionKind::VariableDebt,
+                    maximum_change,
+                    ..
+                } if maximum_change == &Quantity::from_u64(1_510_000)
+            ))
+    );
+    *rpc.simulation_override.lock().unwrap() = None;
+
+    // The ordinary simulation remains capped. Debt above the cap cannot have
+    // a sufficient finite allowance that is itself within the same cap, so
+    // the fresh preview rejects it at the allowance check before authorization.
+    *rpc.simulation_override.lock().unwrap() = Some(abi_value(U256::from(1_021_000)));
+    assert_eq!(
+        a.prepare_with_context("aave.repay", &repay, &accrued_context)
+            .await
+            .unwrap_err()
+            .code,
+        "REPAY_SIMULATION_LIMIT"
+    );
+    *rpc.simulation_override.lock().unwrap() = None;
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_debt: U256::from(1_000_000),
+            income: ray(),
+            debt_index: ray() + ray() / U256::from(10),
+            debt_previous: ray(),
+            ..Default::default()
+        },
+    );
+    let over_cap_snapshot = a.read_snapshot().await.unwrap();
+    let over_cap_context = PreparationContext {
+        positions: over_cap_snapshot
+            .state
+            .positions
+            .into_iter()
+            .filter_map(|position| position.anchor)
+            .collect(),
+    };
+    assert_eq!(
+        a.prepare_with_context("aave.repay", &repay, &over_cap_context)
+            .await
+            .unwrap_err()
+            .code,
+        "ALLOWANCE_INSUFFICIENT"
+    );
+    rpc.states.lock().unwrap().insert(20, original_state);
+    *rpc.allowance.lock().unwrap() = original_allowance;
+    *rpc.cash_override.lock().unwrap() = original_cash;
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .contains(&"eth_sendRawTransaction".into())
+    );
+
+    assert!(proof.effects.iter().any(|effect| matches!(effect, ProjectedEffect::PositionClose{position_kind:PositionKind::VariableDebt,maximum_amount,source_step,..} if maximum_amount == &Quantity::from_u64(1_020_000) && *source_step < proof.step_index)));
+    // The latest one-USDC borrowing credit alone is smaller than repayment.
+    // Its guaranteed source chain also contains earlier swap proceeds.
+    assert!(
+        proof
+            .requires
+            .iter()
+            .any(|requirement| matches!(requirement,
+                ProjectedRequirement::CashAtLeast {asset,amount,source_step:Some(5),..}
+                    if asset.reference == usdc && amount == &Quantity::from_u64(1_020_000)
+            ))
+    );
+    apply_test_plan(&mut context, proof);
+    assert!(
+        context
+            .projected
+            .positions
+            .iter()
+            .filter(|p| p.position_kind != PositionKind::Supply)
+            .all(|p| p.amount.maximum.is_zero())
+    );
+    let mut too_small_withdraw = withdraw.clone();
+    too_small_withdraw["max_amount"] = json!("0.001");
+    assert_eq!(
+        a.preflight_return_route("aave.withdraw", &too_small_withdraw, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_CLOSE_UNBOUNDED"
+    );
+    let proof = a
+        .preflight_return_route("aave.withdraw", &withdraw, &context)
+        .await
+        .unwrap();
+    let withdraw_cap = quantity(exact("0.0074", 18).unwrap());
+    assert!(proof.intent.expected.iter().any(|expected| matches!(
+        expected,
+        EffectConstraint::Accrual {
+            position_kind: PositionKind::Supply,
+            maximum_change,
+            ..
+        } if maximum_change == &withdraw_cap
+    )));
+
+    // A fresh full-close preview sees the physical supply after index yield;
+    // its Accrual envelope remains the finite max_amount from the stored route.
+    let original_state = rpc.states.lock().unwrap().get(&20).cloned().unwrap();
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_supply: exact("0.006666666666666667", 18).unwrap(),
+            income: ray() + ray() / U256::from(100),
+            debt_index: ray() + U256::from(1),
+            supply_previous: ray(),
+            debt_previous: ray(),
+            ..Default::default()
+        },
+    );
+    let yielded_snapshot = a.read_snapshot().await.unwrap();
+    let yielded_context = PreparationContext {
+        positions: yielded_snapshot
+            .state
+            .positions
+            .into_iter()
+            .filter_map(|position| position.anchor)
+            .collect(),
+    };
+    let yielded_preview = a
+        .prepare_with_context("aave.withdraw", &withdraw, &yielded_context)
+        .await
+        .unwrap();
+    let fresh_withdraw_accrual = yielded_preview.intent.expected.iter().find_map(|expected| {
+        if let EffectConstraint::Accrual {
+            position_kind: PositionKind::Supply,
+            maximum_change,
+            ..
+        } = expected
+        {
+            Some(maximum_change)
+        } else {
+            None
+        }
+    });
+    assert_eq!(fresh_withdraw_accrual, Some(&withdraw_cap));
+
+    // Partial withdrawals retain the observed-claim envelope because they do
+    // not close the entire position under the finite max_amount.
+    let partial_withdraw = mk(json!({
+        "token":weth,
+        "amount":"0.001",
+        "recipient":lower_address(addr(1))
+    }));
+    let partial_preview = a
+        .prepare_with_context("aave.withdraw", &partial_withdraw, &yielded_context)
+        .await
+        .unwrap();
+    let yielded_binding: Binding = serde_json::from_value(yielded_preview.binding.clone()).unwrap();
+    let expected_partial_accrual = quantity(
+        exact("0.001", 18).unwrap()
+            + fin_evm::u256(yielded_binding.supplied_before.as_ref().unwrap()).unwrap(),
+    );
+    assert!(
+        partial_preview
+            .intent
+            .expected
+            .iter()
+            .any(|expected| matches!(
+                expected,
+                EffectConstraint::Accrual {
+                    position_kind: PositionKind::Supply,
+                    maximum_change,
+                    ..
+                } if maximum_change == &expected_partial_accrual
+            ))
+    );
+
+    // A physical claim above the same finite cap is rejected before a write;
+    // growth never expands the route or its receipt bounds.
+    rpc.states.lock().unwrap().insert(
+        20,
+        AtBlock {
+            scaled_supply: exact("0.006666666666666667", 18).unwrap(),
+            income: ray() + ray() / U256::from(2),
+            debt_index: ray() + U256::from(1),
+            supply_previous: ray(),
+            debt_previous: ray(),
+            ..Default::default()
+        },
+    );
+    let over_cap_snapshot = a.read_snapshot().await.unwrap();
+    let over_cap_context = PreparationContext {
+        positions: over_cap_snapshot
+            .state
+            .positions
+            .into_iter()
+            .filter_map(|position| position.anchor)
+            .collect(),
+    };
+    assert_eq!(
+        a.prepare_with_context("aave.withdraw", &withdraw, &over_cap_context)
+            .await
+            .unwrap_err()
+            .code,
+        "WITHDRAW_LIMIT"
+    );
+    rpc.states.lock().unwrap().insert(20, original_state);
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .contains(&"eth_sendRawTransaction".into())
+    );
+    assert!(proof.effects.iter().any(|effect| matches!(effect, ProjectedEffect::PositionClose{position_kind:PositionKind::Supply,source_step,..} if *source_step < proof.step_index)));
+    apply_test_plan(&mut context, proof);
+    assert!(
+        context
+            .projected
+            .positions
+            .iter()
+            .all(|p| p.amount.maximum.is_zero())
+    );
+    let approve_reverse = mk(json!({"token":usdc,"spender":a.config.uniswap.router,"amount":"11"}));
+    let proof = a
+        .preflight_return_route("wallet.approve", &approve_reverse, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let reverse = mk(
+        json!({"token_in":usdc,"token_out":weth,"amount":"all","max_amount":"11","min_output":"0.000000000002985","slippage_bps":50,"deadline":chrono::Utc::now().timestamp() as u64+120,"recipient":lower_address(addr(1))}),
+    );
+    let proof = a
+        .preflight_return_route("uniswap.swap", &reverse, &context)
+        .await
+        .unwrap();
+    let projected_usdc = context
+        .projected
+        .cash
+        .iter()
+        .find(|row| row.asset.reference == usdc)
+        .unwrap();
+    assert!(proof.effects.iter().any(
+        |effect| matches!(effect,ProjectedEffect::CashSweep{asset,maximum_amount,..}
+            if asset.reference == usdc && maximum_amount == &projected_usdc.amount.maximum)
+    ));
+    apply_test_plan(&mut context, proof);
+    assert!(
+        context
+            .projected
+            .cash
+            .iter()
+            .find(|p| p.asset.reference == usdc)
+            .unwrap()
+            .amount
+            .maximum
+            .is_zero()
+    );
+    let unwrap = mk(json!({"amount":"all","max_amount":"0.02"}));
+    let proof = a
+        .preflight_return_route("wallet.unwrap", &unwrap, &context)
+        .await
+        .unwrap();
+    let projected_weth = context
+        .projected
+        .cash
+        .iter()
+        .find(|row| row.asset.reference == weth)
+        .unwrap();
+    assert!(proof.effects.iter().any(|effect| matches!(effect,
+        ProjectedEffect::CashSweep {asset,maximum_amount,..}
+            if asset.reference == weth && maximum_amount == &projected_weth.amount.maximum
+    )));
+    apply_test_plan(&mut context, proof);
+    assert!(
+        context
+            .projected
+            .cash
+            .iter()
+            .find(|p| p.asset.reference == weth)
+            .unwrap()
+            .amount
+            .maximum
+            .is_zero()
+    );
+    // No signed transaction is broadcast by route proofs or ordinary previews.
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "eth_sendRawTransaction")
+    );
+}
+
+struct FixedOracleClock(u64);
+#[async_trait]
+impl OracleObservationClock for FixedOracleClock {
+    async fn unix_seconds(&self) -> Result<u64> {
+        Ok(self.0)
+    }
+}
+#[tokio::test]
+async fn oracle_observation_clock_keeps_feed_age_strict_and_cannot_extend_write_freshness() {
+    let rpc = Arc::new(Fixture::new());
+    let historical = chrono::Utc::now().timestamp() as u64 - 172_800;
+    *rpc.feed_updated_at.lock().unwrap() = Some(historical);
+    let units = Quantity::from_u64(1_000_000);
+    // Production composition uses system UTC: historical data remains stale.
+    assert_eq!(
+        adapter(rpc.clone())
+            .quote_usd(&lower_address(addr(101)), units.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "ORACLE_STALE"
+    );
+    let future =
+        adapter(rpc.clone()).with_isolated_oracle_clock(Arc::new(FixedOracleClock(historical - 1)));
+    assert_eq!(
+        future
+            .quote_usd(&lower_address(addr(101)), units.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "ORACLE_STALE"
+    );
+    let stale = adapter(rpc.clone())
+        .with_isolated_oracle_clock(Arc::new(FixedOracleClock(historical + 7_201)));
+    assert_eq!(
+        stale
+            .quote_usd("native", Quantity::from_u64(1))
+            .await
+            .unwrap_err()
+            .code,
+        "ORACLE_STALE"
+    );
+    let boundary = adapter(rpc.clone())
+        .with_isolated_oracle_clock(Arc::new(FixedOracleClock(historical + 7_200)));
+    assert!(
+        boundary
+            .quote_usd("native", Quantity::from_u64(1))
+            .await
+            .is_ok()
+    );
+    let a = adapter(rpc.clone()).with_isolated_oracle_clock(Arc::new(FixedOracleClock(historical)));
+    assert_eq!(
+        a.quote_usd(&lower_address(addr(101)), units.clone())
+            .await
+            .unwrap()
+            .0,
+        Quantity::from_u64(1_000_000)
+    );
+    let before = chrono::Utc::now();
+    let mut wrap = input();
+    wrap["amount"] = json!("0.001");
+    let prepared = a.prepare("wallet.wrap", &wrap).await.unwrap();
+    let observed = chrono::DateTime::parse_from_rfc3339(&prepared.observed_at).unwrap();
+    assert!(observed.timestamp() >= before.timestamp());
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
+            .unwrap()
+            .timestamp()
+            > before.timestamp()
+    );
+    let mut swap = input();
+    swap.as_object_mut().unwrap().extend(json!({"token_in":lower_address(addr(100)),"token_out":lower_address(addr(101)),"amount":"0.000001","min_output":"2.99","slippage_bps":100,"deadline":historical+120,"recipient":lower_address(addr(1))}).as_object().unwrap().clone());
+    // Deadline validation continues to use system UTC, not the historical oracle clock.
+    assert_eq!(
+        a.prepare("uniswap.swap", &swap).await.unwrap_err().code,
+        "DEADLINE_INVALID"
+    );
+}
+
+#[tokio::test]
+async fn tracked_wallet_transfer_routes_restore_both_sources_and_require_original_return_gas() {
+    let rpc = Arc::new(Fixture::new());
+    rpc.other_stable.store(0, Ordering::SeqCst);
+    *rpc.cash_override.lock().unwrap() = Some(U256::from(1_000_000));
+    rpc.cash_by_owner
+        .lock()
+        .unwrap()
+        .insert(addr(2), U256::ZERO);
+    let mut a = adapter(rpc.clone());
+    a.wallets.push(WalletConnection {
+        name: "return-wallet".into(),
+        address: lower_address(addr(2)),
+        signing_enabled: true,
+    });
+    let baseline = a.read_snapshot().await.unwrap();
+    let owner = resource(1, addr(1));
+    let destination = resource(1, addr(2));
+    let native = a.native_asset();
+    let usdc = a.asset(&lower_address(addr(101)), 6);
+    let mut context = ReturnRouteContext {
+        projected: ProjectedState {
+            cash: baseline
+                .state
+                .holdings
+                .iter()
+                .map(|h| ProjectedCash {
+                    resource: h.resource.clone(),
+                    asset: h.amount.asset.clone(),
+                    amount: QuantityInterval {
+                        minimum: h.amount.atoms.clone(),
+                        maximum: h.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            positions: baseline
+                .state
+                .positions
+                .iter()
+                .map(|p| ProjectedPosition {
+                    resource: p.resource.clone(),
+                    position: p.position.clone(),
+                    asset: p.amount.asset.clone(),
+                    position_kind: p.kind.clone(),
+                    amount: QuantityInterval {
+                        minimum: p.amount.atoms.clone(),
+                        maximum: p.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            authorities: baseline.state.authorities.clone(),
+        },
+        baseline: baseline.clone(),
+        allocations: vec![
+            ResourceAmount {
+                resource: owner.clone(),
+                amount: Amount {
+                    asset: native.clone(),
+                    atoms: Quantity::from_decimal("0.01", 18).unwrap(),
+                },
+            },
+            ResourceAmount {
+                resource: destination.clone(),
+                amount: Amount {
+                    asset: native.clone(),
+                    atoms: Quantity::from_decimal("0.0002", 18).unwrap(),
+                },
+            },
+            ResourceAmount {
+                resource: owner.clone(),
+                amount: Amount {
+                    asset: usdc.clone(),
+                    atoms: Quantity::from_u64(500_000),
+                },
+            },
+        ],
+        step_index: 0,
+        prior_proofs: vec![],
+        remaining_cost_budget_usd_micros: Quantity::from_u64(10_000_000),
+        asset_prices: vec![],
+    };
+    // Engine projection begins with selected allocations only. The complete
+    // zero baseline proves this recipient asset despite its omitted cash row.
+    context
+        .projected
+        .cash
+        .retain(|row| row.resource != destination || row.asset != usdc);
+    let mk = |wallet: &str, token: &str, amount: &str, recipient: Address| {
+        let mut value = input();
+        value.as_object_mut().unwrap().extend(json!({"wallet":wallet,"token":token,"amount":amount,"recipient":lower_address(recipient),"max_fee_eth":"0.0001"}).as_object().unwrap().clone());
+        value
+    };
+    let primary = a.wallets[0].name.clone();
+    // A principal credit smaller than one return fee cannot serve as its
+    // funding proof. Both return fees are selected at the destination upfront.
+    let forward = mk(&primary, "native", "0.00001", addr(2));
+    let mut missing_gas = context.clone();
+    missing_gas
+        .allocations
+        .retain(|h| h.resource != destination);
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &forward, &missing_gas)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_RETURN_GAS_UNFUNDED"
+    );
+    let mut missing_destination_coverage = context.clone();
+    missing_destination_coverage
+        .baseline
+        .coverage
+        .retain(|covered| covered != &destination.0);
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &forward, &missing_destination_coverage,)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_BASELINE_INCOMPLETE"
+    );
+    let mut self_transfer = forward.clone();
+    self_transfer["recipient"] = json!(lower_address(addr(1)));
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &self_transfer, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "RECIPIENT_INVALID"
+    );
+    let mut arbitrary = forward.clone();
+    arbitrary["recipient"] = json!(lower_address(addr(3)));
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &arbitrary, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_RECIPIENT_UNSUPPORTED"
+    );
+    a.wallets[1].signing_enabled = false;
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &forward, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_RECIPIENT_UNSUPPORTED"
+    );
+    a.wallets[1].signing_enabled = true;
+    let proof = a
+        .preflight_return_route("wallet.transfer", &forward, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let back = mk("return-wallet", "native", "0.00001", addr(1));
+    let proof = a
+        .preflight_return_route("wallet.transfer", &back, &context)
+        .await
+        .unwrap();
+    assert!(proof.requires.iter().any(|r| matches!(r,
+        ProjectedRequirement::CashAtLeast {resource,asset,amount,source_step:None}
+            if resource == &destination && asset == &native
+                && amount == &Quantity::from_decimal("0.0001", 18).unwrap()
+    )));
+    assert!(proof.requires.iter().any(|r| matches!(r,
+        ProjectedRequirement::CashAtLeast {resource,asset,amount,source_step:Some(0)}
+            if resource == &destination && asset == &native
+                && amount == &Quantity::from_decimal("0.00001", 18).unwrap()
+    )));
+    apply_test_plan(&mut context, proof);
+    let mut wrap = input();
+    wrap["amount"] = json!("0.002");
+    wrap["max_fee_eth"] = json!("0.0001");
+    let wrap_proof = a
+        .preflight_return_route("wallet.wrap", &wrap, &context)
+        .await
+        .unwrap();
+    // The latest returned credit anchors the source chain, whose original
+    // selected cash funds the larger subsequent wrap.
+    assert!(
+        wrap_proof
+            .requires
+            .iter()
+            .any(|requirement| matches!(requirement,
+                ProjectedRequirement::CashAtLeast {resource,asset,amount,source_step:Some(1)}
+                    if resource == &owner && asset == &native
+                        && amount == &Quantity::from_decimal("0.002",18).unwrap()
+            ))
+    );
+    let forward = mk(&primary, &usdc.reference, "0.25", addr(2));
+    for case in 0..4 {
+        let mut invalid = context.clone();
+        match case {
+            0 => {
+                invalid.baseline.state.holdings.retain(|holding| {
+                    holding.resource != destination || holding.amount.asset != usdc
+                })
+            }
+            1 => {
+                let duplicate = invalid
+                    .baseline
+                    .state
+                    .holdings
+                    .iter()
+                    .find(|holding| holding.resource == destination && holding.amount.asset == usdc)
+                    .unwrap()
+                    .clone();
+                invalid.baseline.state.holdings.push(duplicate);
+            }
+            2 => {
+                invalid
+                    .baseline
+                    .state
+                    .holdings
+                    .iter_mut()
+                    .find(|holding| holding.resource == destination && holding.amount.asset == usdc)
+                    .unwrap()
+                    .amount
+                    .atoms = Quantity::from_u64(1);
+            }
+            3 => {
+                // Missing a nonzero derived row cannot be interpreted as zero.
+                invalid
+                    .prior_proofs
+                    .last_mut()
+                    .unwrap()
+                    .effects
+                    .push(ProjectedEffect::CashDelta {
+                        resource: destination.clone(),
+                        asset: usdc.clone(),
+                        minimum_delta: SignedQuantity::positive(&Quantity::from_u64(1)),
+                        maximum_delta: SignedQuantity::positive(&Quantity::from_u64(1)),
+                    });
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            a.preflight_return_route("wallet.transfer", &forward, &invalid)
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_CASH_UNPROVED",
+            "zero destination case {case}"
+        );
+    }
+    let proof = a
+        .preflight_return_route("wallet.transfer", &forward, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    let back = mk("return-wallet", &usdc.reference, "0.25", addr(1));
+    let proof = a
+        .preflight_return_route("wallet.transfer", &back, &context)
+        .await
+        .unwrap();
+    apply_test_plan(&mut context, proof);
+    for wallet in [&owner, &destination] {
+        let original = baseline
+            .state
+            .holdings
+            .iter()
+            .find(|h| &h.resource == wallet && h.amount.asset == usdc)
+            .unwrap();
+        let final_cash = context
+            .projected
+            .cash
+            .iter()
+            .find(|h| &h.resource == wallet && h.asset == usdc)
+            .unwrap();
+        assert_eq!(final_cash.amount.minimum, original.amount.atoms);
+        assert_eq!(final_cash.amount.maximum, original.amount.atoms);
+        let original_native = baseline
+            .state
+            .holdings
+            .iter()
+            .find(|h| &h.resource == wallet && h.amount.asset == native)
+            .unwrap();
+        let final_native = context
+            .projected
+            .cash
+            .iter()
+            .find(|h| &h.resource == wallet && h.asset == native)
+            .unwrap();
+        assert_eq!(
+            original_native
+                .amount
+                .atoms
+                .checked_sub(&final_native.amount.minimum)
+                .unwrap(),
+            Quantity::from_decimal("0.0002", 18).unwrap()
+        );
+        assert_eq!(original_native.amount.atoms, final_native.amount.maximum);
+    }
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
+    );
+}
+
+#[tokio::test]
+async fn combined_native_credits_fund_only_their_guaranteed_selected_history() {
+    let rpc = Arc::new(Fixture::new());
+    let mut a = adapter(rpc.clone());
+    a.wallets.push(WalletConnection {
+        name: "return-wallet".into(),
+        address: lower_address(addr(2)),
+        signing_enabled: true,
+    });
+    let owner = resource(1, addr(1));
+    let donor = resource(1, addr(2));
+    let native = a.native_asset();
+    let baseline = a.read_snapshot().await.unwrap();
+    let mut context = synthetic_route_context(
+        baseline,
+        vec![
+            ResourceAmount {
+                resource: owner.clone(),
+                amount: amount(&native, exact("0.0002", 18).unwrap()),
+            },
+            ResourceAmount {
+                resource: donor.clone(),
+                amount: amount(&native, exact("0.003", 18).unwrap()),
+            },
+        ],
+    );
+    for index in 0..2 {
+        let mut request = input();
+        request.as_object_mut().unwrap().extend(
+            json!({
+                "wallet":"return-wallet", "token":"native", "amount":"0.0003",
+                "recipient":lower_address(addr(1)), "max_fee_eth":"0.0001",
+                "request_id":format!("synthetic-combined-credit-{index}"),
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let proof = a
+            .preflight_return_route("wallet.transfer", &request, &context)
+            .await
+            .unwrap();
+        apply_test_plan(&mut context, proof);
+    }
+    let mut wrap = input();
+    wrap["amount"] = json!("0.0006");
+    wrap["max_fee_eth"] = json!("0.0001");
+    let proof = a
+        .preflight_return_route("wallet.wrap", &wrap, &context)
+        .await
+        .unwrap();
+    // Each credit (0.0003) and original allocation (0.0002) is smaller than
+    // principal (0.0006); the guaranteed combined source funds it and gas.
+    assert!(
+        proof
+            .requires
+            .iter()
+            .any(|requirement| matches!(requirement,
+                ProjectedRequirement::CashAtLeast {resource,asset,amount,source_step:Some(1)}
+                    if resource == &owner && asset == &native
+                        && amount == &Quantity::from_decimal("0.0006",18).unwrap()
+            ))
+    );
+    for case in 0..3 {
+        let mut invalid = context.clone();
+        let first_credit = invalid.prior_proofs[0].effects.iter_mut().find(|effect| matches!(effect,
+            ProjectedEffect::CashDelta {resource,asset,..} if resource == &owner && asset == &native
+        )).unwrap();
+        match case {
+            0 => {
+                if let ProjectedEffect::CashDelta { asset, .. } = first_credit {
+                    asset.network = "ethereum:2".into();
+                }
+            }
+            1 => {
+                if let ProjectedEffect::CashDelta { resource, .. } = first_credit {
+                    *resource = super::resource(1, addr(3));
+                }
+            }
+            2 => {
+                invalid.prior_proofs[1]
+                    .effects
+                    .push(ProjectedEffect::CashDelta {
+                        resource: owner.clone(),
+                        asset: native.clone(),
+                        minimum_delta: SignedQuantity::negative(
+                            &Quantity::from_decimal("0.0002", 18).unwrap(),
+                        ),
+                        maximum_delta: SignedQuantity::negative(
+                            &Quantity::from_decimal("0.0002", 18).unwrap(),
+                        ),
+                    });
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            a.preflight_return_route("wallet.wrap", &wrap, &invalid)
+                .await
+                .unwrap_err()
+                .code,
+            if case == 2 {
+                "PLAN_GAS_UNFUNDED"
+            } else {
+                "PLAN_PRINCIPAL_UNFUNDED"
+            },
+            "case {case}"
+        );
+    }
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "eth_estimateGas" || method == "eth_sendRawTransaction")
+    );
+}
+
+#[tokio::test]
+async fn broker_verified_native_deposit_is_exact_scoped_fresh_and_decimal_safe() {
+    let rpc = Arc::new(Fixture::new());
+    let a = adapter(rpc.clone());
+    let owner = resource(1, addr(1));
+    let venue = ResourceId("synthetic-binance-observed-main".into());
+    let venue_asset = AssetId {
+        network: "binance".into(),
+        reference: "ETH".into(),
+        decimals: 36,
+    };
+    let mut baseline = a.read_snapshot().await.unwrap();
+    baseline.coverage.push(venue.0.clone());
+    baseline.state.holdings.push(ResourceAmount {
+        resource: venue.clone(),
+        amount: Amount {
+            asset: venue_asset.clone(),
+            atoms: Quantity::zero(),
+        },
+    });
+    let context = ReturnRouteContext {
+        projected: ProjectedState {
+            cash: baseline
+                .state
+                .holdings
+                .iter()
+                .map(|h| ProjectedCash {
+                    resource: h.resource.clone(),
+                    asset: h.amount.asset.clone(),
+                    amount: QuantityInterval {
+                        minimum: h.amount.atoms.clone(),
+                        maximum: h.amount.atoms.clone(),
+                    },
+                })
+                .collect(),
+            positions: vec![],
+            authorities: baseline.state.authorities.clone(),
+        },
+        baseline,
+        allocations: vec![ResourceAmount {
+            resource: owner.clone(),
+            amount: Amount {
+                asset: a.native_asset(),
+                atoms: Quantity::from_decimal("0.01", 18).unwrap(),
+            },
+        }],
+        step_index: 0,
+        prior_proofs: vec![],
+        remaining_cost_budget_usd_micros: Quantity::from_u64(1_000_000),
+        asset_prices: vec![],
+    };
+    let mut inner = input();
+    inner.as_object_mut().unwrap().extend(json!({"token":"native","amount":"0.001","recipient":lower_address(addr(2)),"max_fee_eth":"0.0001"}).as_object().unwrap().clone());
+    let target = BrokerVerifiedNativeDepositTarget {
+        chain_id: 1,
+        account_resource: venue.clone(),
+        address: lower_address(addr(2)),
+        asset: venue_asset.clone(),
+        minimum_deposit: Quantity::from_decimal("0.00001", 36).unwrap(),
+        network: "ETH".into(),
+        observed_at: now(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        evidence_digest: binding_hash(&json!({"synthetic_authenticated_observation":true}))
+            .unwrap(),
+    };
+    // The broker seam does not widen the public wallet-transfer route profile.
+    assert_eq!(
+        a.preflight_return_route("wallet.transfer", &inner, &context)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_RECIPIENT_UNSUPPORTED"
+    );
+    let mut wrong = target.clone();
+    wrong.chain_id = 2;
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &context, &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_INVALID"
+    );
+    wrong = target.clone();
+    wrong.asset.decimals = 18;
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &context, &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_INVALID"
+    );
+    wrong = target.clone();
+    wrong.address = lower_address(addr(3));
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &context, &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_MISMATCH"
+    );
+    wrong = target.clone();
+    wrong.observed_at = (chrono::Utc::now() - chrono::Duration::seconds(91))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &context, &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_STALE"
+    );
+    wrong = target.clone();
+    wrong.minimum_deposit =
+        Quantity::from_decimal("0.001000000000000000000000000000000001", 36).unwrap();
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &context, &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_MINIMUM"
+    );
+    let mut missing = context.clone();
+    missing.baseline.coverage.retain(|r| r != &venue.0);
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &missing, &target)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_BASELINE_INCOMPLETE"
+    );
+    let mut unselected = context.clone();
+    unselected.allocations[0].amount.atoms = Quantity::from_decimal("0.001", 18).unwrap();
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&inner, &unselected, &target)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_PRINCIPAL_UNFUNDED"
+    );
+    let mut wrong_token = inner.clone();
+    wrong_token["token"] = json!(lower_address(addr(101)));
+    assert_eq!(
+        a.preflight_native_deposit_transfer(&wrong_token, &context, &target)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_MISMATCH"
+    );
+    let mut all = inner.clone();
+    all["amount"] = json!("all");
+    all["max_amount"] = json!("0.01");
+    assert!(
+        a.preflight_native_deposit_transfer(&all, &context, &target)
+            .await
+            .is_err()
+    );
+    let proof = a
+        .preflight_native_deposit_transfer(&inner, &context, &target)
+        .await
+        .unwrap();
+    let debit = Quantity::from_decimal("0.001", 18).unwrap();
+    let credit = Quantity::from_decimal("0.001", 36).unwrap();
+    assert!(proof.intent.expected.iter().any(|e|matches!(e,EffectConstraint::Transfer {from,to,debit_asset,credit_asset,maximum_debit,minimum_credit} if from == &owner && to == &venue && debit_asset == &a.native_asset() && credit_asset == &venue_asset && maximum_debit == &debit && minimum_credit == &credit)));
+    assert!(proof.effects.iter().any(|e|matches!(e,ProjectedEffect::CashDelta {resource,asset,minimum_delta,maximum_delta} if resource == &venue && asset == &venue_asset && minimum_delta == &SignedQuantity::positive(&credit) && maximum_delta == &SignedQuantity::positive(&credit))));
+    assert_eq!(
+        proof.evidence["broker_verified_deposit_target"]["evidence_digest"],
+        json!(target.evidence_digest)
+    );
+    assert!(
+        !rpc.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m == "eth_estimateGas" || m == "eth_sendRawTransaction")
+    );
+    // The same fixed recipient/amount produces an ordinary frozen preview;
+    // no signer, alternate envelope or special dispatch API is introduced.
+    let prepared = a.prepare("wallet.transfer", &inner).await.unwrap();
+    let binding: Binding = serde_json::from_value(prepared.binding).unwrap();
+    assert_eq!(binding.transaction.to, target.address);
+    assert_eq!(binding.transaction.value, debit);
+}

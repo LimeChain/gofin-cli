@@ -1,0 +1,16 @@
+[
+  {
+    "id": "fixture-withdraw-0001",
+    "withdrawOrderId": "finf9e4077b9b23a4a5cf77bc2",
+    "coin": "ETH",
+    "amount": "0.005000000000000001",
+    "transactionFee": "0.00040000000000000001",
+    "network": "ETH",
+    "address": "0x1111111111111111111111111111111111111111",
+    "txId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": 6,
+    "transferType": 0,
+    "walletType": 0,
+    "completeTime": "2026-09-01 12:30:45"
+  }
+]

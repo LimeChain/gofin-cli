@@ -1,0 +1,22 @@
+[package]
+name = "fin-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alloy = { version = "=2.5.0", default-features = false, features = ["std", "sol-types", "consensus", "eips", "k256", "signer-local", "serde"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+hex.workspace = true
+fin-domain = { path = "../fin-domain" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

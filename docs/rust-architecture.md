@@ -1,12 +1,12 @@
 # Rust implementation architecture
 
-**Agreed direction: 2 October 2026. Status: implementation handoff; Rust code and the commands proposed here are not implemented yet.** The [product concept](fin-product-concept.md) defines scope. The [TypeScript foundation report](reports/foundation.md) records existing evidence; it does not establish Rust verification.
+**Agreed direction: 2 October 2026. Status: Rust foundation implemented; verification in progress.** The workspace now contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, and Ethereum wallet/Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface. Human installation, credential isolation, and real Touch ID checks remain pending; implementation alone is not acceptance evidence. The [product concept](fin-product-concept.md) defines scope. The [TypeScript foundation report](reports/foundation.md) records historical evidence and does not establish Rust verification.
 
 ## Delivery objective and sequence
 
 Build a compiled Rust Fin with the existing Binance funding and Ethereum wallet/Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
 
-The next implementation goal should deliver working code, reproducible automated and fixed-fork verification, updated documentation, a sanitized results report, and a concrete human test handoff. The human will subsequently run onboarding and the real Touch ID path. Human-only checks remain explicitly pending until performed; they must not prevent unrelated implementation and automated verification from finishing. Production/mainnet acceptance still requires the [live-test contract](testing/README.md#live-test-contract), including full restoration.
+The implementation goal delivers working code, reproducible automated and fixed-fork verification, updated documentation, a sanitized results report, and a concrete [human test handoff](testing/rust-human-handoff.md). The human subsequently runs onboarding and the real Touch ID path. Human-only checks remain explicitly pending until performed; they must not prevent unrelated implementation and automated verification from finishing. Production/mainnet acceptance still requires the [live-test contract](testing/README.md#live-test-contract), including full restoration.
 
 This document authorizes no new financial activity. Default build/test/fork commands must not load production secrets or broadcast to mainnet. Any separately authorized live phase must record its own mechanism, identities, budget, baseline, unwind, and results. Earlier TS results and temporary non-biometric testing are not Rust approval or credential-isolation evidence. There must be no shipped flag or environment variable that disables write authorization.
 
@@ -43,18 +43,24 @@ Protect executable code, configuration, approval identities, credential storage,
 
 ## Workspace responsibilities
 
-Start with a small workspace. Keep integrations as modules until separate crates help maintenance; avoid a crate per operation.
+The compiled workspace separates shared accounting from application-owned interpretation. There is no crate per operation.
 
-| Component                | Responsibility                                                                                                                                         |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fin-domain`             | Account/resource/asset identities, exact amounts, operation and evidence versions, financial effect types, stable errors. No CCXT or Alloy dependency. |
-| `fin-engine`             | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
-| `fin-store`              | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
-| `fin-runtimes`           | EVM encoding, fee/nonce preparation, signing and receipt mechanics; reusable exchange transport, authentication, rate limits, and response handling.   |
-| `fin-apps`               | Reviewed Binance funding, wallet, Uniswap, and Aave operations and their protocol-specific receipt interpretation.                                     |
-| `fin-authorization`      | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
-| `fin-credentials`        | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
-| CLI/service entry points | Public command handling and local client protocol; protected broker construction and service lifecycle.                                                |
+| Component               | Responsibility                                                                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fin-domain`            | Account/resource/asset identities, exact amounts, operation and evidence versions, financial effect types, stable errors. No CCXT or Alloy dependency. |
+| `fin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
+| `fin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
+| `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
+| `fin-binance`           | Reviewed Binance HTTP transport, authentication contracts, exact venue quantities and funding evidence.                                                |
+| `fin-ethereum`          | Wallet, Uniswap and Aave requests, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
+| `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
+| `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
+| `fin-discovery`         | Shared offline command metadata, safe schemas and enrollment outcomes.                                                                                 |
+| `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
+| `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
+
+The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses explicit Binance REST methods rather than claiming a Rust CCXT equivalent. SQLite is handled through `rusqlite`; Ethereum uses Alloy. macOS packages are built locally with hardened ad hoc signatures and checksums. Publisher authentication, Linux/Windows write authorization, and an unattended curl installer are not implemented by that packaging script.
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
 
@@ -123,6 +129,41 @@ Version fingerprint encoding explicitly; do not hash incidental JSON ordering or
 
 Application adapters verify their own venue/protocol receipts and emit typed effects: custody movements, asset conversions, positions, debt, spending/collateral authority, usable deposit credit, and attributable costs. The shared ledger checks those effects against approved expectations, identities, reservations, and conservation/provenance rules. It must not branch on `binance.*`, `aave.*`, or other operation-name prefixes to interpret finances.
 
+Conditional return planning needs the same origin discipline before submission.
+The current verification work replaces conversion-cycle graph exemptions with
+finite, tagged quantity replay. Every projected principal credit must match its
+own source leg; a transfer preserves origin identity and a conversion carries the
+origins of the input it consumes. Sweeps consume observed projected inventory,
+not their user ceiling. Gas and other additional costs consume selected holdings
+once, including when a principal output credits the same asset. Yield needs an
+existing selected position and a bounded typed accrual claim. The final route
+must return every origin to its original custody and asset, with individually
+valued shortfalls inside the funded reserve. Ambiguous pooled intervals may fail
+closed rather than inventing an origin attribution. These changes are under
+verification; the [Rust report](reports/rust-foundation.md) records their status.
+
+Execution reserves principal and additional fees into separate pools. Fee caps
+earmark selected allocation-origin lots whose original home matches the fee's
+current resource and asset first, then other selected allocation-origin lots
+recorded at that same source. An unselected, borrowed, or accrual lot cannot fund an additional fee.
+Transfer principal prefers origins whose selected home is the recipient,
+including accrual descendants of that origin; next it uses foreign
+nonborrowed origins, then source-local origins, and borrowed origins last.
+Debt repayment reverses that final preference and consumes borrowed cash first.
+
+Each durable reservation stores the exact pre-selection lot vector and separate
+source-index lists for principal and fees. Those immutable source slices keep
+the original ordering through rejection, partial debit, or fee-only failure.
+Settlement consumes verified principal only from the principal pool and
+verified additional costs only from the fee pool; unspent amounts return to
+their original indexed lots, without appending or reordering refunds. A
+confirmed failure invalidates the remaining route until a fresh complete suffix
+proves it is funded from the unspent reserve. Cross-asset cost attribution
+obtains exact original-asset prices before approval and rechecks them before
+submission. Settlement uses those frozen approved observations so delayed
+reconciliation does not fetch new prices or strand a receipt solely because
+time has passed.
+
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
 Use exact decimal strings at boundaries, integer quantities with explicit asset/scale internally, checked `U256` conversion at EVM boundaries, and exact signed deltas and valuation arithmetic. Never pass financial quantities or policy valuations through `f64`. Use explicit conservative rounding for reserves; requested amounts must not be silently rounded. A fixed-width decimal type is not a universal container for 256-bit chain values.
@@ -135,7 +176,7 @@ Carry forward these demonstrated TS requirements:
 - Chain inclusion, canonical finality, intended effects, and spendable exchange credit have separate completion criteria.
 - Restoration returns principal to its original account and asset representation, reconciles proved costs, and rejects remaining debt, positions/dust, modified allowances, displaced assets, and in-flight work.
 
-The $100 acceptance profile is configurable verification policy, not a permanent product ceiling. Persist its scoped cumulative allocation and consumed costs through retries/restarts. Snapshot all affected resources, reserve the complete unwind, and price exposures independently. Each unwind action is a newly prepared and authorized operation; the engine does not choose financial compensation autonomously.
+The $100 acceptance profile is configurable verification policy, not a permanent product ceiling. Persist its scoped cumulative allocation and consumed costs through retries/restarts. Selected physical holdings include the actual cash that finances gas and unwind costs; the cost reserve earmarks those holdings and is not a second funding source. Gross borrowed proceeds add to the physical allocation without netting debt. Prove every forward/return prefix, including maximum additional cash costs, is funded solely from selected holdings and bounded prior credits. Snapshot all affected resources, reserve the complete unwind, and price exposures independently. Each unwind action is a newly prepared and authorized operation; the engine does not choose financial compensation autonomously.
 
 ## Library choices and implementation spikes
 

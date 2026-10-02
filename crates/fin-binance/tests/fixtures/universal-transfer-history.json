@@ -1,0 +1,17 @@
+{
+  "totalCount": 1,
+  "result": [
+    {
+      "tranId": 8439201,
+      "clientTranId": "fin8be0bdf40d9a0cf728c3acb653f91",
+      "asset": "ETH",
+      "amount": "0.123456789012345678901234567890",
+      "fromAccountType": "SPOT",
+      "toAccountType": "SPOT",
+      "fromEmail": "fixture-child@example.invalid",
+      "toEmail": "fixture-main@example.invalid",
+      "status": "SUCCESS",
+      "createTimeStamp": 1770000000000
+    }
+  ]
+}

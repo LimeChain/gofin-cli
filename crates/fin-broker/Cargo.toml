@@ -1,0 +1,42 @@
+[package]
+name = "fin-broker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22.1"
+clap.workspace = true
+chrono.workspace = true
+fin-authorization.workspace = true
+fin-binance.workspace = true
+fin-credentials.workspace = true
+fin-discovery.workspace = true
+fin-human-terminal.workspace = true
+fin-domain.workspace = true
+fin-engine.workspace = true
+fin-ethereum.workspace = true
+fin-evm.workspace = true
+fin-protocol.workspace = true
+fin-store.workspace = true
+hex.workspace = true
+hmac = "0.12.1"
+libc.workspace = true
+num-bigint.workspace = true
+reqwest.workspace = true
+rsa = { version = "0.9.8", features = ["sha2", "pem"] }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
