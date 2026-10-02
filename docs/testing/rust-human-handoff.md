@@ -97,11 +97,16 @@ the journal and does not perform financial cleanup.
 ## Production/mainnet round trips
 
 Reconcile all earlier test records before starting new financial acceptance.
-The temporary Rust Binance request currently remains unresolved; unchanged
-balances and absent history are not a terminal proof. Do not create a replacement
-request, discard its journal, or use a fresh installation/run to forget that
-uncertainty or reset the original allocation. Carry its resolution and cleanup
-evidence into the human-session report before further financial writes.
+The original temporary Rust Binance request remains unresolved. The owner accepted
+its five USDC as a possible loss and explicitly authorized a distinct 4.9-USDC
+attempt, which received HTTP 400 / `-1022` and retains its own unknown record and
+reservation. Unchanged balances and absent history are not terminal proof. Both
+identities and allocations remain charged; do not replay either request, discard
+the journals, or use installation/enrollment to forget them. A separate 0.05-USDC
+probe has a read-only baseline and funded return plan, with financial authorization
+disabled until explicitly approved. Carry these outcomes and outstanding cleanup
+into the human-session report. The signed POST query change is synthetically
+verified, with live acceptance pending; see the [current report](../reports/rust-foundation.md).
 
 Follow the [live-test contract](README.md#live-test-contract), carrying forward the
 historical selected allocation and actual consumed costs. Snapshot current
