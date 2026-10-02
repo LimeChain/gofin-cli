@@ -1,11 +1,17 @@
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, error::ErrorKind};
 use fin_domain::{FinError, OperationRequest};
-use fin_protocol::{BrokerRequest, BrokerResponse, MAX_FRAME_BYTES};
+use fin_protocol::BrokerRequest;
+#[cfg(any(target_os = "macos", test))]
+use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES};
 use serde::Serialize;
 use serde_json::{Value, json};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(target_os = "macos")]
+use tokio::io::AsyncWriteExt;
+#[cfg(any(target_os = "macos", test))]
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 #[cfg(target_os = "macos")]
 use tokio::net::UnixStream;
 
@@ -13,9 +19,13 @@ use tokio::net::UnixStream;
 const SOCKET_PATH: &str = "/Library/Fin/run/broker.sock";
 #[cfg(target_os = "macos")]
 const BROKER_PATH: &str = "/Library/Fin/runtime/fin-broker";
+#[cfg(target_os = "macos")]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(target_os = "macos")]
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(target_os = "macos")]
 const FINANCIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(target_os = "macos")]
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Parser, Debug)]
@@ -182,6 +192,7 @@ impl UnixTransport {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinError> {
     let reader = BufReader::new(reader);
     let mut bytes = Vec::with_capacity(1024);
@@ -276,6 +287,7 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn protocol_error() -> FinError {
     FinError::new(
         "BROKER_PROTOCOL_ERROR",
@@ -284,6 +296,7 @@ fn protocol_error() -> FinError {
         "Check the installed broker service and retry with the same request ID.",
     )
 }
+#[cfg(any(target_os = "macos", test))]
 fn broker_unavailable() -> FinError {
     FinError::new(
         "BROKER_UNAVAILABLE",
@@ -292,6 +305,7 @@ fn broker_unavailable() -> FinError {
         "Start the installed Fin service and retry the same request ID.",
     )
 }
+#[cfg(target_os = "macos")]
 fn broker_timeout() -> FinError {
     FinError::new(
         "BROKER_TIMEOUT",
@@ -497,7 +511,13 @@ fn launch_human_privileged_with_terminal(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = action;
+        // Consume the public metadata without starting an installer, privilege
+        // command, or secret prompt on an unsupported platform.
+        match action {
+            PrivilegedAction::Setup => {}
+            PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
+            PrivilegedAction::Remove(args) => drop(args),
+        }
         Err(FinError::new(
             "PROTECTED_PROVIDER_UNAVAILABLE",
             "enrollment",
@@ -574,9 +594,11 @@ fn launch_human_privileged_with_terminal(
     }
 }
 
+#[cfg(target_os = "macos")]
 trait ErrorWithoutEcho {
     fn into_with_detail(self, error: std::io::Error) -> FinError;
 }
+#[cfg(target_os = "macos")]
 impl ErrorWithoutEcho for FinError {
     fn into_with_detail(mut self, _error: std::io::Error) -> FinError {
         // Deliberately suppress OS error text because exec diagnostics can
@@ -774,5 +796,54 @@ mod tests {
         let error =
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, false).unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn unsupported_platform_refuses_every_privileged_action_even_with_a_terminal() {
+        let args: fin_discovery::AddConnectionArgs = serde_json::from_value(json!({
+            "provider":"binance","name":"synthetic-main","role":"main","credential_type":"hmac"
+        }))
+        .unwrap();
+        let update: fin_discovery::AddConnectionArgs =
+            serde_json::from_value(serde_json::to_value(&args).unwrap()).unwrap();
+        let remove: fin_discovery::NamedConnectionArgs =
+            serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
+        for action in [
+            PrivilegedAction::Setup,
+            PrivilegedAction::Add(args),
+            PrivilegedAction::Update(update),
+            PrivilegedAction::Remove(remove),
+        ] {
+            let error = launch_human_privileged_with_terminal(action, true).unwrap_err();
+            assert_eq!(error.code, "PROTECTED_PROVIDER_UNAVAILABLE");
+            assert_eq!(error.stage, "enrollment");
+            assert!(
+                !serde_json::to_string(&error)
+                    .unwrap()
+                    .contains("synthetic-main")
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn unsupported_platform_refuses_broker_transport_for_reads_and_writes() {
+        let transport = UnixTransport::installed();
+        for request in [
+            BrokerRequest::Capabilities,
+            BrokerRequest::Execute {
+                request: OperationRequest {
+                    request_id: "synthetic-request".into(),
+                    operation: "wallet.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            },
+        ] {
+            let error = Transport::call(&transport, request).await.unwrap_err();
+            assert_eq!(error.code, "PROTECTED_PROVIDER_UNAVAILABLE");
+            assert_eq!(error.stage, "transport");
+        }
     }
 }
