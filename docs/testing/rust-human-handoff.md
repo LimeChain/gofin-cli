@@ -66,6 +66,14 @@ obtain an unrestricted signer/API. Test the actual tools and privilege state,
 not just file modes. Terminal guards do not cover GUI automation, keylogging,
 root, previous disclosures, or an agent controlling the human's Terminal.
 
+A fresh Ethereum EOA key derives a different address and needs a separately
+named wallet; it is not a same-address key rotation. If that wallet needs test
+funds, transfer only the existing selected stock through a separately approved
+route with receiving-wallet return access and funded gas for both directions.
+Record that funding and restore original custody within the carried allocation.
+Report credential denial for the fresh protected key separately from any source
+key that was previously accessible to the agent.
+
 ## Native financial authorization and recovery
 
 Before each operation the lead presents its concrete preview, current USD bounds
