@@ -1,6 +1,6 @@
 # Binance funding acceptance
 
-Read the [shared testing rules](README.md) first. These cases specify behavior for the implementation; no Fin command syntax or live result is claimed here.
+Read the [shared testing rules](README.md) first. These cases specify required behavior, not a live pass. Existing TS implementation/evidence and the upcoming Rust design are recorded in the [handoff](../implementation-plan.md). Rust must establish its own results.
 
 ## Goal and setup
 
@@ -10,17 +10,19 @@ Live acceptance uses **production Binance and Ethereum mainnet** under the [$100
 
 Use named connections such as `binance-main`, `binance-sub-a`, `binance-sub-b`, and `hot-wallet`. These are placeholders, not real accounts. Start with an explicitly selected account/wallet type such as spot; support for other types must be discovered and tested separately. Use two subaccounts when verifying partial consolidation.
 
+For Rust onboarding, first apply [C12–C19](README.md#common-acceptance-cases) and the [terminal enrollment contract](../onboarding.md). A fresh LLM must discover how to guide the human through Binance connection creation and later credential changes before a broker or credentials exist. The human enters secrets in their own terminal; the agent checks only safe metadata and reported capabilities. Enrollment validates access with reads and must never test authority by moving funds. Actual human onboarding/Touch ID verification follows the implementation-stage automated/fork handoff.
+
 Before a live run, record privately:
 
-| Input | Required detail |
-|---|---|
-| Environment | Binance entity/API host and the Ethereum chain ID/RPC used for destination verification. |
-| Credentials | Protected credential handles, which account owns each credential, and observed/confirmed permissions. No secret values. |
-| Hierarchy | Main/subaccount relationships, concrete adapter identifiers, and source/destination wallet types. |
-| Asset and route | Exchange asset ID, exact withdrawal/deposit network mapping, and native asset or ERC-20 contract on Ethereum. |
-| Quantities | Per-subaccount amounts, withdrawal/deposit amounts, venue minimums and precision, current USD valuation, the $100 allocation, fee/unwind reserves, and expected debit/receipt semantics. |
-| Destination | Named wallet resolved to its exact address, or exchange deposit address plus any required memo/tag. |
-| Baseline | Timestamped balances and existing in-flight activity for each affected account and wallet; expected returned allocation after recorded costs. |
+| Input           | Required detail                                                                                                                                                                          |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Environment     | Binance entity/API host and the Ethereum chain ID/RPC used for destination verification.                                                                                                 |
+| Credentials     | Protected credential handles, which account owns each credential, and observed/confirmed permissions. No secret values.                                                                  |
+| Hierarchy       | Main/subaccount relationships, concrete adapter identifiers, and source/destination wallet types.                                                                                        |
+| Asset and route | Exchange asset ID, exact withdrawal/deposit network mapping, and native asset or ERC-20 contract on Ethereum.                                                                            |
+| Quantities      | Per-subaccount amounts, withdrawal/deposit amounts, venue minimums and precision, current USD valuation, the $100 allocation, fee/unwind reserves, and expected debit/receipt semantics. |
+| Destination     | Named wallet resolved to its exact address, or exchange deposit address plus any required memo/tag.                                                                                      |
+| Baseline        | Timestamped balances and existing in-flight activity for each affected account and wallet; expected returned allocation after recorded costs.                                            |
 
 The operator selects amounts that fit the available balances, minimums, and fees. Do not infer authority to liquidate positions, close orders, or borrow to obtain transferable funds. If a required balance is unavailable, report it and let the agent revise the task with the user.
 
@@ -30,13 +32,13 @@ Binance separates main/subaccount transfers from wallet transfers inside a singl
 
 Useful endpoint families to map through the pinned CCXT version:
 
-| Intent | Binance API reference |
-|---|---|
-| Main-authorized main/subaccount movements and lookup | `POST` / `GET /sapi/v1/sub-account/universalTransfer` |
-| Subaccount-authorized transfer to main | `POST /sapi/v1/sub-account/transfer/subToMaster` |
-| Discover networks and funding constraints | `GET /sapi/v1/capital/config/getall` |
-| Deposit address and credit lookup | `GET /sapi/v1/capital/deposit/address` and `/sapi/v1/capital/deposit/hisrec` |
-| Standard withdrawal and lookup | `POST /sapi/v1/capital/withdraw/apply` and `GET /sapi/v1/capital/withdraw/history` |
+| Intent                                               | Binance API reference                                                              |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Main-authorized main/subaccount movements and lookup | `POST` / `GET /sapi/v1/sub-account/universalTransfer`                              |
+| Subaccount-authorized transfer to main               | `POST /sapi/v1/sub-account/transfer/subToMaster`                                   |
+| Discover networks and funding constraints            | `GET /sapi/v1/capital/config/getall`                                               |
+| Deposit address and credit lookup                    | `GET /sapi/v1/capital/deposit/address` and `/sapi/v1/capital/deposit/hisrec`       |
+| Standard withdrawal and lookup                       | `POST /sapi/v1/capital/withdraw/apply` and `GET /sapi/v1/capital/withdraw/history` |
 
 Binance documents account-dependent Travel Rule routing. If the account requires it, implement the appropriate flow or return a specific unsupported/prerequisite result; do not silently use the standard withdrawal endpoint. The API exposes fee, network, minimum, and status information that should be queried rather than assumed. [Binance capital API](https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/capital)
 
@@ -71,21 +73,21 @@ Every return transfer is part of the intended live test, has its own record, rem
 
 ## Acceptance matrix
 
-| ID | Scenario | Pass condition |
-|---|---|---|
-| B01 | Named hierarchy, balances, funding capabilities | Correct main/subaccount ownership and wallet types; no credentials exposed; available versus committed amounts distinguished. |
-| B02 | Two subaccounts → main | Each authorized transfer produces one matching movement and main credit; per-step evidence persists. |
-| B03 | Main → subaccount | Correct authority, source/destination, amount, and credited balance. |
-| B04 | Main withdrawal → Ethereum wallet | Correct network/token/address, reconciled amount and fees, venue record plus destination receipt. |
-| B05 | Ethereum wallet → Binance deposit | Correct deposit instructions, one authorized transfer, confirmed chain result and exchange credit. |
-| B06 | One consolidation succeeds, next fails | Completed transfer retained; no replay or unrequested compensating transfer; agent sees remaining work. |
-| B07 | Withdrawal accepted but response lost | Original record is reconciled; no duplicate withdrawal; result stays unknown if evidence is insufficient. |
-| B08 | Duplicate/concurrent request and restart | Same logical operation is not repeated; request identity and pending status survive restart. |
-| B09 | Missing permission, blocked network, insufficient balance, invalid precision, unmet account prerequisite, or declined approval | Specific reason and zero unauthorized financial submissions; no credential or route substitution. |
-| B10 | Accepted withdrawal/deposit still pending | Submission, chain receipt, and usable venue credit remain distinct; status polling requires no new approval. |
-| B11 | Production round trip within the test budget | Each movement and total allocation respect the $100 limits; funds return to the starting wallets/accounts/subaccounts with all costs explained and no displaced test funds or pending movements. |
+| ID  | Scenario                                                                                                                       | Pass condition                                                                                                                                                                                   |
+| --- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| B01 | Named hierarchy, balances, funding capabilities                                                                                | Correct main/subaccount ownership and wallet types; no credentials exposed; available versus committed amounts distinguished.                                                                    |
+| B02 | Two subaccounts → main                                                                                                         | Each authorized transfer produces one matching movement and main credit; per-step evidence persists.                                                                                             |
+| B03 | Main → subaccount                                                                                                              | Correct authority, source/destination, amount, and credited balance.                                                                                                                             |
+| B04 | Main withdrawal → Ethereum wallet                                                                                              | Correct network/token/address, reconciled amount and fees, venue record plus destination receipt.                                                                                                |
+| B05 | Ethereum wallet → Binance deposit                                                                                              | Correct deposit instructions, one authorized transfer, confirmed chain result and exchange credit.                                                                                               |
+| B06 | One consolidation succeeds, next fails                                                                                         | Completed transfer retained; no replay or unrequested compensating transfer; agent sees remaining work.                                                                                          |
+| B07 | Withdrawal accepted but response lost                                                                                          | Original record is reconciled; no duplicate withdrawal; result stays unknown if evidence is insufficient.                                                                                        |
+| B08 | Duplicate/concurrent request and restart                                                                                       | Same logical operation is not repeated; request identity and pending status survive restart.                                                                                                     |
+| B09 | Missing permission, blocked network, insufficient balance, invalid precision, unmet account prerequisite, or declined approval | Specific reason and zero unauthorized financial submissions; no credential or route substitution.                                                                                                |
+| B10 | Accepted withdrawal/deposit still pending                                                                                      | Submission, chain receipt, and usable venue credit remain distinct; status polling requires no new approval.                                                                                     |
+| B11 | Production round trip within the test budget                                                                                   | Each movement and total allocation respect the $100 limits; funds return to the starting wallets/accounts/subaccounts with all costs explained and no displaced test funds or pending movements. |
 
-Apply [C01–C11](README.md) to these operations. Induce destructive/ambiguous edge cases using controlled fixtures, not by deliberately disrupting a real funded account. Keep live and fixture results distinct.
+Apply [C01–C19](README.md#common-acceptance-cases) where relevant to onboarding and these operations. Induce destructive/ambiguous edge cases using controlled fixtures, not by deliberately disrupting a real funded account. Keep live and fixture results distinct.
 
 ## What automated and live evidence must cover
 

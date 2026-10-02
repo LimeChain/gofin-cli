@@ -2,10 +2,15 @@
 
 Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the implementation plan](docs/implementation-plan.md), and [the testing guide](docs/testing/README.md) before implementation. The linked Binance and Ethereum guides contain the first acceptance cases.
 
+The next implementation is compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). The current TS source and [foundation report](docs/reports/foundation.md) are behavioral references and historical evidence, not Rust implementation or verification. Do not start the rewrite merely because these docs were updated; the user will issue the implementation goal separately.
+
 ## Product decisions
 
 - Product Fin, repository/package `fin-cli`, binary `fin`; open source, license pending.
 - CLI plus a small companion skill first. MCP and general chain-to-chain bridging are later work.
+- Setup is bundled with Fin and terminal-driven. The human runs installation and credential enrollment in their own terminal; custom credential-entry UI and a graphical installer are not beta requirements. Keep later add/update/remove flows available without reinstalling.
+- LLM discovery includes setup, service lifecycle, and connection management, before a broker/configuration/credentials exist. Shared definitions drive help, explanation, safe input/output/error schemas, examples, validation, and human-versus-agent execution metadata. Never ask for credentials in chat or pass them through an agent-controlled terminal.
+- One public CLI talks to a protected execution role. Keep OS authentication behind `fin-authorization`, with the compiled Swift helper internal to its macOS provider. Define other platform boundaries without claiming unimplemented write authorization works.
 - The LLM plans and invokes steps. Fin validates and executes individual operations, with durable records and reconciliation.
 - Require fresh Touch ID for every write in the first interactive macOS release. Reads, previews, and status checks do not require financial-action approval.
 - Credentials and approval enforcement must be protected from the agent's tools. A flag, prompt instruction, mock biometric response, or ordinary same-user process is not proof of that boundary.
@@ -24,6 +29,10 @@ The command examples are design proposals until implemented. Keep help, schemas,
 Use decimal-safe quantities and explicit units and networks. Persist a write's identity before submission. An uncertain result requires reconciliation, not a new financial action. Do not mark an operation complete merely because a submission returned successfully.
 
 Write meaningful tests for financial behavior, approvals, duplicate requests, and partial failures. Distinguish mocked, fork, read-only live, biometric, and live-write verification in reports. A mocked approval is useful for automated tests but cannot establish that Touch ID or credential isolation works.
+
+For the forthcoming Rust goal, finish implementation and reproducible automated/fork verification, then hand off a concrete human installation/onboarding and Touch ID checklist. The user will run that path afterward. Mark those cases pending/not run until observed; their absence does not excuse unfinished independent engineering. Default tests use synthetic credentials and never load production secrets or broadcast to mainnet. Any new live testing needs its applicable explicit authorization and the existing budget/restoration contract; TS results and earlier temporary non-biometric tests do not transfer to Rust. Do not ship a live authorization-disable switch.
+
+The Rust ledger consumes typed effects backed by application-specific verified evidence. Keep application-name branches out of shared financial accounting. Preserve exact quantities, request/submission identities, reservations, proof-before-terminal settlement, and unresolved records across migrations; upgrading or porting must never silently replay a financial write.
 
 Never commit secrets, private account mappings, signed requests, or unredacted live logs. The existing ignored `.context/` directory can hold private test reports, but is not a protected credential store. Test-only keys and signing fixtures must be unmistakably synthetic and usable only in isolated local tests. Live runs use configured accounts, user-selected amounts/destinations, and the real per-write approval flow.
 

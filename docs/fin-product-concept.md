@@ -6,10 +6,12 @@
 - **Repository/package:** `fin-cli`
 - **Binary:** `fin`
 - **Distribution model:** Open source; license to be selected.
-- **Updated:** 1 October 2026
-- **Status:** Agreed product direction; implementation and verification pending.
+- **Updated:** 2 October 2026
+- **Status:** Agreed product direction; TS foundation implemented with incomplete acceptance; compiled Rust implementation selected and pending.
 
 Implementation starts with the [build plan](implementation-plan.md) and [Binance and Ethereum acceptance guides](testing/README.md). These define the first development milestones within the broader scope below. Release-hardening proposals discussed after this concept were paused; they are not additional beta acceptance gates.
+
+The next implementation follows the [Rust architecture](rust-architecture.md) and [terminal onboarding/discovery contract](onboarding.md). Implementation and automated/fork verification come first; the human subsequently runs onboarding and the real Touch ID path. Production/mainnet acceptance remains separately required and must not be claimed from automated or historical TS results.
 
 Fin is an open-source tool that brings **centralized and on-chain order-book trading, wallets and broader DeFi, and shared authorizations and limits into one locally executed interface** for humans and AI agents.
 
@@ -52,13 +54,13 @@ A user can move from an exchange balance to an on-chain collateral position and 
 
 ### Division of responsibility
 
-| Responsibility | LLM / agent | Fin |
-|---|---|---|
-| Planning | Understand the request, inspect available capabilities, choose steps, and explain the plan to the user. | Supply structured capabilities, state, previews, and constraints. |
-| Authorization | Propose the next concrete operation and explain why it is needed. | Display the actual operation and obtain fresh Touch ID confirmation bound to that write. |
-| Execution | Invoke Fin separately for each step when its prerequisites are satisfied. | Validate the request, execute that operation, and track its outcome. |
-| Recovery | Decide how to continue or revise the plan using the reported state. | Preserve receipts and progress; reconcile uncertain outcomes before allowing a potentially duplicate submission. |
-| Communication | Explain progress, exceptions, and results to the user. | Return structured evidence and actionable errors. |
+| Responsibility | LLM / agent                                                                                             | Fin                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Planning       | Understand the request, inspect available capabilities, choose steps, and explain the plan to the user. | Supply structured capabilities, state, previews, and constraints.                                                |
+| Authorization  | Propose the next concrete operation and explain why it is needed.                                       | Display the actual operation and obtain fresh Touch ID confirmation bound to that write.                         |
+| Execution      | Invoke Fin separately for each step when its prerequisites are satisfied.                               | Validate the request, execute that operation, and track its outcome.                                             |
+| Recovery       | Decide how to continue or revise the plan using the reported state.                                     | Preserve receipts and progress; reconcile uncertain outcomes before allowing a potentially duplicate submission. |
+| Communication  | Explain progress, exceptions, and results to the user.                                                  | Return structured evidence and actionable errors.                                                                |
 
 **The LLM creates and presents the plan in the conversation.** Fin generates the confirmation details for each write from the operation it will execute, independently of the LLM's explanation. Reads and dry-runs do not require financial-action approval. The first version does not use timed authorization sessions or authenticate a complete plan.
 
@@ -110,17 +112,21 @@ User <--> LLM / agent
 
 Fin runs locally; no Fin-hosted execution service is required. **The first release ships the CLI and a small companion agent skill.** Agents with local shell access can invoke Fin directly without an MCP server. A later local MCP mode will expose the same operations and controls through an additional interface to the same engine. Any protected local component needed for credentials and approvals is independent of the choice between CLI and MCP.
 
+The selected Rust design has one public `fin` CLI and a protected local broker role. Bundled `fin setup` guides human administrator installation and terminal credential enrollment; the download script is only a bootstrap. Public daemon commands manage the fixed installed service. Starting it grants no financial authority. One executable with separate modes or separate internal binaries may implement these roles. A graphical installer and custom credential-entry forms are not required for the beta.
+
+Separate application semantics, network runtime mechanics, connection/deployment configuration, and policy/platform providers. Reviewed adapters verify receipts and produce typed financial effects; a shared ledger enforces limits, provenance, and settlement without application-name branches. Version operation/evidence/configuration records for safe upgrades. Native authentication belongs behind `fin-authorization`; the compiled Swift helper is an internal macOS implementation. Other OS interfaces can be defined without claiming equivalent authentication is implemented.
+
 CCXT is the exchange-integration backend, with its exchange catalog and available functionality as the coverage target, except that Lighter is deferred beyond the first release. Fin should reuse CCXT capabilities wherever available, adding venue-specific mappings when needed for operations such as Binance subaccount funding. Wallet and DeFi adapters reuse maintained SDKs, protocol APIs, and appropriate first-party tools. Fin provides consistent discovery, accounts, authorization, and results across these integrations.
 
 Broad CCXT coverage does not mean every venue implements every operation or that every combination has already been validated by Fin. Capability discovery must distinguish the underlying method's availability, credential permissions, and Fin's implementation and verification status. Every write, including venue-specific methods, needs an accurate confirmation and the shared authorization check; broad coverage must not introduce an unchecked raw-method execution path.
 
-Credential input should support both **environment variables** and the **OS credential store**. Both exchange and on-chain credentials are required in the first release:
+Human terminal enrollment is the primary Rust credential-input flow, including later additions/replacements without reinstalling. Secret entry goes directly to the protected enrollment component. **OS credential-store** and **environment-based provisioning** remain desired backends where compatible with that boundary; environment support must not expose execution secrets to the agent. Track each backend's implementation separately. Both exchange and on-chain credentials are required in the first release:
 
-| Connection | Required account model |
-|---|---|
-| **Exchange accounts** | Named main accounts and subaccounts, API keys/secrets and any venue-required passphrase, account hierarchy, permissions, and wallet types. |
-| **On-chain wallets** | Named EVM and Solana wallets, addresses, networks, and protected signing credentials or signer connections. A public address can also be connected for read-only use. |
-| **Venue-specific authorization** | Additional trading keys, subaccount identifiers, or signing permissions required by integrations such as Derive. |
+| Connection                       | Required account model                                                                                                                                                |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Exchange accounts**            | Named main accounts and subaccounts, API keys/secrets and any venue-required passphrase, account hierarchy, permissions, and wallet types.                            |
+| **On-chain wallets**             | Named EVM and Solana wallets, addresses, networks, and protected signing credentials or signer connections. A public address can also be connected for read-only use. |
+| **Venue-specific authorization** | Additional trading keys, subaccount identifiers, or signing permissions required by integrations such as Derive.                                                      |
 
 Stable handles such as `binance-main`, `binance-strategy`, and `treasury-solana` identify connections. A task can use an exchange credential for withdrawal and a wallet signer for the subsequent on-chain action. Normal configuration stores references and metadata, not raw secrets, and secrets must not appear in agent output or logs.
 
@@ -136,12 +142,12 @@ The initial threat model includes an erroneous or prompt-injected agent; a compr
 
 **Fin's differentiation is the combination of four capabilities in one product:**
 
-| Capability | What it enables |
-|---|---|
-| **CEX and on-chain order-book trading** | A consistent interface for market data, balances, orders, and positions across centralized exchanges and supported on-chain trading venues. |
-| **Wallets and broader DeFi** | EVM and Solana wallet integration, signing, transfers, swaps, deposits and withdrawals, collateral, lending, borrowing, and repayment. General chain-to-chain bridging follows immediately after the first release. |
-| **Shared authorizations, limits, and constraints** | Fresh Touch ID authorization for each write across exchange and on-chain actions, bound to the displayed operation and its amounts, destinations, and execution bounds. Richer policy controls can follow. |
-| **Local execution** | Financial operations run from the user's environment, with credentials and signing under the user's control and no required Fin-hosted execution service. |
+| Capability                                         | What it enables                                                                                                                                                                                                     |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CEX and on-chain order-book trading**            | A consistent interface for market data, balances, orders, and positions across centralized exchanges and supported on-chain trading venues.                                                                         |
+| **Wallets and broader DeFi**                       | EVM and Solana wallet integration, signing, transfers, swaps, deposits and withdrawals, collateral, lending, borrowing, and repayment. General chain-to-chain bridging follows immediately after the first release. |
+| **Shared authorizations, limits, and constraints** | Fresh Touch ID authorization for each write across exchange and on-chain actions, bound to the displayed operation and its amounts, destinations, and execution bounds. Richer policy controls can follow.          |
+| **Local execution**                                | Financial operations run from the user's environment, with credentials and signing under the user's control and no required Fin-hosted execution service.                                                           |
 
 The combination lets a user manage a financial task across the places where their assets are held and used. Trading capabilities connect to wallet and DeFi operations; the same authorization model follows the work from one venue to the next.
 
@@ -178,25 +184,29 @@ The financial model and authorization approach should leave room for those syste
 
 The beta should validate a complete cross-system task with per-write Touch ID authorization from the first release. The initial write experience targets interactive macOS use with Touch ID; other authentication methods and unattended writes are deferred.
 
-| Area | Minimum proposed scope |
-|---|---|
-| **Agent interface** | CLI plus a small companion `SKILL.md` that makes Fin discoverable to supported local agents and teaches them how to use its live capability discovery. MCP is deferred beyond the first release. |
-| **Discovery** | Clear help, method/argument explanations, machine-readable input/output and error schemas, read/write classification, and discovery of integrations, networks, markets, assets, and account-specific operations. |
-| **Setup** | Exchange main/subaccount credentials, EVM and Solana wallet credentials, stable names and relationships, OS credential-store support, and environment-based provisioning compatible with the protected execution boundary. |
-| **Reads** | Venue-specific balances, positions, collateral, debt, orders, and operation status, with consistent shared fields, discoverable schemas, and explicit missing or stale data. Aggregate portfolio valuation is not a first-release requirement. |
-| **Trading and exchange actions** | CCXT's exchange catalog and available capabilities, excluding Lighter in the first release; Derive core trading; Binance main/subaccount transfers, crypto deposits, and withdrawals. |
-| **Wallet and DeFi actions** | EVM and Solana wallets; Uniswap and Jupiter swaps; Aave and Kamino deposits/supply, withdrawals, borrowing, repayment, collateral management, and position reads. Derive deposits and withdrawals are included. |
-| **Bridging** | General chain-to-chain bridging is deferred to the immediate next release. Native venue funding remains in scope, with each route's cross-chain mechanics explicitly identified. |
-| **Authorization** | Fresh Touch ID for every write, with Fin-generated confirmation details, single-use authorization, and protected execution credentials. |
-| **Limits and constraints** | Explicit operation amounts, destinations, networks, fees, slippage, and other applicable execution bounds; material changes require renewed approval. |
-| **Previews** | `--dry-run` for every supported write, reporting validation, quotes, and simulations actually performed, their freshness and assumptions, and any unchecked conditions. No financial action is submitted by a preview. |
-| **Reliability** | Persistent identifiers and records for every write, explicit operation states, status checks, duplicate-submission protection, and an audit journal linking authorization, submissions, receipts, outcomes, and costs. |
+| Area                             | Minimum proposed scope                                                                                                                                                                                                                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Agent interface**              | CLI plus a small companion `SKILL.md` that makes Fin discoverable to supported local agents and teaches them how to use its live capability discovery. MCP is deferred beyond the first release.                                                                                                             |
+| **Discovery**                    | Clear help, explanations and input/output/error schemas for financial operations and setup/connection management, with human/agent execution requirements; available before configuration or a broker. Distinguish read/write/configuration changes, integration support, and account-specific availability. |
+| **Setup**                        | Bundled terminal setup and later connection add/update/remove, exchange main/subaccount and EVM/Solana credential models, stable names/relationships, and protected storage/provisioning backends. The human enters secrets in their own terminal; no credential-entry GUI is required.                      |
+| **Reads**                        | Venue-specific balances, positions, collateral, debt, orders, and operation status, with consistent shared fields, discoverable schemas, and explicit missing or stale data. Aggregate portfolio valuation is not a first-release requirement.                                                               |
+| **Trading and exchange actions** | CCXT's exchange catalog and available capabilities, excluding Lighter in the first release; Derive core trading; Binance main/subaccount transfers, crypto deposits, and withdrawals.                                                                                                                        |
+| **Wallet and DeFi actions**      | EVM and Solana wallets; Uniswap and Jupiter swaps; Aave and Kamino deposits/supply, withdrawals, borrowing, repayment, collateral management, and position reads. Derive deposits and withdrawals are included.                                                                                              |
+| **Bridging**                     | General chain-to-chain bridging is deferred to the immediate next release. Native venue funding remains in scope, with each route's cross-chain mechanics explicitly identified.                                                                                                                             |
+| **Authorization**                | Fresh Touch ID for every write, with Fin-generated confirmation details, single-use authorization, and protected execution credentials.                                                                                                                                                                      |
+| **Limits and constraints**       | Explicit operation amounts, destinations, networks, fees, slippage, and other applicable execution bounds; material changes require renewed approval.                                                                                                                                                        |
+| **Previews**                     | `--dry-run` for every supported write, reporting validation, quotes, and simulations actually performed, their freshness and assumptions, and any unchecked conditions. No financial action is submitted by a preview.                                                                                       |
+| **Reliability**                  | Persistent identifiers and records for every write, explicit operation states, status checks, duplicate-submission protection, and an audit journal linking authorization, submissions, receipts, outcomes, and costs.                                                                                       |
 
 Proposed CLI conventions include `--help`, `fin explain <operation>`, `--schema`, and `--json`. Commands should expose explicit asset units, account names, and network identifiers wherever ambiguity could change the action.
 
 ### Agent onboarding and capability discovery
 
-Installing the binary alone does not make an agent aware of Fin. Onboarding should include installing the companion skill in the user's chosen supported agent environment, checking that the CLI is accessible, and completing a read-only connection check. Users supply credentials directly to the protected execution component; the agent receives named account or wallet handles and permission metadata. This setup must use the credential boundary described above rather than rely on a separate terminal or masked input alone.
+Installing the binary alone does not make an agent aware of Fin. Offer the companion skill in the user's chosen supported agent environment, check that the CLI is accessible, and complete a read-only connection check. The CLI must also expose complete onboarding instructions without the skill, configured credentials, or a running broker. Users supply credentials directly to protected enrollment in their own terminal; the agent receives necessary named handles and permission metadata. Hidden input and terminal choice support this workflow, while the installed protected components establish the credential boundary.
+
+The agent must be able to discover how `fin setup` and `fin connections add/list/update/remove` work: actual syntax, examples and safe argument schemas, supported providers and account/credential types, required permissions/IP access, human-terminal and approval requirements, hidden secret-input mechanics, checks performed, safe results/errors, and next verification commands. These proposed Rust commands are not implemented in the current TS CLI. Help, schemas, descriptions, and validation must share definitions so an LLM can guide a human without inventing flags or requesting secret values.
+
+The required onboarding journey starts when the human asks the LLM how to add Binance. The LLM discovers Fin, explains prerequisites, and directs the human to run the advertised enrollment command themselves. After enrollment, it checks safe connection metadata and current capabilities. Adding a new connection later follows the same journey without reinstalling. Saving/replacing credentials requires independent human configuration authorization; it does not authorize future financial operations. See [onboarding acceptance](onboarding.md#acceptance-and-handoff).
 
 The skill provides a concise description of when to use Fin and instructions for discovering and invoking it. Users can explicitly request Fin, or a compatible agent can select the skill when the task matches its description. The skill should refer to the installed CLI's help and schemas rather than duplicate the entire command catalog.
 
@@ -227,14 +237,14 @@ The agent can combine these results to explain the user's holdings and obligatio
 
 The first-release integration target is **CCXT's catalog and available functionality, excluding Lighter, plus Uniswap, Aave, Derive, Jupiter, and Kamino**. For the five named protocols, scope is their core operations rather than every product in their suites. Lighter is deferred to a later release, with no release date committed.
 
-| Integration | First-release operations |
-|---|---|
-| **CCXT** | Discover and expose the available exchange capabilities, markets, balances, positions, orders, trading, account transfers, and funding operations, excluding Lighter in the first release. Binance main/subaccount movements and deposits/withdrawals are explicit acceptance cases. |
-| **Uniswap** | Quotes, swaps, required allowances, and execution status on supported deployments. |
-| **Aave** | Market and position reads, deposit/supply, collateral configuration, borrowing, repayment, and withdrawal. |
-| **Derive** | Market and account reads, core trading in supported instruments, order cancellation and position management, deposits, and withdrawals. |
-| **Jupiter** | Quotes, swaps, and execution status on Solana. |
-| **Kamino** | Market and position reads, deposit/supply, collateral management, borrowing, repayment, and withdrawal. |
+| Integration | First-release operations                                                                                                                                                                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **CCXT**    | Discover and expose the available exchange capabilities, markets, balances, positions, orders, trading, account transfers, and funding operations, excluding Lighter in the first release. Binance main/subaccount movements and deposits/withdrawals are explicit acceptance cases. |
+| **Uniswap** | Quotes, swaps, required allowances, and execution status on supported deployments.                                                                                                                                                                                                   |
+| **Aave**    | Market and position reads, deposit/supply, collateral configuration, borrowing, repayment, and withdrawal.                                                                                                                                                                           |
+| **Derive**  | Market and account reads, core trading in supported instruments, order cancellation and position management, deposits, and withdrawals.                                                                                                                                              |
+| **Jupiter** | Quotes, swaps, and execution status on Solana.                                                                                                                                                                                                                                       |
+| **Kamino**  | Market and position reads, deposit/supply, collateral management, borrowing, repayment, and withdrawal.                                                                                                                                                                              |
 
 Dedicated integrations for liquidity management, strategy vaults, and other products beyond these core operations are not first-release requirements. Reuse CCXT for Derive operations where appropriate; its inclusion does not require duplicate adapters.
 
@@ -250,12 +260,12 @@ The smaller reference journey narrows the first end-to-end acceptance case. The 
 
 **Fin should not impose a fixed, hand-maintained asset whitelist.** Its supported assets are discovered from the connected exchange, wallet, protocol market, or swap route, subject to the capabilities of the relevant adapter.
 
-| Operation | What determines asset availability |
-|---|---|
-| **Exchange trading and funding** | Listed instruments and currencies, supported deposit/withdrawal networks, account permissions, and current venue status. |
-| **Wallet reads and transfers** | The network's native asset and token standards/behaviors implemented by the wallet adapter. Tokens are identified by chain plus contract or mint address. |
-| **Swaps** | A supported protocol deployment, a valid route and quote for the token pair, available liquidity, and compatible token behavior. |
-| **Lending and borrowing** | The selected market's reserves, collateral eligibility, borrowing configuration, caps, and available liquidity. |
+| Operation                        | What determines asset availability                                                                                                                        |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Exchange trading and funding** | Listed instruments and currencies, supported deposit/withdrawal networks, account permissions, and current venue status.                                  |
+| **Wallet reads and transfers**   | The network's native asset and token standards/behaviors implemented by the wallet adapter. Tokens are identified by chain plus contract or mint address. |
+| **Swaps**                        | A supported protocol deployment, a valid route and quote for the token pair, available liquidity, and compatible token behavior.                          |
+| **Lending and borrowing**        | The selected market's reserves, collateral eligibility, borrowing configuration, caps, and available liquidity.                                           |
 
 Fin must retain precise token identities, decimals, and venue identifiers. The same symbol on two chains is not automatically the same transferable asset; native ETH and wrapped ETH are different representations. An asset may be transferable but not swappable on a chosen route or eligible as collateral in a particular market. Aave exposes reserve-specific supply, borrowing, and collateral conditions rather than accepting every wallet token. [Aave reserves](https://www.aave.com/docs/aave-v4/liquidity/reserves).
 
@@ -290,11 +300,11 @@ Timed sessions, authorization of a complete plan, automatic allowances, and rich
 
 Fin must distinguish three kinds of checks:
 
-| Check | What the result establishes |
-|---|---|
+| Check          | What the result establishes                                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Validation** | Whether the request is well formed and which available account, balance, permission, network, and other prerequisite checks passed or failed. |
-| **Quote** | Estimated outputs, fees, or borrowing terms under the quoted conditions, with applicable bounds and expiry. |
-| **Simulation** | Predicted effects of executing the transaction against a specified state, subject to the simulation's coverage and assumptions. |
+| **Quote**      | Estimated outputs, fees, or borrowing terms under the quoted conditions, with applicable bounds and expiry.                                   |
+| **Simulation** | Predicted effects of executing the transaction against a specified state, subject to the simulation's coverage and assumptions.               |
 
 Fin validates inputs and checks relevant state where accessible. Quotes and simulations are included where applicable and supported by the integration. Structured preview results must identify which checks ran, their results, timestamps or relevant chain state, assumptions, and limitations. Unsupported, unavailable, and unchecked conditions must remain explicit rather than appear as passed checks. A generic “safe to execute” result is insufficient.
 
@@ -332,12 +342,11 @@ The hypothesis concerns the value of the combined experience. Validation must es
 
 ### Competitive baseline
 
-| Existing component | Capabilities to reuse or compete against |
-|---|---|
-| **CCXT CLI and MCP** | Exchange operations and normalization. The CLI supports method explanations and environment-based credentials. The MCP server documents named accounts, confirmations, configurable limits, and an audit journal. [CLI documentation](https://github.com/ccxt/ccxt/blob/master/cli/README.md), [MCP documentation](https://docs.ccxt.com/docs/mcp). |
-| **Aave MCP** | Position inspection, action previews, and preparation of supply, borrow, withdraw, and repay transactions. Signing remains with the user's wallet. [Aave MCP](https://aave.com/docs/mcp). |
-| **Bridge tooling** | Quotes, transaction preparation, execution support, and destination-status tracking already exist. Across documents agent workflows for bridging and DeFi actions; its hosted MCP primarily exposes documentation and data, while execution uses additional tooling. [Across workflows](https://docs.across.to/ai-agents/agent-examples), [Across MCP](https://docs.across.to/ai-agents/mcp-server). |
-
+| Existing component   | Capabilities to reuse or compete against                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CCXT CLI and MCP** | Exchange operations and normalization. The CLI supports method explanations and environment-based credentials. The MCP server documents named accounts, confirmations, configurable limits, and an audit journal. [CLI documentation](https://github.com/ccxt/ccxt/blob/master/cli/README.md), [MCP documentation](https://docs.ccxt.com/docs/mcp).                                                  |
+| **Aave MCP**         | Position inspection, action previews, and preparation of supply, borrow, withdraw, and repay transactions. Signing remains with the user's wallet. [Aave MCP](https://aave.com/docs/mcp).                                                                                                                                                                                                            |
+| **Bridge tooling**   | Quotes, transaction preparation, execution support, and destination-status tracking already exist. Across documents agent workflows for bridging and DeFi actions; its hosted MCP primarily exposes documentation and data, while execution uses additional tooling. [Across workflows](https://docs.across.to/ai-agents/agent-examples), [Across MCP](https://docs.across.to/ai-agents/mcp-server). |
 
 The first-release baseline is an agent using CCXT together with the relevant DeFi tools and an appropriate wallet/signing mechanism. Bridge tooling joins the comparison when general bridging ships in the next release. Existing capabilities should be reused where they fit. The comparison must test the complete user experience and shared controls, including whether existing wallet or permission systems already provide them.
 

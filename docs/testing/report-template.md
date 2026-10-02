@@ -7,6 +7,8 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Date/time and timezone:
 - Fin commit/version:
 - Runtime, CCXT, adapter, and test-tool versions:
+- Implementation: TS foundation / Rust; Rust toolchain, artifact/helper versions and OS provider, where applicable:
+- Delivery stage: implementation/automated handoff / human onboarding and approval / production live acceptance:
 - Cases and journey selected:
 - Environment: mocked / fork / live read-only / real biometric / live write
 - Production exchange host and Ethereum mainnet confirmation for live acceptance:
@@ -27,6 +29,22 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Expected restored financial state and permitted cost differences:
 - User-specific prerequisites missing, if any:
 
+## Onboarding and human handoff
+
+- Current CLI help/explain/schema versions and discovery commands:
+- Discovery tested with no broker/configuration/credentials and no companion skill: yes / no / not run:
+- Fresh-agent rehearsal versus actual human journey, context/tools used, and result:
+- Exact implemented installation, enrollment, later update/removal, service, and safe verification commands:
+- Human-terminal and administrator/native authorization requirements:
+- Read-only enrollment checks, reported/unknown permissions, and safe missing-access guidance:
+- Secret argument/no-TTY refusal, cancellation/failure, redaction, and configuration-change results:
+- Pending-operation handling during connection replacement/removal:
+- Actual credential/agent privilege boundary tested, or reason still pending:
+- Real biometric checks versus build/probe/fake-provider tests:
+- Human checklist still outstanding, prerequisites, expected results, and recovery instructions:
+
+No secret values belong in this section. A passed synthetic wizard or agent rehearsal does not establish human installation, protected input/storage, or actual native approval. Human cases can remain pending at the implementation handoff; complete acceptance cannot be claimed from that handoff alone.
+
 Do not include API keys, private keys, seed phrases, auth headers, spending signatures, raw signed transactions, or credential-bearing RPC URLs. Redact private account identifiers and unrelated holdings from any shared copy.
 
 ## Actual execution
@@ -34,12 +52,12 @@ Do not include API keys, private keys, seed phrases, auth headers, spending sign
 Record the exact implemented commands and test commands here, after removing sensitive values. Do not substitute hypothetical CLI syntax.
 
 | Case ID | Environment | Result: passed / failed / blocked / not run | Evidence and reason |
-|---|---|---|---|
-| | | | |
+| ------- | ----------- | ------------------------------------------- | ------------------- |
+|         |             |                                             |                     |
 
 | Operation ID | Action and request identity | USD value / bounded costs / budget remaining | Approval outcome | Venue ID / transaction reference | Final status |
-|---|---|---|---|---|---|
-| | | | | | |
+| ------------ | --------------------------- | -------------------------------------------- | ---------------- | -------------------------------- | ------------ |
+|              |                             |                                              |                  |                                  |              |
 
 ## Reconciliation
 
@@ -66,4 +84,6 @@ A live run cannot be marked passed with unresolved cleanup, test-created debt/po
 - Comparable baseline and conditions, if measured:
 - What this run establishes:
 - What remains unverified or blocked:
+- Historical TS evidence referenced separately, without counting it as Rust verification:
+- Implementation/automated readiness versus human/production acceptance status:
 - Next implementation or verification step:

@@ -1,8 +1,28 @@
 # Implementation handoff
 
-**Updated:** 2 October 2026. [Product concept](fin-product-concept.md) defines the product. The foundational implementation now follows the decisions below; [verification evidence](reports/foundation.md) separates implemented behavior from acceptance results.
+**Updated:** 2 October 2026. [Product concept](fin-product-concept.md) defines the product. The existing TS foundation follows the recorded decisions below; [verification evidence](reports/foundation.md) separates implemented behavior from acceptance results.
 
-## Implementation decisions
+## Next implementation: Rust
+
+The selected next implementation is a compiled Rust workspace. The [Rust architecture](rust-architecture.md) defines the agreed protected client/service roles, domain/engine/storage/runtime/application boundaries, exact financial-effect ledger, versioned contracts, recovery/migration, library verification spikes, and `fin-authorization` platform providers. Bundle the small compiled Swift helper behind the macOS authorization provider; the human should not install it separately. Choose actual toolchain/dependency versions and binary layout during implementation and record them here.
+
+The [terminal onboarding/discovery contract](onboarding.md) is part of the implementation, not a later convenience. A human asks an LLM how to add Binance; the LLM must discover the command and prerequisites from the installed CLI, direct the human to their own terminal, and safely check the result. Setup, daemon lifecycle, and connection add/list/update/remove must expose consistent help/explanation/schemas and human-interaction metadata before configuration or a broker exists. Secret fields belong to protected human enrollment, never normal CLI/JSON arguments. No custom credential-entry windows or `.pkg` distribution requirement is introduced.
+
+Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and exact human checklist with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The docs update is a handoff for the user's later implementation goal, not authorization to begin a rewrite or new live testing now.
+
+### Rust delivery stages
+
+| Stage                             | Deliverable                                                                                                                       | Evidence before human handoff                                                                                                 |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 1. Typed contracts and libraries  | Command/connection/operation registry, exact-money domain, pinned CCXT Rust funding/authentication and Alloy payload preparation. | Safe discovery without a broker, schema/example contracts, exact request fixtures and frozen transaction tests.               |
+| 2. Protected engine               | SQLite persistence/migrations, policy/effect ledger, credential interfaces, native authorization provider, private IPC.           | Crash/response-loss/replay/conflict tests, atomic settlement, preserved old identities/reservations, native build/probe.      |
+| 3. Financial ports                | Binance funding and Ethereum wallet/Uniswap/Aave through the shared engine.                                                       | Financial/limit/receipt regressions and fixed mainnet-fork execution with complete synthetic restoration.                     |
+| 4. Installation and enrollment    | Bundled terminal setup, later add/update/remove, daemon lifecycle/diagnostics, agent discovery.                                   | Synthetic enrollment/failure tests, redaction, noninteractive refusal, and a recorded fresh-agent guidance rehearsal.         |
+| 5. Working implementation handoff | Reproducible builds/tests, updated companion instructions/docs, sanitized report, human commands and prerequisites.               | Actual results separated by environment; unrun real onboarding, isolation, biometric, and production cases explicitly listed. |
+
+Use [testing stages](testing/README.md#rust-implementation-and-later-human-verification). Broader product coverage remains inventoried separately; packaging polish, other OS authorization providers, and formal audits are not additional beta gates.
+
+## Implemented TypeScript foundation
 
 - Node >=22.13, TypeScript 5.9.3, pinned CCXT 4.5.85, viem 2.57.2, Zod 4.6.5; exact installed versions in `package-lock.json`. Native Swift/AppKit/LocalAuthentication handles the interactive approval display. `npm ci`, `npm run build`, `npm run check`, and `npm test` are runnable.
 - Small adapter interface in `src/core/types.ts`; shared strict operation definitions drive capability discovery, examples, JSON schemas, and validation. Metadata and venue-specific financial schemas remain distinct. New integrations register reviewed operations; there is no arbitrary signed venue-method or raw-sign endpoint.
@@ -28,7 +48,7 @@ Live acceptance must use production exchange accounts and Ethereum mainnet with 
 
 ## Keep the implementation small
 
-The selected stack is recorded above. CCXT is the exchange backend, viem handles EVM reads/transactions, and the native macOS helper provides the per-write approval path. Keep new integrations inside the existing operation and adapter interfaces rather than introducing another execution system.
+For the existing TS foundation, CCXT is the exchange backend, viem handles EVM reads/transactions, and the native macOS helper provides the per-write approval path. The upcoming Rust version uses the [new typed extension contracts](rust-architecture.md); preserve the current behavior while separating shared runtime mechanics from application semantics.
 
 Use a modular local application, not a hosted service or a distributed workflow engine. A durable local store should hold operation records. Shared operation definitions should drive help, schemas, and validation so that a later MCP interface can reuse them.
 
@@ -60,7 +80,7 @@ Do not block these milestones on formal audit programs, signed-release infrastru
 
 ## Implemented CLI contract
 
-`--help`, `fin explain <operation>`, operation schemas, and structured `--json` output use the shared operation definitions. The implemented verbs are `read`, `preview`, `execute`, `status`, `operations`, and `run`, alongside discovery/setup commands. See [README setup and examples](../README.md) for connected calls; these commands can inspect the interface without credentials:
+In the current TS build, `--help`, `fin explain <operation>`, operation schemas, and structured `--json` output use the shared operation definitions. The implemented verbs are `read`, `preview`, `execute`, `status`, `operations`, and `run`, alongside `capabilities`, connection listing, and `doctor`. Interactive setup/connection enrollment and daemon-management verbs are proposed Rust work. See [README setup and examples](../README.md) for current connected calls; these commands can inspect the interface without credentials:
 
 ```text
 fin capabilities --json

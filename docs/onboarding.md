@@ -1,0 +1,118 @@
+# Terminal onboarding and agent discovery
+
+**Agreed direction: 2 October 2026. Status: Rust implementation requirements.** The current TS foundation supports financial help/schema/explanation and connection listing. It does not implement `fin setup`, daemon management, or an interactive connection-enrollment wizard. Every command below is proposed until the Rust implementation and its help advertise it.
+
+## Required experience
+
+A human asks their LLM how to add a Binance connection. The LLM inspects Fin's installed help and schemas, explains the prerequisites, and asks the human to run `fin connections add` in the human's own terminal. The human enters credentials privately and authorizes enrollment. The LLM can then inspect safe connection metadata and availability to help with the next task. The LLM must not need this conversation, a private config example, or access to credential values to guide setup correctly.
+
+Setup and subsequent connection management are terminal-driven. Do not require custom credential-entry windows. Use the same public command model on all supported OSes, with platform-specific protected installation, credential storage, and authorization behind interfaces. Native OS authentication prompts may appear; trusted approval of actual operations remains required.
+
+## Installation and repeat use
+
+1. The human runs the published download/bootstrap command in their terminal. The bootstrap selects a compiled release and invokes its bundled setup; it does not implement a second onboarding system.
+2. `fin setup` explains the CLI, protected execution service, credential storage, and authorization behavior, then requests OS administrator permission for protected installation. Administrator permission may require a password even on a Touch ID Mac.
+3. Setup installs/registers the trusted service and helper and establishes the approver identity and protected paths. It must not leave agent-accessible cached elevation or mutable execution code.
+4. The human can enroll supported connections now or later. Enrollment performs read-only validation and creates no financial movement or spending authority.
+5. Setup verifies the service, relevant permissions, and native authorization availability. An optional real authentication check must be clearly labelled as a setup check with no financial operation.
+6. Fin reports actual results, missing prerequisites, and concrete next commands. The human can install the companion agent skill; CLI discovery must also work without it.
+
+A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
+
+Proposed public commands:
+
+```text
+fin setup
+fin daemon start
+fin daemon status
+fin daemon stop
+fin connections add
+fin connections list --json
+fin connections update CONNECTION
+fin connections remove CONNECTION
+```
+
+Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling Fin. Preserve the current `fin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
+
+## Guided credential enrollment
+
+`fin connections add` prompts for provider, connection name, role/relationships, network or wallet type, and credential type. Safe metadata can be supplied as documented flags; secret fields are collected only by the protected enrollment component in a human-controlled terminal. Do not put API/private keys in flags, JSON command input, environment variables exposed to the agent, stdout, help examples, or logs. A masked prompt in an agent-controlled PTY is not an approved enrollment channel; no-TTY/agent-tool invocation must return an actionable human-interaction requirement before collecting secrets.
+
+Examples of provider-specific prompts:
+
+| Provider           | Non-secret setup information                                                                                                               | Secret input and checks                                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Binance            | Stable name, main/subaccount role, parent relationship and subaccount identity where relevant, selected wallet type and credential scheme. | API/signing credential through hidden input; read-only authentication, reported permissions and account mapping. Report unknown permission/identity explicitly. |
+| Ethereum wallet    | Stable name, supported network, address, read-only versus signing connection.                                                              | A signing credential only for a signing connection; independently verify its derived address matches the chosen wallet.                                         |
+| Future integration | Its registered typed connection definition and reviewed prerequisites.                                                                     | Its own credential fields and read-only checks through the same protected enrollment contract. Unsupported types remain unavailable.                            |
+
+The human reviews the resolved connection and reported permissions, then independently authorizes saving or changing execution credentials/configuration. Keep credential storage and enrollment in `fin-credentials`; OS authentication and exact challenge verification belong in `fin-authorization`. Secret input must reach the protected component directly rather than transit the untrusted CLI process. Implement and verify the actual terminal/session and private-channel mechanics; terminal choice and hidden echo alone are not the credential boundary.
+
+Store credentials through a broker-controlled backend and return a stable opaque reference. Ordinary connection configuration and agent results contain safe metadata and the reference, never the secret. Optional OS-store/protected import backends must enforce the same boundary and clearly document support; the current TS protected-file importer is not OS Keychain support. Agent-readable `.context/.ai.env` is not a protected store.
+
+Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
+
+On validation failure, show a stable code, stage, safe description, checks performed, and a specific next action. Keep reported versus untested permissions distinct. Missing IP access or a permission must not trigger a trial withdrawal or substitute another credential. Cancellation or failed enrollment must leave no partial trusted connection and no persistent reusable approval. Replacement/removal must coordinate with outstanding operations; preserve the records and reconciliation path needed for pending work and explain any refusal before changing the connection.
+
+## Discovery before onboarding
+
+Help, explain, schemas, examples, and validation use the same command and connection definitions. Discovery must function without a broker, credentials, administrator permission, or a completed setup. It must identify the installed implementation version and distinguish proposed/unsupported coverage from available commands.
+
+Proposed inspection commands:
+
+```text
+fin --help
+fin capabilities --json
+fin connections add --help
+fin explain connections.add --json
+fin schema connections.add --json
+fin explain setup --json
+```
+
+Descriptions for setup and connection commands must expose:
+
+- The exact command, safe argument meanings, defaults, accepted values, examples, and input/output/error schemas.
+- Supported providers/credential types, account models, networks, and prerequisite access. Describe required secrets by name/type, never value.
+- Execution actor: human-interactive, agent-readable, or agent-invocable. Explain human-terminal, OS-installation, and native-authorization requirements independently.
+- What changes: installation, credential/configuration enrollment, read-only inspection, or a financial write. Enrollment is human-authorized configuration; it moves no funds and does not approve future operations.
+- Secret-input transport and prohibition of secrets in command/JSON arguments or agent conversations.
+- Read-only checks actually performed, known/unknown permissions, cancellation/failure behavior, and when a new connection is saved.
+- Concrete next commands for safe verification, missing setup, missing permissions, unsupported platform authentication, and later replacement/removal.
+
+Illustrative metadata, not implemented output or an input that accepts credentials:
+
+```json
+{
+  "command": "connections.add",
+  "executionActor": "human-interactive",
+  "requiresHumanTerminal": true,
+  "changes": "protected-connection-configuration",
+  "financialMovement": false,
+  "secretInput": "protected-hidden-terminal-prompt",
+  "secretValuesAcceptedInArguments": false,
+  "nextCheck": "fin connections list --json"
+}
+```
+
+Structural schemas describe safe arguments and responses. Secret requirements are explanatory enrollment metadata, not secret-bearing fields that an agent can submit through the normal JSON operation API. The CLI must enforce the documented restrictions; a `human-interactive` label is not sufficient on its own.
+
+## LLM-guided journey
+
+1. The LLM starts with the installed CLI's help and capability inventory, then inspects the onboarding command for the chosen provider.
+2. It explains the role, relationships, permissions, IP/network prerequisites, hidden input, authorization, and safe success check using the current command definition.
+3. It gives the human the exact supported command to run in their own terminal. It never asks for keys in chat or attempts secret entry through its tools.
+4. The human completes enrollment or reports a safe error. The LLM can inspect safe diagnostics or explain the advertised recovery instruction without receiving secret values.
+5. After enrollment, the LLM checks named connections and account-specific capabilities/permissions. The read-only check proves only the observations actually obtained, not financial write success.
+6. It proceeds to reads, planning, previews, and individually authorized writes through the existing engine.
+
+The companion skill teaches this discovery sequence and the boundary between human and agent work. It must refer to implemented commands and remain short; Fin itself must supply complete current onboarding guidance.
+
+## Acceptance and handoff
+
+The implementation stage must verify help/schema/example consistency, discovery with no broker/configuration, human-interaction errors, strict rejection of secret arguments, redacted output/errors, cancellation, permission failures, connection updates and outstanding-operation behavior. Use unmistakably synthetic credentials and test-native providers in isolated harnesses only.
+
+A fresh-agent rehearsal must start from CLI discovery alone and produce correct instructions for human Binance enrollment, including later credential changes and safe verification. Record its actual inputs/tools and outcome; do not call a hard-coded script a fresh-agent pass. The companion skill may be tested separately and must not be necessary for the CLI-only rehearsal.
+
+The later human session uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
+
+Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).

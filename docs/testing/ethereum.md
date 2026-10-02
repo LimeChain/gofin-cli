@@ -1,10 +1,12 @@
 # Ethereum wallet and DeFi acceptance
 
-Read the [shared testing rules](README.md) first. This guide specifies the initial Ethereum implementation and verification work. Command syntax, adapter versions, contract addresses, and test snapshots must be recorded when chosen; they are not already implemented.
+Read the [shared testing rules](README.md) first. This guide specifies required Ethereum behavior. Existing TS choices/results are recorded in the [handoff](../implementation-plan.md) and [foundation report](../reports/foundation.md); Rust must record its own commands, versions, deployments, test snapshots, and results.
 
 ## Scope and representative route
 
 Exercise Ethereum wallet reads/transfers, a Uniswap swap, and an Aave supply → borrow → repay → withdraw round trip. Use ETH/WETH and USDC as representative test assets, after validating their contracts and market eligibility. This is a test fixture choice, not a product asset whitelist.
+
+Rust wallet onboarding follows the [human terminal contract](../onboarding.md), including read-only versus signing connections, hidden protected credential input, derived-address verification, and safe agent discovery. Keep wallet/protocol semantics separate from the shared Alloy EVM runtime and platform authorization provider. Automated/fork verification precedes the later human enrollment and real Touch ID session; neither TS live results nor synthetic signers establish that path.
 
 **Live acceptance runs on Ethereum mainnet with real funds.** Follow the [$100 movement/allocation limits and required restoration](README.md#live-test-contract). Reserve gas for the entire sequence, interest, reverse swaps, and any required exchange return; a route whose round-trip costs or minimums cannot fit must be blocked rather than funded beyond the limit.
 
@@ -14,15 +16,15 @@ General chain-to-chain bridging is deferred. Funding a local fork is test setup,
 
 ## Resolve and record the environment
 
-| Input | Required detail |
-|---|---|
+| Input                 | Required detail                                                                                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Execution environment | Ethereum mainnet for live acceptance; a separately identified local fork for regression checks. Record RPC host without credentials, expected chain ID, and confirmation policy. |
-| Fork fixture | Upstream chain, fixed block number/hash, node/tool version, and repeatable isolated funding/setup procedure. |
-| Wallets | Named signer and optional second receiving wallet; exact addresses private to the test report where needed. |
-| Assets | Native ETH identity; verified WETH and USDC contracts, decimals, and behavior on the selected chain. |
-| Uniswap | Implemented version, router/approval mechanism, spender, pool/route constraints, and supported transaction type. |
-| Aave | Implemented version, market, contracts, reserve eligibility, collateral settings, caps, and current liquidity. |
-| Quantities and bounds | Supply/borrow/repay/swap/transfer amounts and current USD value, total allocation at most $100, full-unwind gas/interest reserves, fee limits, slippage and expiry. |
+| Fork fixture          | Upstream chain, fixed block number/hash, node/tool version, and repeatable isolated funding/setup procedure.                                                                     |
+| Wallets               | Named signer and optional second receiving wallet; exact addresses private to the test report where needed.                                                                      |
+| Assets                | Native ETH identity; verified WETH and USDC contracts, decimals, and behavior on the selected chain.                                                                             |
+| Uniswap               | Implemented version, router/approval mechanism, spender, pool/route constraints, and supported transaction type.                                                                 |
+| Aave                  | Implemented version, market, contracts, reserve eligibility, collateral settings, caps, and current liquidity.                                                                   |
+| Quantities and bounds | Supply/borrow/repay/swap/transfer amounts and current USD value, total allocation at most $100, full-unwind gas/interest reserves, fee limits, slippage and expiry.              |
 
 Uniswap publishes chain-specific deployments and warns against assuming addresses are shared across chains. Use the official deployment data for the selected version and verify code at the addresses in the chosen environment. [Uniswap deployments](https://developers.uniswap.org/deployments)
 
@@ -69,23 +71,23 @@ The combined live test must also return to its exchange starting state: unwind A
 
 ## Acceptance matrix
 
-| ID | Scenario | Pass condition |
-|---|---|---|
-| E01 | Wallet/chain/asset discovery and balances | Exact identities and decimals, correct RPC chain, explicit missing/stale data. |
-| E02 | Native and ERC-20 transfers | Separate approvals, correct recipients and amounts, reconciled balances and gas, successful receipt evidence. |
-| E03 | Required wrapping and token/spending authorization | Effects and spender authority are explicit; each write authorized; no signing/submission through dry-run. |
-| E04 | Uniswap quote, preview, and swap | Actual route/request matches approval and satisfies execution bounds; output and fees verified. |
-| E05 | Aave supply and collateral configuration | Supplied balance and collateral use match the requested operation; no double counting in the returned interpretation. |
-| E06 | Aave borrow | Debt and wallet receipt both verified; current market constraints respected. |
-| E07 | Repayment and collateral withdrawal | Refreshed debt handled correctly, test-created debt cleared, supplied position restored, collateral receipt verified. |
-| E08 | Stale quote, unavailable reserve, insufficient gas, or failed simulation | Clear result and no out-of-bounds submission; the agent receives enough detail to revise the operation. |
-| E09 | Revert, dropped/pending transaction, RPC timeout, or changed confirmation status | Correct failed/pending/unknown state, gas effects where applicable, no premature completion or blind resubmission. |
-| E10 | Concurrent requests, nonce coordination, duplicate request, and restart | Correct transaction identity/nonce tracking; no duplicate logical write; continued status inspection after restart. |
-| E11 | Denied/altered/replayed approval or attempted signer bypass | No unauthorized signature or financial execution; test the real boundary separately from mocks. |
-| E12 | Exchange receipt followed by on-chain success or failure | Receipt is a prerequisite, completed steps retained, no repeated withdrawal; report Kraken and Binance variants separately. |
-| E13 | Mainnet round trip, budget, and state restoration | All movements and allocation respect the $100 limits; test-created debt/positions closed, original asset exposure/account allocation and allowances restored, costs reconciled, no unresolved displaced funds. |
+| ID  | Scenario                                                                         | Pass condition                                                                                                                                                                                                 |
+| --- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| E01 | Wallet/chain/asset discovery and balances                                        | Exact identities and decimals, correct RPC chain, explicit missing/stale data.                                                                                                                                 |
+| E02 | Native and ERC-20 transfers                                                      | Separate approvals, correct recipients and amounts, reconciled balances and gas, successful receipt evidence.                                                                                                  |
+| E03 | Required wrapping and token/spending authorization                               | Effects and spender authority are explicit; each write authorized; no signing/submission through dry-run.                                                                                                      |
+| E04 | Uniswap quote, preview, and swap                                                 | Actual route/request matches approval and satisfies execution bounds; output and fees verified.                                                                                                                |
+| E05 | Aave supply and collateral configuration                                         | Supplied balance and collateral use match the requested operation; no double counting in the returned interpretation.                                                                                          |
+| E06 | Aave borrow                                                                      | Debt and wallet receipt both verified; current market constraints respected.                                                                                                                                   |
+| E07 | Repayment and collateral withdrawal                                              | Refreshed debt handled correctly, test-created debt cleared, supplied position restored, collateral receipt verified.                                                                                          |
+| E08 | Stale quote, unavailable reserve, insufficient gas, or failed simulation         | Clear result and no out-of-bounds submission; the agent receives enough detail to revise the operation.                                                                                                        |
+| E09 | Revert, dropped/pending transaction, RPC timeout, or changed confirmation status | Correct failed/pending/unknown state, gas effects where applicable, no premature completion or blind resubmission.                                                                                             |
+| E10 | Concurrent requests, nonce coordination, duplicate request, and restart          | Correct transaction identity/nonce tracking; no duplicate logical write; continued status inspection after restart.                                                                                            |
+| E11 | Denied/altered/replayed approval or attempted signer bypass                      | No unauthorized signature or financial execution; test the real boundary separately from mocks.                                                                                                                |
+| E12 | Exchange receipt followed by on-chain success or failure                         | Receipt is a prerequisite, completed steps retained, no repeated withdrawal; report Kraken and Binance variants separately.                                                                                    |
+| E13 | Mainnet round trip, budget, and state restoration                                | All movements and allocation respect the $100 limits; test-created debt/positions closed, original asset exposure/account allocation and allowances restored, costs reconciled, no unresolved displaced funds. |
 
-Apply [C01–C11](README.md) throughout. Fault injection belongs in local/fork tests; a fork receipt is not a live mainnet result. Re-broadcasting the same signed transaction and constructing a different transaction are different actions: preserve the original identity during reconciliation and require new approval for material replacements.
+Apply [C01–C19](README.md#common-acceptance-cases) where relevant to onboarding and execution. Fault injection belongs in local/fork tests; a fork receipt is not a live mainnet result. Re-broadcasting the same signed transaction and constructing a different transaction are different actions: preserve the original identity during reconciliation and require new approval for material replacements.
 
 ## Evidence to retain
 

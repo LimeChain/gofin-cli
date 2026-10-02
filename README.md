@@ -16,7 +16,15 @@ The foundational TypeScript CLI, durable execution engine, Binance SPOT funding 
 
 The current protected broker runs the $100 acceptance-verification profile. This is a test guard, not a permanent global Fin product limit. The remaining CCXT/protocol/network inventory stays visible through capability discovery; it is not silently described as implemented.
 
-## Install and discover
+## Next implementation: compiled Rust
+
+The agreed next implementation is Rust. Follow the [Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md): one public `fin` CLI, a protected local execution role, typed application/network boundaries, verified financial effects, and an OS-specific `fin-authorization` crate containing the macOS Swift helper. Setup is bundled with Fin; the human runs installation and credential enrollment in their own terminal. Custom credential-entry windows and a `.pkg` installer are not required for the beta.
+
+An LLM must be able to discover how to guide the human through setup and later credential changes using help, explanation, and schemas before a broker or credentials exist. `fin setup`, `fin daemon ...`, and `fin connections add/list/update/remove` are **proposed Rust commands, not available in the TS build below**. Normal agent requests cannot collect secrets or approve configuration/financial writes.
+
+Delivery is staged: implement Rust and complete reproducible automated/fork verification first; deliver a concrete checklist for the user's subsequent onboarding, credential-boundary, and Touch ID session. Human and production/mainnet acceptance remain pending until actually verified. Existing TS financial results do not establish Rust results. See [verification stages](docs/testing/README.md#rust-implementation-and-later-human-verification).
+
+## Install and discover the current TypeScript foundation
 
 Use Node **22.13 or later** (SQLite support required), npm, and macOS for the native approval component. Development reads and automated tests run without live credentials.
 
@@ -80,15 +88,18 @@ The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. To in
 
 ## Start here
 
-| Document                                               | Purpose                                                                                      |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| [Product concept](docs/fin-product-concept.md)         | Agreed product direction, full integration scope, decisions, and boundaries.                 |
-| [Implementation plan](docs/implementation-plan.md)     | Build order, component responsibilities, CLI contract, and remaining implementation choices. |
-| [Testing guide](docs/testing/README.md)                | Test environments, common acceptance checks, and evidence standards.                         |
-| [Binance flows](docs/testing/binance.md)               | Subaccount consolidation, withdrawal, deposit, and main-to-subaccount acceptance cases.      |
-| [Ethereum flows](docs/testing/ethereum.md)             | Wallet transfers, Uniswap swaps, Aave borrowing and unwind, plus exchange-to-wallet handoff. |
-| [Run report template](docs/testing/report-template.md) | Record what actually ran, what passed, and what remains unverified.                          |
-| [Agent instructions](AGENTS.md)                        | Working guidance for an implementation agent entering this repository.                       |
+| Document                                               | Purpose                                                                                         |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| [Product concept](docs/fin-product-concept.md)         | Agreed product direction, full integration scope, decisions, and boundaries.                    |
+| [Implementation plan](docs/implementation-plan.md)     | Build order, component responsibilities, CLI contract, and remaining implementation choices.    |
+| [Rust architecture](docs/rust-architecture.md)         | Selected compiled design, extension contracts, persistence, authorization, and delivery stages. |
+| [Terminal onboarding](docs/onboarding.md)              | Human credential enrollment and complete LLM-readable setup discovery before configuration.     |
+| [Security](docs/security.md)                           | Existing TS protection model and Rust setup/authorization requirements; actual evidence limits. |
+| [Testing guide](docs/testing/README.md)                | Test environments, common acceptance checks, and evidence standards.                            |
+| [Binance flows](docs/testing/binance.md)               | Subaccount consolidation, withdrawal, deposit, and main-to-subaccount acceptance cases.         |
+| [Ethereum flows](docs/testing/ethereum.md)             | Wallet transfers, Uniswap swaps, Aave borrowing and unwind, plus exchange-to-wallet handoff.    |
+| [Run report template](docs/testing/report-template.md) | Record what actually ran, what passed, and what remains unverified.                             |
+| [Agent instructions](AGENTS.md)                        | Working guidance for an implementation agent entering this repository.                          |
 
 ## First implementation milestones
 
