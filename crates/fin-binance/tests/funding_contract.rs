@@ -1924,8 +1924,57 @@ impl fin_binance::BinanceSigner for SyntheticSigner {
     }
 }
 
+struct Ed25519FixtureSigner {
+    signing_key: ed25519_dalek::SigningKey,
+    signed: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceSigner for Ed25519FixtureSigner {
+    async fn api_key(
+        &self,
+        _credential: &fin_binance::CredentialHandle,
+    ) -> std::result::Result<String, fin_binance::TransportError> {
+        Ok("synthetic-ed25519-api-key".into())
+    }
+
+    async fn sign(
+        &self,
+        _credential: &fin_binance::CredentialHandle,
+        encoded_parameters: &[u8],
+    ) -> std::result::Result<fin_binance::BinanceSignature, fin_binance::TransportError> {
+        use base64::Engine as _;
+        use ed25519_dalek::Signer as _;
+        self.signed
+            .lock()
+            .unwrap()
+            .push(encoded_parameters.to_vec());
+        let signature = self.signing_key.sign(encoded_parameters);
+        Ok(fin_binance::BinanceSignature::from_provider(
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+        ))
+    }
+}
+
+fn percent_decode_component(encoded: &str) -> String {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap();
+            decoded.push(u8::from_str_radix(hex, 16).unwrap());
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).unwrap()
+}
+
 #[tokio::test]
-async fn loopback_transport_signs_exact_body_and_uses_only_closed_endpoint_path() {
+async fn loopback_transport_signs_exact_query_for_post_and_keeps_closed_endpoint_path() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1939,33 +1988,21 @@ async fn loopback_transport_signs_exact_body_and_uses_only_closed_endpoint_path(
             request.extend_from_slice(&chunk[..count]);
             if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&request[..header_end]);
-                let body_len = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .expect("POST request has a content length");
-                if request.len() >= header_end + 4 + body_len {
-                    let body = String::from_utf8_lossy(
-                        &request[header_end + 4..header_end + 4 + body_len],
-                    );
-                    assert!(
-                        headers.starts_with("POST /sapi/v1/sub-account/universalTransfer HTTP/1.1")
-                    );
-                    assert!(
-                        headers
-                            .to_lowercase()
-                            .contains("x-mbx-apikey: synthetic-test-api-key")
-                    );
-                    assert!(body.contains("amount=0.000000000000000000123456"));
-                    assert!(body.contains("toEmail=child%2Btag%40example.invalid"));
-                    assert!(body.contains("recvWindow=5000&timestamp=123"));
-                    assert!(body.contains("signature=fixture%2B%2F%3D"));
-                    break;
-                }
+                let request_line = headers.lines().next().unwrap();
+                assert!(request_line.starts_with(
+                    "POST /sapi/v1/sub-account/universalTransfer?asset=ETH&amount=0.000000000000000000123456&fromAccountType=SPOT&toAccountType=SPOT&clientTranId="
+                ));
+                assert!(request_line.contains(
+                    "&toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example&recvWindow=5000&timestamp=123&signature=fixture%2B%2F%3D HTTP/1.1"
+                ));
+                assert!(
+                    headers
+                        .to_lowercase()
+                        .contains("x-mbx-apikey: synthetic-test-api-key")
+                );
+                assert!(!headers.to_lowercase().contains("content-type:"));
+                assert_eq!(request.len(), header_end + 4, "POST body must be empty");
+                break;
             }
         }
         stream
@@ -1987,7 +2024,7 @@ async fn loopback_transport_signs_exact_body_and_uses_only_closed_endpoint_path(
         asset: "ETH".into(),
         amount: amount("0.000000000000000000123456"),
         from_email: None,
-        to_email: Some("child+tag@example.invalid".into()),
+        to_email: Some("name@plus+amp&pct%雪.example".into()),
         client_id: fin_binance::ClientIdentity::transfer("http-fixture-1").unwrap(),
     }
     .request()
@@ -2002,17 +2039,125 @@ async fn loopback_transport_signs_exact_body_and_uses_only_closed_endpoint_path(
     assert_eq!(response["tranId"], 7);
     let preimage = String::from_utf8(signer.signed.lock().unwrap()[0].clone()).unwrap();
     assert!(preimage.contains("amount=0.000000000000000000123456"));
-    assert!(preimage.contains("toEmail=child%2Btag%40example.invalid"));
+    assert!(preimage.contains("toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example"));
     assert_eq!(
         preimage,
         format!(
-            "asset=ETH&amount=0.000000000000000000123456&fromAccountType=SPOT&toAccountType=SPOT&clientTranId={}&toEmail=child%2Btag%40example.invalid&recvWindow=5000&timestamp=123",
+            "asset=ETH&amount=0.000000000000000000123456&fromAccountType=SPOT&toAccountType=SPOT&clientTranId={}&toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example&recvWindow=5000&timestamp=123",
             fin_binance::ClientIdentity::transfer("http-fixture-1")
                 .unwrap()
                 .as_str()
         )
     );
-    server.await.unwrap();
+    let wire_request = server.await.unwrap();
+    let header_end = wire_request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let headers = std::str::from_utf8(&wire_request[..header_end]).unwrap();
+    assert_eq!(
+        headers.lines().next().unwrap(),
+        format!(
+            "POST /sapi/v1/sub-account/universalTransfer?{preimage}&signature=fixture%2B%2F%3D HTTP/1.1"
+        )
+    );
+}
+
+#[tokio::test]
+async fn loopback_post_query_verifies_with_synthetic_ed25519_key() {
+    use base64::Engine as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // RFC 8032 test-vector key material is public and unmistakably synthetic.
+    let seed: [u8; 32] =
+        hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                assert!(
+                    headers
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .starts_with("POST /sapi/v1/sub-account/universalTransfer?")
+                );
+                assert!(request.len() == header_end + 4, "POST must have no body");
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"tranId\":7}")
+            .await
+            .unwrap();
+        request
+    });
+    let signer = std::sync::Arc::new(Ed25519FixtureSigner {
+        signing_key,
+        signed: std::sync::Mutex::new(Vec::new()),
+    });
+    let transport = fin_binance::BinanceHttpTransport::with_clock(
+        format!("http://{address}"),
+        signer.clone(),
+        || 123,
+    )
+    .unwrap();
+    let request = fin_binance::UniversalTransferIntent {
+        asset: "ETH".into(),
+        amount: amount("0.000000000000000000123456"),
+        from_email: None,
+        to_email: Some("name@plus+amp&pct%雪.example".into()),
+        client_id: fin_binance::ClientIdentity::transfer("ed25519-query-fixture").unwrap(),
+    }
+    .request()
+    .unwrap();
+    fin_binance::BinanceTransport::request(
+        &transport,
+        &fin_binance::CredentialHandle::new("test-only-ed25519").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
+
+    let wire_request = server.await.unwrap();
+    let header_end = wire_request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap();
+    let request_line = std::str::from_utf8(&wire_request[..header_end])
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap();
+    let request_target = request_line.split_whitespace().nth(1).unwrap();
+    let (_, query) = request_target.split_once('?').unwrap();
+    let (wire_payload, encoded_signature) = query.rsplit_once("&signature=").unwrap();
+    let signed_payload = signer.signed.lock().unwrap()[0].clone();
+    assert_eq!(wire_payload.as_bytes(), signed_payload);
+    assert!(wire_payload.contains("name%40plus%2Bamp%26pct%25%E9%9B%AA.example"));
+    let decoded_signature = percent_decode_component(encoded_signature);
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(decoded_signature)
+        .unwrap();
+    assert_eq!(signature_bytes.len(), 64);
+    let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
+    verifying_key
+        .verify_strict(wire_payload.as_bytes(), &signature)
+        .expect("captured query must verify under the unmistakably synthetic Ed25519 key");
 }
 
 #[tokio::test]
@@ -2045,9 +2190,7 @@ async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_42
                     })
                     .unwrap_or(0);
                 if request.len() >= header_end + 4 + body_len {
-                    assert!(
-                        headers.starts_with("POST /sapi/v1/sub-account/universalTransfer HTTP/1.1")
-                    );
+                    assert!(headers.starts_with("POST /sapi/v1/sub-account/universalTransfer?"));
                     break;
                 }
             }
@@ -2096,7 +2239,7 @@ async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_42
         assert!(!retried, "HTTP {status} caused an automatic second request");
         assert!(
             String::from_utf8_lossy(&request)
-                .starts_with("POST /sapi/v1/sub-account/universalTransfer")
+                .starts_with("POST /sapi/v1/sub-account/universalTransfer?")
         );
     }
 }

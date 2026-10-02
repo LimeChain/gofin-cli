@@ -1105,27 +1105,22 @@ impl BinanceTransport for BinanceHttpTransport {
         }
         let signature_param = format!("signature={}", percent_encode(signature.as_str()));
         let mut url = format!("{}{}", self.base_url, path);
-        let builder = if method == "GET" {
+        let builder = if method == "GET" || method == "POST" {
             url.push('?');
             url.push_str(
                 std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
             );
             url.push('&');
             url.push_str(&signature_param);
-            self.client.get(url)
-        } else if method == "POST" {
-            let body = format!(
-                "{}&{}",
-                std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
-                signature_param
-            );
-            self.client
-                .post(url)
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
-                .body(body)
+            if method == "GET" {
+                self.client.get(url)
+            } else {
+                // Binance permits signed POST parameters in the query string;
+                // its Ed25519 example uses this placement. Keeping the exact
+                // signing preimage and signature together avoids depending on
+                // venue form-body parsing for characters such as '+' and '@'.
+                self.client.post(url)
+            }
         } else {
             return Err(TransportError::InvalidResponse);
         };
