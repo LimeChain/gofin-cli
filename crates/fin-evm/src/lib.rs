@@ -145,6 +145,22 @@ struct RpcAttemptFailure {
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 
+fn rpc_rejection(details: &Value) -> RpcAttemptFailure {
+    // Read only an exact signed integer. Provider messages, data and other
+    // fields can contain request parameters or private revert payloads.
+    let code = details.get("code").and_then(Value::as_i64);
+    let message = match code {
+        Some(code) => format!(
+            "RPC request was rejected (JSON-RPC code {code}); external details are suppressed."
+        ),
+        None => "RPC request was rejected; external details are suppressed.".to_owned(),
+    };
+    RpcAttemptFailure {
+        retryable: code.is_some_and(|code| matches!(code, -32002 | -32005)),
+        error: error("RPC_REQUEST_FAILED", "rpc", &message),
+    }
+}
+
 impl HttpRpc {
     pub fn new(urls: Vec<String>, expected_chain_id: u64) -> Result<Self> {
         Self::construct(urls, expected_chain_id, false)
@@ -253,20 +269,8 @@ impl HttpRpc {
                 ),
             });
         }
-        if result.get("error").is_some() {
-            let retryable = result
-                .get("error")
-                .and_then(|value| value.get("code"))
-                .and_then(Value::as_i64)
-                .is_some_and(|code| matches!(code, -32002 | -32005));
-            return Err(RpcAttemptFailure {
-                retryable,
-                error: error(
-                    "RPC_REQUEST_FAILED",
-                    "rpc",
-                    "RPC request was rejected; external details are suppressed.",
-                ),
-            });
+        if let Some(details) = result.get("error") {
+            return Err(rpc_rejection(details));
         }
         result
             .get("result")
@@ -297,11 +301,17 @@ impl HttpRpc {
                 }
                 Err(failure) => {
                     let error = if failure.retryable {
-                        error(
-                            "RPC_UNAVAILABLE",
-                            "rpc",
-                            "Transient RPC failure persisted after bounded retries.",
-                        )
+                        let message = if failure.error.code == "RPC_REQUEST_FAILED" {
+                            // This message is generated locally by rpc_rejection;
+                            // retain its validated numeric cause, never provider text.
+                            format!(
+                                "Transient RPC failure persisted after bounded retries. {}",
+                                failure.error.message
+                            )
+                        } else {
+                            "Transient RPC failure persisted after bounded retries.".to_owned()
+                        };
+                        error("RPC_UNAVAILABLE", "rpc", &message)
                     } else {
                         failure.error
                     };
@@ -1302,6 +1312,106 @@ mod http_rpc_tests {
             worker.join().unwrap(),
             vec!["eth_chainId", "eth_call", "eth_call", "eth_call"]
         );
+    }
+
+    #[test]
+    fn rpc_rejection_retains_only_exact_numeric_codes() {
+        for code in [-32700_i64, -32602, -32005, -32002, 3, i64::MIN, i64::MAX] {
+            let failure = rpc_rejection(&json!({
+                "code":code,
+                "message":"SYNTHETIC_PRIVATE_MESSAGE",
+                "data":{"calldata":"SYNTHETIC_PRIVATE_DATA"},
+                "params":["SYNTHETIC_PRIVATE_PARAMS"]
+            }));
+            assert_eq!(failure.error.code, "RPC_REQUEST_FAILED");
+            assert!(
+                failure
+                    .error
+                    .message
+                    .contains(&format!("JSON-RPC code {code}"))
+            );
+            assert_eq!(failure.retryable, matches!(code, -32002 | -32005));
+            assert!(
+                !serde_json::to_string(&failure.error)
+                    .unwrap()
+                    .contains("SYNTHETIC_PRIVATE")
+            );
+        }
+        for details in [
+            json!({"code":"SYNTHETIC_PRIVATE_CODE","message":"SYNTHETIC_PRIVATE_MESSAGE"}),
+            json!({"code":-32005.5,"data":"SYNTHETIC_PRIVATE_DATA"}),
+            json!({"code":u64::MAX,"message":"SYNTHETIC_PRIVATE_MESSAGE"}),
+            json!({"message":"SYNTHETIC_PRIVATE_MESSAGE"}),
+            json!("SYNTHETIC_PRIVATE_ERROR"),
+            Value::Null,
+        ] {
+            let failure = rpc_rejection(&details);
+            assert_eq!(failure.error.code, "RPC_REQUEST_FAILED");
+            assert!(!failure.retryable);
+            assert!(!failure.error.message.contains("JSON-RPC code"));
+            assert!(
+                !serde_json::to_string(&failure.error)
+                    .unwrap()
+                    .contains("SYNTHETIC_PRIVATE")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_json_rpc_exhaustion_preserves_safe_numeric_diagnosis() {
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::RpcError(-32002, "SYNTHETIC_PRIVATE_MESSAGE"),
+            FixtureResponse::RpcError(-32002, "SYNTHETIC_PRIVATE_MESSAGE"),
+            FixtureResponse::RpcError(-32002, "SYNTHETIC_PRIVATE_MESSAGE"),
+        ]);
+        let failure = rpc
+            .request("eth_call", json!([{}, "latest"]))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "RPC_UNAVAILABLE");
+        assert!(failure.message.contains("JSON-RPC code -32002"));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE")
+        );
+        assert_eq!(
+            worker.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_call", "eth_call"]
+        );
+    }
+
+    #[tokio::test]
+    async fn hostile_json_rpc_write_error_keeps_numeric_code_without_retry_or_fallback() {
+        let (rpc, first, second) = two_endpoint_rpc(FixtureResponse::Raw(json!({
+            "jsonrpc":"2.0","id":1,
+            "error":{
+                "code":-32005,
+                "message":"SYNTHETIC_PRIVATE_MESSAGE",
+                "data":{"signed_transaction":"SYNTHETIC_PRIVATE_DATA"},
+                "params":["SYNTHETIC_PRIVATE_PARAMS"]
+            }
+        })));
+        let failure = rpc
+            .request(
+                "eth_sendRawTransaction",
+                json!(["SYNTHETIC_PRIVATE_REQUEST"]),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "RPC_UNAVAILABLE");
+        assert!(failure.message.contains("JSON-RPC code -32005"));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE")
+        );
+        assert_eq!(
+            first.join().unwrap(),
+            vec!["eth_chainId", "eth_sendRawTransaction"]
+        );
+        assert!(second.join().unwrap().is_empty());
     }
 
     #[tokio::test]
