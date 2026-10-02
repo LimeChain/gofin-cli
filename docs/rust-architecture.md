@@ -166,6 +166,8 @@ time has passed.
 
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
+Keep numeraire conversion behind an injectable valuation provider. A venue pair priced in USDT is not automatically USD: combine exact coin/USDT and independently observed USDT/USD values, preserve both sources and the oldest observation, and round cost/value bounds conservatively. The initial Binance provider uses a fixed reviewed Coinbase public product/ticker; unavailable or invalid data blocks writes instead of assuming parity. Price nonzero holdings/positions, selected assets and configured route assets, while retaining all observed holdings for restoration. Original allocation asset identities remain required at every replan even when their local balances reach zero.
+
 Use exact decimal strings at boundaries, integer quantities with explicit asset/scale internally, checked `U256` conversion at EVM boundaries, and exact signed deltas and valuation arithmetic. Never pass financial quantities or policy valuations through `f64`. Use explicit conservative rounding for reserves; requested amounts must not be silently rounded. A fixed-width decimal type is not a universal container for 256-bit chain values.
 
 Carry forward these demonstrated TS requirements:

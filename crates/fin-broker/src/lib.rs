@@ -610,24 +610,212 @@ pub trait AssetValuator: Send + Sync {
     }
 }
 
+/// An independent USD quote for one USDT, the Binance ticker numeraire.
+#[async_trait]
+pub trait NumeraireUsdProvider: Send + Sync {
+    async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote>;
+}
+
+pub struct CoinbaseNumeraireUsd {
+    client: reqwest::Client,
+    #[cfg(test)]
+    test_base_url: Option<String>,
+}
+
+fn market_data_client() -> fin_domain::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("fin-cli/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| {
+            error(
+                "PRICE_UNAVAILABLE",
+                "configuration",
+                "Public market data transport could not be initialized.",
+                "Check broker networking.",
+            )
+        })
+}
+
+async fn public_market_json(client: &reqwest::Client, url: &str) -> fin_domain::Result<Value> {
+    let response = client.get(url).send().await.map_err(|_| {
+        error(
+            "PRICE_UNAVAILABLE",
+            "valuation",
+            "Public market data is unavailable.",
+            "Retry a read after the trusted market endpoint is reachable.",
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(error(
+            "PRICE_UNAVAILABLE",
+            "valuation",
+            &format!(
+                "Public market data request was rejected with HTTP status {}.",
+                response.status().as_u16()
+            ),
+            "Use a supported, available market product.",
+        ));
+    }
+    response.json().await.map_err(|_| {
+        error(
+            "PRICE_DATA_INVALID",
+            "valuation",
+            "Public market data response is malformed.",
+            "Retry later; no external response details or quantities were accepted.",
+        )
+    })
+}
+
+fn positive_price_atoms(value: &Value) -> fin_domain::Result<fin_domain::Quantity> {
+    let price = value
+        .as_str()
+        .filter(|text| !text.is_empty() && text.len() <= 64)
+        .and_then(|text| fin_domain::Quantity::from_decimal(text, 18).ok())
+        .filter(|price| !price.is_zero())
+        .ok_or_else(|| {
+            error(
+                "PRICE_DATA_INVALID",
+                "valuation",
+                "A positive exact decimal price with at most 18 fractional places is required.",
+                "Use a supported product with a complete exact quote.",
+            )
+        })?;
+    Ok(price)
+}
+
+fn checked_usd_quote(
+    quote: &fin_binance::PriceQuote,
+    instant: chrono::DateTime<Utc>,
+) -> fin_domain::Result<(fin_domain::Quantity, chrono::DateTime<Utc>)> {
+    let price = positive_price_atoms(&json!(quote.usd_per_unit))?;
+    let observed = chrono::DateTime::parse_from_rfc3339(&quote.observed_at)
+        .map(|time| time.with_timezone(&Utc))
+        .map_err(|_| {
+            error(
+                "PRICE_DATA_INVALID",
+                "valuation",
+                "USD quote observation time is malformed.",
+                "Obtain a fresh independent USD quote.",
+            )
+        })?;
+    if observed > instant || instant - observed > chrono::Duration::seconds(60) {
+        return Err(error(
+            "PRICE_STALE",
+            "valuation",
+            "Independent USD quote is future-dated or older than 60 seconds.",
+            "Obtain a fresh independent USD quote before a financial action.",
+        ));
+    }
+    if quote.source.trim().is_empty() || quote.source.len() > 1024 {
+        return Err(error(
+            "PRICE_DATA_INVALID",
+            "valuation",
+            "Independent USD quote has no bounded source description.",
+            "Use a reviewed independent USD provider.",
+        ));
+    }
+    Ok((price, observed))
+}
+
+fn coinbase_usdt_quote(
+    product: &Value,
+    ticker: &Value,
+    instant: chrono::DateTime<Utc>,
+) -> fin_domain::Result<fin_binance::PriceQuote> {
+    if product.get("id").and_then(Value::as_str) != Some("USDT-USD")
+        || product.get("base_currency").and_then(Value::as_str) != Some("USDT")
+        || product.get("quote_currency").and_then(Value::as_str) != Some("USD")
+        || product.get("status").and_then(Value::as_str) != Some("online")
+        || product.get("trading_disabled").and_then(Value::as_bool) != Some(false)
+    {
+        return Err(error(
+            "PRICE_PRODUCT_INVALID",
+            "valuation",
+            "The independent USDT-USD product identity or trading state is unavailable.",
+            "Use the reviewed online USDT-USD product; no parity fallback is allowed.",
+        ));
+    }
+    let price = positive_price_atoms(&ticker["price"])?;
+    let bid = positive_price_atoms(&ticker["bid"])?;
+    let ask = positive_price_atoms(&ticker["ask"])?;
+    if bid > ask {
+        return Err(error(
+            "PRICE_DATA_INVALID",
+            "valuation",
+            "Independent USD quote has an inverted bid/ask spread.",
+            "Obtain a complete consistent USDT-USD quote.",
+        ));
+    }
+    let quote = fin_binance::PriceQuote {
+        usd_per_unit: std::cmp::max(price, ask).to_decimal(18),
+        observed_at: ticker["time"].as_str().unwrap_or_default().into(),
+        source: "Coinbase Exchange USDT-USD public ticker max(price, ask)".into(),
+    };
+    checked_usd_quote(&quote, instant)?;
+    Ok(quote)
+}
+
+impl CoinbaseNumeraireUsd {
+    pub fn new() -> fin_domain::Result<Self> {
+        Ok(Self {
+            client: market_data_client()?,
+            #[cfg(test)]
+            test_base_url: None,
+        })
+    }
+    fn base_url(&self) -> &str {
+        #[cfg(test)]
+        if let Some(url) = &self.test_base_url {
+            return url;
+        }
+        "https://api.exchange.coinbase.com"
+    }
+}
+
+#[async_trait]
+impl NumeraireUsdProvider for CoinbaseNumeraireUsd {
+    async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
+        let product = public_market_json(
+            &self.client,
+            &format!("{}/products/USDT-USD", self.base_url()),
+        )
+        .await?;
+        let ticker = public_market_json(
+            &self.client,
+            &format!("{}/products/USDT-USD/ticker", self.base_url()),
+        )
+        .await?;
+        coinbase_usdt_quote(&product, &ticker, Utc::now())
+    }
+}
+
 pub struct PublicBinancePrices {
     client: reqwest::Client,
+    numeraire: Arc<dyn NumeraireUsdProvider>,
+    #[cfg(test)]
+    test_base_url: Option<String>,
 }
 
 impl PublicBinancePrices {
     pub fn new() -> fin_domain::Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .build()
-            .map_err(|_| {
-                error(
-                    "PRICE_UNAVAILABLE",
-                    "configuration",
-                    "Public market data transport could not be initialized.",
-                    "Check broker networking.",
-                )
-            })?;
-        Ok(Self { client })
+        Self::with_numeraire(Arc::new(CoinbaseNumeraireUsd::new()?))
+    }
+    pub fn with_numeraire(numeraire: Arc<dyn NumeraireUsdProvider>) -> fin_domain::Result<Self> {
+        Ok(Self {
+            client: market_data_client()?,
+            numeraire,
+            #[cfg(test)]
+            test_base_url: None,
+        })
+    }
+    fn base_url(&self) -> &str {
+        #[cfg(test)]
+        if let Some(url) = &self.test_base_url {
+            return url;
+        }
+        "https://api.binance.com"
     }
 }
 
@@ -645,61 +833,37 @@ impl fin_binance::BinancePriceProvider for PublicBinancePrices {
                 "Use an explicitly configured, supported asset symbol.",
             ));
         }
-        let url = format!("https://api.binance.com/api/v3/ticker/price?symbol={coin}USDT");
-        let response = self.client.get(url).send().await.map_err(|_| {
-            error(
-                "PRICE_UNAVAILABLE",
-                "valuation",
-                "Public Binance market quote is unavailable.",
-                "Retry a read after the market data endpoint is reachable.",
-            )
-        })?;
-        if !response.status().is_success() {
+        let numeraire = self.numeraire.quote_usd().await?;
+        let (numeraire_atoms, numeraire_time) = checked_usd_quote(&numeraire, Utc::now())?;
+        if coin == "USDT" {
+            return Ok(numeraire);
+        }
+        let symbol = format!("{coin}USDT");
+        let url = format!("{}/api/v3/ticker/price?symbol={symbol}", self.base_url());
+        let value = public_market_json(&self.client, &url).await?;
+        if value.get("symbol").and_then(Value::as_str) != Some(symbol.as_str()) {
             return Err(error(
-                "PRICE_UNAVAILABLE",
+                "PRICE_PRODUCT_INVALID",
                 "valuation",
-                "Public Binance market quote was rejected.",
-                "Use an asset with a listed USDT market.",
+                "Public Binance quote does not match the exact requested market pair.",
+                "Use the reviewed product identity; no alternative ticker is inferred.",
             ));
         }
-        let value: Value = response.json().await.map_err(|_| {
-            error(
-                "PRICE_DATA_INVALID",
-                "valuation",
-                "Market quote response is malformed.",
-                "Retry later; no financial quantity was rounded.",
-            )
-        })?;
-        let price = value
-            .get("price")
-            .and_then(Value::as_str)
-            .filter(|text| {
-                !text.is_empty()
-                    && text.len() <= 64
-                    && text
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || byte == b'.')
-            })
-            .ok_or_else(|| {
-                error(
-                    "PRICE_DATA_INVALID",
-                    "valuation",
-                    "Market quote did not contain an exact decimal string.",
-                    "Use a supported market pair.",
-                )
-            })?;
-        fin_domain::Quantity::from_decimal(price, 18).map_err(|_| {
-            error(
-                "PRICE_DATA_INVALID",
-                "valuation",
-                "Market quote precision is unsupported.",
-                "Use a supported market pair with exact decimal precision.",
-            )
-        })?;
+        let ticker_atoms = positive_price_atoms(&value["price"])?;
+        let ticker_time = Utc::now();
+        // Both components must still be fresh after the second HTTP read.
+        checked_usd_quote(&numeraire, ticker_time)?;
+        let usd_atoms = ticker_atoms.mul_div_ceil(
+            &numeraire_atoms,
+            &fin_domain::Quantity::from_decimal("1", 18)?,
+        )?;
         Ok(fin_binance::PriceQuote {
-            usd_per_unit: price.into(),
-            observed_at: now(),
-            source: format!("Binance {coin}USDT public ticker; USDT/USD parity assumption"),
+            usd_per_unit: usd_atoms.to_decimal(18),
+            observed_at: std::cmp::min(numeraire_time, ticker_time).to_rfc3339(),
+            source: format!(
+                "Binance {symbol} public ticker multiplied by {}",
+                numeraire.source
+            ),
         })
     }
 }
@@ -803,6 +967,7 @@ pub fn build_protected_applications(
         .cloned()
         .map(|adapter| adapter as Arc<dyn Adapter>)
         .collect();
+    let binance_prices = Arc::new(PublicBinancePrices::new()?);
     if config
         .connections
         .iter()
@@ -894,7 +1059,6 @@ pub fn build_protected_applications(
                 },
             )?,
         );
-        let price_provider = Arc::new(PublicBinancePrices::new()?);
         let payout_verifier = Arc::new(EthereumPayoutVerifier::new(
             ethereum_adapters
                 .values()
@@ -907,7 +1071,7 @@ pub fn build_protected_applications(
                 destinations,
             },
             transport,
-            Some(price_provider.clone()),
+            Some(binance_prices.clone()),
             Some(payout_verifier),
         )?);
         adapters.push(adapter.clone());
@@ -922,7 +1086,7 @@ pub fn build_protected_applications(
         }
     }
     let valuator: Arc<dyn AssetValuator> = Arc::new(CompositeAssetValuator {
-        binance: Arc::new(PublicBinancePrices::new()?),
+        binance: binance_prices,
         ethereum: ethereum_adapters,
     });
     Ok(ProtectedApplications { adapters, valuator })
@@ -1470,7 +1634,12 @@ impl BrokerRuntime {
                 "Reconcile pending activity and retry with a broker-captured snapshot.",
             ));
         }
-        let route_prices = self.trusted_asset_prices(&current, &[]).await?;
+        // Original allocation assets remain relevant to origin/cost accounting
+        // when their current local holding is zero after a custody conversion.
+        let original_assets = self.engine.run_allocation_assets(&id)?;
+        let route_prices = self
+            .trusted_asset_prices(&current, &original_assets)
+            .await?;
         self.engine
             .replan_remaining_from_observer(
                 &id,
@@ -1492,6 +1661,7 @@ impl BrokerRuntime {
             .state
             .holdings
             .iter()
+            .filter(|holding| !holding.amount.atoms.is_zero())
             .map(|holding| &holding.amount.asset)
             .chain(
                 snapshot
@@ -2341,6 +2511,400 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
 
+    struct FixedNumeraire {
+        price: String,
+    }
+    #[async_trait]
+    impl NumeraireUsdProvider for FixedNumeraire {
+        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
+            Ok(fin_binance::PriceQuote {
+                usd_per_unit: self.price.clone(),
+                observed_at: now(),
+                source: "synthetic independent USDT-USD quote".into(),
+            })
+        }
+    }
+    fn independent_prices(price: &str) -> PublicBinancePrices {
+        let mut provider = PublicBinancePrices::with_numeraire(Arc::new(FixedNumeraire {
+            price: price.into(),
+        }))
+        .unwrap();
+        // A regression must never cause these offline fixtures to use a public URL.
+        provider.test_base_url = Some("http://127.0.0.1:9".into());
+        provider
+    }
+
+    #[tokio::test]
+    async fn rejected_public_market_keeps_only_validated_http_status() {
+        let (endpoint, server) = market_fixture(vec![(
+            503,
+            json!({"message":"SYNTHETIC_SECRET_MARKER","data":{"token":"SYNTHETIC_RAW_TOKEN"}}),
+        )]);
+        let failure = public_market_json(&market_data_client().unwrap(), &endpoint)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "PRICE_UNAVAILABLE");
+        assert_eq!(
+            failure.message,
+            "Public market data request was rejected with HTTP status 503."
+        );
+        let serialized = serde_json::to_string(&failure).unwrap();
+        assert!(!serialized.contains("SYNTHETIC"));
+        assert!(!serialized.contains(&endpoint));
+        assert_eq!(server.join().unwrap(), vec!["/"]);
+    }
+
+    #[tokio::test]
+    async fn binance_usdt_numeraire_quote_is_a_fresh_independent_usd_observation() {
+        let provider = independent_prices("1.02");
+        let before = Utc::now();
+        let quote = fin_binance::BinancePriceProvider::quote_usd(&provider, "USDT")
+            .await
+            .unwrap();
+        let observed = chrono::DateTime::parse_from_rfc3339(&quote.observed_at).unwrap();
+        assert_eq!(quote.usd_per_unit, "1.02");
+        // now() records milliseconds, so permit only that truncation at entry.
+        assert!(observed >= before - chrono::Duration::milliseconds(1));
+        assert!(observed <= Utc::now());
+        assert_eq!(quote.source, "synthetic independent USDT-USD quote");
+        assert!(!quote.source.contains("public ticker"));
+    }
+
+    #[tokio::test]
+    async fn binance_usdt_numeraire_does_not_expand_accepted_symbol_shape() {
+        let provider = independent_prices("1.02");
+        for coin in [
+            "",
+            "USDT/USD",
+            "USDT?secret=SYNTHETIC",
+            "USDT\n",
+            "USDT ",
+            "USDT_____________________",
+        ] {
+            let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, coin)
+                .await
+                .unwrap_err();
+            assert_eq!(failure.code, "PRICE_ASSET_UNSUPPORTED");
+            assert!(
+                !serde_json::to_string(&failure)
+                    .unwrap()
+                    .contains("SYNTHETIC")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn binance_usdt_numeraire_valuation_preserves_exact_units_and_conservative_bounds() {
+        let valuator = CompositeAssetValuator {
+            binance: Arc::new(independent_prices("1.02")),
+            ethereum: BTreeMap::new(),
+        };
+        let asset = AssetId {
+            network: "binance".into(),
+            reference: "USDT".into(),
+            decimals: 36,
+        };
+        for (units, expected_micros) in [
+            ("0", "0"),
+            ("0.000000000000000000000000000000000001", "1"),
+            ("99", "100980000"),
+            ("99.999999", "101999999"),
+            ("100", "102000000"),
+            ("100.000000000000000000000000000000000001", "102000001"),
+        ] {
+            let amount = Amount {
+                asset: asset.clone(),
+                atoms: Quantity::from_decimal(units, asset.decimals).unwrap(),
+            };
+            let (micros, observed_at, source) = valuator.usd_micros(&amount).await.unwrap();
+            assert_eq!(micros, expected_micros);
+            assert!(chrono::DateTime::parse_from_rfc3339(&observed_at).is_ok());
+            assert_eq!(source, "synthetic independent USDT-USD quote");
+        }
+        let price = valuator.asset_price(&asset).await.unwrap();
+        assert_eq!(price.usd_micros_per_unit.as_str(), "1020000");
+        assert_eq!(price.unit_atoms, Quantity::from_decimal("1", 36).unwrap());
+        assert_eq!(price.asset, asset);
+    }
+
+    fn usdt_product() -> Value {
+        json!({"id":"USDT-USD","base_currency":"USDT","quote_currency":"USD","status":"online","trading_disabled":false})
+    }
+    fn usdt_ticker(instant: chrono::DateTime<Utc>) -> Value {
+        json!({"price":"1.02","bid":"1.01","ask":"1.03","time":instant.to_rfc3339()})
+    }
+
+    #[test]
+    fn independent_usd_product_and_ticker_are_strict_positive_and_fresh() {
+        let instant = chrono::DateTime::parse_from_rfc3339("2026-10-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let product = usdt_product();
+        let ticker = usdt_ticker(instant - chrono::Duration::seconds(3));
+        let quote = coinbase_usdt_quote(&product, &ticker, instant).unwrap();
+        assert_eq!(quote.usd_per_unit, "1.03");
+        assert_eq!(quote.observed_at, ticker["time"].as_str().unwrap());
+        assert!(quote.source.contains("max(price, ask)"));
+        let mut higher_trade = ticker.clone();
+        higher_trade["price"] = json!("1.04");
+        assert_eq!(
+            coinbase_usdt_quote(&product, &higher_trade, instant)
+                .unwrap()
+                .usd_per_unit,
+            "1.04"
+        );
+        for (field, value) in [
+            ("id", json!("SYNTHETIC_WRONG_PRODUCT")),
+            ("base_currency", json!("USDC")),
+            ("quote_currency", json!("USDT")),
+            ("status", json!("offline")),
+            ("trading_disabled", json!(true)),
+            ("trading_disabled", json!("false")),
+        ] {
+            let mut changed = product.clone();
+            changed[field] = value;
+            let failure = coinbase_usdt_quote(&changed, &ticker, instant).unwrap_err();
+            assert_eq!(failure.code, "PRICE_PRODUCT_INVALID");
+            assert!(
+                !serde_json::to_string(&failure)
+                    .unwrap()
+                    .contains("SYNTHETIC")
+            );
+        }
+        for field in [
+            "id",
+            "base_currency",
+            "quote_currency",
+            "status",
+            "trading_disabled",
+        ] {
+            let mut missing = product.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(coinbase_usdt_quote(&missing, &ticker, instant).is_err());
+        }
+        for field in ["price", "bid", "ask"] {
+            for value in [
+                json!("0"),
+                json!("-1"),
+                json!("1e0"),
+                json!("NaN"),
+                json!(1.02),
+                Value::Null,
+            ] {
+                let mut changed = ticker.clone();
+                changed[field] = value;
+                assert_eq!(
+                    coinbase_usdt_quote(&product, &changed, instant)
+                        .unwrap_err()
+                        .code,
+                    "PRICE_DATA_INVALID"
+                );
+            }
+        }
+        let mut inverted = ticker.clone();
+        inverted["bid"] = json!("1.04");
+        assert!(coinbase_usdt_quote(&product, &inverted, instant).is_err());
+        for age in [-1, 61] {
+            let changed = usdt_ticker(instant - chrono::Duration::seconds(age));
+            assert_eq!(
+                coinbase_usdt_quote(&product, &changed, instant)
+                    .unwrap_err()
+                    .code,
+                "PRICE_STALE"
+            );
+        }
+        let mut missing_time = ticker;
+        missing_time.as_object_mut().unwrap().remove("time");
+        assert!(coinbase_usdt_quote(&product, &missing_time, instant).is_err());
+    }
+
+    fn market_fixture(
+        responses: Vec<(u16, Value)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let mut paths = vec![];
+            for (status, value) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = vec![];
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = std::io::Read::read(&mut stream, &mut buffer).unwrap();
+                    assert_ne!(read, 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let headers = std::str::from_utf8(&request).unwrap();
+                assert!(
+                    headers
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .any(|(name, value)| name.eq_ignore_ascii_case("user-agent")
+                            && value.trim() == concat!("fin-cli/", env!("CARGO_PKG_VERSION")))
+                );
+                let first = std::str::from_utf8(&request)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap();
+                assert!(first.starts_with("GET "));
+                paths.push(first.split_whitespace().nth(1).unwrap().to_owned());
+                let body = value.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+            }
+            paths
+        });
+        (endpoint, worker)
+    }
+
+    #[tokio::test]
+    async fn coinbase_numeraire_fetches_only_the_fixed_product_and_ticker_gets() {
+        let (endpoint, worker) = market_fixture(vec![
+            (200, usdt_product()),
+            (200, usdt_ticker(Utc::now() - chrono::Duration::seconds(2))),
+        ]);
+        let mut provider = CoinbaseNumeraireUsd::new().unwrap();
+        provider.test_base_url = Some(endpoint);
+        assert_eq!(provider.quote_usd().await.unwrap().usd_per_unit, "1.03");
+        assert_eq!(
+            worker.join().unwrap(),
+            vec!["/products/USDT-USD", "/products/USDT-USD/ticker"]
+        );
+    }
+
+    struct StaticNumeraire {
+        quote: fin_binance::PriceQuote,
+    }
+    #[async_trait]
+    impl NumeraireUsdProvider for StaticNumeraire {
+        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
+            Ok(self.quote.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn binance_quote_multiplies_independent_usd_exactly_and_preserves_oldest_observation() {
+        let time = (Utc::now() - chrono::Duration::seconds(20)).to_rfc3339();
+        let (endpoint, worker) =
+            market_fixture(vec![(200, json!({"symbol":"ETHUSDT","price":"2"}))]);
+        let mut provider = PublicBinancePrices::with_numeraire(Arc::new(StaticNumeraire {
+            quote: fin_binance::PriceQuote {
+                usd_per_unit: "1.02".into(),
+                observed_at: time.clone(),
+                source: "synthetic independent USDT-USD".into(),
+            },
+        }))
+        .unwrap();
+        provider.test_base_url = Some(endpoint);
+        let quote = fin_binance::BinancePriceProvider::quote_usd(&provider, "ETH")
+            .await
+            .unwrap();
+        assert_eq!(quote.usd_per_unit, "2.04");
+        assert_eq!(quote.observed_at, time);
+        assert!(quote.source.contains("ETHUSDT"));
+        assert!(quote.source.contains("synthetic independent USDT-USD"));
+        assert_eq!(
+            worker.join().unwrap(),
+            vec!["/api/v3/ticker/price?symbol=ETHUSDT"]
+        );
+        let (endpoint, worker) = market_fixture(vec![(
+            200,
+            json!({"symbol":"TINYUSDT","price":"0.000000000000000001"}),
+        )]);
+        let mut provider = independent_prices("0.999999999999999999");
+        provider.test_base_url = Some(endpoint);
+        assert_eq!(
+            fin_binance::BinancePriceProvider::quote_usd(&provider, "TINY")
+                .await
+                .unwrap()
+                .usd_per_unit,
+            "0.000000000000000001"
+        );
+        assert_eq!(worker.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn binance_quote_rejects_wrong_pair_or_invalid_price_without_alternative_requests() {
+        for value in [
+            json!({"symbol":"SYNTHETIC_WRONG_PAIR","price":"2"}),
+            json!({"price":"2"}),
+            json!({"symbol":"ETHUSDT","price":"0"}),
+            json!({"symbol":"ETHUSDT","price":"-1"}),
+            json!({"symbol":"ETHUSDT","price":2}),
+            json!({"symbol":"ETHUSDT","price":"SYNTHETIC_PRIVATE_PRICE"}),
+        ] {
+            let (endpoint, worker) = market_fixture(vec![(200, value)]);
+            let mut provider = independent_prices("0.99");
+            provider.test_base_url = Some(endpoint);
+            let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, "ETH")
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure.code.as_str(),
+                "PRICE_PRODUCT_INVALID" | "PRICE_DATA_INVALID"
+            ));
+            assert!(
+                !serde_json::to_string(&failure)
+                    .unwrap()
+                    .contains("SYNTHETIC")
+            );
+            assert_eq!(worker.join().unwrap().len(), 1);
+        }
+    }
+
+    struct UnavailableNumeraire;
+    #[async_trait]
+    impl NumeraireUsdProvider for UnavailableNumeraire {
+        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
+            Err(error(
+                "SYNTHETIC_NUMERAIRE_UNAVAILABLE",
+                "test",
+                "Independent source unavailable.",
+                "No quote fallback.",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_or_invalid_independent_numeraire_blocks_usdt_and_other_coins() {
+        for numeraire in [
+            Arc::new(UnavailableNumeraire) as Arc<dyn NumeraireUsdProvider>,
+            Arc::new(StaticNumeraire {
+                quote: fin_binance::PriceQuote {
+                    usd_per_unit: "0".into(),
+                    observed_at: now(),
+                    source: "synthetic".into(),
+                },
+            }),
+            Arc::new(StaticNumeraire {
+                quote: fin_binance::PriceQuote {
+                    usd_per_unit: "1".into(),
+                    observed_at: (Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(),
+                    source: "synthetic".into(),
+                },
+            }),
+        ] {
+            let mut provider = PublicBinancePrices::with_numeraire(numeraire).unwrap();
+            provider.test_base_url = Some("http://127.0.0.1:9".into());
+            for coin in ["USDT", "ETH"] {
+                let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, coin)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    failure.code.as_str(),
+                    "SYNTHETIC_NUMERAIRE_UNAVAILABLE" | "PRICE_DATA_INVALID" | "PRICE_STALE"
+                ));
+            }
+        }
+    }
+
     #[test]
     fn binance_ed25519_pkcs8_signs_raw_request_bytes_as_base64() {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
@@ -2374,6 +2938,8 @@ mod tests {
 
     struct ReadAdapter {
         captures: Arc<AtomicUsize>,
+        pricing_snapshot: Option<Arc<Mutex<StateSnapshot>>>,
+        pricing_preflight: Option<Arc<AtomicBool>>,
     }
 
     #[async_trait]
@@ -2410,6 +2976,11 @@ mod tests {
         }
         async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
             self.captures.fetch_add(1, Ordering::SeqCst);
+            if let Some(snapshot) = &self.pricing_snapshot {
+                let mut snapshot = snapshot.lock().unwrap().clone();
+                snapshot.observed_at = now();
+                return Ok(snapshot);
+            }
             Ok(StateSnapshot {
                 state: FinancialState {
                     holdings: vec![ResourceAmount {
@@ -2450,6 +3021,51 @@ mod tests {
         async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
             Err(FinError::validation("Synthetic read-only adapter."))
         }
+        async fn preflight_return_route(
+            &self,
+            operation: &str,
+            input: &Value,
+            context: &fin_domain::ReturnRouteContext,
+        ) -> fin_domain::Result<fin_domain::ReturnRouteProof> {
+            if !self
+                .pricing_preflight
+                .as_ref()
+                .is_some_and(|allowed| allowed.load(Ordering::SeqCst))
+            {
+                return Err(error(
+                    "RETURN_ROUTE_PREFLIGHT_UNAVAILABLE",
+                    "test",
+                    "Synthetic preflight is unavailable.",
+                    "No write can execute in this read-only price fixture.",
+                ));
+            }
+            let resource = ResourceId("fixture:account".into());
+            Ok(fin_domain::ReturnRouteProof {
+                step_index: context.step_index,
+                operation: operation.into(),
+                input_hash: fin_domain::binding_hash(input)?,
+                observed_at: now(),
+                expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+                intent: fin_domain::FinancialIntent {
+                    debits: vec![],
+                    maximum_costs: vec![],
+                    expected: vec![fin_domain::EffectConstraint::Authority {
+                        resource: resource.clone(),
+                        authority: "synthetic-pricing-authority".into(),
+                        before: "0".into(),
+                        after: "0".into(),
+                    }],
+                    locks: vec![resource.clone()],
+                },
+                effects: vec![fin_domain::ProjectedEffect::AuthorityValue {
+                    resource,
+                    authority: "synthetic-pricing-authority".into(),
+                    value: "0".into(),
+                }],
+                requires: vec![],
+                evidence: json!({"synthetic_read_only_price_fixture":true}),
+            })
+        }
     }
 
     struct ReadOnlyAuthorizer;
@@ -2476,6 +3092,322 @@ mod tests {
         }
     }
 
+    struct RecordingPriceValuator {
+        calls: Arc<Mutex<Vec<(AssetId, usize)>>>,
+        revision: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl AssetValuator for RecordingPriceValuator {
+        async fn usd_micros(
+            &self,
+            amount: &Amount,
+        ) -> fin_domain::Result<(String, String, String)> {
+            let revision = self.revision.load(Ordering::SeqCst);
+            self.calls
+                .lock()
+                .unwrap()
+                .push((amount.asset.clone(), revision));
+            Ok((
+                "1000000".into(),
+                now(),
+                format!("synthetic price revision {revision}"),
+            ))
+        }
+    }
+
+    struct PricingFixture {
+        runtime: Arc<BrokerRuntime>,
+        snapshot: Arc<Mutex<StateSnapshot>>,
+        calls: Arc<Mutex<Vec<(AssetId, usize)>>>,
+        revision: Arc<AtomicUsize>,
+        allow_preflight: Arc<AtomicBool>,
+    }
+
+    fn price_holding(reference: &str, atoms: &str) -> ResourceAmount {
+        ResourceAmount {
+            resource: ResourceId("fixture:account".into()),
+            amount: Amount {
+                asset: AssetId {
+                    network: "binance".into(),
+                    reference: reference.into(),
+                    decimals: 6,
+                },
+                atoms: Quantity::new(atoms).unwrap(),
+            },
+        }
+    }
+
+    fn price_snapshot(holdings: Vec<ResourceAmount>) -> StateSnapshot {
+        StateSnapshot {
+            state: FinancialState {
+                holdings,
+                authorities: vec![fin_domain::AuthorityState {
+                    resource: ResourceId("fixture:account".into()),
+                    authority: "synthetic-pricing-authority".into(),
+                    value: "0".into(),
+                }],
+                ..FinancialState::default()
+            },
+            observed_at: now(),
+            complete: true,
+            coverage: vec!["fixture:account".into()],
+            pending: vec![],
+        }
+    }
+
+    fn pricing_fixture(configuration: BrokerConfigV2, observed: StateSnapshot) -> PricingFixture {
+        let snapshot = Arc::new(Mutex::new(observed));
+        let calls = Arc::new(Mutex::new(vec![]));
+        let revision = Arc::new(AtomicUsize::new(1));
+        let allow_preflight = Arc::new(AtomicBool::new(true));
+        let runtime = compose_runtime(
+            configuration,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures: Arc::new(AtomicUsize::new(0)),
+                    pricing_snapshot: Some(snapshot.clone()),
+                    pricing_preflight: Some(allow_preflight.clone()),
+                })],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(RecordingPriceValuator {
+                    calls: calls.clone(),
+                    revision: revision.clone(),
+                }),
+            },
+        )
+        .unwrap();
+        PricingFixture {
+            runtime,
+            snapshot,
+            calls,
+            revision,
+            allow_preflight,
+        }
+    }
+
+    #[tokio::test]
+    async fn trusted_prices_skip_a_thousand_zero_holdings_without_changing_snapshot() {
+        let observed = price_snapshot(
+            (0..1000)
+                .map(|index| price_holding(&format!("EMPTY{index}"), "0"))
+                .collect(),
+        );
+        let fixture = pricing_fixture(config(), observed.clone());
+        let prices = fixture
+            .runtime
+            .trusted_asset_prices(&observed, &[])
+            .await
+            .unwrap();
+        assert!(prices.is_empty());
+        assert!(fixture.calls.lock().unwrap().is_empty());
+        assert_eq!(fixture.snapshot.lock().unwrap().state, observed.state);
+        assert_eq!(observed.state.holdings.len(), 1000);
+        assert!(observed.complete);
+    }
+
+    #[tokio::test]
+    async fn trusted_prices_keep_selected_and_configured_zero_assets_and_positive_holdings() {
+        let selected = price_holding("USDC", "0").amount.asset;
+        let positive = price_holding("BNB", "1000000");
+        let configured = AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        };
+        let mut observed = price_snapshot(vec![
+            price_holding("DELISTED", "0"),
+            price_holding("USDC", "0"),
+            positive.clone(),
+        ]);
+        observed.state.holdings.push(ResourceAmount {
+            resource: ResourceId("ethereum:1:synthetic".into()),
+            amount: Amount {
+                asset: configured.clone(),
+                atoms: Quantity::zero(),
+            },
+        });
+        observed.coverage.push("ethereum:1:synthetic".into());
+        let mut configuration = config();
+        configuration.connections.push(ConnectionConfig::Ethereum {
+            name: "synthetic-read-only-wallet".into(),
+            resource: ResourceId("ethereum:1:synthetic".into()),
+            credential_ref: None,
+            network: "ethereum:1".into(),
+            address: "0x1111111111111111111111111111111111111111".into(),
+            signing_enabled: false,
+            assets: vec![configured.clone()],
+        });
+        let fixture = pricing_fixture(configuration, observed.clone());
+        let prices = fixture
+            .runtime
+            .trusted_asset_prices(
+                &observed,
+                &[selected.clone(), configured.clone(), selected.clone()],
+            )
+            .await
+            .unwrap();
+        let actual = prices
+            .into_iter()
+            .map(|price| price.asset)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![positive.amount.asset, selected, configured]);
+        assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+        assert_eq!(fixture.snapshot.lock().unwrap().state, observed.state);
+    }
+
+    #[tokio::test]
+    async fn trusted_prices_deduplicate_full_network_reference_and_decimal_identity() {
+        let assets = vec![
+            AssetId {
+                network: "binance".into(),
+                reference: "USDT".into(),
+                decimals: 36,
+            },
+            AssetId {
+                network: "ethereum:1".into(),
+                reference: "USDT".into(),
+                decimals: 6,
+            },
+            AssetId {
+                network: "binance".into(),
+                reference: "USDT".into(),
+                decimals: 6,
+            },
+        ];
+        let observed = price_snapshot(
+            assets
+                .iter()
+                .map(|asset| ResourceAmount {
+                    resource: ResourceId("fixture:account".into()),
+                    amount: Amount {
+                        asset: asset.clone(),
+                        atoms: Quantity::from_u64(1),
+                    },
+                })
+                .collect(),
+        );
+        let fixture = pricing_fixture(config(), observed.clone());
+        let prices = fixture
+            .runtime
+            .trusted_asset_prices(&observed, &assets)
+            .await
+            .unwrap();
+        assert_eq!(
+            prices
+                .iter()
+                .map(|price| price.asset.clone())
+                .collect::<Vec<_>>(),
+            assets
+        );
+        for price in prices {
+            assert_eq!(
+                price.unit_atoms,
+                Quantity::from_decimal("1", price.asset.decimals).unwrap()
+            );
+        }
+        assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn independent_usdt_premium_blocks_99_token_allocation_over_100_usd() {
+        let mut selected = price_holding("USDT", "0");
+        selected.amount.asset.decimals = 36;
+        selected.amount.atoms = Quantity::from_decimal("99", 36).unwrap();
+        let observed = Arc::new(Mutex::new(price_snapshot(vec![selected.clone()])));
+        let runtime = compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures: Arc::new(AtomicUsize::new(0)),
+                    pricing_snapshot: Some(observed),
+                    pricing_preflight: None,
+                })],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(CompositeAssetValuator {
+                    binance: Arc::new(independent_prices("1.02")),
+                    ethereum: BTreeMap::new(),
+                }),
+            },
+        )
+        .unwrap();
+        let step = fin_domain::PlanStep {
+            operation: "fixture.write".into(),
+            input: json!({}),
+            maximum_fee_usd_micros: "0".into(),
+            description: "synthetic cap check".into(),
+        };
+        let failure = runtime
+            .begin_run(RunBeginRequest {
+                allocations: vec![selected],
+                planned_operations: vec![step.clone()],
+                borrowed_proceeds_reserve_usd_micros: "0".into(),
+                return_cost_reserve_usd_micros: "0".into(),
+                unwind: vec![step],
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "RUN_ALLOCATION_LIMIT");
+        assert!(runtime.engine.operations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn replan_freshly_prices_original_allocation_when_current_local_holding_is_zero() {
+        let original = price_holding("USDC", "1000000");
+        let fixture = pricing_fixture(config(), price_snapshot(vec![original.clone()]));
+        let step = fin_domain::PlanStep {
+            operation: "fixture.write".into(),
+            input: json!({}),
+            maximum_fee_usd_micros: "0".into(),
+            description: "synthetic no-change authority proof for pricing only".into(),
+        };
+        let run = fixture
+            .runtime
+            .begin_run(RunBeginRequest {
+                allocations: vec![original.clone()],
+                planned_operations: vec![step.clone()],
+                borrowed_proceeds_reserve_usd_micros: "0".into(),
+                return_cost_reserve_usd_micros: "0".into(),
+                unwind: vec![step.clone()],
+            })
+            .await
+            .unwrap();
+        fixture.calls.lock().unwrap().clear();
+        fixture.revision.store(2, Ordering::SeqCst);
+        // The read-only fixture observes displaced custody. It intentionally
+        // refuses any replacement proof after we inspect its fresh quotes.
+        fixture.allow_preflight.store(false, Ordering::SeqCst);
+        let displaced = ResourceAmount {
+            resource: ResourceId("fixture:wallet".into()),
+            amount: Amount {
+                asset: AssetId {
+                    network: "ethereum:1".into(),
+                    reference: "synthetic-usdc".into(),
+                    decimals: 6,
+                },
+                atoms: original.amount.atoms.clone(),
+            },
+        };
+        {
+            let mut current = fixture.snapshot.lock().unwrap();
+            current.state.holdings[0].amount.atoms = Quantity::zero();
+            current.state.holdings.push(displaced.clone());
+            current.coverage.push(displaced.resource.0.clone());
+        }
+        let failure = fixture
+            .runtime
+            .replan_run(run.id, vec![step])
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "RETURN_ROUTE_PREFLIGHT_UNAVAILABLE");
+        assert_eq!(
+            *fixture.calls.lock().unwrap(),
+            vec![(displaced.amount.asset, 2), (original.amount.asset, 2)]
+        );
+        assert!(fixture.runtime.engine.operations().unwrap().is_empty());
+    }
+
     fn config() -> BrokerConfigV2 {
         BrokerConfigV2 {
             version: 2,
@@ -2500,6 +3432,8 @@ mod tests {
                 store: Store::in_memory().unwrap(),
                 adapters: vec![Arc::new(ReadAdapter {
                     captures: captures.clone(),
+                    pricing_snapshot: None,
+                    pricing_preflight: None,
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),

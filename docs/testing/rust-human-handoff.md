@@ -84,6 +84,13 @@ the journal and does not perform financial cleanup.
 
 ## Production/mainnet round trips
 
+Reconcile all earlier test records before starting new financial acceptance.
+The temporary Rust Binance request currently remains unresolved; unchanged
+balances and absent history are not a terminal proof. Do not create a replacement
+request, discard its journal, or use a fresh installation/run to forget that
+uncertainty or reset the original allocation. Carry its resolution and cleanup
+evidence into the human-session report before further financial writes.
+
 Follow the [live-test contract](README.md#live-test-contract), carrying forward the
 historical selected allocation and actual consumed costs. Snapshot current
 production accounts and mainnet positions privately. Every movement and the

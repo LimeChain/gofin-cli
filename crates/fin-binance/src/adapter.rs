@@ -2220,11 +2220,13 @@ impl Adapter for BinanceAdapter {
             ));
         }
         let current = self.prepare(&prepared.operation, &prepared.input).await?;
-        if current.binding != prepared.binding {
+        if current.binding != prepared.binding
+            || !approved_native_valuation_matches(prepared, &current)
+        {
             return Err(error(
                 "PREVIEW_CHANGED",
                 "submission",
-                "Material Binance parameters changed; obtain fresh authorization.",
+                "Material Binance parameters or valuation changed; obtain fresh authorization.",
             ));
         }
         Ok(current)
@@ -2253,14 +2255,44 @@ impl Adapter for BinanceAdapter {
                 let input: TransferInput = self.parse_input(&input).await?;
                 let (main, from, to) = self.validate_transfer_route(&input)?;
                 let (r, source_before, dest_before) = self.transfer_route(&input).await?;
-                authority = main;
                 request = r;
+                // Binance's universal-transfer history defaults to the main
+                // account's outgoing transfers. Persist the one route filter
+                // needed to find the exact child leg after a lost response.
+                let (selector_parameter, selector_value) = if from.name == main.name {
+                    ("toEmail", request.get("toEmail"))
+                } else {
+                    ("fromEmail", request.get("fromEmail"))
+                };
+                let selector_value = selector_value.ok_or_else(|| {
+                    error(
+                        "TRANSFER_ROUTE_INVALID",
+                        "submission",
+                        "The child account email required for transfer history correlation is unavailable.",
+                    )
+                })?;
+                let expected_email = if selector_parameter == "toEmail" {
+                    to.email.as_deref()
+                } else {
+                    from.email.as_deref()
+                };
+                if Some(selector_value) != expected_email {
+                    return Err(error(
+                        "TRANSFER_ROUTE_INVALID",
+                        "submission",
+                        "The transfer history selector does not match the configured child account.",
+                    ));
+                }
+                let history_selector =
+                    json!({"parameter":selector_parameter,"value":selector_value});
+                authority = main;
                 submission = Submission {
                     kind: "binance".into(),
                     reference: request.get("clientTranId").unwrap_or_default().into(),
                     data: json!({
                         "operation":"binance.transfer","binding":current.binding,"submittedAt":now(),"sourceFreeBefore":source_before,"destinationFreeBefore":dest_before,
-                        "authority":main.name,"from":from.name,"to":to.name,"coin":input.coin,"amount":input.amount,"fromEmail":from.email,"toEmail":to.email
+                        "authority":main.name,"from":from.name,"to":to.name,"coin":input.coin,"amount":input.amount,"fromEmail":from.email,"toEmail":to.email,
+                        "historySelector":history_selector
                     }),
                 };
             }
@@ -2679,6 +2711,108 @@ impl BinanceAdapter {
         let authority = self.require_main(main_name)?;
         let from = self.account(from_name)?;
         let to = self.account(to_name)?;
+        if (from.name != authority.name && from.parent.as_deref() != Some(authority.name.as_str()))
+            || (to.name != authority.name && to.parent.as_deref() != Some(authority.name.as_str()))
+            || from.name == to.name
+            || (from.name != authority.name && to.name != authority.name)
+            || binding.get("authority").and_then(Value::as_str) != Some(authority.name.as_str())
+            || binding.get("clientTranId").and_then(Value::as_str)
+                != Some(submission.reference.as_str())
+        {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted Binance transfer route or client identity is invalid.",
+            ));
+        }
+        let params: BinanceRequest =
+            serde_json::from_value(binding.get("params").cloned().ok_or_else(|| {
+                error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted Binance transfer request is missing.",
+                )
+            })?)
+            .map_err(|_| {
+                error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted Binance transfer request is invalid.",
+                )
+            })?;
+        if params.endpoint != BinanceEndpoint::UniversalTransfer
+            || params.validate().is_err()
+            || params.get("clientTranId") != Some(submission.reference.as_str())
+            || params.get("clientTranId") != binding.get("clientTranId").and_then(Value::as_str)
+            || params.get("asset") != Some(coin)
+            || params
+                .get("amount")
+                .and_then(|value| amount(value).ok())
+                .is_none_or(|value| value.checked_cmp(&requested).is_ne())
+            || params.get("fromEmail") != binding.get("fromEmail").and_then(Value::as_str)
+            || params.get("toEmail") != binding.get("toEmail").and_then(Value::as_str)
+        {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted Binance transfer request does not match its immutable route identity.",
+            ));
+        }
+        let (route_parameter, route_email) = if from.name == authority.name {
+            ("toEmail", to.email.as_deref())
+        } else if to.name == authority.name {
+            ("fromEmail", from.email.as_deref())
+        } else {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted Binance transfer route is unsupported.",
+            ));
+        };
+        if route_email.is_none()
+            || params.get("fromEmail")
+                != (if route_parameter == "fromEmail" {
+                    route_email
+                } else {
+                    None
+                })
+            || params.get("toEmail")
+                != (if route_parameter == "toEmail" {
+                    route_email
+                } else {
+                    None
+                })
+            || data.get("fromEmail").and_then(Value::as_str) != from.email.as_deref()
+            || data.get("toEmail").and_then(Value::as_str) != to.email.as_deref()
+        {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted Binance transfer parameters do not match the configured route.",
+            ));
+        }
+        // New records persist this route selector explicitly. Older durable
+        // submissions predate that field, so derive it only from their exact,
+        // validated immutable UniversalTransfer request above.
+        if let Some(selector) = data.get("historySelector") {
+            let selector_object = selector.as_object().ok_or_else(|| {
+                error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted Binance transfer history selector is invalid.",
+                )
+            })?;
+            if selector_object.len() != 2
+                || selector.get("parameter").and_then(Value::as_str) != Some(route_parameter)
+                || selector.get("value").and_then(Value::as_str) != route_email
+            {
+                return Err(error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted Binance transfer history selector does not match its request.",
+                ));
+            }
+        }
         let started =
             DateTime::parse_from_rfc3339(data["submittedAt"].as_str().unwrap_or_default())
                 .map_err(|_| {
@@ -2705,6 +2839,10 @@ impl BinanceAdapter {
                 .push("startTime", window.start_time_ms.to_string())
                 .push("endTime", window.end_time_ms.to_string())
                 .push("clientTranId", client_id)
+                .push(
+                    route_parameter,
+                    route_email.expect("validated child route email"),
+                )
                 .push("page", page.to_string())
                 .push("limit", "500");
             let response = match self.call(authority, request, "reconciliation").await {
@@ -3196,6 +3334,65 @@ impl BinanceAdapter {
             verified: Some(verified),
         })
     }
+}
+
+/// Compare the adapter-owned valuation fields that were approved while
+/// allowing the engine to append trusted cost-origin price rows. Observation
+/// timestamps are freshness metadata, not a changed financial amount; exact
+/// unit, price and provider source remain part of the approved binding.
+fn approved_native_valuation_matches(
+    approved: &PreparedOperation,
+    refreshed: &PreparedOperation,
+) -> bool {
+    let (Some(approved_value), Some(refreshed_value)) =
+        (approved.valuation.as_ref(), refreshed.valuation.as_ref())
+    else {
+        return approved.valuation.is_none() && refreshed.valuation.is_none();
+    };
+    if approved_value.movement_usd_micros != refreshed_value.movement_usd_micros
+        || approved_value.maximum_fee_usd_micros != refreshed_value.maximum_fee_usd_micros
+        || approved_value.additional_allocation_usd_micros
+            != refreshed_value.additional_allocation_usd_micros
+    {
+        return false;
+    }
+
+    let mut adapter_assets = BTreeSet::new();
+    if let Some(coin) = approved.input.get("coin").and_then(Value::as_str) {
+        adapter_assets.insert(AssetId {
+            network: "binance".into(),
+            reference: coin.into(),
+            decimals: 36,
+        });
+    }
+    if approved.operation == "binance.withdraw" {
+        for constraint in &approved.intent.expected {
+            if let EffectConstraint::Transfer { credit_asset, .. } = constraint {
+                adapter_assets.insert(credit_asset.clone());
+            }
+        }
+    }
+    if adapter_assets.is_empty() {
+        return false;
+    }
+
+    adapter_assets.iter().all(|asset| {
+        let approved_rows = approved_value
+            .prices
+            .iter()
+            .filter(|row| row.asset == *asset)
+            .collect::<Vec<_>>();
+        let refreshed_rows = refreshed_value
+            .prices
+            .iter()
+            .filter(|row| row.asset == *asset)
+            .collect::<Vec<_>>();
+        matches!((approved_rows.as_slice(), refreshed_rows.as_slice()),
+            ([before], [after])
+                if before.usd_micros_per_unit == after.usd_micros_per_unit
+                    && before.unit_atoms == after.unit_atoms
+                    && before.source == after.source)
+    })
 }
 
 fn decimal_delta(before: &ExactDecimal, after: &ExactDecimal) -> Option<ExactDecimal> {

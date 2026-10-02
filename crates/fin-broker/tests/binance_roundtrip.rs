@@ -23,7 +23,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -986,8 +986,30 @@ struct CanonicalNativeCreditRpc {
     latest: Mutex<String>,
 }
 
-struct DepositPreviewRpc;
+fn synthetic_oracle_updated_at() -> u128 {
+    // Round 1 has one immutable publication time; advancing the observer must
+    // not synthesize a different source for that same round on every read.
+    (chrono::Utc::now().timestamp() - 30).try_into().unwrap()
+}
+
+struct SyntheticOracleClock(AtomicU64);
+
+#[async_trait]
+impl fin_ethereum::OracleObservationClock for SyntheticOracleClock {
+    async fn unix_seconds(&self) -> Result<u64> {
+        Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+struct DepositPreviewRpc {
+    oracle_updated_at: u128,
+}
 impl DepositPreviewRpc {
+    fn new() -> Self {
+        Self {
+            oracle_updated_at: synthetic_oracle_updated_at(),
+        }
+    }
     fn abi_word(value: u128) -> [u8; 32] {
         let mut word = [0u8; 32];
         word[16..].copy_from_slice(&value.to_be_bytes());
@@ -1001,6 +1023,7 @@ impl DepositPreviewRpc {
 }
 
 struct DepositExecutionRpc {
+    oracle_updated_at: u128,
     transaction: Arc<Mutex<Option<fin_evm::FrozenTransaction>>>,
     hash: Mutex<Option<String>>,
     accepted: AtomicUsize,
@@ -1199,9 +1222,14 @@ impl EvmRpc for DepositExecutionRpc {
                     && hex::decode(&data[2..10]).unwrap()
                         == DepositPreviewRpc::selector("latestRoundData()")
                 {
-                    let now = chrono::Utc::now().timestamp() as u128;
                     let mut result = Vec::new();
-                    for value in [1, 200_000_000_000, now, now, 1] {
+                    for value in [
+                        1,
+                        200_000_000_000,
+                        self.oracle_updated_at,
+                        self.oracle_updated_at,
+                        1,
+                    ] {
                         result.extend_from_slice(&DepositPreviewRpc::abi_word(value));
                     }
                     Ok(json!(fin_evm::hex_bytes(&result)))
@@ -1264,8 +1292,13 @@ impl EvmRpc for DepositPreviewRpc {
                     let selector = hex::decode(&data[2..10]).unwrap();
                     if selector == Self::selector("latestRoundData()") {
                         let mut result = Vec::new();
-                        let now = chrono::Utc::now().timestamp() as u128;
-                        for value in [1, 200_000_000_000, now, now, 1] {
+                        for value in [
+                            1,
+                            200_000_000_000,
+                            self.oracle_updated_at,
+                            self.oracle_updated_at,
+                            1,
+                        ] {
                             result.extend_from_slice(&Self::abi_word(value));
                         }
                         json!(fin_evm::hex_bytes(&result))
@@ -1401,7 +1434,7 @@ async fn binance_deposit_preview_freezes_only_current_fixed_eth_target_and_exact
                 signing_enabled: true,
             }],
             Arc::new(fin_evm::EvmRuntime::new(
-                Arc::new(DepositPreviewRpc),
+                Arc::new(DepositPreviewRpc::new()),
                 1,
                 None,
             )),
@@ -1473,7 +1506,7 @@ async fn binance_deposit_return_route_proof_binds_fresh_address_and_cross_asset_
                 signing_enabled: true,
             }],
             Arc::new(fin_evm::EvmRuntime::new(
-                Arc::new(DepositPreviewRpc),
+                Arc::new(DepositPreviewRpc::new()),
                 1,
                 None,
             )),
@@ -1602,7 +1635,12 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     let wallet_balance = Arc::new(Mutex::new("0.1".to_owned()));
     let transaction = Arc::new(Mutex::new(None));
     let journal = Arc::new(SyntheticSubmissionJournal::default());
+    let oracle_updated_at = synthetic_oracle_updated_at();
+    let oracle_clock = Arc::new(SyntheticOracleClock(AtomicU64::new(
+        u64::try_from(oracle_updated_at).unwrap() + 30,
+    )));
     let rpc = Arc::new(DepositExecutionRpc {
+        oracle_updated_at,
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),
@@ -1630,11 +1668,31 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
                 })),
             )),
         )
-        .unwrap(),
+        .unwrap()
+        .with_isolated_oracle_clock(oracle_clock.clone()),
     );
     let composite = fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum);
     let input = json!({"requestId":"synthetic-deposit-e2e","account":"main","wallet":"synthetic-wallet","amount":"0.01","maxFeeEth":"0.001"});
     let prepared = composite.prepare("binance.deposit", &input).await.unwrap();
+    let expected_round = format!(":updated:{oracle_updated_at}");
+    assert!(
+        prepared
+            .valuation
+            .as_ref()
+            .unwrap()
+            .source
+            .ends_with(&expected_round),
+        "A fixed oracle round must retain its constructor timestamp independently of observation time."
+    );
+    // Advance only the observation clock, without sleeping or fabricating a
+    // new oracle round. Exact prices/source and the frozen authorization must
+    // remain identical at the final check.
+    oracle_clock.0.fetch_add(1, Ordering::SeqCst);
+    let refreshed = composite.revalidate(&prepared).await.unwrap();
+    assert_eq!(
+        fin_domain::authorization_binding(&refreshed),
+        fin_domain::authorization_binding(&prepared)
+    );
     let submission = composite.submit(&prepared, journal.clone()).await.unwrap();
     assert_eq!(submission.kind, "ethereum");
     assert_eq!(
@@ -1740,6 +1798,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     let transaction = Arc::new(Mutex::new(None));
     let journal = Arc::new(SyntheticSubmissionJournal::default());
     let rpc = Arc::new(DepositExecutionRpc {
+        oracle_updated_at: synthetic_oracle_updated_at(),
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),
@@ -1935,6 +1994,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
     let transaction = Arc::new(Mutex::new(None));
     let journal = Arc::new(SyntheticSubmissionJournal::default());
     let rpc = Arc::new(DepositExecutionRpc {
+        oracle_updated_at: synthetic_oracle_updated_at(),
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),

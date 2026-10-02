@@ -677,6 +677,124 @@ struct TransferFixtureTransport {
     transfer_history_status: &'static str,
 }
 
+#[derive(Clone, Copy)]
+enum TransferDirection {
+    MainToChild,
+    ChildToMain,
+}
+
+struct RouteAwareTransferTransport {
+    direction: TransferDirection,
+    main_free: std::sync::Mutex<String>,
+    child_free: std::sync::Mutex<String>,
+    posts: std::sync::atomic::AtomicUsize,
+    history_queries: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+    client_id: std::sync::Mutex<Option<String>>,
+}
+
+impl RouteAwareTransferTransport {
+    fn new(direction: TransferDirection) -> Self {
+        let (main_free, child_free) = match direction {
+            TransferDirection::MainToChild => ("1", "0"),
+            TransferDirection::ChildToMain => ("0", "1"),
+        };
+        Self {
+            direction,
+            main_free: std::sync::Mutex::new(main_free.into()),
+            child_free: std::sync::Mutex::new(child_free.into()),
+            posts: std::sync::atomic::AtomicUsize::new(0),
+            history_queries: std::sync::Mutex::new(Vec::new()),
+            client_id: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
+    async fn request(
+        &self,
+        _credential: &fin_binance::CredentialHandle,
+        request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        use fin_binance::BinanceEndpoint as E;
+        match request.endpoint {
+            E::SubAccountList => Ok(json!({"subAccounts":[{
+                "email":"child@example.invalid", "isFreeze":false, "isMaster":false
+            }]})),
+            E::ApiRestrictions => Ok(json!({
+                "enableReading":true, "enableWithdrawals":true,
+                "enableInternalTransfer":true, "permitsUniversalTransfer":true
+            })),
+            E::CapitalConfig => Ok(json!([{
+                "coin":"ETH", "withdrawAllEnable":true, "depositAllEnable":true,
+                "networkList":[{
+                    "network":"ETH", "coin":"ETH", "depositEnable":true,
+                    "withdrawEnable":true, "withdrawIntegerMultiple":"0.00000100",
+                    "withdrawFee":"0.0004", "withdrawMin":"0.001", "withdrawMax":"1000",
+                    "withdrawTag":false, "busy":false
+                }]
+            }])),
+            E::SubAccountSpotAssets => Ok(json!({"balances":[{
+                "asset":"ETH", "free":self.child_free.lock().unwrap().clone(), "locked":"0"
+            }]})),
+            E::Account => Ok(json!({"balances":[{
+                "asset":"ETH", "free":self.main_free.lock().unwrap().clone(), "locked":"0"
+            }]})),
+            E::UniversalTransfer => {
+                self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let id = request.get("clientTranId").unwrap().to_owned();
+                *self.client_id.lock().unwrap() = Some(id);
+                match self.direction {
+                    TransferDirection::MainToChild => {
+                        *self.main_free.lock().unwrap() = "0.75".into();
+                        *self.child_free.lock().unwrap() = "0.25".into();
+                    }
+                    TransferDirection::ChildToMain => {
+                        *self.main_free.lock().unwrap() = "0.25".into();
+                        *self.child_free.lock().unwrap() = "0.75".into();
+                    }
+                }
+                // Simulate Binance accepting the write while the HTTP response
+                // is lost. Reconciliation must use the original clientTranId.
+                Err(fin_binance::TransportError::Timeout)
+            }
+            E::UniversalTransferHistory => {
+                let params = request
+                    .params
+                    .iter()
+                    .map(|p| (p.key.clone(), p.value.clone()))
+                    .collect::<Vec<_>>();
+                let from = request.get("fromEmail");
+                let to = request.get("toEmail");
+                match self.direction {
+                    TransferDirection::ChildToMain => {
+                        assert_eq!(from, Some("child@example.invalid"))
+                    }
+                    TransferDirection::MainToChild => assert_eq!(to, Some("child@example.invalid")),
+                }
+                assert_ne!(
+                    from.is_some(),
+                    to.is_some(),
+                    "history must use exactly one route selector"
+                );
+                self.history_queries.lock().unwrap().push(params);
+                let (from_email, to_email) = match self.direction {
+                    TransferDirection::ChildToMain => (Some("child@example.invalid"), None),
+                    TransferDirection::MainToChild => (None, Some("child@example.invalid")),
+                };
+                Ok(json!({"totalCount":1,"result":[{
+                    "tranId":123456789,
+                    "clientTranId":self.client_id.lock().unwrap().clone(),
+                    "asset":"ETH", "amount":"0.25", "fromAccountType":"SPOT",
+                    "toAccountType":"SPOT", "fromEmail":from_email, "toEmail":to_email,
+                    "status":"SUCCESS", "createTimeStamp":1
+                }]}))
+            }
+            endpoint => panic!("unexpected synthetic endpoint {endpoint:?}"),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl fin_binance::BinanceTransport for TransferFixtureTransport {
     async fn request(
@@ -924,6 +1042,165 @@ async fn accepted_or_timed_out_write_reconciles_same_identity_without_replay() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn transfer_history_uses_persisted_single_route_selector_after_restart() {
+    use fin_domain::Adapter;
+
+    for direction in [
+        TransferDirection::MainToChild,
+        TransferDirection::ChildToMain,
+    ] {
+        let transport = std::sync::Arc::new(RouteAwareTransferTransport::new(direction));
+        let config = main_and_child_config();
+        let adapter =
+            fin_binance::BinanceAdapter::new(config.clone(), transport.clone(), None, None)
+                .unwrap();
+        let (from, to) = match direction {
+            TransferDirection::MainToChild => ("main-fixture", "child-fixture"),
+            TransferDirection::ChildToMain => ("child-fixture", "main-fixture"),
+        };
+        let preview = adapter
+            .prepare(
+                "binance.transfer",
+                &json!({
+                    "requestId":"synthetic-route-recovery",
+                    "authority":"main-fixture", "from":from, "to":to,
+                    "coin":"ETH", "amount":"0.25",
+                    "fromWallet":"SPOT", "toWallet":"SPOT"
+                }),
+            )
+            .await
+            .unwrap();
+        let journal = std::sync::Arc::new(RecordingJournal {
+            events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            persisted: std::sync::Mutex::new(Vec::new()),
+        });
+        assert_eq!(
+            adapter
+                .submit(&preview, journal.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "VENUE_TIMEOUT"
+        );
+        let original = journal.persisted.lock().unwrap()[0].clone();
+        assert_eq!(original.reference, preview.binding["clientTranId"]);
+        let persisted_selector = &original.data["historySelector"];
+        match direction {
+            TransferDirection::MainToChild => {
+                assert_eq!(
+                    persisted_selector,
+                    &json!({"parameter":"toEmail","value":"child@example.invalid"})
+                );
+            }
+            TransferDirection::ChildToMain => {
+                assert_eq!(
+                    persisted_selector,
+                    &json!({"parameter":"fromEmail","value":"child@example.invalid"})
+                );
+            }
+        }
+        let record = fin_domain::OperationRecord {
+            id: "synthetic-transfer-restart".into(),
+            request_id: "synthetic-route-recovery".into(),
+            fingerprint: "synthetic-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "binance.transfer".into(),
+            input: preview.input.clone(),
+            status: fin_domain::Status::Submitted,
+            created_at: fin_domain::now(),
+            updated_at: fin_domain::now(),
+            preview: Some(preview),
+            approval: None,
+            submission: Some(original.clone()),
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+
+        // New adapter instance models a process restart; the journaled client
+        // identity and route selector are the only write correlation inputs.
+        let restarted =
+            fin_binance::BinanceAdapter::new(config, transport.clone(), None, None).unwrap();
+        let result = restarted.reconcile(&record).await.unwrap();
+        assert_eq!(result.status, fin_domain::Status::Completed);
+        let verified = result.verified.unwrap();
+        assert_eq!(verified.submission, original);
+        assert_eq!(verified.effects.len(), 1);
+        assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Pre-selector durable records can derive the same filter from their
+        // immutable typed write request. The original Submission is retained
+        // byte-for-byte; reconciliation does not mint or rewrite an ID.
+        let mut legacy = original.clone();
+        legacy
+            .data
+            .as_object_mut()
+            .unwrap()
+            .remove("historySelector");
+        let mut legacy_record = record.clone();
+        legacy_record.submission = Some(legacy.clone());
+        let legacy_result = restarted.reconcile(&legacy_record).await.unwrap();
+        assert_eq!(legacy_result.status, fin_domain::Status::Completed);
+        assert_eq!(legacy_result.verified.unwrap().submission, legacy);
+
+        // A missing typed write request, an ambiguous pair of route filters,
+        // or a changed client identity must fail before another history read.
+        let mut malformed_records = Vec::new();
+        let mut missing_params = record.clone();
+        missing_params.submission.as_mut().unwrap().data["binding"]
+            .as_object_mut()
+            .unwrap()
+            .remove("params");
+        malformed_records.push(missing_params);
+        let mut ambiguous_route = record.clone();
+        let params =
+            &mut ambiguous_route.submission.as_mut().unwrap().data["binding"]["params"]["params"];
+        params.as_array_mut().unwrap().push(match direction {
+            TransferDirection::MainToChild => {
+                json!({"key":"fromEmail","value":"child@example.invalid"})
+            }
+            TransferDirection::ChildToMain => {
+                json!({"key":"toEmail","value":"child@example.invalid"})
+            }
+        });
+        malformed_records.push(ambiguous_route);
+        let mut changed_id = record.clone();
+        changed_id.submission.as_mut().unwrap().data["binding"]["params"]["params"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|param| param["key"] == "clientTranId")
+            .unwrap()["value"] = json!("fin-mutated");
+        malformed_records.push(changed_id);
+        for malformed in malformed_records {
+            let error = restarted.reconcile(&malformed).await.unwrap_err();
+            assert_eq!(error.code, "RECONCILIATION_INVALID");
+        }
+        let queries = transport.history_queries.lock().unwrap();
+        assert_eq!(queries.len(), 2);
+        let route_keys = queries[0]
+            .iter()
+            .filter(|(key, _)| key == "fromEmail" || key == "toEmail")
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        match direction {
+            TransferDirection::MainToChild => {
+                assert_eq!(route_keys, vec![("toEmail", "child@example.invalid")])
+            }
+            TransferDirection::ChildToMain => {
+                assert_eq!(route_keys, vec![("fromEmail", "child@example.invalid")])
+            }
+        }
+        assert!(
+            queries[0]
+                .iter()
+                .any(|(key, value)| key == "clientTranId" && value == &original.reference)
+        );
+    }
 }
 
 struct EmptyHistorySnapshotTransport {

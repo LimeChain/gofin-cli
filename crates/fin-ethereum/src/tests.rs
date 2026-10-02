@@ -92,7 +92,9 @@ impl Fixture {
             cash_by_owner: Mutex::new(std::collections::BTreeMap::new()),
             other_stable: AtomicU64::new(777),
             include_weth: Mutex::new(false),
-            feed_updated_at: Mutex::new(None),
+            // Repeated reads of the same synthetic oracle round retain its
+            // publication time even when the observation crosses a second.
+            feed_updated_at: Mutex::new(Some(chrono::Utc::now().timestamp() as u64)),
             call_overrides: Mutex::new(std::collections::BTreeMap::new()),
             simulation_override: Mutex::new(None),
             simulation_failure: Mutex::new(false),
@@ -124,6 +126,368 @@ impl Fixture {
 }
 fn txhash() -> String {
     format!("0x{}", "ab".repeat(32))
+}
+
+mod final_submission_valuation_tests {
+    use super::*;
+    use fin_engine::{Engine, EngineOptions};
+    use fin_evm::{EnvelopeSigner, alloy::primitives::Bytes};
+    use fin_store::Store;
+
+    type ValuationMutation = (&'static str, fn(&mut Valuation));
+
+    #[derive(Default)]
+    struct CountingSigner(AtomicUsize);
+    #[async_trait]
+    impl EnvelopeSigner for CountingSigner {
+        async fn sign_prepared(&self, _transaction: &FrozenTransaction) -> Result<Bytes> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            // No key or signed bytes: reaching the isolated signing seam ends
+            // the test before the fixture's prohibited dispatch seam.
+            Err(FinError::new(
+                "SYNTHETIC_SIGNER_REACHED",
+                "signing",
+                "Isolated signing seam reached.",
+                "Inspect fixture counters.",
+            ))
+        }
+    }
+    #[derive(Default)]
+    struct CountingJournal {
+        authorized: AtomicUsize,
+        persisted: AtomicUsize,
+    }
+    impl SubmissionJournal for CountingJournal {
+        fn assert_authorized(&self) -> Result<()> {
+            self.authorized.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn persist_submission(&self, _submission: &Submission) -> Result<()> {
+            self.persisted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    fn counted_adapter(rpc: Arc<Fixture>, signer: Arc<CountingSigner>) -> EthereumAdapter {
+        let mut a = adapter(rpc.clone());
+        a.runtime = Arc::new(EvmRuntime::new(rpc, 1, Some(signer)));
+        a
+    }
+    fn wrap_input() -> Value {
+        let mut v = input();
+        v["amount"] = json!("0.001");
+        v
+    }
+    fn assert_no_dispatch(rpc: &Fixture) {
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction")
+        );
+    }
+
+    /// Changes the oracle only after the real post-approval adapter check has
+    /// completed. Thus only EthereumAdapter::submit's final revalidation sees
+    /// the new price; the engine's prior authorization comparison still passes.
+    struct ChangeAfterApprovedRecheck {
+        inner: EthereumAdapter,
+        rpc: Arc<Fixture>,
+        phases: AtomicUsize,
+    }
+    #[async_trait]
+    impl Adapter for ChangeAfterApprovedRecheck {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            assert_eq!(self.phases.fetch_add(1, Ordering::SeqCst), 0);
+            self.inner.prepare(operation, input).await
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            assert_eq!(self.phases.fetch_add(1, Ordering::SeqCst), 1);
+            let refreshed = self.inner.revalidate(prepared).await?;
+            assert_eq!(refreshed.binding, prepared.binding);
+            require_frozen_valuation(refreshed.valuation.as_ref(), prepared.valuation.as_ref())?;
+            self.rpc.call_overrides.lock().unwrap().insert(
+                Oracle::getAssetPriceCall::SELECTOR,
+                abi_value(U256::from(310_000_000_000u64)),
+            );
+            Ok(refreshed)
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            assert_eq!(self.phases.fetch_add(1, Ordering::SeqCst), 2);
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    #[derive(Default)]
+    struct SyntheticApproval(AtomicUsize);
+    #[async_trait]
+    impl Authorizer for SyntheticApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-final-valuation-regression".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_final_oracle_change_stops_before_signing_or_identity_persistence() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = Arc::new(ChangeAfterApprovedRecheck {
+            inner: counted_adapter(rpc.clone(), signer.clone()),
+            rpc: rpc.clone(),
+            phases: AtomicUsize::new(0),
+        });
+        let approval = Arc::new(SyntheticApproval::default());
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            Store::open(directory.path().join("synthetic.sqlite")).unwrap(),
+            vec![a.clone()],
+            approval.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let request = OperationRequest {
+            request_id: "synthetic-final-oracle-change".into(),
+            operation: "wallet.wrap".into(),
+            input: wrap_input(),
+            run_id: None,
+        };
+        let record = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(record.error.as_ref().unwrap().code, "VALUATION_CHANGED");
+        assert_eq!(record.status, Status::Failed);
+        assert!(record.approval.is_some());
+        assert!(record.submission.is_none());
+        assert!(record.effects.is_none());
+        assert_eq!(a.phases.load(Ordering::SeqCst), 3);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+        // The same logical identity keeps its durable failure; no new quote,
+        // approval or submission is attempted on a duplicate request.
+        let duplicate = engine.execute(request).await.unwrap();
+        assert_eq!(duplicate.id, record.id);
+        assert_eq!(duplicate.error, record.error);
+        assert_eq!(a.phases.load(Ordering::SeqCst), 3);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn unchanged_quotes_allow_new_timestamps_and_other_network_origin_rows() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = counted_adapter(rpc.clone(), signer.clone());
+        let mut p = a.prepare("wallet.wrap", &wrap_input()).await.unwrap();
+        let v = p.valuation.as_mut().unwrap();
+        let prior_observation = (chrono::Utc::now() - chrono::Duration::seconds(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        v.observed_at = prior_observation.clone();
+        for row in &mut v.prices {
+            row.observed_at = prior_observation.clone();
+        }
+        // Same reference/decimals but a different exact network must not be
+        // mistaken for a duplicate or for the Ethereum adapter-owned row.
+        let mut origin = v.prices[0].clone();
+        origin.asset.network = "ethereum:11155111".into();
+        origin.usd_micros_per_unit = Quantity::from_u64(7);
+        origin.source = "synthetic-engine-origin".into();
+        v.prices.push(origin);
+        v.prices.reverse();
+        let fresh = a.revalidate(&p).await.unwrap();
+        assert_ne!(
+            fresh.valuation.as_ref().unwrap().observed_at,
+            prior_observation
+        );
+        assert_eq!(fresh.binding, p.binding);
+        let journal = Arc::new(CountingJournal::default());
+        assert_eq!(
+            a.submit(&p, journal.clone()).await.unwrap_err().code,
+            "SYNTHETIC_SIGNER_REACHED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn changed_oracle_round_source_with_same_price_stops_before_signing() {
+        let rpc = Arc::new(Fixture::new());
+        let published = u64::try_from(chrono::Utc::now().timestamp()).unwrap() - 30;
+        *rpc.feed_updated_at.lock().unwrap() = Some(published);
+        let signer = Arc::new(CountingSigner::default());
+        let a = counted_adapter(rpc.clone(), signer.clone());
+        let prepared = a.prepare("wallet.wrap", &wrap_input()).await.unwrap();
+        // Publish a new synthetic round with the same answer/asset price, but
+        // a different publication timestamp. This is a changed exact source
+        // observation, unlike changing only Valuation.observed_at.
+        rpc.call_overrides.lock().unwrap().insert(
+            PriceFeed::latestRoundDataCall::SELECTOR,
+            abi_value((
+                U80::from(2),
+                I256::from_raw(U256::from(100_000_000)),
+                U256::from(published + 1),
+                U256::from(published + 1),
+                U80::from(2),
+            )),
+        );
+        let refreshed = a.revalidate(&prepared).await.unwrap();
+        assert_eq!(refreshed.binding, prepared.binding);
+        let approved = prepared.valuation.as_ref().unwrap();
+        let fresh = refreshed.valuation.as_ref().unwrap();
+        assert_eq!(fresh.movement_usd_micros, approved.movement_usd_micros);
+        assert_eq!(
+            fresh.maximum_fee_usd_micros,
+            approved.maximum_fee_usd_micros
+        );
+        assert_eq!(
+            fresh.additional_allocation_usd_micros,
+            approved.additional_allocation_usd_micros
+        );
+        assert_ne!(fresh.source, approved.source);
+        assert_eq!(fresh.prices.len(), approved.prices.len());
+        for (current, original) in fresh.prices.iter().zip(&approved.prices) {
+            assert_eq!(current.asset, original.asset);
+            assert_eq!(current.unit_atoms, original.unit_atoms);
+            assert_eq!(current.usd_micros_per_unit, original.usd_micros_per_unit);
+            assert_ne!(current.source, original.source);
+        }
+        let journal = Arc::new(CountingJournal::default());
+        assert_eq!(
+            a.submit(&prepared, journal.clone()).await.unwrap_err().code,
+            "VALUATION_CHANGED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn missing_duplicate_or_materially_changed_approved_valuation_never_signs() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = counted_adapter(rpc.clone(), signer.clone());
+        let prepared = a.prepare("wallet.wrap", &wrap_input()).await.unwrap();
+        let changes: &[ValuationMutation] = &[
+            ("movement", |v| v.movement_usd_micros = Quantity::zero()),
+            ("fee", |v| v.maximum_fee_usd_micros = Quantity::zero()),
+            ("allocation", |v| {
+                v.additional_allocation_usd_micros = Quantity::from_u64(1)
+            }),
+            ("valuation source", |v| v.source = "changed-source".into()),
+            ("missing row", |v| {
+                v.prices.remove(0);
+            }),
+            ("missing all rows", |v| v.prices.clear()),
+            ("duplicate row", |v| v.prices.push(v.prices[0].clone())),
+            ("changed USD", |v| {
+                v.prices[0].usd_micros_per_unit = Quantity::from_u64(1)
+            }),
+            ("changed unit", |v| {
+                v.prices[0].unit_atoms = Quantity::from_u64(1)
+            }),
+            ("changed price source", |v| {
+                v.prices[0].source = "changed-source".into()
+            }),
+            ("blank price source", |v| v.prices[0].source = "  ".into()),
+            ("zero price", |v| {
+                v.prices[0].usd_micros_per_unit = Quantity::zero()
+            }),
+            ("zero unit", |v| v.prices[0].unit_atoms = Quantity::zero()),
+            ("wrong network", |v| {
+                v.prices[0].asset.network = "ethereum:11155111".into()
+            }),
+            ("wrong precision", |v| v.prices[0].asset.decimals = 17),
+            ("wrong reference", |v| {
+                v.prices[0].asset.reference = lower_address(addr(199))
+            }),
+        ];
+        for (case, change) in changes {
+            let mut p = prepared.clone();
+            change(p.valuation.as_mut().unwrap());
+            let journal = Arc::new(CountingJournal::default());
+            let failure = a.submit(&p, journal.clone()).await.unwrap_err();
+            assert_eq!(failure.code, "VALUATION_CHANGED", "{case}");
+            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
+            assert_no_dispatch(&rpc);
+        }
+        let mut missing = prepared;
+        missing.valuation = None;
+        let journal = Arc::new(CountingJournal::default());
+        assert_eq!(
+            a.submit(&missing, journal.clone()).await.unwrap_err().code,
+            "VALUATION_CHANGED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_duplicate_fresh_prices_fail_closed_even_when_frozen_identically() {
+        let rpc = Arc::new(Fixture::new());
+        let prepared = adapter(rpc)
+            .prepare("wallet.wrap", &wrap_input())
+            .await
+            .unwrap();
+        let valuation = prepared.valuation.unwrap();
+        let invalid: &[ValuationMutation] = &[
+            ("missing prices", |v| v.prices.clear()),
+            ("duplicate prices", |v| v.prices.push(v.prices[0].clone())),
+            ("zero USD", |v| {
+                v.prices[0].usd_micros_per_unit = Quantity::zero()
+            }),
+            ("zero unit", |v| v.prices[0].unit_atoms = Quantity::zero()),
+            ("blank price source", |v| v.prices[0].source = " ".into()),
+            ("blank valuation source", |v| v.source = " ".into()),
+            ("blank network", |v| v.prices[0].asset.network.clear()),
+            ("blank reference", |v| v.prices[0].asset.reference.clear()),
+        ];
+        for (case, invalidate) in invalid {
+            let mut malformed = valuation.clone();
+            invalidate(&mut malformed);
+            assert_eq!(
+                require_frozen_valuation(Some(&malformed), Some(&malformed))
+                    .unwrap_err()
+                    .code,
+                "VALUATION_CHANGED",
+                "{case}"
+            );
+        }
+        assert_eq!(
+            require_frozen_valuation(None, Some(&valuation))
+                .unwrap_err()
+                .code,
+            "VALUATION_CHANGED"
+        );
+        assert_eq!(
+            require_frozen_valuation(None, None).unwrap_err().code,
+            "VALUATION_CHANGED"
+        );
+    }
 }
 
 #[tokio::test]

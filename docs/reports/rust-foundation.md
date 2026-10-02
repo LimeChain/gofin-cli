@@ -23,19 +23,97 @@ uses an ignored, lead-owned harness and does not establish credential isolation.
 
 ## Evidence recorded so far
 
-| Area                      | Current evidence                                                                                                                                                                                                             | Result and limits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Rust workspace            | `cargo test --locked --workspace`: 270 passed, zero failed, one explicitly ignored fork test; formatting and strict all-target workspace Clippy pass                                                                         | Complete default synthetic suite on this Mac. The fork and production checks are separate. Release build and clean-revision macOS bundle succeeded locally; installation remains pending.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Shared execution ledger   | 106 engine tests in that workspace run                                                                                                                                                                                       | Includes paired flow validation, interval replay, selected-origin fees, exact source-index refunds, borrowed-first repayment, frozen cost prices, snapshot refusal, recovery and duplicate handling. Synthetic evidence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Binance funding           | 35 endpoint contract tests and 12 broker funding round-trip tests pass                                                                                                                                                       | Exact quantities, HMAC/RSA/Ed25519 and typed settlement are tested with fixtures. Not a production funding pass.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Ethereum and EVM          | 31 adapter tests and 16 EVM tests pass                                                                                                                                                                                       | Synthetic payload, deployed-protocol receipt shapes, snapshot bounds and transient read-only RPC retries. Writes are never retried at the transport layer.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Production Binance reads  | Fresh complete GET-only snapshot, no pending funding operations                                                                                                                                                              | Current keys authenticate; GET-only permission checks show internal transfer and withdrawal enabled for the main key. One child connection is available. The signer wallet has no matching ETH-mainnet withdrawal-address entry in the read response. Actual writes and the two-child live journey remain unverified.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| Production Ethereum reads | Complete mainnet snapshot with no pending nonce mismatch                                                                                                                                                                     | Read access and coverage only. Rust financial writes remain zero.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Return planning           | Eleven private production plan-only attempts, all with no signer and authorization denied; the eleventh passed                                                                                                               | First: `RETURN_ROUTE_STALE`; second: later `PLAN_BASELINE_INCOMPLETE`; third: `INCOMPLETE_BASELINE` after transient RPC read failures; fourth: private preflight refusal with no proven detailed cause; fifth: full maximum costs exceeded the provisional $10 earmark; sixth: funded full plan assembled and reached a `SLIPPAGE_LIMIT` refusal; seventh: malformed JSON from a public `eth_getCode` response caused `RPC_DATA_INVALID` before full assembly; eighth: current fees exceeded the original prepared wrap cap (`PLAN_FEE_TOO_LOW`); ninth: required snapshot reads failed (`INCOMPLETE_BASELINE`); tenth: the complete fee margin exceeded the remaining original physical stock and was refused before baseline or authorization. Eleventh: complete quiet mainnet capture and the full 18-step funded route passed in 93.121 seconds. Its complete maximum cost earmark was $33.934909 inside the original selected native stock; historical gas and the separate CEX/borrow reserves remain inside the cumulative $79 ceiling. This is planning evidence only; no financial write occurred. |
-| Fixed mainnet fork        | Seventeen guarded attempts: the last two settled all 22 synthetic writes and tested 22 duplicates                                                                                                                            | Both latest runs passed independent restoration of cash, positions, debt and modified authorities after one hour of Aave accrual. This is a fixed-fork pass, with zero production financial writes or biometric evidence. Earlier failed attempts remain failed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Remote CI                 | [Corrected workflow](https://github.com/LimeChain/fin-cli/actions/runs/37017907106): Mac267 and Ubuntu268 passed, zero failures, one explicitly ignored fork test on each; formatting, strict Clippy and release builds pass | Confirms the pushed `cf91af6` code on both CI platforms. Protected Linux financial writes remain unavailable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Historical TS regression  | 328 tests, type checking, formatting and build passed                                                                                                                                                                        | Reference evidence only; it does not establish Rust behavior.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| macOS helper/package      | Clean committed source bundle, six-file checksum verification, locally hardened signatures and non-authorizing availability probe passed                                                                                     | The arm64 bundle records source revision `cf91af6` and `source_state=clean` in BUILDINFO. Actual installation, hidden human input, credential isolation and Touch ID remain pending.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust workspace                     | `cargo test --locked --workspace`: 296 passed, zero failed, one explicitly ignored fork test. Strict all-target workspace Clippy and formatting passed after correcting the test formatting found by the first final check. These local checks cover the current source; the CI row below covers an earlier commit.                                                                                       |
+| Shared execution ledger            | 108 engine tests passed, including paired-flow validation, interval replay, selected-origin fees, source-index refunds, frozen cost prices, snapshot refusal, recovery, duplicate handling and retention of uncertain submission errors.                                                                                                                                                                  |
+| Broker and Binance                 | 26 broker library tests passed, including independent USD, zero-pricing, safe HTTP diagnostics and original-asset replan regressions. Binance passed 40 endpoint/valuation tests; Ethereum passed 36 adapter tests. The ignored private drivers passed 56 synthetic test invocations across their two binaries. These are fixture results, not production funding.                                        |
+| Ethereum and EVM                   | Synthetic adapter and EVM tests passed in the workspace suite. RPC fixtures cover bounded read retries and prohibit transport retry of writes.                                                                                                                                                                                                                                                            |
+| Production Binance                 | Authenticated GETs, exact identity checks and the eighth funded preflight passed. The first private non-biometric execution has one durable submission identity and remains `unknown`; route-filtered history reads show no matching row and separate account reads show unchanged numeric USDC balances. No retry or completed live round trip is claimed. Cleanup remains unproven.                     |
+| Production Ethereum reads/planning | Read-only mainnet snapshot and bounded route planning were exercised. The unused plan closed with an independently unchanged financial baseline; the thirteenth full plan passed. Ethereum production envelope signatures, broadcasts and financial authorizations remain zero.                                                                                                                           |
+| Fixed mainnet fork                 | Attempt 19 passed 22 synthetic writes and 22 same-request duplicates after the final valuation guards. Independent cash, positions, debt, and authority cleanup matched earlier successful runs at the same block, hash, gas, and allocation. Attempts 14 and 15 failed cleanup and remain failed evidence.                                                                                               |
+| Remote CI                          | Corrected workflow [run 37021968557](https://github.com/LimeChain/fin-cli/actions/runs/37021968557) reached terminal success after an initial macOS job was cancelled without a runner and a failed-job retry. Mac 270 and Ubuntu 271 ran default tests; TS 328, formatting, strict Clippy, release, and native checks passed. This supersedes earlier `cf` workflow status while preserving its history. |
+| macOS helper/package               | Clean-source bundle at `work/release-diagnostics.pWODXr/bundle` passed six SHA-256 checks and ad-hoc hardening. The non-authorizing native probe reported Touch ID available (`approvalRequested=false`); installation, human input, credential isolation, and actual Touch ID authorization remain unverified.                                                                                           |
+| Historical TS regression           | 328 tests, type checking, formatting, and build passed. TS evidence does not establish Rust behavior.                                                                                                                                                                                                                                                                                                     |
+
+The ignored private-harness synthetic checks passed 18 Ethereum-driver and 38
+Binance-driver test invocations, including repeated shared-helper fixtures.
+Status-only recovery cannot execute a replacement. Two earlier mainnet plan preparations stopped
+before authorization: preparation attempt three with `INCOMPLETE_BASELINE` after an
+`eth_getCode` response carrying validated JSON-RPC code `-32000`, and preparation
+attempt five with `PLAN_FEE_TOO_LOW`. Four earlier private Binance RunBegin attempts were refused before writes. The
+first lacked oracle context; subsequent valuation exposed 1,142 configured asset
+keys, mostly zero-balance assets. Later attempts stopped on a public market HTTP
+rejection; one attempt failed compilation before live access. A controlled public
+probe isolated an HTTP 400 response from the Rust client without a User-Agent.
+The shared market client now identifies itself truthfully as Fin, and the eighth
+Binance preflight passed with a complete baseline and a funded five-USDC return.
+This observation does not establish a general provider requirement.
+
+The first explicit Binance execution recorded one private non-biometric approval
+and one original submission identity, but has not proved a transfer outcome.
+Independent route-filtered history reads, both with the original client ID and
+with a bounded broader query, returned no matching row; both selected USDC
+balances were numerically unchanged. A status-only observation of that same
+operation still returned `unknown`. No replacement request was executed. The
+run remains active with its reservation, and cannot pass cleanup or production
+acceptance. Ethereum production envelope signatures and broadcasts remain zero.
+
+The unused Ethereum plan was independently compared with its original financial
+baseline and closed as restored with zero operations. Fresh observation times
+and oracle-anchor evidence are metadata, while all cash, positions, scaled
+claims, authorities and coverage remain exact. That empty closure is not a
+live journey pass. A subsequent plan stopped on a fresh swap-minimum check; a
+tighter proposed minimum, retaining the same slippage limit and adding quote
+margin, allowed the thirteenth full 18-step plan to pass. Its maximum cost
+earmark was $19.892925 inside the remaining original native stock. Historical
+gas and the original $79 combined ceiling remain carried forward. Further
+financial writes are held while the Binance outcome is unresolved.
+
+The valuation fix retains all configured baseline keys while requesting prices
+for positive, selected, and configured route assets; replans refresh prices for
+the run's original allocation assets even when their current balance is zero.
+A complete Ogi Spark (`glm-5.3-flash`) pricing review raised snapshot races,
+stablecoin parity and exact-identity risks. Source review found that the parity
+label still allowed USDT-denominated values to enforce USD limits. The public
+provider now independently observes Coinbase Exchange USDT-USD and combines it
+with exact Binance pair prices; the 99-USDT/1.02-USD fixture exceeds the $100 cap
+and is refused. It validates product identity, positive decimals and freshness,
+uses conservative `max(price, ask)`, retains both sources and the oldest time,
+and has no parity fallback. See [the public ticker contract](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker).
+Strict recent-trade availability can block valuation; that refusal is deliberate.
+
+Review also found that both adapters' final submission checks could omit changed
+USD valuation after the engine's approval check. They now compare material bounds
+and exact adapter-owned prices while permitting unrelated engine-added origin
+rows and observation-time updates. Actual engine-path regressions prove a changed
+final quote causes zero Binance POSTs and zero Ethereum signatures/dispatches.
+Default tests remain offline and use synthetic or loopback market data.
+
+Production recovery review also exposed a route-selection omission: Binance
+defaults unfiltered universal-transfer history to transfers from the master
+account. Reconciliation now selects exactly one child route filter from the
+original typed request and validates the route, client ID and any stored
+selector. Older pending submissions derive it from their immutable request
+without rewriting the submission or replaying a write. Restart fixtures cover
+both directions, lost responses and invalid legacy bindings. This fixes query
+coverage; it does not turn the unresolved production operation into a pass.
+See [Binance's history contract](https://developers.binance.com/en/docs/catalog/vip-and-institutional-sub-account/api/rest-api/asset-management#query-universal-transfer-history).
+
+One fresh full run caught a synthetic oracle that changed its publication time
+while claiming the same round and price. Fixtures now pin publication evidence
+for each round. A deterministic regression accepts advancing observation time
+and separately rejects a new oracle round/source before signing, even when its
+USD price is unchanged. The production valuation guard remains intact.
+
+Recovery review found that proofless status updates could erase the original
+adapter submission error. The engine now retains that diagnostic while the
+submission is unresolved and preserves the latest reconciliation evidence.
+Verified terminal settlement clears it. A synthetic lifecycle test covers
+pending/unknown responses, read failure, absent or invalid terminal proof and
+eventual valid proof with one approval/dispatch and unchanged submission identity.
+This cannot reconstruct an error already lost from the production record, or
+establish that an API rejection means no financial submission occurred.
 
 A fresh Ogi Spark onboarding rehearsal used nine successful compiled discovery
 commands and no private configuration. Its main/child Ed25519 enrollment,
@@ -99,16 +177,18 @@ remains single-attempt on its first endpoint. The explicit RPC codes follow
 cover recovery, exhaustion, rejected response identities and absence of write
 retry. Additional hostile-response fixtures retain only validated signed integer
 JSON-RPC codes for diagnosis, suppress all external message/data/parameter fields,
-and preserve the existing error-code and retry contracts. The eleventh production plan captured a complete baseline and proved the entire
-route. Earlier transient and malformed-response refusals remain recorded; that
-pass does not promise continuous availability from public providers.
+and preserve the existing error-code and retry contracts. An earlier historical
+plan-only run captured a complete baseline and proved the then-current route;
+later zero-pricing and original-allocation replan changes are being rechecked.
+Earlier transient and malformed-response refusals remain recorded; the historical
+plan does not promise current route readiness or continuous provider availability.
 
 Ogi Spark reviews used the discovered `glm-5.3-flash` model. A complete accounting
 answer identified mixed-origin risks. The first two onboarding rehearsals were partial
 guidance evidence because each included an incorrect detail; the later seven-command
 rehearsal returned correct discovered command guidance. Several other
 requests returned empty/partial answers, and one lost its output handle. The
-latest interval-math, RPC retry and frozen-source accounting requests returned no answer text despite the
+latest interval-math, RPC retry, frozen-source accounting and final valuation requests returned no answer text despite the
 server reporting completion; they provide no independent review evidence and
 were not silently retried. Model output grants no access or execution authority.
 
@@ -118,7 +198,7 @@ Neither completed cleanup. Fresh full-close accrual bounds now use the same
 finite amount cap as their route proofs, while partial operations retain their
 prior envelopes. Over-cap debt or collateral still blocks before broadcast.
 
-Attempts sixteen and seventeen passed the complete 22-write fixed-block journey, including
+Attempts sixteen through nineteen passed the complete 22-write fixed-block journey, including
 native/ERC-20 transfers and returns, wrap/swap, Aave supply/collateral/borrow,
 one hour of debt accrual, full repayment/withdrawal, reverse swap, allowance
 restoration and unwrap. All 22 duplicate requests caused no new authorization,
@@ -126,7 +206,9 @@ signature or dispatch. The final independent state comparison found no
 unexplained differences, zero supplied collateral and zero variable debt.
 Observed gas was 0.002047518599808507 synthetic ETH ($5.555410 at the fixed
 fixture price); the physical allocation, including the separate borrowed-proceeds
-reserve, was $99.414576. This proves the guarded fork route and cleanup only.
+reserve, was $99.414576. Attempt nineteen matched earlier successful runs at the same
+block, transaction hash, gas, and allocation. This proves the guarded fork route
+and cleanup only.
 
 Review also found that financial challenge nonces and their expiry differed
 from the actual macOS provider's contract. Generation now uses exact lowercase
@@ -161,18 +243,18 @@ synthetic permit/recovery regressions: it rejects altered network, sender,
 destination, native value and fee bounds; preparation cannot authorize or dispatch;
 a permit authorizes one action; unsigned raw bytes cannot dispatch; and recovery
 preserves submission identity and requires versioned, digest-checked effects.
-Its first live preparation attempt stopped during the remaining route at step
-three with `PLAN_FEE_TOO_LOW`. A later preparation passed the complete fresh
-remaining route, then previewed the $11 wrap with a maximum fee of $0.291292.
-The subsequent explicit execution attempt failed during its authoritative snapshot
-with `INCOMPLETE_BASELINE`, before approval, signing or broadcast. Inspection of
-the stopped journal found zero operations and zero submissions. These are planning
-and refusal observations, not a live-write or restoration pass.
+Earlier attempts planned the complete fresh remaining route and previewed the
+$11 wrap with a maximum fee of $0.291292. A subsequent explicit execution attempt
+failed during its authoritative snapshot with `INCOMPLETE_BASELINE`, before
+approval, signing, or broadcast. Inspection of the stopped journal found zero
+operations and zero submissions. The newer ETH preparation failures above also
+remain pre-authorization. These are planning and refusal observations, not a
+live-write or restoration pass.
 
 ## Outstanding acceptance
 
-- Preserve the complete fixed-fork pass and run the final regressions after any
-  subsequent financial-path changes.
+- Preserve the attempt-nineteen fixed-fork pass and run the final regressions
+  after any subsequent financial-path changes.
 - Complete separately authorized production Binance and Ethereum mainnet
   scenarios within the same $100 movement and total physical allocation limits,
   carrying prior test costs and planning the full funded unwind before writes.
@@ -182,9 +264,9 @@ and refusal observations, not a live-write or restoration pass.
   destination allowlisting and return access. A whitelist for API access alone
   does not establish withdrawal or deposit readiness.
 - Complete the actual installed-agent discovery and human onboarding checks.
-  The foundational source is committed and pushed as `7d0a8fd` on
-  `codex/fin-foundation`; the clean-source local bundle and reproducible default
-  checks passed. The corrected remote CI passed on Mac and Ubuntu.
+  The clean-source local bundle and reproducible default checks passed. Corrected
+  remote CI completed Mac and Ubuntu checks after the initial Mac job had no
+  runner and a failed-job retry was required.
 - Perform the subsequent human installation, fresh private enrollment,
   credential isolation and per-write Touch ID session using the
   [human handoff checklist](../testing/rust-human-handoff.md).

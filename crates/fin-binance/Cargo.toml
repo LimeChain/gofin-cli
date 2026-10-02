@@ -20,6 +20,9 @@ reqwest.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+fin-engine.workspace = true
+fin-store.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

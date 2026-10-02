@@ -1222,7 +1222,9 @@ impl Engine {
             Ok(reconciliation) => reconciliation,
             Err(error) => {
                 let mut retained = record;
-                retained.error = Some(error);
+                if retained.error.is_none() || retained.submission.is_none() {
+                    retained.error = Some(error);
+                }
                 retained.updated_at = now();
                 self.update_record(&retained)?;
                 return Ok(retained);
@@ -1238,7 +1240,9 @@ impl Engine {
                     retained.status
                 };
                 retained.last_reconciliation_evidence = Some(reconciliation.evidence);
-                retained.error = Some(error);
+                if retained.error.is_none() || retained.submission.is_none() {
+                    retained.error = Some(error);
+                }
                 retained.updated_at = now();
                 self.update_record(&retained)?;
                 Ok(retained)
@@ -1256,7 +1260,9 @@ impl Engine {
             Status::Pending | Status::Submitted | Status::Unknown => {
                 record.status = reconciliation.status;
                 record.last_reconciliation_evidence = Some(reconciliation.evidence);
-                record.error = None;
+                if record.submission.is_none() {
+                    record.error = None;
+                }
                 record.updated_at = now();
                 self.update_record(&record)?;
                 Ok(record)
@@ -1503,6 +1509,20 @@ impl Engine {
     pub fn run(&self, id: &str) -> Result<RunResult> {
         let run: RunLedger = self.load_run(id)?;
         Ok(run_result(&run))
+    }
+
+    /// Return the unique exact assets present in this run's original selected
+    /// allocations. This intentionally reads the immutable allocation record,
+    /// not current available cash, which may be zero or moved during a route.
+    /// It exposes no run identity or account mapping and fails for unknown runs.
+    pub fn run_allocation_assets(&self, id: &str) -> Result<Vec<fin_domain::AssetId>> {
+        let run = self.load_run(id)?;
+        let assets = run
+            .allocations
+            .into_iter()
+            .map(|allocation| allocation.holding.amount.asset)
+            .collect::<BTreeSet<_>>();
+        Ok(assets.into_iter().collect())
     }
 
     pub fn finish_run(
@@ -7036,6 +7056,7 @@ mod tests {
         Amount, AssetId, Authorizer, Definition, EffectConstraint, ExecutionActor, FinancialState,
         PositionAnchor, Quantity, SignedQuantity, StateSnapshot,
     };
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn resource(value: &str) -> ResourceId {
@@ -7398,6 +7419,75 @@ mod tests {
         }
     }
 
+    struct PersistThenErrorAdapter {
+        inner: SyntheticAdapter,
+        reconciliations: Mutex<VecDeque<Result<Reconciliation>>>,
+        reconciliation_calls: AtomicUsize,
+    }
+
+    impl PersistThenErrorAdapter {
+        fn new() -> Self {
+            Self {
+                inner: SyntheticAdapter::new(),
+                reconciliations: Mutex::new(VecDeque::new()),
+                reconciliation_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn push_reconciliation(&self, result: Result<Reconciliation>) {
+            self.reconciliations.lock().unwrap().push_back(result);
+        }
+    }
+
+    #[async_trait]
+    impl Adapter for PersistThenErrorAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            self.inner.prepare(operation, input).await
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await?;
+            Err(FinError::new(
+                "VENUE_REQUEST_FAILED",
+                "venue",
+                "Synthetic adapter reports an uncertain dispatch failure.",
+                "Reconcile the persisted submission identity.",
+            ))
+        }
+
+        async fn reconcile(&self, _record: &OperationRecord) -> Result<Reconciliation> {
+            self.reconciliation_calls.fetch_add(1, Ordering::SeqCst);
+            self.reconciliations
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(FinError::new(
+                        "SYNTHETIC_RECONCILIATION_EMPTY",
+                        "reconciliation",
+                        "No synthetic reconciliation outcome was queued.",
+                        "Queue a synthetic result in the test.",
+                    ))
+                })
+        }
+    }
+
     struct SyntheticAuthorizer;
 
     #[async_trait]
@@ -7431,6 +7521,122 @@ mod tests {
                 expires_at: challenge.expires_at.clone(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn persisted_submit_error_survives_proofless_reconciliation_until_terminal_proof() {
+        let adapter = Arc::new(PersistThenErrorAdapter::new());
+        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let request = OperationRequest {
+            request_id: "synthetic-persisted-submit-error".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({"amount":"1"}),
+            run_id: None,
+        };
+
+        let initial = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(initial.status, Status::Unknown);
+        assert_eq!(initial.error.as_ref().unwrap().code, "VENUE_REQUEST_FAILED");
+        let original_submission = initial.submission.clone().unwrap();
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+
+        for (status, evidence) in [
+            (Status::Pending, json!({"phase":"pending"})),
+            (Status::Unknown, json!({"phase":"unknown"})),
+        ] {
+            adapter.push_reconciliation(Ok(Reconciliation {
+                status: status.clone(),
+                evidence: evidence.clone(),
+                verified: None,
+            }));
+            let reconciled = engine.status(&initial.id, true).await.unwrap();
+            assert_eq!(reconciled.status, status);
+            assert_eq!(
+                reconciled.error.as_ref().unwrap().code,
+                "VENUE_REQUEST_FAILED"
+            );
+            assert_eq!(reconciled.submission.as_ref(), Some(&original_submission));
+            assert_eq!(reconciled.last_reconciliation_evidence, Some(evidence));
+        }
+
+        adapter.push_reconciliation(Err(FinError::new(
+            "SYNTHETIC_READ_TIMEOUT",
+            "reconciliation",
+            "Synthetic status read timed out.",
+            "Retry read-only reconciliation.",
+        )));
+        let after_reconcile_error = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(after_reconcile_error.status, Status::Unknown);
+        assert_eq!(
+            after_reconcile_error.error.as_ref().unwrap().code,
+            "VENUE_REQUEST_FAILED"
+        );
+        assert_eq!(
+            after_reconcile_error.submission.as_ref(),
+            Some(&original_submission)
+        );
+
+        adapter.push_reconciliation(Ok(Reconciliation {
+            status: Status::Completed,
+            evidence: json!({"phase":"missing-proof"}),
+            verified: None,
+        }));
+        let after_missing_proof = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(after_missing_proof.status, Status::Unknown);
+        assert_eq!(
+            after_missing_proof.error.as_ref().unwrap().code,
+            "VENUE_REQUEST_FAILED"
+        );
+        assert_eq!(
+            after_missing_proof.last_reconciliation_evidence,
+            Some(json!({"phase":"missing-proof"}))
+        );
+
+        adapter.inner.completed_response();
+        let mut invalid_terminal = adapter.inner.response.lock().unwrap().clone();
+        invalid_terminal.evidence = json!({"phase":"invalid-proof"});
+        invalid_terminal.verified.as_mut().unwrap().proof_digest =
+            "synthetic-invalid-proof-digest".into();
+        adapter.push_reconciliation(Ok(invalid_terminal));
+        let after_invalid_proof = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(after_invalid_proof.status, Status::Unknown);
+        assert_eq!(
+            after_invalid_proof.error.as_ref().unwrap().code,
+            "VENUE_REQUEST_FAILED"
+        );
+        assert_eq!(
+            after_invalid_proof.last_reconciliation_evidence,
+            Some(json!({"phase":"invalid-proof"}))
+        );
+        assert_eq!(
+            after_invalid_proof.submission.as_ref(),
+            Some(&original_submission)
+        );
+
+        let valid_terminal = adapter.inner.response.lock().unwrap().clone();
+        adapter.push_reconciliation(Ok(valid_terminal));
+        let settled = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(settled.status, Status::Completed);
+        assert!(settled.error.is_none());
+        assert_eq!(settled.submission.as_ref(), Some(&original_submission));
+        assert!(settled.effects.is_some());
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.reconciliation_calls.load(Ordering::SeqCst), 6);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+
+        let duplicate = engine.execute(request).await.unwrap();
+        assert_eq!(duplicate.id, initial.id);
+        assert_eq!(duplicate.submission, Some(original_submission));
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
     }
 
     struct ChallengeAdapter {
@@ -10689,5 +10895,89 @@ mod tests {
             ..Default::default()
         };
         assert!(ensure_intent_scope(&run, &unselected_withdrawal).is_err());
+    }
+
+    #[test]
+    fn run_allocation_assets_uses_durable_original_assets_after_cash_moves() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("allocation-assets.sqlite")).unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let baseline = StateSnapshot {
+            state: FinancialState::default(),
+            observed_at: Utc::now().to_rfc3339(),
+            complete: true,
+            coverage: vec!["wallet-a".into(), "wallet-b".into()],
+            pending: vec![],
+        };
+        let mut run = empty_run_for_provenance(baseline);
+        run.id = "synthetic-origin-assets".into();
+        let eth = asset("binance", "ETH", 18);
+        let usdc = asset("binance", "USDC", 8);
+        run.allocations = vec![
+            RunAllocation {
+                holding: ResourceAmount {
+                    resource: resource("wallet-a"),
+                    amount: Amount {
+                        asset: eth.clone(),
+                        atoms: quantity("100"),
+                    },
+                },
+                value_usd_micros: "1000".into(),
+                observed_at: Utc::now().to_rfc3339(),
+                source: "synthetic fixture".into(),
+            },
+            RunAllocation {
+                holding: ResourceAmount {
+                    resource: resource("wallet-b"),
+                    amount: Amount {
+                        asset: eth.clone(),
+                        atoms: quantity("50"),
+                    },
+                },
+                value_usd_micros: "500".into(),
+                observed_at: Utc::now().to_rfc3339(),
+                source: "synthetic fixture".into(),
+            },
+            RunAllocation {
+                holding: ResourceAmount {
+                    resource: resource("wallet-a"),
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("250"),
+                    },
+                },
+                value_usd_micros: "250".into(),
+                observed_at: Utc::now().to_rfc3339(),
+                source: "synthetic fixture".into(),
+            },
+        ];
+        // Current local cash is empty after movement; pricing still needs the
+        // exact assets captured in the immutable original allocation.
+        run.available.clear();
+        run.provenance.clear();
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_run(&run.id, &to_value(&run).unwrap(), &now())
+            .unwrap();
+
+        assert_eq!(
+            engine.run_allocation_assets(&run.id).unwrap(),
+            vec![eth, usdc]
+        );
+        assert_eq!(
+            engine
+                .run_allocation_assets("missing-synthetic-run")
+                .unwrap_err()
+                .code,
+            "RUN_NOT_FOUND"
+        );
     }
 }

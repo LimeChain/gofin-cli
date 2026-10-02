@@ -16,9 +16,9 @@ The compiled workspace now contains the public `fin` client, protected broker,
 exact-unit financial domain, durable SQLite engine, Binance funding adapter,
 Ethereum wallet/Uniswap/Aave adapter, and macOS authorization and credential
 providers. Offline onboarding discovery works before installation or accounts.
-End-to-end Rust acceptance is still in progress: conditional unwind planning,
-fork round trips, production/mainnet verification, human onboarding, and Touch ID
-must be reported separately. Historical TypeScript results do not establish Rust
+Conditional unwind planning and complete fixed-mainnet-fork round trips pass
+automated verification. End-to-end acceptance remains in progress: production/mainnet
+verification, human onboarding, and actual Touch ID must be reported separately. Historical TypeScript results do not establish Rust
 results. The [Rust verification report](docs/reports/rust-foundation.md) records
 the current passes, failures and outstanding checks.
 

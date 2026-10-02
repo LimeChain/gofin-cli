@@ -62,6 +62,59 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
         Err(error(code, "validation", message))
     }
 }
+/// Recheck adapter-owned valuation immediately before entering the signing
+/// runtime. The engine may have added origin prices for a bounded run, so
+/// compare exact asset identities rather than requiring identical price lists.
+fn require_frozen_valuation(fresh: Option<&Valuation>, approved: Option<&Valuation>) -> Result<()> {
+    let changed = || {
+        error(
+            "VALUATION_CHANGED",
+            "submission",
+            "Current exact valuation differs from the approved envelope or has missing or ambiguous prices.",
+        )
+    };
+    let (fresh, approved) = match (fresh, approved) {
+        (Some(fresh), Some(approved)) => (fresh, approved),
+        _ => return Err(changed()),
+    };
+    if fresh.movement_usd_micros != approved.movement_usd_micros
+        || fresh.maximum_fee_usd_micros != approved.maximum_fee_usd_micros
+        || fresh.additional_allocation_usd_micros != approved.additional_allocation_usd_micros
+        || fresh.source != approved.source
+        || fresh.source.trim().is_empty()
+        || fresh.prices.is_empty()
+    {
+        return Err(changed());
+    }
+    for valuation in [fresh, approved] {
+        let mut identities = BTreeSet::new();
+        for price in &valuation.prices {
+            if !identities.insert(&price.asset)
+                || price.asset.network.trim().is_empty()
+                || price.asset.reference.trim().is_empty()
+                || price.source.trim().is_empty()
+                || price.unit_atoms.is_zero()
+                || price.usd_micros_per_unit.is_zero()
+            {
+                return Err(changed());
+            }
+        }
+    }
+    for price in &fresh.prices {
+        let original = approved
+            .prices
+            .iter()
+            .find(|original| original.asset == price.asset)
+            .ok_or_else(changed)?;
+        if price.usd_micros_per_unit != original.usd_micros_per_unit
+            || price.unit_atoms != original.unit_atoms
+            || price.source != original.source
+        {
+            return Err(changed());
+        }
+    }
+    Ok(())
+}
 fn exact(value: &str, decimals: u8) -> Result<U256> {
     let whole = value.split('.').next().unwrap_or("");
     require(
@@ -436,6 +489,7 @@ impl Adapter for EthereumAdapter {
             "BINDING_CHANGED",
             "Current executable fields differ from approved envelope.",
         )?;
+        require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())?;
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
