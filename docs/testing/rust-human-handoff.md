@@ -86,6 +86,10 @@ must fail. Every allowance, collateral change and cleanup is its own approval.
 
 Inspect a submitted original operation after a caller disconnect/restart. Never
 construct a replacement financial action merely because a response was lost.
+For Binance failures, retain Fin's safe error code, stage, and message. The
+message may contain a numeric HTTP status and Binance error code; upstream
+messages and response bodies are suppressed. Those numbers help diagnosis but
+do not establish a terminal outcome or release an unresolved reservation.
 Fresh cleanup-plan revision retains the original baseline, allocation, consumed
 costs and unresolved identities; it authorizes no write. Service stop preserves
 the journal and does not perform financial cleanup.

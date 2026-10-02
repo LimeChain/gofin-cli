@@ -25,9 +25,9 @@ uses an ignored, lead-owned harness and does not establish credential isolation.
 
 | Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                            |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust workspace                     | `cargo test --locked --workspace`: 296 passed, zero failed, one explicitly ignored fork test. Strict all-target workspace Clippy and formatting passed after correcting the test formatting found by the first final check. These local checks cover the current source; the CI row below covers an earlier commit.                                                                            |
+| Rust workspace                     | `cargo test --locked --workspace`: 299 passed, zero failed, one explicitly ignored fork test. Strict all-target workspace Clippy and formatting passed after correcting the test formatting found by the first final check. These local checks cover the current source; the CI row below covers an earlier commit.                                                                            |
 | Shared execution ledger            | 108 engine tests passed, including paired-flow validation, interval replay, selected-origin fees, source-index refunds, frozen cost prices, snapshot refusal, recovery, duplicate handling and retention of uncertain submission errors.                                                                                                                                                       |
-| Broker and Binance                 | 26 broker library tests passed, including independent USD, zero-pricing, safe HTTP diagnostics and original-asset replan regressions. Binance passed 40 endpoint/valuation tests; Ethereum passed 36 adapter tests. The ignored private drivers passed 56 synthetic test invocations across their two binaries. These are fixture results, not production funding.                             |
+| Broker and Binance                 | 26 broker library tests passed, including independent USD, zero-pricing, safe HTTP diagnostics and original-asset replan regressions. Binance passed 43 endpoint/valuation tests; Ethereum passed 36 adapter tests. The ignored private drivers passed 56 synthetic test invocations across their two binaries. These are fixture results, not production funding.                             |
 | Ethereum and EVM                   | Synthetic adapter and EVM tests passed in the workspace suite. RPC fixtures cover bounded read retries and prohibit transport retry of writes.                                                                                                                                                                                                                                                 |
 | Production Binance                 | Authenticated GETs, exact identity checks and the eighth funded preflight passed. The first private non-biometric execution has one durable submission identity and remains `unknown`; route-filtered history reads show no matching row and separate account reads show unchanged numeric USDC balances. No retry or completed live round trip is claimed. Cleanup remains unproven.          |
 | Production Ethereum reads/planning | Read-only mainnet snapshot and bounded route planning were exercised. The unused plan closed with an independently unchanged financial baseline; the thirteenth full plan passed. Ethereum production envelope signatures, broadcasts and financial authorizations remain zero.                                                                                                                |
@@ -114,6 +114,29 @@ pending/unknown responses, read failure, absent or invalid terminal proof and
 eventual valid proof with one approval/dispatch and unchanged submission identity.
 This cannot reconstruct an error already lost from the production record, or
 establish that an API rejection means no financial submission occurred.
+
+The Binance HTTP transport now retains the numeric HTTP status and an optional
+JSON signed-integer error code in a typed failure. The adapter appends only those
+numbers to its internally generated error message; external messages, response
+bodies, URLs and signed parameters are never copied into diagnostics. Strings,
+floats, objects, null and integers outside the signed 64-bit range are suppressed.
+Malformed successful responses retain HTTP 200 with `VENUE_RESPONSE_INVALID`.
+Non-JSON HTTP failures now follow their HTTP status classification; previously
+some could fail JSON parsing before that classification. The transport still
+makes one request and treats the diagnostic as advisory. A real engine-path
+fixture preserves the original error and submission through pending/unknown
+polls and a duplicate execute, with one approval and one dispatch.
+
+A fresh private audit found that the unresolved original request, saved input,
+account route, derived client identity, preview and approval binding agree.
+Another status-only observation retained `unknown`, one submission and one
+reservation, with zero new authorizations or financial POSTs. This rules out
+those local binding mismatches; it does not prove a transfer or no-effect result.
+The latest Ogi Spark (`glm-5.3-flash`) diagnostic review supported numeric-only
+errors and preserving unknown submissions. It raised strict parsing, bounded
+representations, endpoint attribution, crash ambiguity and symmetric receipt
+verification. Its answer cut off during the test matrix, so it is partial review
+evidence. No production operation was sent to Ogi.
 
 A fresh Ogi Spark onboarding rehearsal used nine successful compiled discovery
 commands and no private configuration. Its main/child Ed25519 enrollment,

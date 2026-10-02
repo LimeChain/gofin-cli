@@ -692,6 +692,13 @@ struct RouteAwareTransferTransport {
     client_id: std::sync::Mutex<Option<String>>,
 }
 
+struct DiagnosticTransferTransport {
+    inner: RouteAwareTransferTransport,
+    posts: std::sync::atomic::AtomicUsize,
+    history_reads: std::sync::atomic::AtomicUsize,
+    client_id: std::sync::Mutex<Option<String>>,
+}
+
 impl RouteAwareTransferTransport {
     fn new(direction: TransferDirection) -> Self {
         let (main_free, child_free) = match direction {
@@ -792,6 +799,45 @@ impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
             }
             endpoint => panic!("unexpected synthetic endpoint {endpoint:?}"),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
+    async fn request(
+        &self,
+        credential: &fin_binance::CredentialHandle,
+        request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        if request.endpoint == BinanceEndpoint::UniversalTransfer {
+            self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.client_id.lock().unwrap() = request.get("clientTranId").map(str::to_owned);
+            return Err(fin_binance::TransportError::HttpFailure {
+                status: 400,
+                binance_code: Some(-2010),
+                kind: fin_binance::HttpFailureKind::Rejected,
+            });
+        }
+        if request.endpoint == BinanceEndpoint::UniversalTransferHistory {
+            assert_ne!(
+                request.get("fromEmail").is_some(),
+                request.get("toEmail").is_some()
+            );
+            let read = self
+                .history_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if read == 0 {
+                return Ok(json!({"totalCount":1,"result":[{
+                    "tranId":123456789,
+                    "clientTranId":self.client_id.lock().unwrap().clone(),
+                    "asset":"ETH", "amount":"0.25", "fromAccountType":"SPOT",
+                    "toAccountType":"SPOT", "fromEmail":"child@example.invalid",
+                    "status":"PENDING", "createTimeStamp":1
+                }]}));
+            }
+            return Ok(json!({"totalCount":0,"result":[]}));
+        }
+        fin_binance::BinanceTransport::request(&self.inner, credential, request).await
     }
 }
 
@@ -1201,6 +1247,159 @@ async fn transfer_history_uses_persisted_single_route_selector_after_restart() {
                 .any(|(key, value)| key == "clientTranId" && value == &original.reference)
         );
     }
+}
+
+struct SyntheticApproval(std::sync::atomic::AtomicUsize);
+
+struct StaticHttpFailure(fin_binance::TransportError);
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for StaticHttpFailure {
+    async fn request(
+        &self,
+        _credential: &fin_binance::CredentialHandle,
+        _request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        Err(self.0.clone())
+    }
+}
+
+#[async_trait::async_trait]
+impl fin_domain::Authorizer for SyntheticApproval {
+    async fn authorize(
+        &self,
+        challenge: &fin_domain::AuthorizationChallenge,
+    ) -> fin_domain::Result<fin_domain::ApprovalAudit> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(fin_domain::ApprovalAudit {
+            mechanism: "test-only-synthetic-approval".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: fin_domain::now(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn http_diagnostics_preserve_public_fin_error_classification() {
+    use fin_domain::Adapter;
+    let cases = [
+        (
+            fin_binance::HttpFailureKind::Rejected,
+            400,
+            Some(-2010),
+            "VENUE_REQUEST_FAILED",
+        ),
+        (
+            fin_binance::HttpFailureKind::PermissionDenied,
+            403,
+            None,
+            "VENUE_PERMISSION",
+        ),
+        (
+            fin_binance::HttpFailureKind::RateLimited,
+            429,
+            None,
+            "VENUE_RATE_LIMIT",
+        ),
+        (
+            fin_binance::HttpFailureKind::InvalidResponse,
+            200,
+            None,
+            "VENUE_RESPONSE_INVALID",
+        ),
+    ];
+    for (kind, status, binance_code, expected_code) in cases {
+        let adapter = fin_binance::BinanceAdapter::new(
+            main_and_child_config(),
+            std::sync::Arc::new(StaticHttpFailure(
+                fin_binance::TransportError::HttpFailure {
+                    status,
+                    binance_code,
+                    kind,
+                },
+            )),
+            None,
+            None,
+        )
+        .unwrap();
+        let error = adapter
+            .prepare(
+                "binance.transfer",
+                &json!({
+                    "requestId":"classification-test", "authority":"main-fixture",
+                    "from":"child-fixture", "to":"main-fixture", "coin":"ETH",
+                    "amount":"0.25", "fromWallet":"SPOT", "toWallet":"SPOT"
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        assert!(error.message.contains(&format!("HTTP {status}")));
+        if let Some(code) = binance_code {
+            assert!(error.message.contains(&format!("Binance code {code}")));
+        }
+    }
+}
+
+#[tokio::test]
+async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_replay() {
+    let transport = std::sync::Arc::new(DiagnosticTransferTransport {
+        inner: RouteAwareTransferTransport::new(TransferDirection::ChildToMain),
+        posts: std::sync::atomic::AtomicUsize::new(0),
+        history_reads: std::sync::atomic::AtomicUsize::new(0),
+        client_id: std::sync::Mutex::new(None),
+    });
+    let adapter = std::sync::Arc::new(
+        fin_binance::BinanceAdapter::new(main_and_child_config(), transport.clone(), None, None)
+            .unwrap(),
+    );
+    let authorizer = std::sync::Arc::new(SyntheticApproval(std::sync::atomic::AtomicUsize::new(0)));
+    let engine = fin_engine::Engine::new(
+        fin_store::Store::in_memory().unwrap(),
+        vec![adapter],
+        authorizer.clone(),
+        fin_engine::EngineOptions::default(),
+    )
+    .unwrap();
+    let request = fin_domain::OperationRequest {
+        request_id: "synthetic-http-recovery".into(),
+        operation: "binance.transfer".into(),
+        input: json!({
+            "requestId":"synthetic-http-recovery", "authority":"main-fixture",
+            "from":"child-fixture", "to":"main-fixture", "coin":"ETH",
+            "amount":"0.25", "fromWallet":"SPOT", "toWallet":"SPOT"
+        }),
+        run_id: None,
+    };
+    let initial = engine.execute(request.clone()).await.unwrap();
+    assert_eq!(initial.status, fin_domain::Status::Unknown);
+    let original_submission = initial.submission.clone().unwrap();
+    let original_error = initial.error.clone().unwrap();
+    assert_eq!(original_error.code, "VENUE_REQUEST_FAILED");
+    assert_eq!(
+        original_error.message,
+        "Binance rejected the request; reconcile any persisted submission before retrying. [HTTP 400; Binance code -2010]"
+    );
+    assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(authorizer.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    for expected_status in [fin_domain::Status::Pending, fin_domain::Status::Unknown] {
+        let status = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(status.status, expected_status);
+        assert_eq!(status.error, Some(original_error.clone()));
+        assert_eq!(status.submission, Some(original_submission.clone()));
+        assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    let duplicate = engine.execute(request).await.unwrap();
+    assert_eq!(duplicate.id, initial.id);
+    assert_eq!(duplicate.status, fin_domain::Status::Unknown);
+    assert_eq!(duplicate.error, Some(original_error));
+    assert_eq!(duplicate.submission, Some(original_submission));
+    assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(authorizer.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 struct EmptyHistorySnapshotTransport {
@@ -1885,13 +2084,172 @@ async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_42
             request,
         )
         .await;
-        assert_eq!(result, Err(fin_binance::TransportError::RateLimited));
+        assert!(matches!(
+            result,
+            Err(fin_binance::TransportError::HttpFailure {
+                status: response_status,
+                binance_code: None,
+                kind: fin_binance::HttpFailureKind::RateLimited,
+            }) if response_status == status
+        ));
         let (request, retried) = server.await.unwrap();
         assert!(!retried, "HTTP {status} caused an automatic second request");
         assert!(
             String::from_utf8_lossy(&request)
                 .starts_with("POST /sapi/v1/sub-account/universalTransfer")
         );
+    }
+}
+
+#[tokio::test]
+async fn loopback_http_diagnostics_keep_only_validated_status_and_integer_code() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let cases = [
+        (
+            400u16,
+            r#"{"code":-2010,"msg":"body-secret"}"#,
+            Some(-2010),
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            200,
+            r#"{"code":-2010,"msg":"body-secret"}"#,
+            Some(-2010),
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":"-2010","msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":-2010.5,"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":-2010.0,"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":null,"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":{"value":-2010},"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":9223372036854775808,"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            r#"{"code":-9223372036854775809,"msg":"body-secret"}"#,
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            400,
+            "not-json body-secret",
+            None,
+            fin_binance::HttpFailureKind::Rejected,
+        ),
+        (
+            200,
+            "not-json body-secret",
+            None,
+            fin_binance::HttpFailureKind::InvalidResponse,
+        ),
+        (
+            401,
+            "body-secret",
+            None,
+            fin_binance::HttpFailureKind::PermissionDenied,
+        ),
+        (
+            403,
+            "body-secret",
+            None,
+            fin_binance::HttpFailureKind::PermissionDenied,
+        ),
+        (
+            418,
+            "body-secret",
+            None,
+            fin_binance::HttpFailureKind::RateLimited,
+        ),
+        (
+            429,
+            "body-secret",
+            None,
+            fin_binance::HttpFailureKind::RateLimited,
+        ),
+    ];
+    for (status, body, expected_code, expected_kind) in cases {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = body.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status} Synthetic\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let transport = fin_binance::BinanceHttpTransport::with_clock(
+            format!("http://{address}"),
+            std::sync::Arc::new(SyntheticSigner {
+                signed: std::sync::Mutex::new(Vec::new()),
+            }),
+            || 123,
+        )
+        .unwrap();
+        let result = fin_binance::BinanceTransport::request(
+            &transport,
+            &fin_binance::CredentialHandle::new("test-only-http-diagnostics").unwrap(),
+            BinanceRequest::new(BinanceEndpoint::ApiRestrictions),
+        )
+        .await;
+        let Err(failure) = result else {
+            panic!("expected classified HTTP failure, got {result:?}");
+        };
+        assert!(!format!("{failure:?}").contains("body-secret"));
+        let fin_binance::TransportError::HttpFailure {
+            status: actual_status,
+            binance_code,
+            kind,
+        } = failure
+        else {
+            panic!("expected classified HTTP failure, got {failure:?}");
+        };
+        assert_eq!(actual_status, status);
+        assert_eq!(binance_code, expected_code);
+        assert_eq!(kind, expected_kind);
+        server.await.unwrap();
     }
 }
 

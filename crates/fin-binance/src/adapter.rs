@@ -296,14 +296,30 @@ impl BinanceAdapter {
         request
             .validate()
             .map_err(|e| error("INVALID_ENDPOINT_REQUEST", stage, e.to_string()))?;
-        self.transport.request(&account.credential, request).await.map_err(|e| match e {
-            TransportError::Unavailable => error("VENUE_UNAVAILABLE", stage, "Binance could not be reached."),
-            TransportError::RateLimited => error("VENUE_RATE_LIMIT", stage, "Binance rate limited the request."),
-            TransportError::PermissionDenied => error("VENUE_PERMISSION", stage, "The selected Binance credential was denied."),
-            TransportError::InvalidResponse => error("VENUE_RESPONSE_INVALID", stage, "Binance returned an invalid response; reconcile any persisted submission before retrying."),
-            TransportError::Timeout => error("VENUE_TIMEOUT", stage, "Binance timed out; reconcile any persisted submission before retrying."),
-            TransportError::Rejected => error("VENUE_REQUEST_FAILED", stage, "Binance rejected the request; reconcile any persisted submission before retrying."),
-        })
+        self.transport
+            .request(&account.credential, request)
+            .await
+            .map_err(|e| match e {
+                TransportError::Unavailable => {
+                    error("VENUE_UNAVAILABLE", stage, "Binance could not be reached.")
+                }
+                TransportError::RateLimited => {
+                    error("VENUE_RATE_LIMIT", stage, "Binance rate limited the request.")
+                }
+                TransportError::PermissionDenied => error(
+                    "VENUE_PERMISSION",
+                    stage,
+                    "The selected Binance credential was denied.",
+                ),
+                TransportError::InvalidResponse => error("VENUE_RESPONSE_INVALID", stage, "Binance returned an invalid response; reconcile any persisted submission before retrying."),
+                TransportError::Timeout => error("VENUE_TIMEOUT", stage, "Binance timed out; reconcile any persisted submission before retrying."),
+                TransportError::Rejected => error("VENUE_REQUEST_FAILED", stage, "Binance rejected the request; reconcile any persisted submission before retrying."),
+                TransportError::HttpFailure {
+                    status,
+                    binance_code,
+                    kind,
+                } => http_failure_error(stage, status, binance_code, kind),
+            })
     }
 
     async fn permissions(&self, account: &BinanceAccount) -> Result<ApiRestrictions, FinError> {
@@ -1516,6 +1532,45 @@ fn error(code: &str, stage: &str, message: impl Into<String>) -> FinError {
         "Inspect operation status and reconcile the original request before starting another financial action.",
     )
 }
+
+fn http_failure_error(
+    stage: &str,
+    status: u16,
+    binance_code: Option<i64>,
+    kind: HttpFailureKind,
+) -> FinError {
+    let mut error = match kind {
+        HttpFailureKind::RateLimited => error(
+            "VENUE_RATE_LIMIT",
+            stage,
+            "Binance rate limited the request.",
+        ),
+        HttpFailureKind::PermissionDenied => error(
+            "VENUE_PERMISSION",
+            stage,
+            "The selected Binance credential was denied.",
+        ),
+        HttpFailureKind::Rejected => error(
+            "VENUE_REQUEST_FAILED",
+            stage,
+            "Binance rejected the request; reconcile any persisted submission before retrying.",
+        ),
+        HttpFailureKind::InvalidResponse => error(
+            "VENUE_RESPONSE_INVALID",
+            stage,
+            "Binance returned an invalid response; reconcile any persisted submission before retrying.",
+        ),
+    };
+    // These values are parsed from the protocol status and a JSON signed
+    // integer only. Never attach upstream messages or response contents.
+    error.message.push_str(&format!(" [HTTP {status}"));
+    if let Some(code) = binance_code {
+        error.message.push_str(&format!("; Binance code {code}"));
+    }
+    error.message.push(']');
+    error
+}
+
 fn domain_error(error: impl std::fmt::Display) -> FinError {
     FinError::new(
         "BINANCE_VALIDATION",

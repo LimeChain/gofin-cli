@@ -388,6 +388,19 @@ pub enum TransportError {
     InvalidResponse,
     Timeout,
     Rejected,
+    HttpFailure {
+        status: u16,
+        binance_code: Option<i64>,
+        kind: HttpFailureKind,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpFailureKind {
+    RateLimited,
+    PermissionDenied,
+    Rejected,
+    InvalidResponse,
 }
 
 impl fmt::Display for TransportError {
@@ -399,6 +412,12 @@ impl fmt::Display for TransportError {
             Self::InvalidResponse => "Binance returned an invalid response",
             Self::Timeout => "Binance request timed out",
             Self::Rejected => "Binance rejected the request",
+            Self::HttpFailure { kind, .. } => match kind {
+                HttpFailureKind::RateLimited => "Binance rate limited the request",
+                HttpFailureKind::PermissionDenied => "Binance request permission denied",
+                HttpFailureKind::Rejected => "Binance rejected the request",
+                HttpFailureKind::InvalidResponse => "Binance returned an invalid response",
+            },
         })
     }
 }
@@ -1122,24 +1141,38 @@ impl BinanceTransport for BinanceHttpTransport {
                 }
             })?;
         let status = response.status();
-        if status.as_u16() == 429 || status.as_u16() == 418 {
-            return Err(TransportError::RateLimited);
-        }
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|_| TransportError::InvalidResponse)?;
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(TransportError::PermissionDenied);
-        }
-        if !status.is_success()
-            || value
-                .get("code")
-                .and_then(Value::as_i64)
-                .is_some_and(|code| code < 0)
+        let status_code = status.as_u16();
+        // Retain only Binance's numeric `code` in failure diagnostics; never
+        // retain other response fields or body text in the error.
+        // A malformed/non-JSON body still receives the HTTP classification.
+        let body = response.bytes().await.ok();
+        let parsed = body
+            .as_deref()
+            .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+        let binance_code = parsed
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_i64);
+        let failure_kind = if status_code == 418 || status_code == 429 {
+            Some(HttpFailureKind::RateLimited)
+        } else if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
         {
-            return Err(TransportError::Rejected);
+            Some(HttpFailureKind::PermissionDenied)
+        } else if !status.is_success() || binance_code.is_some_and(|code| code < 0) {
+            Some(HttpFailureKind::Rejected)
+        } else if parsed.is_none() {
+            Some(HttpFailureKind::InvalidResponse)
+        } else {
+            None
+        };
+        if let Some(kind) = failure_kind {
+            return Err(TransportError::HttpFailure {
+                status: status_code,
+                binance_code,
+                kind,
+            });
         }
-        Ok(value)
+        parsed.ok_or(TransportError::InvalidResponse)
     }
 }
