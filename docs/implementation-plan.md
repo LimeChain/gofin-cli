@@ -23,6 +23,13 @@ Homebrew directories or edit user shell profiles. Setup reports the current-shel
 PATH export as well as the new-Terminal option. Cached sudo credentials are
 cleared separately with `sudo -K` before agent credential-isolation checks.
 
+The public CLI explains administrator authentication before replacing itself
+with macOS sudo: an action-specific reason, the Mac login password, hidden
+typing, cancellation and the later independent Touch ID approval. Shared
+discovery constants supply the password explanation and labelled sudo prompt.
+Only setup and connection add/update/remove use sudo; routine broker requests
+do not. A failed explanation write/flush must prevent the privileged launch.
+
 Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The subsequent implementation goal explicitly authorizes a temporary private lead-owned non-biometric verification harness; the shipped entrypoint still requires real per-write Touch ID and exposes no authorization-disable switch.
 
 Binance's implicit master destination is a role, not an absent receipt identity.

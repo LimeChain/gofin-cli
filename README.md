@@ -47,6 +47,12 @@ has not been published. See [the bundle instructions](packaging/README.md).
 From the repository, `python3 scripts/test-rust-macos-installer.py` runs isolated
 installer fixtures without administrator access, installation, or credentials.
 
+Setup explains the administrator request before macOS prompts for your **Mac
+login password**. Enter it in your own Terminal; characters stay hidden. Fin
+then requests separate Touch ID approval for its initial configuration. Sudo is
+used for setup and connection add/update/remove; everyday Fin commands use the
+background service without sudo, and financial writes require fresh Touch ID.
+
 The human enrolls connections through the installed CLI:
 
 ```sh

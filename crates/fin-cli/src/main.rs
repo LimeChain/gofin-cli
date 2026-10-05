@@ -64,6 +64,7 @@ enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
+    /// Install protected service/storage; macOS may request your Mac login password.
     Setup,
     Daemon {
         #[command(subcommand)]
@@ -527,78 +528,123 @@ fn launch_human_privileged_with_terminal(
     }
     #[cfg(target_os = "macos")]
     {
-        use std::{os::unix::process::CommandExt, process::Command};
-        let mut command = Command::new("/usr/bin/sudo");
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .arg("-k")
-            .arg("--");
-        match action {
-            PrivilegedAction::Setup => {
-                let script = std::env::current_exe()
-                    .ok()
-                    .and_then(|path| path.parent().map(|parent| parent.join("install.sh")))
-                    .filter(|path| path.is_absolute())
-                    .ok_or_else(|| FinError::new(
-                        "INSTALLER_MISSING",
-                        "setup",
-                        "The bundled Fin installer could not be located beside this executable.",
-                        "Run setup from the reviewed installation bundle.",
-                    ))?;
-                let uid = unsafe { libc::getuid() };
-                let gid = unsafe { libc::getgid() };
-                if uid < 501 {
-                    return Err(FinError::new(
-                        "HUMAN_ACCOUNT_REQUIRED",
-                        "setup",
-                        "Fin setup requires a standard human account.",
-                        "Run setup from your own macOS Terminal account.",
-                    ));
-                }
-                command
-                    .arg("/bin/bash")
-                    .arg(script)
-                    .arg("--approver-uid")
-                    .arg(uid.to_string())
-                    .arg("--approver-gid")
-                    .arg(gid.to_string());
-            }
-            PrivilegedAction::Add(args) => {
-                command
-                    .arg(BROKER_PATH)
-                    .args(["enrollment", "add", "--request"])
-                    .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
-            }
-            PrivilegedAction::Update(args) => {
-                command
-                    .arg(BROKER_PATH)
-                    .args(["enrollment", "update", "--request"])
-                    .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
-            }
-            PrivilegedAction::Remove(args) => {
-                command
-                    .arg(BROKER_PATH)
-                    .args(["enrollment", "remove", "--request"])
-                    .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
-            }
-        }
-        let error = command.exec();
-        Err(FinError::new(
-            "PRIVILEGED_EXEC_FAILED",
-            "enrollment",
-            "The fixed protected Fin command could not be started.",
-            "Check the reviewed installation and run the command again in Terminal.",
-        )
-        .into_with_detail(error))
+        use std::os::unix::process::CommandExt;
+        let reason = administrator_authentication_reason(&action);
+        let mut command = prepare_privileged_command(action)?;
+        exec_after_administrator_notice(reason, &mut std::io::stderr().lock(), || command.exec())
     }
 }
 
 #[cfg(target_os = "macos")]
+fn prepare_privileged_command(action: PrivilegedAction) -> Result<std::process::Command, FinError> {
+    let mut command = std::process::Command::new("/usr/bin/sudo");
+    command.env_clear().env("PATH", "/usr/bin:/bin").args([
+        "-k",
+        "-p",
+        fin_discovery::MACOS_ADMIN_PASSWORD_PROMPT,
+        "--",
+    ]);
+    match action {
+        PrivilegedAction::Setup => {
+            let script = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("install.sh")))
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| {
+                    FinError::new(
+                        "INSTALLER_MISSING",
+                        "setup",
+                        "The bundled Fin installer could not be located beside this executable.",
+                        "Run setup from the reviewed installation bundle.",
+                    )
+                })?;
+            let uid = unsafe { libc::getuid() };
+            let gid = unsafe { libc::getgid() };
+            if uid < 501 {
+                return Err(FinError::new(
+                    "HUMAN_ACCOUNT_REQUIRED",
+                    "setup",
+                    "Fin setup requires a standard human account.",
+                    "Run setup from your own macOS Terminal account.",
+                ));
+            }
+            command
+                .arg("/bin/bash")
+                .arg(script)
+                .arg("--approver-uid")
+                .arg(uid.to_string())
+                .arg("--approver-gid")
+                .arg(gid.to_string());
+        }
+        PrivilegedAction::Add(args) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "add", "--request"])
+                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+        }
+        PrivilegedAction::Update(args) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "update", "--request"])
+                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+        }
+        PrivilegedAction::Remove(args) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "remove", "--request"])
+                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+        }
+    }
+    Ok(command)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static str {
+    match action {
+        PrivilegedAction::Setup => {
+            "Fin setup needs administrator access to install the protected service and credential storage. Setup then requests a separate Touch ID configuration approval to initialize Fin. No funds will move."
+        }
+        PrivilegedAction::Add(_) => {
+            "Fin needs administrator access to add a connection in protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before saving the connection; this does not approve future financial writes."
+        }
+        PrivilegedAction::Update(_) => {
+            "Fin needs administrator access to update a connection in protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before saving the replacement; this does not approve future financial writes."
+        }
+        PrivilegedAction::Remove(_) => {
+            "Fin needs administrator access to remove a connection from protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before removing the connection; this does not approve future financial writes."
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn exec_after_administrator_notice(
+    reason: &str,
+    output: &mut impl std::io::Write,
+    exec: impl FnOnce() -> std::io::Error,
+) -> Result<Value, FinError> {
+    writeln!(output, "{reason}\nOnly setup and connection add/update/remove request administrator access. Reads, previews, status, service control, and financial writes run without sudo; each financial write requires fresh Touch ID.\n{}", fin_discovery::MACOS_ADMIN_PASSWORD_HELP)
+        .and_then(|_| output.flush())
+        .map_err(|_| FinError::new(
+            "ADMINISTRATOR_NOTICE_UNAVAILABLE",
+            "enrollment",
+            "Fin could not display the administrator authentication explanation.",
+            "Check terminal output and run the command again in your own Terminal.",
+        ))?;
+    let error = exec();
+    Err(FinError::new(
+        "PRIVILEGED_EXEC_FAILED",
+        "enrollment",
+        "The fixed protected Fin command could not be started.",
+        "Check the reviewed installation and run the command again in Terminal.",
+    )
+    .into_with_detail(error))
+}
+
+#[cfg(any(target_os = "macos", test))]
 trait ErrorWithoutEcho {
     fn into_with_detail(self, error: std::io::Error) -> FinError;
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 impl ErrorWithoutEcho for FinError {
     fn into_with_detail(mut self, _error: std::io::Error) -> FinError {
         // Deliberately suppress OS error text because exec diagnostics can
@@ -796,6 +842,159 @@ mod tests {
         let error =
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, false).unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    struct NoticeWriter<'a> {
+        bytes: Vec<u8>,
+        flushes: &'a std::cell::Cell<usize>,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl std::io::Write for NoticeWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                return Err(std::io::Error::other("synthetic notice write failure"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes.set(self.flushes.get() + 1);
+            if self.fail_flush {
+                return Err(std::io::Error::other("synthetic notice flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn administrator_notice_is_flushed_before_exec_for_every_privileged_action() {
+        let args = || {
+            serde_json::from_value(json!({
+            "provider":"binance", "name":"synthetic-main", "role":"main", "credential_type":"hmac"
+        })).unwrap()
+        };
+        let remove = serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
+        for (action, expected_reason) in [
+            (
+                PrivilegedAction::Setup,
+                "install the protected service and credential storage",
+            ),
+            (
+                PrivilegedAction::Add(args()),
+                "add a connection in protected connection storage",
+            ),
+            (
+                PrivilegedAction::Update(args()),
+                "update a connection in protected connection storage",
+            ),
+            (
+                PrivilegedAction::Remove(remove),
+                "remove a connection from protected connection storage",
+            ),
+        ] {
+            let flushes = std::cell::Cell::new(0);
+            let mut output = NoticeWriter {
+                bytes: Vec::new(),
+                flushes: &flushes,
+                fail_write: false,
+                fail_flush: false,
+            };
+            let reason = administrator_authentication_reason(&action);
+            let error = exec_after_administrator_notice(reason, &mut output, || {
+                assert_eq!(
+                    flushes.get(),
+                    1,
+                    "explanation must be flushed before execution"
+                );
+                std::io::Error::other("synthetic exec failure")
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "PRIVILEGED_EXEC_FAILED");
+            let notice = String::from_utf8(output.bytes).unwrap();
+            assert!(notice.contains(expected_reason));
+            assert!(notice.contains("No funds will move"));
+            assert!(
+                notice.contains("separate") && notice.contains("Touch ID configuration approval")
+            );
+            assert!(notice.contains("financial writes run without sudo"));
+            if matches!(action, PrivilegedAction::Setup) {
+                assert!(notice.contains("Setup then requests a separate Touch ID configuration approval to initialize Fin"));
+            }
+            assert!(notice.contains(fin_discovery::MACOS_ADMIN_PASSWORD_HELP));
+            assert!(!notice.contains("synthetic-main"));
+        }
+    }
+
+    #[test]
+    fn administrator_notice_output_failure_prevents_exec() {
+        for (fail_write, fail_flush) in [(true, false), (false, true)] {
+            let flushes = std::cell::Cell::new(0);
+            let executed = std::cell::Cell::new(false);
+            let mut output = NoticeWriter {
+                bytes: Vec::new(),
+                flushes: &flushes,
+                fail_write,
+                fail_flush,
+            };
+            let error = exec_after_administrator_notice(
+                administrator_authentication_reason(&PrivilegedAction::Setup),
+                &mut output,
+                || {
+                    executed.set(true);
+                    std::io::Error::other("synthetic exec failure")
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "ADMINISTRATOR_NOTICE_UNAVAILABLE");
+            assert!(!executed.get());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn privileged_commands_keep_fixed_sudo_prompt_executable_and_public_metadata() {
+        let args = || {
+            serde_json::from_value(json!({
+            "provider":"binance", "name":"synthetic-main", "role":"main", "credential_type":"hmac"
+        })).unwrap()
+        };
+        let remove = serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
+        for (action, verb) in [
+            (PrivilegedAction::Add(args()), "add"),
+            (PrivilegedAction::Update(args()), "update"),
+            (PrivilegedAction::Remove(remove), "remove"),
+        ] {
+            let command = prepare_privileged_command(action).unwrap();
+            assert_eq!(command.get_program(), "/usr/bin/sudo");
+            let arguments = command
+                .get_args()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &arguments[..8],
+                &[
+                    "-k",
+                    "-p",
+                    fin_discovery::MACOS_ADMIN_PASSWORD_PROMPT,
+                    "--",
+                    BROKER_PATH,
+                    "enrollment",
+                    verb,
+                    "--request"
+                ]
+            );
+            assert_eq!(arguments.len(), 9);
+            let request: Value = serde_json::from_str(arguments[8]).unwrap();
+            assert_eq!(request["name"], "synthetic-main");
+            let environment = command
+                .get_envs()
+                .map(|(name, value)| (name.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(environment, vec![("PATH", "/usr/bin:/bin")]);
+        }
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -11,7 +11,7 @@ Setup and subsequent connection management are terminal-driven. Do not require c
 ## Installation and repeat use
 
 1. The human runs the published download/bootstrap command in their terminal. The bootstrap selects a compiled release and invokes its bundled setup; it does not implement a second onboarding system.
-2. `fin setup` explains the CLI, protected execution service, credential storage, and authorization behavior, then requests OS administrator permission for protected installation. Administrator permission may require a password even on a Touch ID Mac.
+2. `fin setup` explains the CLI, protected execution service, credential storage, and authorization behavior before requesting OS administrator permission. It identifies the password as the human's Mac login password, explains hidden typing and Ctrl-C cancellation, and says that macOS checks the password directly. The sudo prompt identifies the authenticating account. Administrator permission may require a password even on a Touch ID Mac; the later configuration Touch ID approval is separate.
 3. Setup installs/registers the trusted service and helper and establishes the approver identity and protected paths. It must not leave agent-accessible cached elevation or mutable execution code.
 4. The human can enroll supported connections now or later. Enrollment performs read-only validation and creates no financial movement or spending authority.
 5. Setup verifies the service, relevant permissions, and native authorization availability. An optional real authentication check must be clearly labelled as a setup check with no financial operation.
@@ -31,6 +31,13 @@ human account, across terminal sessions. This prevents existing cached elevation
 from undermining the agent credential-denial test. It grants no authorization
 and does not stop Fin or alter per-write Touch ID. It cannot revoke an already
 root shell or override passwordless sudo policy; check the actual agent's access.
+
+Sudo is used only for setup and connection add/update/remove. Those commands
+explain why they need administrator access before the OS prompt. Reads, previews,
+status, service lifecycle and financial commands use the protected background
+service without sudo; each financial write independently requires fresh Touch ID.
+The pre-prompt explanation is flushed before handing control to macOS. If it
+cannot be displayed, Fin refuses to start administrator authentication.
 
 Implemented public command families (inspect their help for required arguments):
 

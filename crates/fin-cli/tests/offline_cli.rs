@@ -135,8 +135,50 @@ fn unknown_secret_flags_and_invalid_json_never_echo_values() {
 
 #[test]
 fn enrollment_requires_human_terminal_before_installer_or_privileged_exec() {
-    let output = run(&["setup"]);
-    assert!(!output.status.success());
-    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+    for arguments in [
+        vec!["setup", "--json"],
+        vec![
+            "connections",
+            "add",
+            "--provider",
+            "binance",
+            "--name",
+            "synthetic-main",
+            "--role",
+            "main",
+            "--credential-type",
+            "hmac",
+            "--json",
+        ],
+        vec![
+            "connections",
+            "update",
+            "--provider",
+            "binance",
+            "--name",
+            "synthetic-main",
+            "--role",
+            "main",
+            "--credential-type",
+            "hmac",
+            "--json",
+        ],
+        vec![
+            "connections",
+            "remove",
+            "--name",
+            "synthetic-main",
+            "--json",
+        ],
+    ] {
+        let output = run(&arguments);
+        assert!(!output.status.success());
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+        assert!(
+            output.stderr.is_empty(),
+            "noninteractive invocation must not display an administrator notice or password prompt"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Mac login password"));
+    }
 }

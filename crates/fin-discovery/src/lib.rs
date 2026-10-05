@@ -10,6 +10,10 @@ use serde_json::{Value, json};
 
 pub mod enrollment_contract;
 
+/// Shared human-facing explanation for macOS administrator authentication.
+pub const MACOS_ADMIN_PASSWORD_PROMPT: &str = "Mac login password for %p: ";
+pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS will request administrator authentication. If a password is requested, enter the password you use to log in to this Mac; characters will not appear as you type. macOS checks this password; Fin does not read or store it. Press Ctrl-C to cancel.";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[value(rename_all = "snake_case")]
@@ -238,8 +242,17 @@ fn definition<T: JsonSchema>(
 }
 
 pub fn operation_definitions() -> Vec<Definition> {
+    let administrator_authentication = json!({
+        "provider":"macOS sudo",
+        "explanation":MACOS_ADMIN_PASSWORD_HELP,
+        "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
+        "scope":"Setup and connection add/update/remove only. Everyday commands use the protected background service without sudo.",
+        "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
+        "financial_approval":"Every financial write requires its own fresh Touch ID approval."
+    });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
+        "requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),
         "secret_values_accepted_in_arguments":false,"secret_values_accepted_in_json":false,
         "human_action":"Run this command yourself in a new human-owned Terminal session. Never enter keys through an agent tool or chat.",
         "platform":"macOS protected enrollment; unavailable providers fail closed",
@@ -390,7 +403,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"financial_movement":false,"secret_input":"none","installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
         ),
         definition::<AddConnectionArgs>(
             "connections.add",
@@ -414,7 +427,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"name":"main"}),
-            json!({"requires_human_terminal":true,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"fin connections list --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"fin connections list --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",

@@ -18,7 +18,10 @@ non-biometric verification does not establish this boundary.
    credential category, and direct secret entry to the human's own Terminal.
    Record its actual discovery inputs and advice; incorrect commands fail this
    case. A text-mediated Ogi rehearsal is separate from installed-agent evidence.
-3. In a fresh macOS Terminal window, the human runs `./fin setup`. Administrator
+3. In a fresh macOS Terminal window, the human runs `./fin setup`. Before any OS
+   authentication prompt, Fin must explain why administrator access is needed,
+   identify the Mac login password and hidden typing, and explain cancellation.
+   The password prompt identifies the authenticating account. Administrator
    authorization and configuration Touch ID are distinct. Cancel once: no active
    configuration should result. Retrying must preserve any uncertain committed
    state rather than deleting a journal. Approve the reviewed initialization and
@@ -52,6 +55,8 @@ reports an existing installation or uncertain state; do not delete its journal.
 `sudo -K` clears cached sudo credentials across all your terminal sessions. It
 does not stop Fin or remove its enrolled connections. Clearing this cache is
 separate from the fresh Touch ID required by Fin for each write.
+Sudo is needed for setup and connection add/update/remove. Ordinary Fin commands
+use the background service without sudo; financial writes request Touch ID.
 
 ## Private connection enrollment
 

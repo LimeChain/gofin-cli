@@ -23,6 +23,18 @@ uses an ignored, lead-owned harness and does not establish credential isolation.
 
 ## Evidence recorded so far
 
+The subsequent 5 October human retry exposed an unexplained OS password prompt:
+the CLI handed control to sudo before the installer printed its explanation.
+Setup and connection changes now flush an action-specific explanation before
+that handoff, use a labelled Mac login password prompt, and distinguish
+administrator authentication from the later Touch ID approval. A failed notice
+write/flush prevents sudo execution; noninteractive commands remain prompt-free.
+Twelve CLI unit tests, four offline CLI tests, six discovery tests, scoped strict
+Clippy and formatting checks passed. These checks launch no real sudo and
+collect no passwords. The real human retry remains pending. Normal reads,
+previews, status, service lifecycle and financial commands continue through the
+broker without sudo; financial writes still require fresh Touch ID.
+
 The 5 October installation follow-up registers the protected runtime through
 macOS `/etc/paths.d/fin`, making `fin` available in new Terminal login shells even
 when Homebrew owns `/usr/local/bin`. Setup prints an explicit PATH export for

@@ -4,6 +4,17 @@ Review this bundle and its checksum manifest before running `./fin setup` yourse
 in a fresh macOS Terminal window. Setup requests fresh administrator authorization
 and native Touch ID to initialize the protected configuration. It moves no funds.
 
+Before the administrator prompt, Fin explains the installation and identifies
+the password as **your Mac login password**. The prompt comes from macOS `sudo`,
+which checks the password directly; Fin does not read or store it. Characters do
+not appear as you type. Press Ctrl-C to cancel. A separate Touch ID prompt then
+approves the initial Fin configuration.
+
+Administrator authentication is used for setup and connection add/update/remove.
+Everyday reads, previews, status, service commands and financial operations use
+the protected background service without sudo. Each financial write still needs
+its own fresh Touch ID approval.
+
 The bundle contains `fin`, the internal `fin-broker`, the internal native
 `fin-touch-id` helper, and `install.sh`. `BUILDINFO` records the source commit,
 whether that checkout had modifications, and the target architecture; its checksum
