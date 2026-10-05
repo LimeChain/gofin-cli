@@ -1,6 +1,6 @@
 # Rust foundation verification — in progress
 
-Updated 2 October 2026. This report covers the Rust foundation source and its observed
+Updated 5 October 2026. This report covers the Rust foundation source and its observed
 verification. It is not a completed acceptance report. The
 [TypeScript report](foundation.md) is historical evidence; none of its live or
 fork results establish Rust acceptance.
@@ -23,18 +23,18 @@ uses an ignored, lead-owned harness and does not establish credential isolation.
 
 ## Evidence recorded so far
 
-| Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust workspace                     | Code commit `9930ef3`: `cargo test --locked --workspace` passed 304 tests, zero failed, one explicitly ignored fork test across 34 groups. Strict all-target workspace Clippy, formatting and diff checks passed. These include the signed POST wire regression and four campaign accounting/dispatch regressions.                                                                                                                                                                                                                                 |
-| Shared execution ledger            | 108 engine library tests passed, including paired-flow validation, interval replay, selected-origin fees, source-index refunds, frozen cost prices, snapshot refusal, recovery, duplicate handling and retention of uncertain submission errors. Four separate verification-campaign tests cover retained-risk charging, conservative rounding, cross-attempt locking and concurrent single-dispatch claims.                                                                                                                                       |
-| Broker and Binance                 | 26 broker library tests passed, including independent USD, zero-pricing, safe HTTP diagnostics and original-asset replan regressions. Binance passed 44 endpoint/valuation tests; Ethereum passed 36 adapter tests. Separate ignored-harness fixture results are described below. These are fixture results, not production funding.                                                                                                                                                                                                               |
-| Ethereum and EVM                   | Synthetic adapter and EVM tests passed in the workspace suite. RPC fixtures cover bounded read retries and prohibit transport retry of writes.                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Production Binance                 | The original five-USDC request remains `unknown`. After explicit owner authorization accepting that possible loss, one distinct 4.9-USDC attempt made one non-biometric approval and one POST, receiving HTTP 400 / Binance `-1022`. Its diagnostic survives status-only recovery, but it also remains `unknown` without terminal effects. Independent reads show unchanged numeric USDC balances and no matching history row. Neither run passed cleanup. A separate 0.05-USDC probe is prepared read-only with financial authorization disabled. |
-| Production Ethereum reads/planning | Read-only mainnet snapshot and bounded route planning were exercised. Both unused plans closed with independently unchanged financial baselines and complete final observations; the thirteenth full plan passed before closure. Ethereum production envelope signatures, broadcasts and financial authorizations remain zero.                                                                                                                                                                                                                     |
-| Fixed mainnet fork                 | Attempt 19 passed 22 synthetic writes and 22 same-request duplicates after the final valuation guards. Independent cash, positions, debt, and authority cleanup matched earlier successful runs at the same block, hash, gas, and allocation. Attempts 14 and 15 failed cleanup and remain failed evidence.                                                                                                                                                                                                                                        |
-| Remote CI                          | [Run 37055531973](https://github.com/LimeChain/fin-cli/actions/runs/37055531973) passed for code commit `9930ef3`: macOS 304 and Ubuntu 305 default Rust tests, 328 historical TS tests, formatting, strict Clippy, release builds and native compilation. All three jobs reached terminal success. Earlier `659ad7f`, `8c7c6a1` and `ccaf570` CI evidence remains retained separately.                                                                                                                                                            |
-| macOS helper/package               | Clean-source arm64 bundle for `9930ef3` at `work/release-9930ef3.LYWLlL/bundle` passed six SHA-256 checks and strict ad-hoc hardened-signature verification for all three binaries. Compiled capability, connection-schema and explanation discovery succeeded. The non-authorizing native probe reported Touch ID available (`approvalRequested=false`); installation, human input, credential isolation, and actual Touch ID authorization remain unverified.                                                                                    |
-| Historical TS regression           | 328 tests, type checking, formatting, and build passed. TS evidence does not establish Rust behavior.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Rust workspace                     | Code commit `c78f7c8`: `cargo test --locked --workspace` passed 307 tests, zero failed, one explicitly ignored fork test across 34 groups. Strict all-target workspace Clippy, formatting and diff checks passed. These include signed POST wire verification, four campaign accounting/dispatch regressions and the default-master receipt recovery cases.                                                                                                                                                                                                                                                                                                                                                              |
+| Shared execution ledger            | 108 engine library tests passed, including paired-flow validation, interval replay, selected-origin fees, source-index refunds, frozen cost prices, snapshot refusal, recovery, duplicate handling and retention of uncertain submission errors. Four separate verification-campaign tests cover retained-risk charging, conservative rounding, cross-attempt locking and concurrent single-dispatch claims.                                                                                                                                                                                                                                                                                                             |
+| Broker and Binance                 | 26 broker library tests passed, including independent USD, zero-pricing, safe HTTP diagnostics and original-asset replan regressions. Binance passed 47 endpoint/valuation tests; Ethereum passed 36 adapter tests. All 12 broker funding round-trip tests passed with realistic master email and child-counterparty history. Separate ignored-harness fixture results are described below. These are fixture results, not production funding.                                                                                                                                                                                                                                                                           |
+| Ethereum and EVM                   | Synthetic adapter and EVM tests passed in the workspace suite. RPC fixtures cover bounded read retries and prohibit transport retry of writes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Production Binance                 | The original five-USDC request remains `unknown`. After explicit owner authorization accepting that possible loss, one distinct 4.9-USDC attempt made one non-biometric approval and one POST, receiving HTTP 400 / Binance `-1022`. Its diagnostic survives status-only recovery, but it also remains `unknown` without terminal effects. Independent reads show unchanged numeric USDC balances and no matching history row. Neither run passed cleanup. A separately authorized 0.05-USDC probe subsequently completed its outward and exact return writes, passed full restoration with zero fees, and passed two original-request duplicate checks without additional POSTs. The older campaign remains incomplete. |
+| Production Ethereum reads/planning | Read-only mainnet snapshot and bounded route planning were exercised. Both unused plans closed with independently unchanged financial baselines and complete final observations; the thirteenth full plan passed before closure. Ethereum production envelope signatures, broadcasts and financial authorizations remain zero.                                                                                                                                                                                                                                                                                                                                                                                           |
+| Fixed mainnet fork                 | Attempt 19 passed 22 synthetic writes and 22 same-request duplicates after the final valuation guards. Independent cash, positions, debt, and authority cleanup matched earlier successful runs at the same block, hash, gas, and allocation. Attempts 14 and 15 failed cleanup and remain failed evidence.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Remote CI                          | [Run 37300988784](https://github.com/LimeChain/fin-cli/actions/runs/37300988784) passed for code commit `c78f7c8`: macOS 307 and Ubuntu 308 default Rust tests, 328 historical TS tests, formatting, strict Clippy, release builds and native compilation. All three jobs reached terminal success. Earlier `9930ef3`, `659ad7f`, `8c7c6a1` and `ccaf570` CI evidence remains retained separately.                                                                                                                                                                                                                                                                                                                       |
+| macOS helper/package               | Clean-source arm64 bundle for `c78f7c8` at `work/release-c78f7c8.k8zRA8/bundle` passed six SHA-256 checks and strict ad-hoc hardened-signature verification for all three binaries. Compiled capability, connection-schema and explanation discovery succeeded. The non-authorizing native probe reported Touch ID available (`approvalRequested=false`); installation, human input, credential isolation, and actual Touch ID authorization remain unverified.                                                                                                                                                                                                                                                          |
+| Historical TS regression           | 328 tests, type checking, formatting, and build passed. TS evidence does not establish Rust behavior.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 Earlier ignored private-harness synthetic checks passed 18 Ethereum-driver and 38
 Binance-driver test invocations, including repeated shared-helper fixtures.
@@ -111,7 +111,7 @@ in the query for both GET and POST, retaining POST with an empty body. Binance
 permits that placement and shows it in its Ed25519 example. The old implementation
 already sent its signed bytes directly in the form body; it did not perform a
 second encoding pass. Query placement avoids depending on venue body parsing.
-The inference that this addresses the observed rejection remains unverified live.
+At that stage the inference that this addressed the observed rejection was unverified live. The later query-form round trip below establishes that this format works for its exact route; Binance has not exposed the precise cause of the earlier rejection.
 An isolated loopback regression signs with public RFC 8032 Ed25519 fixture material,
 captures the raw POST query, decodes its Base64 signature and verifies it over
 those exact bytes. Email characters `@`, `+`, `&`, `%`, Unicode and signature
@@ -133,8 +133,8 @@ Default tests load no production secrets or accounts.
 A separate 0.05-USDC child-to-main probe and exact return passed read-only
 preflight and preparation. The full prior 9.9 USDC remains charged; its conservative
 combined Binance bound was $9.949602, inside the original limits. The pending
-probe has zero operations, submissions and financial approvals; its private
-financial-authorization flag remains false. A further live attempt requires
+probe initially had zero operations, submissions and financial approvals; its private
+financial-authorization flag remained false until the subsequent explicit owner approval. A further live attempt requires
 explicit human authorization, fresh bounds and its own immutable identity.
 Neither accepted potential loss nor a separately restored future probe can make
 the unresolved campaign a cleanup pass.
@@ -145,6 +145,68 @@ separate cleanup status address those points. Its claims that Fin reservations
 expire at the provider or that this finite zero-fee transfer has unbounded
 principal exposure were not adopted: the local exact reservation persists and
 the original request bounds the uncertain debit. No production data was sent.
+
+## Authorized query-form round trip on 5 October
+
+The owner authorized the previously proposed 0.05-USDC probe and exact return.
+Fresh preflight and return bounds valued the movement at $0.049998 with zero
+transfer fees. Both prior uncertain amounts remained charged; the conservative
+Binance bound was $9.949602 inside the original $10 venue and $79 combined limits.
+The original two immutable records and shared dispatch lock remained enforced.
+
+The query-form outward POST was accepted with the existing credential setup.
+Authenticated master history returned one matching `SUCCESS` row and separate
+account reads showed exactly +0.05 USDC on the master and -0.05 USDC on the child.
+Initial Fin reconciliation refused the master email: the financial request used
+Binance's implicit master destination, while history returned a nonempty email.
+The owner privately confirmed the returned identity; no account mapping or
+credential is included in this report. A signed child-history read independently
+identified the same venue transaction and `master` counterparty.
+
+The adapter now corroborates the implicit master role through typed child-side
+history and physical UID/parent checks. The proof binds venue transaction,
+direction, peer email, asset, numerically exact quantity, SPOT wallet types,
+status and timestamp within the submission window. It retains selected child
+receipt/UID facts in durable evidence. Full 200-row child pages and incomplete
+master pagination cannot establish a unique terminal receipt. Child identity
+and history access are checked before a new write. No immutable request,
+submission identity, configured account mapping or shared ledger rule is rewritten.
+See [Binance's child-history contract](https://developers.binance.com/en/docs/catalog/vip-and-institutional-sub-account/api/rest-api/asset-management#sub-account-transfer-history-for-sub-account-user_data).
+
+Status-only recovery completed the original outward identity with zero further
+approvals or POSTs. The exact 0.05-USDC return then completed with its own private
+non-biometric approval and one POST. Fin's complete final snapshot and ledger
+restoration check passed: two completed operations, two terminal proofs, zero
+reservations and one restored run. Both original-request duplicate checks returned
+completed with zero additional approvals or POSTs. The probe authorization is
+consumed and its private flag is false. Transfer fees were zero; no Ethereum
+envelope was signed or broadcast. This passes only that private non-biometric
+Binance round trip, not native Touch ID or credential isolation.
+
+The earlier five- and 4.9-USDC records still have no matching history row, remain
+unknown with their original reservations, and cannot pass campaign restoration.
+Fresh broader history queries include the new probe while finding no receipt for
+either older identity. The owner’s original loss allowance does not fabricate
+a provider outcome or turn the overall campaign into a pass.
+
+The query-form success makes the former form-body parsing/canonicalization path
+the leading explanation for the earlier `-1022`, but the exact provider-side
+reason is still an inference. CCXT 4.5.85 has a special unescaped subaccount
+signing path and form-body placement; that difference alone did not justify
+another signing change. An Ogi request for a public/synthetic diagnostic returned
+no answer text (`completed` with an empty answer); no usable assessment or silent
+retry is claimed. Public code review found no remaining byte/signature mismatch.
+
+The default-master regressions cover both directions, lost responses and legacy
+restart without replay; 14 receipt faults plus child UID/access refusal retain
+unknown outcomes or refuse a new preview. Existing broker round-trip fixtures
+now exercise this evidence through the full ledger. The first workspace check
+failed to compile an older exhaustive fixture after the endpoint enum grew; the
+fixture was updated and the final workspace/strict checks passed. Private probe
+fixtures passed 42 tests and the independent quantity diagnostic passed two.
+That diagnostic initially used structural decimal equality and returned false
+for equivalent trailing zeros; numeric comparison corrected it without weakening
+the route proof. Default tests never load production secrets or broadcast.
 
 ## Earlier verification findings
 

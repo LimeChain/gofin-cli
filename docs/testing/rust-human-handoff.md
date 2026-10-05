@@ -31,14 +31,31 @@ non-biometric verification does not establish this boundary.
    agent that `sudo -n true` fails. Root or cached/passwordless elevation defeats
    the intended credential boundary; do not mark isolation passed in that state.
 
+Run these in the human's own fresh macOS Terminal after the lead identifies the
+final reviewed bundle path:
+
+```sh
+cd /absolute/path/to/reviewed/fin-bundle
+/usr/bin/shasum -a 256 -c SHA256SUMS
+./fin --help
+./fin setup
+sudo -K
+/Library/Fin/runtime/fin daemon status --json
+/Library/Fin/runtime/fin doctor --json
+```
+
+Setup and enrollment move no funds. Stop and retain the safe diagnostic if setup
+reports an existing installation or uncertain state; do not delete its journal.
+
 ## Private connection enrollment
 
 Use actual help for the final version. Illustrative safe metadata commands are:
 
 ```sh
-fin connections add --provider binance --name main --role main --credential-type rsa
-fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type hmac
-fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
+/Library/Fin/runtime/fin connections add --provider binance --name main --role main --credential-type ed25519
+/Library/Fin/runtime/fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
+/Library/Fin/runtime/fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
+/Library/Fin/runtime/fin connections list --json
 ```
 
 The human supplies their own account metadata and enters keys only into the
@@ -48,6 +65,12 @@ human reviews the independently resolved UID/address, permissions and warnings,
 then approves only the configuration change. Verify `connections list --json`.
 The child UID/email relationship includes an explicit human confirmation where
 Binance's normal list cannot attest the association.
+
+The master email is not required as an enrollment flag: the configured main role
+uses Binance's default master account. Funding verification requires the child's
+own read credential for physical UID and counterparty-history proof; missing
+access refuses a new transfer preview. Reconciliation can corroborate a returned
+master email without changing the persisted financial request or configuration.
 
 Test cancellation, invalid key/IP access, wrong expected wallet address, and
 attempted secret flags/JSON. Inspect safe errors and cleanup. Rotate a key for the
@@ -103,10 +126,13 @@ attempt, which received HTTP 400 / `-1022` and retains its own unknown record an
 reservation. Unchanged balances and absent history are not terminal proof. Both
 identities and allocations remain charged; do not replay either request, discard
 the journals, or use installation/enrollment to forget them. A separate 0.05-USDC
-probe has a read-only baseline and funded return plan, with financial authorization
-disabled until explicitly approved. Carry these outcomes and outstanding cleanup
-into the human-session report. The signed POST query change is synthetically
-verified, with live acceptance pending; see the [current report](../reports/rust-foundation.md).
+probe was subsequently authorized and completed both writes with an exact
+zero-fee return, full restoration and no additional POSTs during duplicate checks.
+Its authorization is consumed. Carry the two older unknown outcomes and
+outstanding campaign cleanup into the human-session report. Query-form signing
+and default-master receipt proof passed that exact private non-biometric route;
+Touch ID and protected credential acceptance remain pending. See the
+[current report](../reports/rust-foundation.md).
 
 Follow the [live-test contract](README.md#live-test-contract), carrying forward the
 historical selected allocation and actual consumed costs. Snapshot current
