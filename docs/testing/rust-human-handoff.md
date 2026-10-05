@@ -23,10 +23,11 @@ non-biometric verification does not establish this boundary.
    configuration should result. Retrying must preserve any uncertain committed
    state rather than deleting a journal. Approve the reviewed initialization and
    inspect `fin daemon status --json` and `fin doctor --json`.
-4. Setup may use the fixed `/Library/Fin/runtime/fin` command when Homebrew owns
-   `/usr/local/bin`; the optional convenience alias must not change directory
-   ownership or prevent service activation. Existing installations require a
-   reviewed upgrade, not deletion to bypass the installer.
+4. Setup registers `/Library/Fin/runtime` through `/etc/paths.d/fin`. Open a new
+   Terminal and check `command -v fin` resolves to `/Library/Fin/runtime/fin`.
+   Existing shells can use the PATH export below. Homebrew directories and shell
+   profiles remain unchanged. Existing installations require a reviewed upgrade,
+   not deletion to bypass the installer.
 5. The human runs `sudo -K` and closes elevated shells. Check with the actual
    agent that `sudo -n true` fails. Root or cached/passwordless elevation defeats
    the intended credential boundary; do not mark isolation passed in that state.
@@ -40,22 +41,27 @@ cd /absolute/path/to/reviewed/fin-bundle
 ./fin --help
 ./fin setup
 sudo -K
-/Library/Fin/runtime/fin daemon status --json
-/Library/Fin/runtime/fin doctor --json
+export PATH="/Library/Fin/runtime:$PATH"
+command -v fin
+fin daemon status --json
+fin doctor --json
 ```
 
 Setup and enrollment move no funds. Stop and retain the safe diagnostic if setup
 reports an existing installation or uncertain state; do not delete its journal.
+`sudo -K` clears cached sudo credentials across all your terminal sessions. It
+does not stop Fin or remove its enrolled connections. Clearing this cache is
+separate from the fresh Touch ID required by Fin for each write.
 
 ## Private connection enrollment
 
 Use actual help for the final version. Illustrative safe metadata commands are:
 
 ```sh
-/Library/Fin/runtime/fin connections add --provider binance --name main --role main --credential-type ed25519
-/Library/Fin/runtime/fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
-/Library/Fin/runtime/fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
-/Library/Fin/runtime/fin connections list --json
+fin connections add --provider binance --name main --role main --credential-type ed25519
+fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
+fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
+fin connections list --json
 sudo -K
 ```
 

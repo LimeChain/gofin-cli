@@ -19,6 +19,19 @@ Setup and subsequent connection management are terminal-driven. Do not require c
 
 A `.pkg` installer, Developer ID signing/notarization, and Homebrew packaging can be added for distribution; they are not prerequisites for the reviewed manual/bootstrap beta. No Node/npm or Rust toolchain is required to run downloaded compiled releases. No installation URL is published by this design document.
 
+The macOS installer registers `/Library/Fin/runtime` in the root-owned
+`/etc/paths.d/fin` file. New Terminal login shells can invoke `fin` directly,
+including when Homebrew owns `/usr/local/bin`. An already-open shell can run
+`export PATH="/Library/Fin/runtime:$PATH"`; an installer cannot modify its parent
+shell environment. Setup does not edit shell profiles or take ownership of
+Homebrew directories. Custom PATH overrides must retain the Fin directory.
+
+After setup and enrollment, `sudo -K` clears every cached sudo credential for the
+human account, across terminal sessions. This prevents existing cached elevation
+from undermining the agent credential-denial test. It grants no authorization
+and does not stop Fin or alter per-write Touch ID. It cannot revoke an already
+root shell or override passwordless sudo policy; check the actual agent's access.
+
 Implemented public command families (inspect their help for required arguments):
 
 ```text

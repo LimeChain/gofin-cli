@@ -12,6 +12,19 @@ on the target machine. Local beta binaries use ad-hoc hardened signatures. A
 published download script, Apple Developer signing, and notarized distribution
 have not been released or verified.
 
+Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
+Terminal can run `fin` directly. It leaves Homebrew directories and shell profiles
+unchanged. For the Terminal already open during setup, run:
+
+```sh
+export PATH="/Library/Fin/runtime:$PATH"
+fin doctor --json
+```
+
+The installer cannot change its parent shell's PATH. Existing app/agent sessions
+may also need restarting to inherit the new PATH; custom shell configurations
+that replace PATH must include `/Library/Fin/runtime` themselves.
+
 Setup preserves and refuses an existing installation or journal. Upgrades must
 preserve pending requests, reservations, proofs, and financial run state; do not
 delete the existing installation to get past this check.
@@ -28,7 +41,12 @@ checks do not protect old disclosures or a session where an untrusted agent has
 GUI automation, keylogging, root, or terminal access.
 
 After setup, clear cached administration with `sudo -K`, close elevated shells,
-and verify the actual agent cannot use noninteractive sudo. After enrollment,
+and verify the actual agent cannot use noninteractive sudo. `sudo -K` removes all
+of your cached sudo credentials, including other terminal sessions. Your next
+sudo command will need authentication again where policy requires it. It does
+not stop Fin, remove credentials from Fin, or change Touch ID approval. Already
+elevated shells and passwordless sudo rules require separate attention; clearing
+the cache does not revoke either. After enrollment,
 remove all agent-readable credential copies before testing isolation. Native
 approval, cancellation, credential denial, and cleanup must be observed with the
 human; synthetic tests do not establish those results.

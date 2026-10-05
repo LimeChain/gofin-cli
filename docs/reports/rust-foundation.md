@@ -23,6 +23,18 @@ uses an ignored, lead-owned harness and does not establish credential isolation.
 
 ## Evidence recorded so far
 
+The 5 October installation follow-up registers the protected runtime through
+macOS `/etc/paths.d/fin`, making `fin` available in new Terminal login shells even
+when Homebrew owns `/usr/local/bin`. Setup prints an explicit PATH export for
+existing shells. The lead reviewed the delegated installer change; 12 isolated
+installer fixtures, four offline CLI tests, six discovery tests, scoped strict
+Clippy, shell syntax, Rust formatting and whitespace checks passed. The fixtures
+cover conflicting entries, unsafe parents and preservation after configuration
+or service failures; they use temporary paths and OS/privilege doubles. They do
+not verify actual installation, root ownership, launchd or Touch ID. The Ogi
+review request returned no answer text, so no Ogi review pass is claimed.
+No production credentials or financial operations were used for this change.
+
 | Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Rust workspace                     | Code commit `c78f7c8`: `cargo test --locked --workspace` passed 307 tests, zero failed, one explicitly ignored fork test across 34 groups. Strict all-target workspace Clippy, formatting and diff checks passed. These include signed POST wire verification, four campaign accounting/dispatch regressions and the default-master receipt recovery cases.                                                                                                                                                                                                                                                                                                                                                              |

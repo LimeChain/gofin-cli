@@ -37,9 +37,15 @@ The toolchain is pinned in `rust-toolchain.toml`; runtime users need no Rust,
 Node.js, or npm. Build an inspectable local macOS bundle with
 `sh scripts/package-rust-macos.sh /absolute/path/to/new-fin-bundle`. The human
 reviews the bundle and runs `./fin setup` in a fresh macOS Terminal, then clears
-cached administration with `sudo -K`. The initial installer preserves and refuses
+cached administration with `sudo -K`. Setup registers Fin with macOS's PATH
+configuration. Open a new Terminal and use `fin`, or run
+`export PATH="/Library/Fin/runtime:$PATH"` in the current shell first.
+The initial installer preserves and refuses
 an existing installation/journal. A public curl installer or notarized release
 has not been published. See [the bundle instructions](packaging/README.md).
+
+From the repository, `python3 scripts/test-rust-macos-installer.py` runs isolated
+installer fixtures without administrator access, installation, or credentials.
 
 The human enrolls connections through the installed CLI:
 

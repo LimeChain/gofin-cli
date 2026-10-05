@@ -390,7 +390,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"financial_movement":false,"secret_input":"none","installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage"],"boundary":"Installation authorizes no financial action. Clear cached administrative privileges and verify the agent lacks root access.","next_check":"fin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"financial_movement":false,"secret_input":"none","installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
         ),
         definition::<AddConnectionArgs>(
             "connections.add",

@@ -16,6 +16,13 @@ The TS SQLite database is not silently opened or replayed by Rust. The read-only
 
 The [terminal onboarding/discovery contract](onboarding.md) is part of the implementation, not a later convenience. A human asks an LLM how to add Binance; the LLM must discover the command and prerequisites from the installed CLI, direct the human to their own terminal, and safely check the result. Setup, daemon lifecycle, and connection add/list/update/remove must expose consistent help/explanation/schemas and human-interaction metadata before configuration or a broker exists. Secret fields belong to protected human enrollment, never normal CLI/JSON arguments. No custom credential-entry windows or `.pkg` distribution requirement is introduced.
 
+The macOS installer registers the protected runtime in `/etc/paths.d/fin` so
+new Terminal login shells can invoke `fin` without an absolute path. It verifies
+the root-owned PATH directory and preserves existing entries; it does not claim
+Homebrew directories or edit user shell profiles. Setup reports the current-shell
+PATH export as well as the new-Terminal option. Cached sudo credentials are
+cleared separately with `sudo -K` before agent credential-isolation checks.
+
 Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The subsequent implementation goal explicitly authorizes a temporary private lead-owned non-biometric verification harness; the shipped entrypoint still requires real per-write Touch ID and exposes no authorization-disable switch.
 
 Binance's implicit master destination is a role, not an absent receipt identity.

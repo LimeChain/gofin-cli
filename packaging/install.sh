@@ -22,16 +22,26 @@ case "$fin_uid:$fin_gid" in *[!0-9:]*|:|:*|*:) usage ;; esac
 fin_source=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 fin_root=/Library/Fin
 fin_plist=/Library/LaunchDaemons/io.fin-cli.broker.plist
-for fin_existing in "$fin_root" "$fin_plist" /usr/local/bin/fin; do
+fin_path_file=/private/etc/paths.d/fin
+for fin_existing in "$fin_root" "$fin_plist" /usr/local/bin/fin "$fin_path_file"; do
   [ ! -e "$fin_existing" ] && [ ! -L "$fin_existing" ] || { echo 'An existing Fin installation needs a reviewed upgrade; its state was preserved.' >&2; exit 1; }
 done
+# /etc is a macOS symlink. Check its real path without modifying system dirs.
+check_path_directories() {
+  for fin_directory in /private /private/etc /private/etc/paths.d; do
+    [ -d "$fin_directory" ] && [ ! -L "$fin_directory" ] && [ "$(/usr/bin/stat -f '%u' "$fin_directory")" = 0 ] || { echo 'PATH registration requires existing real root-owned system directories; installation state was preserved.' >&2; return 1; }
+    /bin/ls -ld "$fin_directory" | /usr/bin/awk '{if (substr($1,6,1)=="w" || substr($1,9,1)=="w" || index($1,"+")) bad=1} END {exit bad}' || { echo 'PATH registration requires system directories without group/world write access or extended ACLs; installation state was preserved.' >&2; return 1; }
+  done
+}
+check_path_directories
 for fin_name in fin fin-broker fin-touch-id install.sh README.md BUILDINFO SHA256SUMS; do
   [ -f "$fin_source/$fin_name" ] && [ ! -L "$fin_source/$fin_name" ] || { echo 'Bundle has a missing or symbolic-link component.' >&2; exit 1; }
 done
 /usr/bin/awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ {bad=1}
  $2 != "fin" && $2 != "fin-broker" && $2 != "fin-touch-id" && $2 != "install.sh" && $2 != "README.md" && $2 != "BUILDINFO" {bad=1}
  {if (++seen[$2] > 1) bad=1; count++} END {if (count != 6) bad=1; exit bad}' "$fin_source/SHA256SUMS" || { echo 'Bundle checksum manifest is invalid.' >&2; exit 1; }
-echo 'Fin installs compiled binaries in /Library/Fin/runtime, private state, a launchd socket service, and /usr/local/bin/fin.'
+echo 'Fin installs compiled binaries in /Library/Fin/runtime, private state, and a launchd socket service.'
+echo 'Setup registers /Library/Fin/runtime in /private/etc/paths.d/fin so new Terminal sessions can run fin.'
 echo 'Touch ID approves initial configuration. Each later financial write needs a separate fresh approval.'
 fin_stage=$(/usr/bin/mktemp -d /Library/.fin-rust-install.XXXXXX)
 fin_installed=0
@@ -96,22 +106,16 @@ PLIST
 /bin/chmod -N "$fin_plist"
 /bin/chmod 644 "$fin_plist"
 /usr/bin/plutil -lint "$fin_plist" >/dev/null
-# The optional convenience alias must not turn Homebrew directory ownership
-# into a partially configured installation. Never change an existing owner's
-# directory or follow a symbolic link in this path.
-fin_cli=/Library/Fin/runtime/fin
-if [ ! -e /usr/local ] && [ ! -L /usr/local ]; then /bin/mkdir /usr/local; fi
-if [ -d /usr/local ] && [ ! -L /usr/local ] && [ "$(/usr/bin/stat -f '%u' /usr/local)" = 0 ]; then
-  if [ ! -e /usr/local/bin ] && [ ! -L /usr/local/bin ]; then /bin/mkdir /usr/local/bin; fi
-  if [ -d /usr/local/bin ] && [ ! -L /usr/local/bin ] && [ "$(/usr/bin/stat -f '%u' /usr/local/bin)" = 0 ]; then
-    # Reject group/world writable directories and extended ACLs for this alias.
-    if /bin/ls -ld /usr/local /usr/local/bin | /usr/bin/awk '{if (substr($1,6,1)=="w" || substr($1,9,1)=="w" || index($1,"+")) bad=1} END {exit bad}'; then
-      /bin/ln -s /Library/Fin/runtime/fin /usr/local/bin/fin
-      fin_cli=fin
-    fi
-  fi
-fi
 /bin/launchctl bootstrap system "$fin_plist"
-echo "Fin installed. Run $fin_cli daemon start, $fin_cli doctor --json, then $fin_cli connections add yourself."
+# Register only after approved configuration and service bootstrap. Failures
+# retain the protected configuration/journal for inspection rather than retry.
+check_path_directories
+[ ! -e "$fin_path_file" ] && [ ! -L "$fin_path_file" ] || { echo 'The Fin PATH registration already exists. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
+(set -o noclobber; printf '%s\n' /Library/Fin/runtime > "$fin_path_file") || { echo 'Fin PATH registration failed. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
+/usr/sbin/chown root:wheel "$fin_path_file"
+/bin/chmod -N "$fin_path_file"
+/bin/chmod 644 "$fin_path_file"
+echo 'Fin installed. Open a new Terminal window, then run fin daemon start, fin doctor --json, and fin connections add yourself.'
+echo 'Or in your current shell: export PATH="/Library/Fin/runtime:$PATH"'
 echo 'Human: run sudo -K and close elevated shells. Verify the actual agent cannot obtain noninteractive sudo before asserting isolation.'
 echo 'Remove agent-readable credential copies after protected enrollment. Old disclosures are not retroactively protected; rotate exposed keys where needed.'
