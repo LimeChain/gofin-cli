@@ -56,6 +56,7 @@ Use actual help for the final version. Illustrative safe metadata commands are:
 /Library/Fin/runtime/fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
 /Library/Fin/runtime/fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
 /Library/Fin/runtime/fin connections list --json
+sudo -K
 ```
 
 The human supplies their own account metadata and enters keys only into the
@@ -81,7 +82,9 @@ parent with children must fail. Configuration approvals must never authorize a
 financial operation.
 
 Before claiming isolation, remove every agent-readable key copy, including the
-old `.context/.ai.env`, and rotate previously disclosed keys where appropriate.
+old `.context/.ai.env` and `.context/rust-live-harness/provision.json`, and rotate
+previously disclosed keys where appropriate. Preserve the financial journals and
+reconciliation evidence when removing those secret files.
 An agent that knew the old key cannot be shown to have forgotten it. Use fresh
 keys entered only by the human for the denial test. The agent must fail to read
 root-private keys, mutate trusted runtime/config/policy, replace the helper, or
