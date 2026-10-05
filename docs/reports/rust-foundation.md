@@ -35,6 +35,11 @@ collect no passwords. The real human retry remains pending. Normal reads,
 previews, status, service lifecycle and financial commands continue through the
 broker without sudo; financial writes still require fresh Touch ID.
 
+The current retry bundle is `work/release-password-20261005/bundle`, from code
+commit `b8f1b52`, with `source_state=clean`. All six checksums, hardened ad-hoc
+signature checks, compiled setup help and setup discovery passed. This is the
+bundle to use for the next human setup attempt.
+
 The 5 October installation follow-up registers the protected runtime through
 macOS `/etc/paths.d/fin`, making `fin` available in new Terminal login shells even
 when Homebrew owns `/usr/local/bin`. Setup prints an explicit PATH export for
@@ -47,10 +52,10 @@ not verify actual installation, root ownership, launchd or Touch ID. The Ogi
 review request returned no answer text, so no Ogi review pass is claimed.
 No production credentials or financial operations were used for this change.
 
-The updated human-installation bundle is
+The earlier PATH-enabled bundle is
 `work/release-path-20261005-clean/bundle`, built from commit `58f19db` with
 `source_state=clean`. Its six SHA-256 checks, hardened ad-hoc signing checks and
-compiled setup discovery passed. Use this bundle for the PATH-enabled setup;
+compiled setup discovery passed. It introduced the PATH-enabled setup;
 the older `c78f7c8` bundle retains the original installation behavior. An
 intermediate build recorded an untracked cache symlink, and the first attempt to
 remove that link left cached CLI tests pointing at a missing executable path.
