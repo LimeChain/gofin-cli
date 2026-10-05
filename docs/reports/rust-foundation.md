@@ -35,6 +35,18 @@ not verify actual installation, root ownership, launchd or Touch ID. The Ogi
 review request returned no answer text, so no Ogi review pass is claimed.
 No production credentials or financial operations were used for this change.
 
+The updated human-installation bundle is
+`work/release-path-20261005-clean/bundle`, built from commit `58f19db` with
+`source_state=clean`. Its six SHA-256 checks, hardened ad-hoc signing checks and
+compiled setup discovery passed. Use this bundle for the PATH-enabled setup;
+the older `c78f7c8` bundle retains the original installation behavior. An
+intermediate build recorded an untracked cache symlink, and the first attempt to
+remove that link left cached CLI tests pointing at a missing executable path.
+Correcting the isolated cache layout restored all four tests before the final
+bundle was produced. These were local build-layout failures; the installer was
+never run against the host. Actual installed PATH lookup, human enrollment and
+Touch ID remain pending.
+
 | Area                               | Evidence and limits                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Rust workspace                     | Code commit `c78f7c8`: `cargo test --locked --workspace` passed 307 tests, zero failed, one explicitly ignored fork test across 34 groups. Strict all-target workspace Clippy, formatting and diff checks passed. These include signed POST wire verification, four campaign accounting/dispatch regressions and the default-master receipt recovery cases.                                                                                                                                                                                                                                                                                                                                                              |
