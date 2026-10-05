@@ -66,6 +66,12 @@ baseline, selected allocations, a funded return plan, and exact restoration net
 of proved costs. Production tests retain the $100 movement and total allocation
 limits.
 
+Binance SPOT funding previews check the child's own read access as well as its
+parent mapping. When transfer history returns an email for the implicit master
+account, reconciliation corroborates the route against the child's authenticated
+transfer history and physical account identity. Missing or mismatched evidence
+keeps the original operation unresolved.
+
 ## Historical TypeScript foundation
 
 The foundational TypeScript CLI, durable execution engine, Binance SPOT funding adapter, and Ethereum wallet/Uniswap v3/Aave v3 adapter are implemented. A native macOS Touch ID helper and protected root-owned broker installer are included. **Production financial acceptance is still pending:** live reads, fixtures, fork execution, biometric approval, credential isolation, and live writes are reported separately in [the verification report](docs/reports/foundation.md).

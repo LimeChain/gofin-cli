@@ -189,6 +189,7 @@ pub enum BinanceEndpoint {
     DepositHistory,
     WithdrawalHistory,
     UniversalTransferHistory,
+    SubAccountTransferHistory,
     UniversalTransfer,
     StandardWithdrawal,
     TravelRuleRequirements,
@@ -207,6 +208,9 @@ impl BinanceEndpoint {
             Self::DepositHistory => ("GET", "/sapi/v1/capital/deposit/hisrec"),
             Self::WithdrawalHistory => ("GET", "/sapi/v1/capital/withdraw/history"),
             Self::UniversalTransferHistory => ("GET", "/sapi/v1/sub-account/universalTransfer"),
+            Self::SubAccountTransferHistory => {
+                ("GET", "/sapi/v1/sub-account/transfer/subUserHistory")
+            }
             Self::UniversalTransfer => ("POST", "/sapi/v1/sub-account/universalTransfer"),
             Self::StandardWithdrawal => ("POST", "/sapi/v1/capital/withdraw/apply"),
             Self::TravelRuleRequirements => {
@@ -290,6 +294,18 @@ impl BinanceRequest {
                     "recvWindow",
                 ],
             ),
+            BinanceEndpoint::SubAccountTransferHistory => (
+                &[],
+                &[
+                    "asset",
+                    "type",
+                    "startTime",
+                    "endTime",
+                    "limit",
+                    "returnFailHistory",
+                    "recvWindow",
+                ],
+            ),
             BinanceEndpoint::UniversalTransfer => (
                 &[
                     "asset",
@@ -357,6 +373,33 @@ impl BinanceRequest {
                 || self.get("walletType") != Some("0"))
         {
             return Err(BinanceError::InvalidRequest);
+        }
+        if matches!(self.endpoint, BinanceEndpoint::SubAccountTransferHistory) {
+            let valid_u64 = |key: &str| {
+                self.get(key)
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_some()
+            };
+            if self.get("asset").is_none_or(str::is_empty)
+                || !matches!(self.get("type"), Some("1" | "2"))
+                || !valid_u64("startTime")
+                || !valid_u64("endTime")
+                || !valid_u64("limit")
+                || self
+                    .get("startTime")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    > self
+                        .get("endTime")
+                        .and_then(|value| value.parse::<u64>().ok())
+                || !matches!(
+                    self.get("limit")
+                        .and_then(|value| value.parse::<u64>().ok()),
+                    Some(1..=200)
+                )
+                || self.get("returnFailHistory") != Some("true")
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
         }
         Ok(())
     }
@@ -620,6 +663,33 @@ impl HistoryWindow {
     }
 }
 
+/// Build the bounded child-credential history request used to corroborate a
+/// main-account universal-transfer row whose main-side email is not enrolled.
+pub fn subaccount_transfer_history_request(
+    asset: &str,
+    transfer_type: u64,
+    start_time_ms: u64,
+    end_time_ms: u64,
+    limit: u64,
+) -> Result<BinanceRequest, BinanceError> {
+    if asset.is_empty()
+        || !matches!(transfer_type, 1 | 2)
+        || start_time_ms > end_time_ms
+        || !(1..=200).contains(&limit)
+    {
+        return Err(BinanceError::InvalidRequest);
+    }
+    let request = BinanceRequest::new(BinanceEndpoint::SubAccountTransferHistory)
+        .push("asset", asset)
+        .push("type", transfer_type.to_string())
+        .push("startTime", start_time_ms.to_string())
+        .push("endTime", end_time_ms.to_string())
+        .push("limit", limit.to_string())
+        .push("returnFailHistory", "true");
+    request.validate()?;
+    Ok(request)
+}
+
 /// Exact financial fields are deserialized only from venue decimal strings.
 /// Serde will reject JSON numeric values instead of accepting a rounded float.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -703,6 +773,34 @@ pub struct TransferHistoryRow {
     pub to_email: Option<String>,
     pub status: String,
     #[serde(rename = "createTimeStamp")]
+    pub timestamp: u64,
+}
+
+/// Signed history returned by the child credential for spot transfers with
+/// its master. Binance documents this as a bare array and does not include the
+/// master universal-transfer client's `clientTranId`, so reconciliation must
+/// correlate through the immutable master-side `tranId` and peer fields.
+pub type SubAccountTransferHistoryResponse = Vec<SubAccountTransferHistoryRow>;
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SubAccountTransferHistoryRow {
+    #[serde(rename = "counterParty")]
+    pub counter_party: String,
+    /// Counterparty email (the master email for a master-child transfer).
+    pub email: String,
+    #[serde(rename = "type")]
+    pub transfer_type: u64,
+    pub asset: String,
+    #[serde(rename = "qty")]
+    pub quantity: ExactDecimal,
+    #[serde(rename = "fromAccountType")]
+    pub from_account_type: String,
+    #[serde(rename = "toAccountType")]
+    pub to_account_type: String,
+    pub status: String,
+    #[serde(rename = "tranId")]
+    pub tran_id: VenueIdentifier,
+    #[serde(rename = "time")]
     pub timestamp: u64,
 }
 

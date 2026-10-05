@@ -18,6 +18,15 @@ The [terminal onboarding/discovery contract](onboarding.md) is part of the imple
 
 Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The subsequent implementation goal explicitly authorizes a temporary private lead-owned non-biometric verification harness; the shipped entrypoint still requires real per-write Touch ID and exposes no authorization-disable switch.
 
+Binance's implicit master destination is a role, not an absent receipt identity.
+SPOT funding previews verify the selected child's own history access, physical UID
+and parent mapping. If master history returns an email for that implicit role,
+the adapter correlates the exact venue transaction with child-side history:
+master counterparty, direction, email, asset, quantity, wallet types, status and
+time. Missing, ambiguous, truncated or mismatched evidence retains the original
+submission and reservation. This is application-specific proof; shared ledger
+accounting and protected enrollment remain unchanged.
+
 ### Rust delivery stages
 
 | Stage                             | Deliverable                                                                                                                       | Evidence before human handoff                                                                                                 |

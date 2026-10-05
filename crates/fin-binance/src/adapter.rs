@@ -521,6 +521,117 @@ impl BinanceAdapter {
         }
     }
 
+    async fn verify_child_transfer_history_access(
+        &self,
+        child: &BinanceAccount,
+        authority: &BinanceAccount,
+        asset: &str,
+        transfer_type: u64,
+    ) -> Result<(), FinError> {
+        // The child credential is part of the proof path when the main
+        // account's email is not enrolled. Establish both its configured
+        // parent/email and immutable physical UID before trusting its history.
+        self.verify_subaccount(child, authority).await?;
+        self.account_identity(child).await?;
+        let end = Utc::now().timestamp_millis().max(0) as u64;
+        let start = end.saturating_sub(60_000);
+        let request = subaccount_transfer_history_request(asset, transfer_type, start, end, 1)
+            .map_err(domain_error)?;
+        let response = self.call(child, request, "preview").await?;
+        let _: SubAccountTransferHistoryResponse = parse_response(response).map_err(|_| {
+            error(
+                "VENUE_RESPONSE_INVALID",
+                "preview",
+                "The selected child credential cannot provide typed transfer history.",
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn child_transfer_history_confirms(
+        &self,
+        child: &BinanceAccount,
+        authority: &BinanceAccount,
+        row: &TransferHistoryRow,
+        asset: &str,
+        submitted_at: DateTime<Utc>,
+        end_time_ms: u64,
+    ) -> Result<Option<Value>, FinError> {
+        let child_is_source = row.from_email.as_deref() == child.email.as_deref();
+        let transfer_type = if child_is_source { 2 } else { 1 };
+        let peer_email = if child_is_source {
+            row.to_email.as_deref()
+        } else {
+            row.from_email.as_deref()
+        };
+        if child.email.is_none()
+            || peer_email.is_none()
+            || (!child_is_source && row.to_email.as_deref() != child.email.as_deref())
+        {
+            return Ok(None);
+        }
+        self.verify_subaccount(child, authority).await?;
+        let (uid, account_type) = self.account_identity(child).await?;
+        let start = submitted_at.timestamp_millis().max(0) as u64;
+        let request =
+            subaccount_transfer_history_request(asset, transfer_type, start, end_time_ms, 200)
+                .map_err(domain_error)?;
+        let response = self.call(child, request, "reconciliation").await?;
+        let history: SubAccountTransferHistoryResponse =
+            parse_response(response).map_err(|_| {
+                error(
+                    "VENUE_RESPONSE_INVALID",
+                    "reconciliation",
+                    "The selected child credential returned invalid transfer history.",
+                )
+            })?;
+        // The endpoint has no offset/page parameter. A full page cannot prove
+        // uniqueness because older matching rows may have been truncated.
+        if history.len() >= 200 {
+            return Ok(None);
+        }
+        let matches = history
+            .iter()
+            .filter(|item| item.tran_id.as_str() == row.tran_id.as_str())
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        let child_row = matches[0];
+        if child_row.counter_party != "master"
+            || child_row.email != peer_email.unwrap_or_default()
+            || child_row.transfer_type != transfer_type
+            || child_row.asset != row.asset
+            || !child_row.quantity.checked_cmp(&row.amount).is_eq()
+            || child_row.from_account_type != row.from_account_type
+            || child_row.to_account_type != row.to_account_type
+            || child_row.status != row.status
+            || child_row.timestamp != row.timestamp
+            || child_row.timestamp < start
+            || child_row.timestamp > end_time_ms
+            || account_type != "SPOT"
+        {
+            return Ok(None);
+        }
+        Ok(Some(json!({
+            "childResource": child.resource,
+            "authenticatedUid": uid,
+            "accountType": account_type,
+            "parentEmailVerified": true,
+            "counterParty": child_row.counter_party,
+            "peerEmailMatchedMasterHistory": true,
+            "directionType": child_row.transfer_type,
+            "venueId": child_row.tran_id.as_str(),
+            "asset": child_row.asset,
+            "quantity": child_row.quantity.canonical(),
+            "fromAccountType": child_row.from_account_type,
+            "toAccountType": child_row.to_account_type,
+            "status": child_row.status,
+            "timestamp": child_row.timestamp,
+            "timestampWithinSubmissionWindow": true
+        })))
+    }
+
     async fn capital_config(
         &self,
         account: &BinanceAccount,
@@ -844,12 +955,18 @@ impl BinanceAdapter {
                 "Only Binance SPOT wallet transfers are implemented.",
             ));
         }
-        if from.name != authority.name {
-            self.verify_subaccount(from, authority).await?;
-        }
-        if to.name != authority.name {
-            self.verify_subaccount(to, authority).await?;
-        }
+        let (child, child_transfer_type) = if from.name == authority.name {
+            (to, 1)
+        } else {
+            (from, 2)
+        };
+        self.verify_child_transfer_history_access(
+            child,
+            authority,
+            &input.coin,
+            child_transfer_type,
+        )
+        .await?;
         let permissions = self.permissions(authority).await?;
         if permissions.enable_internal_transfer != Some(true)
             || permissions.permits_universal_transfer != Some(true)
@@ -1904,9 +2021,6 @@ impl Adapter for BinanceAdapter {
             ));
         }
         for account in [from, to] {
-            if account.name != authority.name {
-                self.verify_subaccount(account, authority).await?;
-            }
             if !context.baseline.coverage.contains(&account.resource.0) {
                 return Err(error(
                     "PLAN_BASELINE_INCOMPLETE",
@@ -1915,6 +2029,18 @@ impl Adapter for BinanceAdapter {
                 ));
             }
         }
+        let (child, child_transfer_type) = if from.name == authority.name {
+            (to, 1)
+        } else {
+            (from, 2)
+        };
+        self.verify_child_transfer_history_access(
+            child,
+            authority,
+            &input.coin,
+            child_transfer_type,
+        )
+        .await?;
         let permissions = self.permissions(authority).await?;
         if permissions.enable_internal_transfer != Some(true)
             || permissions.permits_universal_transfer != Some(true)
@@ -2938,16 +3064,28 @@ impl BinanceAdapter {
                 json!({"clientTranId":client_id,"reason":"Multiple matching transfer history rows require operator reconciliation."}),
             ));
         }
+        if !complete {
+            return Ok(unknown(json!({
+                "clientTranId": client_id,
+                "venueId": matches[0].tran_id.as_str(),
+                "historyComplete": false,
+                "reason": "The matching transfer row appeared in an incomplete master history window; terminal proof requires complete bounded pagination."
+            })));
+        }
         let row = matches.remove(0);
-        let from_email = from.email.as_deref();
-        let to_email = to.email.as_deref();
+        let (child, child_row_email, master_row_email) = if from.name == authority.name {
+            (&to, row.to_email.as_deref(), row.from_email.as_deref())
+        } else {
+            (&from, row.from_email.as_deref(), row.to_email.as_deref())
+        };
+        let child_email_matches = child_row_email == child.email.as_deref();
+        let configured_master_email_matches = master_row_email == authority.email.as_deref();
         let identity_matches = row.client_tran_id.as_deref() == Some(client_id)
             && row.asset == coin
             && row.amount.checked_cmp(&requested).is_eq()
             && row.from_account_type == "SPOT"
             && row.to_account_type == "SPOT"
-            && row.from_email.as_deref() == from_email
-            && row.to_email.as_deref() == to_email
+            && child_email_matches
             && data
                 .get("venueId")
                 .and_then(Value::as_str)
@@ -2957,7 +3095,37 @@ impl BinanceAdapter {
                 json!({"clientTranId":client_id,"historyComplete":complete,"reason":"Transfer history identity, account route, amount, wallet type or persisted venue ID mismatch."}),
             ));
         }
-        let evidence_base = json!({"clientTranId":client_id,"venueId":row.tran_id.as_str(),"from":from.name,"to":to.name,"asset":coin,"amount":row.amount.canonical(),"venueStatus":row.status,"historyComplete":complete});
+        let child_history_proof = if configured_master_email_matches {
+            Value::Null
+        } else if authority.email.is_none() && master_row_email.is_some() {
+            let proof = self
+                .child_transfer_history_confirms(
+                    child,
+                    authority,
+                    &row,
+                    coin,
+                    started,
+                    Utc::now().timestamp_millis().max(0) as u64,
+                )
+                .await
+                .unwrap_or(None);
+            let Some(proof) = proof else {
+                return Ok(unknown(json!({
+                    "clientTranId": client_id,
+                    "venueId": row.tran_id.as_str(),
+                    "reason": "Configured master email is unavailable and the selected child credential did not prove the matching SPOT transfer counterpart."
+                })));
+            };
+            proof
+        } else {
+            return Ok(unknown(json!({
+                "clientTranId": client_id,
+                "venueId": row.tran_id.as_str(),
+                "reason": "Transfer history master-side email differs from the configured identity and cannot be safely corroborated."
+            })));
+        };
+        let child_history_verified = !child_history_proof.is_null();
+        let evidence_base = json!({"clientTranId":client_id,"venueId":row.tran_id.as_str(),"from":from.name,"to":to.name,"asset":coin,"amount":row.amount.canonical(),"venueStatus":row.status,"historyComplete":complete,"childHistoryVerified":child_history_verified,"childHistoryProof":child_history_proof});
         if row.status == "FAILED" || row.status == "FAILURE" {
             let source_before =
                 observed_decimal(data["sourceFreeBefore"].as_str().unwrap_or_default())?;

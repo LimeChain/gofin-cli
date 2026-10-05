@@ -226,6 +226,54 @@ fn history_window_rejects_inverted_range_and_uses_pagination_identity() {
 }
 
 #[test]
+fn child_transfer_history_uses_fixed_typed_request_and_official_row_shape() {
+    let request = fin_binance::subaccount_transfer_history_request("ETH", 2, 10, 20, 200).unwrap();
+    assert_eq!(
+        request.endpoint.method_path(),
+        ("GET", "/sapi/v1/sub-account/transfer/subUserHistory")
+    );
+    assert_eq!(request.get("asset"), Some("ETH"));
+    assert_eq!(request.get("type"), Some("2"));
+    assert_eq!(request.get("startTime"), Some("10"));
+    assert_eq!(request.get("endTime"), Some("20"));
+    assert_eq!(request.get("limit"), Some("200"));
+    assert_eq!(request.get("returnFailHistory"), Some("true"));
+    assert!(
+        fin_binance::BinanceRequest::new(fin_binance::BinanceEndpoint::SubAccountTransferHistory)
+            .push("asset", "ETH")
+            .push("type", "3")
+            .push("startTime", "10")
+            .push("endTime", "20")
+            .push("limit", "1000")
+            .push("returnFailHistory", "true")
+            .validate()
+            .is_err()
+    );
+    let rows: fin_binance::SubAccountTransferHistoryResponse =
+        fin_binance::parse_response(json!([{
+            "counterParty":"master", "email":"synthetic-master@example.invalid",
+            "type":2,"asset":"ETH","qty":"0.05000000",
+            "fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS",
+            "tranId":123456789,"time":1000
+        }]))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].quantity.checked_cmp(&amount("0.05")).is_eq());
+    assert_eq!(rows[0].tran_id.as_str(), "123456789");
+    assert!(
+        fin_binance::parse_response::<fin_binance::SubAccountTransferHistoryResponse>(json!([
+            {
+                "counterParty":"master", "email":"synthetic-master@example.invalid",
+                "type":"2","asset":"ETH","qty":"0.05",
+                "fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS",
+                "tranId":123456789,"time":1000
+            }
+        ]))
+        .is_err()
+    );
+}
+
+#[test]
 fn fixtures_preserve_raw_balances_transfer_history_and_withdrawal_fees() {
     let balances: Value =
         serde_json::from_str(include_str!("fixtures/spot-balances.json")).unwrap();
@@ -720,7 +768,7 @@ impl RouteAwareTransferTransport {
 impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
     async fn request(
         &self,
-        _credential: &fin_binance::CredentialHandle,
+        credential: &fin_binance::CredentialHandle,
         request: BinanceRequest,
     ) -> std::result::Result<Value, fin_binance::TransportError> {
         use fin_binance::BinanceEndpoint as E;
@@ -744,9 +792,19 @@ impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
             E::SubAccountSpotAssets => Ok(json!({"balances":[{
                 "asset":"ETH", "free":self.child_free.lock().unwrap().clone(), "locked":"0"
             }]})),
-            E::Account => Ok(json!({"balances":[{
-                "asset":"ETH", "free":self.main_free.lock().unwrap().clone(), "locked":"0"
-            }]})),
+            E::Account => {
+                let is_child = credential.as_str().ends_with("child");
+                Ok(json!({
+                    "accountType":"SPOT",
+                    "uid":if is_child {"1002"} else {"1001"},
+                    "balances":[{
+                        "asset":"ETH",
+                        "free":if is_child {self.child_free.lock().unwrap().clone()} else {self.main_free.lock().unwrap().clone()},
+                        "locked":"0"
+                    }]
+                }))
+            }
+            E::SubAccountTransferHistory => Ok(json!([])),
             E::UniversalTransfer => {
                 self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let id = request.get("clientTranId").unwrap().to_owned();
@@ -802,6 +860,304 @@ impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DefaultMasterReceiptFault {
+    None,
+    WrongCounterparty,
+    WrongVenueId,
+    WrongQuantity,
+    WrongAsset,
+    WrongType,
+    WrongPeerEmail,
+    WrongWallet,
+    WrongStatus,
+    OutsideWindow,
+    Duplicate,
+    FullPage,
+    MasterHistoryIncomplete,
+    WrongChildUid,
+    ChildHistoryDenied,
+    MissingChildReceipt,
+    WrongMasterChildEmail,
+}
+
+struct DefaultMasterReceiptTransport {
+    direction: TransferDirection,
+    fault: DefaultMasterReceiptFault,
+    main_free: std::sync::Mutex<String>,
+    child_free: std::sync::Mutex<String>,
+    client_id: std::sync::Mutex<Option<String>>,
+    posts: std::sync::atomic::AtomicUsize,
+    child_history_reads: std::sync::atomic::AtomicUsize,
+    invalid_timestamp: std::sync::Mutex<Option<u64>>,
+}
+
+impl DefaultMasterReceiptTransport {
+    fn new(direction: TransferDirection, fault: DefaultMasterReceiptFault) -> Self {
+        let (main, child) = match direction {
+            TransferDirection::MainToChild => ("1", "0"),
+            TransferDirection::ChildToMain => ("0", "1"),
+        };
+        Self {
+            direction,
+            fault,
+            main_free: std::sync::Mutex::new(main.into()),
+            child_free: std::sync::Mutex::new(child.into()),
+            client_id: std::sync::Mutex::new(None),
+            posts: std::sync::atomic::AtomicUsize::new(0),
+            child_history_reads: std::sync::atomic::AtomicUsize::new(0),
+            invalid_timestamp: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn outside_timestamp(&self, end: u64) -> u64 {
+        let mut timestamp = self.invalid_timestamp.lock().unwrap();
+        *timestamp.get_or_insert_with(|| end.saturating_add(1))
+    }
+}
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for DefaultMasterReceiptTransport {
+    async fn request(
+        &self,
+        credential: &fin_binance::CredentialHandle,
+        request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        use fin_binance::BinanceEndpoint as E;
+        let child_credential = credential.as_str().ends_with("child");
+        match request.endpoint {
+            E::SubAccountList => Ok(json!({"subAccounts":[{
+                "email":"child@example.invalid", "isFreeze":false, "isMaster":false
+            }]})),
+            E::ApiRestrictions => Ok(json!({
+                "enableReading":true, "enableWithdrawals":true,
+                "enableInternalTransfer":true, "permitsUniversalTransfer":true
+            })),
+            E::CapitalConfig => Ok(json!([{
+                "coin":"ETH", "withdrawAllEnable":true, "depositAllEnable":true,
+                "networkList":[{
+                    "network":"ETH", "coin":"ETH", "depositEnable":true,
+                    "withdrawEnable":true, "withdrawIntegerMultiple":"0.00000100",
+                    "withdrawFee":"0.0004", "withdrawMin":"0.001", "withdrawMax":"1000",
+                    "withdrawTag":false, "busy":false
+                }]
+            }])),
+            E::SubAccountSpotAssets => Ok(json!({"balances":[{
+                "asset":"ETH",
+                "free":self.child_free.lock().unwrap().clone(),
+                "locked":"0"
+            }]})),
+            E::Account => Ok(json!({
+                "accountType":"SPOT",
+                "uid":if child_credential {
+                    if matches!(self.fault, DefaultMasterReceiptFault::WrongChildUid) {"1003"} else {"1002"}
+                } else {"1001"},
+                "balances":[{
+                    "asset":"ETH",
+                    "free":if child_credential {self.child_free.lock().unwrap().clone()} else {self.main_free.lock().unwrap().clone()},
+                    "locked":"0"
+                }]
+            })),
+            E::SubAccountTransferHistory => {
+                self.child_history_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if matches!(self.fault, DefaultMasterReceiptFault::ChildHistoryDenied) {
+                    return Err(fin_binance::TransportError::PermissionDenied);
+                }
+                // The pre-write capability probe has no associated transfer.
+                if request.get("limit") == Some("1") {
+                    return Ok(json!([]));
+                }
+                if matches!(self.fault, DefaultMasterReceiptFault::MissingChildReceipt) {
+                    return Ok(json!([]));
+                }
+                let start = request.get("startTime").unwrap().parse::<u64>().unwrap();
+                let end = request.get("endTime").unwrap().parse::<u64>().unwrap();
+                let time = if matches!(self.fault, DefaultMasterReceiptFault::OutsideWindow) {
+                    self.outside_timestamp(end)
+                } else {
+                    start
+                };
+                let row = json!({
+                    "counterParty":if matches!(self.fault, DefaultMasterReceiptFault::WrongCounterparty) {"another-sub"} else {"master"},
+                    "email":if matches!(self.fault, DefaultMasterReceiptFault::WrongPeerEmail) {"wrong-master@example.invalid"} else {"synthetic-master@example.invalid"},
+                    "type":if matches!(self.fault, DefaultMasterReceiptFault::WrongType) {
+                        if request.get("type") == Some("1") {2} else {1}
+                    } else {request.get("type").unwrap().parse::<u64>().unwrap()},
+                    "asset":if matches!(self.fault, DefaultMasterReceiptFault::WrongAsset) {"BTC"} else {"ETH"},
+                    "qty":if matches!(self.fault, DefaultMasterReceiptFault::WrongQuantity) {"0.24"} else {"0.25000000"},
+                    "fromAccountType":if matches!(self.fault, DefaultMasterReceiptFault::WrongWallet) {"MARGIN"} else {"SPOT"},
+                    "toAccountType":"SPOT",
+                    "status":if matches!(self.fault, DefaultMasterReceiptFault::WrongStatus) {"PENDING"} else {"SUCCESS"},
+                    "tranId":if matches!(self.fault, DefaultMasterReceiptFault::WrongVenueId) {123456790u64} else {123456789u64},
+                    "time":time
+                });
+                if matches!(self.fault, DefaultMasterReceiptFault::Duplicate) {
+                    Ok(json!([row.clone(), row]))
+                } else if matches!(self.fault, DefaultMasterReceiptFault::FullPage) {
+                    Ok(json!(vec![row; 200]))
+                } else {
+                    Ok(json!([row]))
+                }
+            }
+            E::UniversalTransfer => {
+                let previous_posts = self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.client_id.lock().unwrap() = request.get("clientTranId").map(str::to_owned);
+                let child_sends = request.get("fromEmail").is_some();
+                if previous_posts == 0 {
+                    match (self.direction, child_sends) {
+                        (TransferDirection::ChildToMain, true) => {
+                            *self.main_free.lock().unwrap() = "0.25".into();
+                            *self.child_free.lock().unwrap() = "0.75".into();
+                        }
+                        (TransferDirection::MainToChild, false) => {
+                            *self.main_free.lock().unwrap() = "0.75".into();
+                            *self.child_free.lock().unwrap() = "0.25".into();
+                        }
+                        _ => return Err(fin_binance::TransportError::Rejected),
+                    }
+                } else if child_sends {
+                    *self.main_free.lock().unwrap() = "1".into();
+                    *self.child_free.lock().unwrap() = "0".into();
+                } else {
+                    *self.main_free.lock().unwrap() = "0.75".into();
+                    *self.child_free.lock().unwrap() = "0.25".into();
+                }
+                Err(fin_binance::TransportError::Timeout)
+            }
+            E::UniversalTransferHistory => {
+                let id = self.client_id.lock().unwrap().clone().unwrap_or_default();
+                let peer_email = if matches!(self.fault, DefaultMasterReceiptFault::WrongPeerEmail)
+                {
+                    "different-peer@example.invalid"
+                } else {
+                    "synthetic-master@example.invalid"
+                };
+                let child_email =
+                    if matches!(self.fault, DefaultMasterReceiptFault::WrongMasterChildEmail) {
+                        "wrong-child@example.invalid"
+                    } else {
+                        "child@example.invalid"
+                    };
+                let child_sends = request.get("fromEmail").is_some();
+                let (from_email, to_email) = if child_sends {
+                    (child_email, peer_email)
+                } else {
+                    (peer_email, child_email)
+                };
+                let end = request.get("endTime").unwrap().parse::<u64>().unwrap();
+                let time = if matches!(self.fault, DefaultMasterReceiptFault::OutsideWindow) {
+                    self.outside_timestamp(end)
+                } else {
+                    request.get("startTime").unwrap().parse::<u64>().unwrap()
+                };
+                let row = json!({
+                    "tranId":123456789,
+                    "clientTranId":id,
+                    "asset":"ETH", "amount":"0.25", "fromAccountType":"SPOT",
+                    "toAccountType":"SPOT", "fromEmail":from_email, "toEmail":to_email,
+                    "status":"SUCCESS", "createTimeStamp":time
+                });
+                if matches!(
+                    self.fault,
+                    DefaultMasterReceiptFault::MasterHistoryIncomplete
+                ) {
+                    let mut result = vec![row];
+                    result.extend((0..499).map(|index| {
+                        json!({
+                            "tranId":format!("noise-{index}"),"clientTranId":"other-request",
+                            "asset":"ETH","amount":"0.25","fromAccountType":"SPOT",
+                            "toAccountType":"SPOT","fromEmail":from_email,"toEmail":to_email,
+                            "status":"SUCCESS","createTimeStamp":time
+                        })
+                    }));
+                    Ok(json!({"totalCount":12000,"result":result}))
+                } else {
+                    Ok(json!({"totalCount":1,"result":[row]}))
+                }
+            }
+            endpoint => panic!("unexpected synthetic endpoint {endpoint:?}"),
+        }
+    }
+}
+
+async fn submit_and_reconcile_default_master_transfer(
+    transport: std::sync::Arc<DefaultMasterReceiptTransport>,
+    from: &str,
+    to: &str,
+    request_id: &str,
+    legacy_submission: bool,
+) -> (fin_domain::Reconciliation, fin_domain::Submission) {
+    use fin_domain::Adapter;
+    let config = main_and_child_config();
+    let adapter =
+        fin_binance::BinanceAdapter::new(config.clone(), transport.clone(), None, None).unwrap();
+    let preview = adapter
+        .prepare(
+            "binance.transfer",
+            &json!({
+                "requestId":request_id, "authority":"main-fixture",
+                "from":from, "to":to, "coin":"ETH", "amount":"0.25",
+                "fromWallet":"SPOT", "toWallet":"SPOT"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        preview.binding["params"]["params"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|param| param["key"] == "fromEmail" || param["key"] == "toEmail")
+            .count(),
+        1
+    );
+    let journal = std::sync::Arc::new(RecordingJournal {
+        events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        persisted: std::sync::Mutex::new(Vec::new()),
+    });
+    assert_eq!(
+        adapter
+            .submit(&preview, journal.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "VENUE_TIMEOUT"
+    );
+    let mut original = journal.persisted.lock().unwrap()[0].clone();
+    if legacy_submission {
+        original
+            .data
+            .as_object_mut()
+            .unwrap()
+            .remove("historySelector");
+    }
+    assert_eq!(original.reference, preview.binding["clientTranId"]);
+    assert!(original.data["toEmail"].is_null() || original.data["fromEmail"].is_null());
+    let record = fin_domain::OperationRecord {
+        id: format!("restart-{request_id}"),
+        request_id: request_id.to_owned(),
+        fingerprint: "synthetic-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "binance.transfer".into(),
+        input: preview.input.clone(),
+        status: fin_domain::Status::Submitted,
+        created_at: fin_domain::now(),
+        updated_at: fin_domain::now(),
+        preview: Some(preview),
+        approval: None,
+        submission: Some(original.clone()),
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    // Recreate the adapter to model restart. Reconciliation remains read-only.
+    let restarted = fin_binance::BinanceAdapter::new(config, transport, None, None).unwrap();
+    let result = restarted.reconcile(&record).await.unwrap();
+    (result, original)
+}
+
 #[async_trait::async_trait]
 impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
     async fn request(
@@ -845,7 +1201,7 @@ impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
 impl fin_binance::BinanceTransport for TransferFixtureTransport {
     async fn request(
         &self,
-        _credential: &fin_binance::CredentialHandle,
+        credential: &fin_binance::CredentialHandle,
         request: BinanceRequest,
     ) -> std::result::Result<Value, fin_binance::TransportError> {
         use fin_binance::BinanceEndpoint as E;
@@ -873,9 +1229,15 @@ impl fin_binance::BinanceTransport for TransferFixtureTransport {
             E::SubAccountSpotAssets => Ok(json!({"balances":[{
                 "asset":"ETH", "free":"1.000000000000000123456789", "locked":"0"
             }]})),
-            E::Account => Ok(json!({"balances":[{
-                "asset":"ETH", "free":"0", "locked":"0"
-            }]})),
+            E::Account => {
+                let is_child = credential.as_str().ends_with("child");
+                Ok(json!({
+                    "accountType":"SPOT",
+                    "uid":if is_child {"1002"} else {"1001"},
+                    "balances":[{"asset":"ETH", "free":"0", "locked":"0"}]
+                }))
+            }
+            E::SubAccountTransferHistory => Ok(json!([])),
             E::UniversalTransferHistory => Ok(json!({"totalCount":1,"result":[{
                 "tranId":123456789,
                 "clientTranId":request.get("clientTranId"),
@@ -1246,6 +1608,146 @@ async fn transfer_history_uses_persisted_single_route_selector_after_restart() {
                 .iter()
                 .any(|(key, value)| key == "clientTranId" && value == &original.reference)
         );
+    }
+}
+
+#[tokio::test]
+async fn default_master_email_recovers_forward_and_return_from_child_history() {
+    let transport = std::sync::Arc::new(DefaultMasterReceiptTransport::new(
+        TransferDirection::MainToChild,
+        DefaultMasterReceiptFault::None,
+    ));
+    let (forward, forward_submission) = submit_and_reconcile_default_master_transfer(
+        transport.clone(),
+        "main-fixture",
+        "child-fixture",
+        "synthetic-default-master-forward",
+        false,
+    )
+    .await;
+    assert_eq!(forward.status, fin_domain::Status::Completed);
+    let forward_proof = forward.verified.unwrap();
+    assert_eq!(forward_proof.submission, forward_submission);
+    assert_eq!(
+        forward_proof.evidence["transfer"]["childHistoryVerified"],
+        true
+    );
+    assert_eq!(
+        forward_proof.evidence["transfer"]["childHistoryProof"]["authenticatedUid"],
+        "1002"
+    );
+    assert_eq!(
+        forward_proof.evidence["transfer"]["childHistoryProof"]["counterParty"],
+        "master"
+    );
+    assert_eq!(
+        forward_proof.evidence["transfer"]["childHistoryProof"]["directionType"],
+        1
+    );
+    assert_eq!(
+        forward_proof.evidence["transfer"]["childHistoryProof"]["quantity"],
+        "0.25"
+    );
+
+    // The same synthetic account pair now returns the funded quantity. This
+    // record models a pre-history-selector durable submission after restart;
+    // no original identity or route email is rewritten.
+    let (return_leg, return_submission) = submit_and_reconcile_default_master_transfer(
+        transport.clone(),
+        "child-fixture",
+        "main-fixture",
+        "synthetic-default-master-return",
+        true,
+    )
+    .await;
+    assert_eq!(return_leg.status, fin_domain::Status::Completed);
+    let return_proof = return_leg.verified.unwrap();
+    assert_eq!(return_proof.submission, return_submission);
+    assert_eq!(return_proof.submission.data["historySelector"], Value::Null);
+    assert_eq!(
+        return_proof.evidence["transfer"]["childHistoryVerified"],
+        true
+    );
+    assert_eq!(
+        return_proof.evidence["transfer"]["childHistoryProof"]["directionType"],
+        2
+    );
+    assert_eq!(
+        return_proof.evidence["transfer"]["childHistoryProof"]["timestampWithinSubmissionWindow"],
+        true
+    );
+    assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn default_master_peer_proof_refuses_mismatch_duplicates_caps_and_bad_child_identity() {
+    use fin_domain::Adapter;
+    let invalid_receipts = [
+        DefaultMasterReceiptFault::WrongCounterparty,
+        DefaultMasterReceiptFault::WrongVenueId,
+        DefaultMasterReceiptFault::WrongQuantity,
+        DefaultMasterReceiptFault::WrongAsset,
+        DefaultMasterReceiptFault::WrongType,
+        DefaultMasterReceiptFault::WrongPeerEmail,
+        DefaultMasterReceiptFault::WrongWallet,
+        DefaultMasterReceiptFault::WrongStatus,
+        DefaultMasterReceiptFault::OutsideWindow,
+        DefaultMasterReceiptFault::Duplicate,
+        DefaultMasterReceiptFault::FullPage,
+        DefaultMasterReceiptFault::MissingChildReceipt,
+        DefaultMasterReceiptFault::WrongMasterChildEmail,
+        DefaultMasterReceiptFault::MasterHistoryIncomplete,
+    ];
+    for (index, fault) in invalid_receipts.into_iter().enumerate() {
+        let transport = std::sync::Arc::new(DefaultMasterReceiptTransport::new(
+            TransferDirection::ChildToMain,
+            fault,
+        ));
+        let (result, original) = submit_and_reconcile_default_master_transfer(
+            transport.clone(),
+            "child-fixture",
+            "main-fixture",
+            &format!("synthetic-invalid-peer-{index}"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            result.status,
+            fin_domain::Status::Unknown,
+            "fault index {index}"
+        );
+        assert!(result.verified.is_none(), "fault index {index}");
+        assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(original.data["toEmail"], Value::Null);
+    }
+
+    for fault in [
+        DefaultMasterReceiptFault::WrongChildUid,
+        DefaultMasterReceiptFault::ChildHistoryDenied,
+    ] {
+        let transport = std::sync::Arc::new(DefaultMasterReceiptTransport::new(
+            TransferDirection::ChildToMain,
+            fault,
+        ));
+        let adapter = fin_binance::BinanceAdapter::new(
+            main_and_child_config(),
+            transport.clone(),
+            None,
+            None,
+        )
+        .unwrap();
+        let preview = adapter
+            .prepare(
+                "binance.transfer",
+                &json!({
+                    "requestId":"synthetic-child-proof-readiness", "authority":"main-fixture",
+                    "from":"child-fixture", "to":"main-fixture", "coin":"ETH",
+                    "amount":"0.25", "fromWallet":"SPOT", "toWallet":"SPOT"
+                }),
+            )
+            .await;
+        assert!(preview.is_err());
+        assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
 

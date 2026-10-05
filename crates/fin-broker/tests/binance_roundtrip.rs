@@ -32,6 +32,7 @@ const CHILD_A: &str = "child-a";
 const CHILD_B: &str = "child-b";
 const EMAIL_A: &str = "a@example.invalid";
 const EMAIL_B: &str = "b@example.invalid";
+const MASTER_EMAIL: &str = "synthetic-master@example.invalid";
 const ASSET: &str = "ETH";
 const STEP_A_IN: &str = "a-to-main";
 const STEP_B_IN: &str = "b-to-main";
@@ -178,6 +179,37 @@ impl BinanceTransport for SyntheticVenue {
             E::SubAccountList => Ok(
                 json!({"subAccounts":[{"email":EMAIL_A,"isFreeze":false,"subAccountId":1002},{"email":EMAIL_B,"isFreeze":false,"subAccountId":1003}]}),
             ),
+            E::SubAccountTransferHistory => {
+                let direction = params.get("type").ok_or(TransportError::InvalidResponse)?;
+                let start = params
+                    .get("startTime")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or(TransportError::InvalidResponse)?;
+                let end = params
+                    .get("endTime")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or(TransportError::InvalidResponse)?;
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .ok_or(TransportError::InvalidResponse)?;
+                let rows = s.history.iter().filter_map(|row| {
+                    let child_sends = row["fromEmail"] == owner && row["toEmail"] == MASTER_EMAIL;
+                    let child_receives = row["toEmail"] == owner && row["fromEmail"] == MASTER_EMAIL;
+                    let kind = if child_sends { 2 } else if child_receives { 1 } else { return None; };
+                    let time = row["createTimeStamp"].as_u64()?;
+                    if kind.to_string() != *direction || time < start || time > end {
+                        return None;
+                    }
+                    Some(json!({
+                        "counterParty":"master", "email":MASTER_EMAIL, "type":kind,
+                        "asset":row["asset"], "qty":row["amount"],
+                        "fromAccountType":row["fromAccountType"], "toAccountType":row["toAccountType"],
+                        "status":row["status"], "tranId":row["tranId"], "time":time
+                    }))
+                }).take(limit).collect::<Vec<_>>();
+                Ok(json!(rows))
+            }
             E::CapitalConfig => Ok(
                 json!([{"coin":ASSET,"depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ETH","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":s.withdraw_fee,"withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":true,"minConfirm":12,"unLockConfirm":64}]}]),
             ),
@@ -277,7 +309,7 @@ impl BinanceTransport for SyntheticVenue {
                 let to_email = params.get("toEmail").cloned();
                 if s.reject_request_id.as_deref() == Some(id.as_str()) {
                     let tran = s.posts.to_string();
-                    s.history.push(json!({"tranId":tran,"clientTranId":id,"asset":ASSET,"amount":params.get("amount").ok_or(TransportError::InvalidResponse)?,"fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":from_email,"toEmail":to_email,"status":"FAILED","createTimeStamp":chrono::Utc::now().timestamp_millis() as u64}));
+                    s.history.push(json!({"tranId":tran,"clientTranId":id,"asset":ASSET,"amount":params.get("amount").ok_or(TransportError::InvalidResponse)?,"fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":from_email.as_deref().unwrap_or(MASTER_EMAIL),"toEmail":to_email.as_deref().unwrap_or(MASTER_EMAIL),"status":"FAILED","createTimeStamp":chrono::Utc::now().timestamp_millis() as u64}));
                     return Err(TransportError::Rejected);
                 }
                 let from = from_email.as_deref().unwrap_or("main");
@@ -294,7 +326,7 @@ impl BinanceTransport for SyntheticVenue {
                 Self::alter(&mut s, from, -millis);
                 Self::alter(&mut s, to, millis);
                 let tran = s.posts.to_string();
-                let row = json!({"tranId":tran,"clientTranId":id,"asset":ASSET,"amount":params["amount"],"fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":from_email,"toEmail":to_email,"status":"SUCCESS","createTimeStamp":chrono::Utc::now().timestamp_millis() as u64});
+                let row = json!({"tranId":tran,"clientTranId":id,"asset":ASSET,"amount":params["amount"],"fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":from_email.as_deref().unwrap_or(MASTER_EMAIL),"toEmail":to_email.as_deref().unwrap_or(MASTER_EMAIL),"status":"SUCCESS","createTimeStamp":chrono::Utc::now().timestamp_millis() as u64});
                 s.history.push(row);
                 if s.accept_then_timeout.as_deref() == Some(id.as_str()) {
                     s.accept_then_timeout = None;
