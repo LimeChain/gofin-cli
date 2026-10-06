@@ -4251,6 +4251,208 @@ mod wallet_only_tests {
             }
         }
     }
+    struct ObservedPrices {
+        observed_at: String,
+        fail: bool,
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl WalletValuation for ObservedPrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            EnginePrices::default().quote_usd(asset, units).await
+        }
+        async fn quote_observation(
+            &self,
+            asset: &AssetId,
+            units: Quantity,
+        ) -> Result<(Quantity, String, String)> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(error(
+                    "SYNTHETIC_SHARED_PRICE_UNAVAILABLE",
+                    "valuation",
+                    "Injected source unavailable.",
+                ));
+            }
+            let (value, _) = self.quote_usd(asset, units).await?;
+            Ok((
+                value,
+                format!("synthetic-shared-price:{}", self.observed_at),
+                self.observed_at.clone(),
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn injected_shared_prices_win_on_all_networks_and_keep_actual_observation_times() {
+        for chain in [1, 42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let mut a = if chain == 1 {
+                adapter(rpc.clone())
+            } else {
+                wallet_adapter(chain, rpc.clone())
+            };
+            *rpc.missing_selector.lock().unwrap() = Some(Oracle::getAssetPriceCall::SELECTOR);
+            let observed_at = (chrono::Utc::now() - chrono::Duration::seconds(45)).to_rfc3339();
+            let provider = Arc::new(ObservedPrices {
+                observed_at: observed_at.clone(),
+                fail: false,
+                calls: AtomicUsize::new(0),
+            });
+            a = a.with_wallet_valuation(provider.clone());
+            let prepared = a
+                .prepare("wallet.transfer", &transfer(chain, "native"))
+                .await
+                .unwrap();
+            let valuation = prepared.valuation.as_ref().unwrap();
+            assert_eq!(valuation.observed_at, observed_at);
+            assert!(
+                valuation.prices.iter().all(|p| p.observed_at == observed_at
+                    && p.source.starts_with("synthetic-shared-price:"))
+            );
+            assert!(valuation.source.starts_with("synthetic-shared-price:"));
+            assert_eq!(valuation.movement_usd_micros, Quantity::from_u64(3_000_000));
+            assert!(provider.calls.load(Ordering::SeqCst) > 0);
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&prepared.observed_at).unwrap()
+                    > chrono::DateTime::parse_from_rfc3339(&observed_at).unwrap()
+            );
+            // Mainnet retains deployment and risk checks despite shared policy pricing.
+            if chain == 1 {
+                *rpc.paused.lock().unwrap() = true;
+                assert_eq!(
+                    a.prepare("aave.supply", &aave_input("aave.supply"))
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "RESERVE_UNAVAILABLE"
+                );
+                *rpc.paused.lock().unwrap() = false;
+                assert!(
+                    a.quote_protocol_usd(&lower_address(addr(101)), Quantity::from_u64(1_000_000))
+                        .await
+                        .is_err()
+                );
+            }
+        }
+    }
+    struct DistinctObservationPrices {
+        principal: String,
+        native: String,
+    }
+    #[async_trait]
+    impl WalletValuation for DistinctObservationPrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            EnginePrices::default().quote_usd(asset, units).await
+        }
+        async fn quote_observation(
+            &self,
+            asset: &AssetId,
+            units: Quantity,
+        ) -> Result<(Quantity, String, String)> {
+            let (amount, _) = self.quote_usd(asset, units).await?;
+            let observed = if asset.reference == "native" {
+                self.native.clone()
+            } else {
+                self.principal.clone()
+            };
+            Ok((
+                amount,
+                format!("synthetic-distinct-observation:{observed}"),
+                observed,
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn principal_and_fee_prices_keep_distinct_observations_and_valuation_uses_oldest() {
+        for chain in [1, 42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let a = if chain == 1 {
+                adapter(rpc)
+            } else {
+                wallet_adapter(chain, rpc)
+            };
+            let principal = (chrono::Utc::now() - chrono::Duration::seconds(45)).to_rfc3339();
+            let native = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+            let a = a.with_wallet_valuation(Arc::new(DistinctObservationPrices {
+                principal: principal.clone(),
+                native: native.clone(),
+            }));
+            let prepared = a
+                .prepare(
+                    "wallet.transfer",
+                    &transfer(chain, &lower_address(addr(101))),
+                )
+                .await
+                .unwrap();
+            let valuation = prepared.valuation.unwrap();
+            assert_eq!(valuation.observed_at, native);
+            assert_eq!(
+                valuation
+                    .prices
+                    .iter()
+                    .find(|p| p.asset.reference == "native")
+                    .unwrap()
+                    .observed_at,
+                native
+            );
+            assert_eq!(
+                valuation
+                    .prices
+                    .iter()
+                    .find(|p| p.asset.reference == lower_address(addr(101)))
+                    .unwrap()
+                    .observed_at,
+                principal
+            );
+        }
+    }
+    #[tokio::test]
+    async fn injected_unavailable_stale_future_or_malformed_prices_never_fall_back_to_aave() {
+        for chain in [1, 42161, 4663] {
+            for (fail, observed_at, expected) in [
+                (true, now(), "SYNTHETIC_SHARED_PRICE_UNAVAILABLE"),
+                (
+                    false,
+                    (chrono::Utc::now() - chrono::Duration::seconds(180)).to_rfc3339(),
+                    "VALUATION_UNAVAILABLE",
+                ),
+                (
+                    false,
+                    (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
+                    "VALUATION_UNAVAILABLE",
+                ),
+                (false, "invalid-timestamp".into(), "VALUATION_UNAVAILABLE"),
+            ] {
+                let rpc = Arc::new(Fixture::new());
+                let a = if chain == 1 {
+                    adapter(rpc.clone())
+                } else {
+                    wallet_adapter(chain, rpc.clone())
+                };
+                let provider = Arc::new(ObservedPrices {
+                    observed_at,
+                    fail,
+                    calls: AtomicUsize::new(0),
+                });
+                let a = a.with_wallet_valuation(provider.clone());
+                assert_eq!(
+                    a.prepare("wallet.transfer", &transfer(chain, "native"))
+                        .await
+                        .unwrap_err()
+                        .code,
+                    expected
+                );
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                assert!(
+                    !rpc.calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|method| method == "eth_sendRawTransaction")
+                );
+            }
+        }
+    }
     #[derive(Default)]
     struct IsolatedSigningSeam(AtomicUsize);
     #[async_trait]

@@ -514,7 +514,10 @@ impl EthereumAdapter {
                         )?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
                         let (usd, _) = self
-                            .quote_usd(&token.reference, quantity(add(qty, rounding_limit)?))
+                            .quote_protocol_usd(
+                                &token.reference,
+                                quantity(add(qty, rounding_limit)?),
+                            )
                             .await?;
                         let added = mul(u256(&usd)?, U256::from(100))?;
                         let debt = add(account.totalDebtBase, added)?;
@@ -977,8 +980,11 @@ impl EthereumAdapter {
         } else {
             quantity(qty)
         };
-        let (movement_usd, source) = self.quote_usd(&principal_asset.reference, movement).await?;
-        let (fee_usd, _) = self.quote_usd("native", quantity(gas)).await?;
+        let (movement_usd, source, movement_observed) = self
+            .quote_usd_observed(&principal_asset.reference, movement)
+            .await?;
+        let (fee_usd, _, fee_observed) = self.quote_usd_observed("native", quantity(gas)).await?;
+        let mut price_observations = vec![movement_observed, fee_observed];
         let mut prices = Vec::new();
         for asset in [&principal_asset, &self.native_asset()]
             .into_iter()
@@ -988,29 +994,41 @@ impl EthereumAdapter {
                 continue;
             }
             let unit = quantity(pow10(asset.decimals)?);
-            let (usd, source) = self.quote_usd(&asset.reference, unit.clone()).await?;
+            let (usd, source, observed_at) = self
+                .quote_usd_observed(&asset.reference, unit.clone())
+                .await?;
+            price_observations.push(observed_at.clone());
             prices.push(AssetPrice {
                 asset: asset.clone(),
                 usd_micros_per_unit: usd,
                 unit_atoms: unit,
-                observed_at: now(),
+                observed_at,
                 source,
             });
         }
         let observed = now();
         let additional_allocation = if operation == "aave.borrow" {
-            self.quote_usd(
-                &principal_asset.reference,
-                quantity(add(
-                    qty,
-                    u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
-                )?),
-            )
-            .await?
-            .0
+            let (value, _, observed_at) = self
+                .quote_usd_observed(
+                    &principal_asset.reference,
+                    quantity(add(
+                        qty,
+                        u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
+                    )?),
+                )
+                .await?;
+            price_observations.push(observed_at);
+            value
         } else {
             Quantity::zero()
         };
+        let valuation_observed = price_observations
+            .into_iter()
+            .min_by_key(|timestamp| {
+                chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .expect("validated observation timestamp")
+            })
+            .expect("principal and fee observations");
         let expires = (chrono::Utc::now() + chrono::Duration::seconds(120))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         Ok(PreparedOperation {
@@ -1039,7 +1057,7 @@ impl EthereumAdapter {
                 movement_usd_micros: movement_usd,
                 maximum_fee_usd_micros: fee_usd,
                 additional_allocation_usd_micros: additional_allocation,
-                observed_at: observed,
+                observed_at: valuation_observed,
                 source,
                 prices,
             }),

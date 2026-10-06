@@ -204,7 +204,8 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
         let name = match result.connection.as_ref().ok_or_else(invalid)? {
             PublicConnection::Binance { name, .. }
             | PublicConnection::Ethereum { name, .. }
-            | PublicConnection::Evm { name, .. } => name,
+            | PublicConnection::Evm { name, .. }
+            | PublicConnection::CoinGecko { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",

@@ -102,7 +102,21 @@ Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use nati
 ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
 native/ERC-20 transfers. Dapps and bridging on those networks are later work.
 Automatic token discovery is partial; candidates are verified against RPC and
-explicit token addresses remain available. Unknown USD valuations block writes.
+explicit token addresses remain available. Shared CoinGecko USD pricing serves
+Binance and every EVM network: exact contract lookups for ERC-20s, reviewed coin
+IDs for exchange assets and native ETH. Missing or stale quotes block writes;
+anonymous public access is best effort. To use your Demo/Pro plan, enroll its
+market-data key yourself in Terminal (the key is requested privately):
+
+```sh
+fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
+```
+
+Use `--api-plan pro` for a Pro key; Demo is the default. This authorizes saving
+a market-data connection, after authenticated ping, a fresh ETH/USD quote and
+configuration Touch ID.
+API requests consume plan quota/billing; the key grants no exchange or wallet
+access. It does not approve financial writes.
 See the [EVM wallet guide](docs/testing/evm-wallets.md) for scope, compatibility,
 transfer previews and the human verification checklist.
 

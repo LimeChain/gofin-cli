@@ -282,6 +282,12 @@ fn collect_material(
     args: &AddConnectionArgs,
 ) -> Result<Option<SecretMaterial>> {
     let material = match args.provider {
+        Provider::CoinGecko => SecretMaterial::CoinGeckoApiKey {
+            api_key: terminal
+                .read_secret("CoinGecko API key", SecretInput::Line)?
+                .to_string(),
+            plan: args.api_plan.as_deref().unwrap_or("demo").into(),
+        },
         Provider::Binance => {
             let api_key = terminal.read_secret("Binance API key", SecretInput::Line)?;
             if matches!(
@@ -338,6 +344,61 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
+        Provider::CoinGecko => {
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "CREDENTIAL_REQUIRED",
+                    "CoinGecko needs a protected API key.",
+                )
+            })?;
+            let plan = args.api_plan.as_deref().unwrap_or("demo");
+            let source = store.with_material(reference, |material| match material {
+                SecretMaterial::CoinGeckoApiKey {
+                    api_key,
+                    plan: stored_plan,
+                } if stored_plan == plan => fin_pricing::CoinGeckoPrices::with_api_key(
+                    if plan == "demo" {
+                        fin_pricing::ApiPlan::Demo
+                    } else {
+                        fin_pricing::ApiPlan::Pro
+                    },
+                    api_key,
+                ),
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "The staged key is not the selected CoinGecko plan.",
+                )),
+            })?;
+            {
+                let _progress = ui.progress("Checking CoinGecko access");
+                source.validate_access().await?;
+            }
+            {
+                let _progress = ui.progress("Checking current USD pricing");
+                fin_pricing::UsdPriceSource::quote(
+                    &source,
+                    &fin_domain::AssetId {
+                        network: "ethereum:1".into(),
+                        reference: "native".into(),
+                        decimals: 18,
+                    },
+                )
+                .await?;
+            }
+            Ok((
+                ConnectionConfig::CoinGecko {
+                    name: args.name.clone(),
+                    resource: ResourceId("market-data:coingecko".into()),
+                    credential_ref: reference.as_str().into(),
+                    api_plan: plan.into(),
+                },
+                vec![
+                    json!({"name":"CoinGecko API access","status":"passed","api_plan":plan}),
+                    json!({"name":"fresh USD price read","status":"passed"}),
+                ],
+                vec![],
+            ))
+        }
         Provider::Evm => {
             let network = config
                 .networks
@@ -696,19 +757,24 @@ fn name(connection: &ConnectionConfig) -> &str {
     match connection {
         ConnectionConfig::Binance { name, .. }
         | ConnectionConfig::Ethereum { name, .. }
-        | ConnectionConfig::Evm { name, .. } => name,
+        | ConnectionConfig::Evm { name, .. }
+        | ConnectionConfig::CoinGecko { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
     match connection {
         ConnectionConfig::Binance { resource, .. }
         | ConnectionConfig::Ethereum { resource, .. }
-        | ConnectionConfig::Evm { resource, .. } => resource,
+        | ConnectionConfig::Evm { resource, .. }
+        | ConnectionConfig::CoinGecko { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
-        ConnectionConfig::Binance { credential_ref, .. } => CredentialRef::new(credential_ref).ok(),
+        ConnectionConfig::Binance { credential_ref, .. }
+        | ConnectionConfig::CoinGecko { credential_ref, .. } => {
+            CredentialRef::new(credential_ref).ok()
+        }
         ConnectionConfig::Ethereum { credential_ref, .. }
         | ConnectionConfig::Evm { credential_ref, .. } => credential_ref
             .as_ref()
@@ -737,6 +803,12 @@ fn recover_inactive_credentials(
 }
 fn public_connection(connection: &ConnectionConfig) -> Value {
     match connection {
+        ConnectionConfig::CoinGecko {
+            name,
+            resource,
+            api_plan,
+            ..
+        } => json!({"provider":"coingecko","name":name,"resource":resource,"api_plan":api_plan}),
         ConnectionConfig::Binance {
             name,
             resource,
@@ -777,6 +849,9 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
             json!({"provider":"evm","name":name,"address":address.to_ascii_lowercase()})
         }
         ConnectionConfig::Binance { .. } => public_connection(connection),
+        ConnectionConfig::CoinGecko { name, resource, .. } => {
+            json!({"provider":"coingecko","name":name,"resource":resource})
+        }
     }
 }
 fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {
@@ -830,6 +905,132 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {
+        ConnectionConfig::CoinGecko {
+            name: "synthetic-pricing".into(),
+            resource: ResourceId("market-data:coingecko".into()),
+            credential_ref: reference.into(),
+            api_plan: plan.into(),
+        }
+    }
+
+    fn pricing_config(connection: ConnectionConfig) -> BrokerConfigV2 {
+        BrokerConfigV2 {
+            version: 2,
+            approver_uid: 501,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![connection],
+            policy: BrokerPolicy::beta(),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn coingecko_configuration_and_public_outcomes_use_one_safe_identity() {
+        let reference = "11111111-1111-4111-8111-111111111111";
+        let connection = pricing_connection("demo", reference);
+        let config = pricing_config(connection.clone());
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&connection).unwrap()["provider"],
+            "coingecko"
+        );
+        assert_eq!(name(&connection), "synthetic-pricing");
+        assert_eq!(resource(&connection).0, "market-data:coingecko");
+        assert_eq!(credential(&connection).unwrap().as_str(), reference);
+        assert!(referenced(&config).contains(reference));
+        assert_eq!(
+            connection_resources(&connection, &config),
+            vec![ResourceId("market-data:coingecko".into())]
+        );
+        let public = public_connection(&connection);
+        assert_eq!(
+            public,
+            json!({"provider":"coingecko","name":"synthetic-pricing","resource":"market-data:coingecko","api_plan":"demo"})
+        );
+        for action in ["add", "update", "remove"] {
+            let output = outcome(
+                action,
+                Some(&connection),
+                vec![json!({"name":"CoinGecko API access","status":"passed"})],
+                vec![],
+                None,
+            );
+            assert_eq!(output["connection"], public);
+            assert_eq!(output["configuration_authorized"], true);
+            assert_eq!(output["financial_movement"], false);
+            assert_eq!(output["future_financial_authority"], false);
+            assert!(!output.to_string().contains(reference));
+            assert!(output["connection"].get("credential_ref").is_none());
+            assert!(output["connection"].get("signing_enabled").is_none());
+            serde_json::from_value::<fin_discovery::enrollment_contract::EnrollmentOutcome>(output)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn coingecko_rotation_preserves_market_data_identity_and_rejects_duplicate_aliases() {
+        let original = pricing_connection("demo", "11111111-1111-4111-8111-111111111111");
+        let replacement = pricing_connection("pro", "22222222-2222-4222-8222-222222222222");
+        assert_eq!(
+            immutable_identity(&original),
+            immutable_identity(&replacement)
+        );
+        assert_ne!(credential(&original), credential(&replacement));
+        assert_ne!(
+            config_hash(&pricing_config(original.clone())).unwrap(),
+            config_hash(&pricing_config(replacement.clone())).unwrap()
+        );
+        let mut duplicate = replacement;
+        if let ConnectionConfig::CoinGecko { name, .. } = &mut duplicate {
+            *name = "synthetic-other-pricing".into();
+        }
+        let mut config = pricing_config(original.clone());
+        config.connections.push(duplicate);
+        assert_eq!(
+            config.validate().unwrap_err().code,
+            "CONFIG_CONNECTION_DUPLICATE"
+        );
+        for (field, value) in [
+            ("api_plan", "unsupported"),
+            ("resource", "market-data:other"),
+            ("credential_ref", "not-a-credential-reference"),
+        ] {
+            let mut wrong = serde_json::to_value(&original).unwrap();
+            wrong[field] = json!(value);
+            let wrong: ConnectionConfig = serde_json::from_value(wrong).unwrap();
+            assert_eq!(
+                pricing_config(wrong).validate().unwrap_err().code,
+                "CONFIG_PRICING_CONNECTION_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn coingecko_safe_requests_reject_key_and_approval_values_without_echo() {
+        let base = json!({"provider":"coingecko","name":"synthetic-pricing","credential_type":"api_key","api_plan":"demo"});
+        validate_add(&parse::<AddConnectionArgs>(base.clone()).unwrap()).unwrap();
+        for field in [
+            "api_key",
+            "secret",
+            "approval",
+            "credential_ref",
+            "signature",
+        ] {
+            let mut request = base.clone();
+            request[field] = json!("SYNTHETIC-NOT-A-REAL-KEY");
+            let failure = parse::<AddConnectionArgs>(request).unwrap_err();
+            assert!(!failure.to_string().contains("SYNTHETIC-NOT-A-REAL-KEY"));
+        }
+        let material = SecretMaterial::CoinGeckoApiKey {
+            api_key: "SYNTHETIC-NOT-A-REAL-KEY".into(),
+            plan: "demo".into(),
+        };
+        material.validate_present().unwrap();
+        assert!(!format!("{material:?}").contains("SYNTHETIC-NOT-A-REAL-KEY"));
+    }
+
     #[test]
     fn enrollment_binance_diagnostic_preserves_only_typed_http_codes() {
         use fin_binance::{HttpFailureKind, TransportError};

@@ -40,9 +40,10 @@ Wallet balance reads combine configured/explicit tokens with bounded cached
 Blockscout candidate discovery, then verify metadata and balances on RPC.
 Discovery always reports partial coverage. Snapshot restoration scope is explicit
 native plus configured tokens, not a claim to enumerate every holding or dapp.
-Wallet-only USD valuation maps exact reviewed contracts (native ETH; Arbitrum
-WETH/USDC; Robinhood WETH/USDG) to independent quotes; unknown valuation blocks
-writes instead of bypassing limits. L2 settlement also requires the RPC finalized
+Shared CoinGecko USD valuation serves Binance and all EVM networks. ERC-20
+lookups use verified chain/platform plus exact contract; exchange symbols use a
+reviewed coin-ID registry. Missing valuation blocks writes instead of bypassing
+limits; no stablecoin parity or exchange-price fallback is assumed. L2 settlement also requires the RPC finalized
 block to include the receipt; sequencer confirmation remains pending. That marker
 is not a proof of the complete rollup challenge period.
 
@@ -58,7 +59,27 @@ Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Sc
 
 The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline for the declared observer scope and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
 
-Binance USD valuation uses an injected independent USDT/USD provider rather than a peg assumption. The initial provider validates Coinbase Exchange's fixed USDT-USD product and fresh positive ticker, conservatively uses the greater of the last price and ask, and combines it with the exact Binance asset/USDT quote. Missing, stale or invalid components refuse valuation; no parity fallback exists. The adapter and allocation valuator share the provider, and final submission rechecks the approved material valuation. Zero unselected holdings remain in the complete baseline/restoration scope but need no quote; replan still freshly prices immutable original allocation assets after custody moves. This provider boundary allows a future reviewed oracle without changing generic ledger accounting.
+`fin-pricing` owns provider-independent async `UsdPriceSource`; the default
+CoinGecko implementation supplies direct USD pricing for Binance and EVM mainnet/
+L2 wallets. Native ETH uses a verified coin ID, ERC-20s use verified platform and
+exact contract, and Binance coins use a reviewed ID registry rather than blind
+symbol search. Unknown mappings or absent listed-token quotes fail closed.
+Aave collateral/health oracles remain application-specific protocol checks.
+
+Raw JSON numeric lexemes become positive exact decimal text without floating
+point. Provider `last_updated_at` becomes RFC3339 source time, distinct from
+retrieval time. Maximum quote age is 120 seconds; a shared/coalesced 30-second
+cache rechecks freshness and never supplies stale data on outage. Missing, zero,
+malformed, future or stale quotes and rate limits block financial execution.
+The $100 verification policy and 90-second preview expiry are unchanged.
+No Binance/Coinbase/Kraken price fallback is implemented. Anonymous public access
+is best effort. Optional CoinGecko Demo/Pro enrollment uses a hidden protected
+key prompt, read-only authenticated ping plus a fresh ETH/USD quote, and
+configuration Touch ID. Safe
+metadata names the API plan; protected references stay private to the broker.
+A single `market-data:coingecko` resource prevents duplicate pricing credentials;
+keys grant market-data access only and calls may consume plan quota/billing.
+Saving the connection grants no financial approval; no environment key is loaded. See [pricing tests and public probes](testing/evm-wallets.md#reproducible-offline-tests).
 
 The TS SQLite database is not silently opened or replayed by Rust. The read-only `fin-store` legacy inspection example preserves original records and emits hashes and unresolved/reservation counts. Active legacy records block a separate Rust financial run; recovery or migration still needs compatible historical interpretation.
 
@@ -226,7 +247,7 @@ Use a modular local application, not a hosted service or a distributed workflow 
 | Operation store           | Durable identifiers, request fingerprints, authorization references, submissions, receipts, and reconciliation state.                                            |
 | Verification inventory    | Selected exact-unit funds, in-flight reservations, consumed costs, debt, custody/conversion origins, and exact restoration checks.                               |
 
-Configuration is versioned and strict. The current schema supports Binance and Ethereum mainnet; changing an RPC URL does not add another network. A new application or network should add its connection schema and reviewed operation definitions, adapter construction, exact asset/unit identities, valuation, submission identity, effect reconciliation, and scoped inventory/return behavior. Reuse the existing approval and durable execution path. Extend the receipt verifier for a new payout format instead of treating an unverified receipt as completion. These are ordinary implementation responsibilities, not a separate release-hardening gate.
+Configuration is versioned and strict. The current schema supports Binance and reusable EVM wallets on Ethereum mainnet, Arbitrum One and Robinhood Chain; changing an RPC URL does not add another network. A new application or network should add its connection schema and reviewed operation definitions, adapter construction, exact asset/unit identities, valuation, submission identity, effect reconciliation, and scoped inventory/return behavior. Reuse the existing approval and durable execution path. Extend the receipt verifier for a new payout format instead of treating an unverified receipt as completion. These are ordinary implementation responsibilities, not a separate release-hardening gate.
 
 The credential/approval boundary is implemented as a prototype but human protected installation, biometric confirmation, and bypass verification remain unrun. Document the actual agent capabilities against which it is tested. Do not assume an OS keychain, separate terminal, or background process automatically makes keys inaccessible. Automated fake authorization belongs only in isolated test construction and must not become a switch that permits live writes without the real approval path. The explicitly user-authorized temporary non-biometric production test phase supplies evidence only for its exact financial operations and restoration; it does not establish shipped Touch ID behavior or credential isolation.
 

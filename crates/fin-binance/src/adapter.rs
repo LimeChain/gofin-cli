@@ -720,11 +720,11 @@ impl BinanceAdapter {
             )
         })?;
         let age = Utc::now().signed_duration_since(observed.with_timezone(&Utc));
-        if age < Duration::seconds(-5) || age > Duration::seconds(60) {
+        if age < Duration::seconds(-5) || age > Duration::seconds(120) {
             return Err(error(
                 "STALE_VALUATION",
                 "preview",
-                "USD price must be observed within the last 60 seconds.",
+                "USD price must be observed within the last 120 seconds.",
             ));
         }
         let movement_usd = decimal_product_micros(movement, &quote.usd_per_unit)?;

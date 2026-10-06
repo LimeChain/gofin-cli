@@ -76,6 +76,24 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         };
         lines.push(format!("{verb} {subject}: {}", safe(name(&connection))));
         match &connection {
+            ConnectionConfig::CoinGecko {
+                api_plan, resource, ..
+            } => {
+                if !matches!(api_plan.as_str(), "demo" | "pro")
+                    || resource.0 != "market-data:coingecko"
+                {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The pricing connection is invalid.",
+                    ));
+                }
+                lines.push(format!(
+                    "CoinGecko {} API | USD pricing reads only",
+                    safe(api_plan)
+                ));
+                lines.push("This key grants no exchange or wallet signing access.".into());
+                lines.push("Calls consume API plan quota and may incur billing.".into());
+            }
             ConnectionConfig::Binance {
                 role,
                 parent,
@@ -250,6 +268,74 @@ mod tests {
             "connection":{"provider":"binance","name":"SYNTHETIC-account","resource":"binance:uid:123:SPOT","credential_ref":"SYNTHETIC-ref","role":role,"parent":if role=="sub" {Some("SYNTHETIC-main")} else {None},"email":if role=="sub" {Some("synthetic@example.invalid")} else {None},"wallet_type":"SPOT","physical_identity":"123","physical_identity_verified":true},
             "checks":[{"name":"reported API restrictions","permissions":{"enableReading":true,"enableWithdrawals":false}}],"warnings":["Synthetic warning"]})
     }
+    fn coingecko(plan: &str) -> Value {
+        let connection = ConnectionConfig::CoinGecko {
+            name: "synthetic-pricing".into(),
+            resource: ResourceId("market-data:coingecko".into()),
+            credential_ref: "11111111-1111-4111-8111-111111111111".into(),
+            api_plan: plan.into(),
+        };
+        json!({"action":"add","financial_movement":false,"future_financial_authority":false,"connection":connection,"checks":[{"name":"CoinGecko API access","status":"passed"},{"name":"fresh USD price read","status":"passed"}],"warnings":[]})
+    }
+
+    #[test]
+    fn coingecko_review_names_plan_scope_and_cost_without_private_reference_or_json() {
+        for plan in ["demo", "pro"] {
+            let binding = coingecko(plan);
+            let text = review(&binding).unwrap();
+            for expected in [
+                "Save credentials for connection: synthetic-pricing",
+                &format!("CoinGecko {plan} API"),
+                "USD pricing reads only",
+                "no exchange or wallet signing access",
+                "quota",
+                "No funds move now",
+                "fresh Touch ID",
+            ] {
+                assert!(text.contains(expected), "missing {expected}");
+            }
+            assert!(!text.contains("11111111-1111-4111-8111-111111111111"));
+            assert!(!text.contains("credential_ref") && !text.contains("{\""));
+            assert!(text.lines().count() <= 9);
+            let mut update = binding.clone();
+            update["action"] = json!("update");
+            let text = review(&update).unwrap();
+            assert!(text.contains("Update credentials for connection: synthetic-pricing"));
+            assert!(text.contains("Revoke obsolete keys at the provider separately"));
+            let mut remove = binding;
+            remove["action"] = json!("remove");
+            let text = review(&remove).unwrap();
+            assert!(text.contains("Remove credentials for connection: synthetic-pricing"));
+            assert!(text.contains("Provider keys are not revoked"));
+        }
+    }
+
+    #[test]
+    fn coingecko_review_rejects_materially_invalid_or_secret_bearing_bindings() {
+        for (field, value) in [
+            ("api_plan", json!("unsupported")),
+            ("resource", json!("market-data:other")),
+            ("api_key", json!("SYNTHETIC-NOT-A-REAL-KEY")),
+            ("signing_enabled", json!(true)),
+        ] {
+            let mut wrong = coingecko("demo");
+            wrong["connection"][field] = value;
+            let failure = review(&wrong).unwrap_err();
+            assert_eq!(failure.code, "INVALID_CHALLENGE");
+            assert!(!failure.to_string().contains("SYNTHETIC-NOT-A-REAL-KEY"));
+        }
+        for flag in ["financial_movement", "future_financial_authority"] {
+            let mut wrong = coingecko("demo");
+            wrong[flag] = json!(true);
+            assert_eq!(review(&wrong).unwrap_err().code, "INVALID_CHALLENGE");
+        }
+        let mut binding = coingecko("demo");
+        binding["connection"]["name"] = json!("synthetic\u{1b}[2J\u{202e}pricing");
+        binding["warnings"] = json!(["synthetic\u{1b}[2Jwarning"]);
+        let text = review(&binding).unwrap();
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'));
+    }
+
     #[test]
     fn main_review_is_concise_truthful_and_shows_unknown_permissions() {
         let text = review(&binance("main")).unwrap();

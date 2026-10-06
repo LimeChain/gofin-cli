@@ -124,6 +124,9 @@ struct ApprovalPresentationTests {
         evmConnection["provider"] = "evm"
         evm["connection"] = evmConnection
         assert(configurationAuthenticationReason(evm) == "save the EVM connection \"SYNTHETIC-wallet\"")
+        let pricing: [String: Any] = ["action": "add", "financial_movement": false, "future_financial_authority": false,
+                                      "connection": ["provider": "coingecko", "name": "SYNTHETIC-pricing"]]
+        assert(configurationAuthenticationReason(pricing) == "save the CoinGecko connection \"SYNTHETIC-pricing\"")
         for field in ["financial_movement", "future_financial_authority"] {
             var candidate = setup; candidate[field] = true
             assert(configurationAuthenticationReason(candidate) == nil)
@@ -135,6 +138,6 @@ struct ApprovalPresentationTests {
         badName["connection"] = badConnection
         assert(configurationAuthenticationReason(badName) == nil)
         assert(configurationAuthenticationReason([:]) == nil)
-        print("Approval presentation: 17 summary, 20 terminal-proof/channel and 12 authentication-reason cases passed; no UI or authentication requested.")
+        print("Approval presentation: 17 summary, 20 terminal-proof/channel and 13 authentication-reason cases passed; no UI or authentication requested.")
     }
 }

@@ -1742,6 +1742,7 @@ dependencies = [
  "fin-evm",
  "fin-human-terminal",
  "fin-presentation",
+ "fin-pricing",
  "fin-protocol",
  "fin-store",
  "hex",
@@ -1894,6 +1895,19 @@ version = "0.2.0-beta.1"
 dependencies = [
  "fin-domain",
  "serde_json",
+]
+
+[[package]]
+name = "fin-pricing"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fin-domain",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

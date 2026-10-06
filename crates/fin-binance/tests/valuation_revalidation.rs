@@ -319,6 +319,41 @@ async fn duplicate_adapter_native_price_identity_is_rejected() {
 }
 
 #[tokio::test]
+async fn provider_timestamp_survives_prepare_and_expired_quotes_block_submission() {
+    use fin_domain::Adapter;
+    for seconds in [90, 121] {
+        let timestamp = (chrono::Utc::now() - chrono::Duration::seconds(seconds)).to_rfc3339();
+        let prices = Arc::new(ScriptedPrices {
+            quotes: Mutex::new(vec![PriceQuote {
+                usd_per_unit: "1.02".into(),
+                observed_at: timestamp.clone(),
+                source: "synthetic-fixture:CoinGecko-source-time".into(),
+            }]),
+            calls: AtomicUsize::new(0),
+        });
+        let transport = Arc::new(RecordingTransport::default());
+        let adapter = BinanceAdapter::new(
+            config(),
+            transport.clone(),
+            Some(prices),
+            Some(Arc::new(PendingRecipientVerifier)),
+        )
+        .unwrap();
+        let result = adapter
+            .prepare("binance.withdraw", &withdrawal_input())
+            .await;
+        if seconds == 90 {
+            let valuation = result.unwrap().valuation.unwrap();
+            assert_eq!(valuation.observed_at, timestamp);
+            assert_eq!(valuation.prices[0].observed_at, timestamp);
+        } else {
+            assert_eq!(result.unwrap_err().code, "STALE_VALUATION");
+        }
+        assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
 async fn stale_zero_and_unavailable_quotes_fail_closed_during_prepare() {
     use fin_domain::Adapter;
     for (provider, expected) in [

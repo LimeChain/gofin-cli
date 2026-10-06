@@ -22,6 +22,9 @@ pub enum Provider {
     #[serde(alias = "ethereum")]
     #[value(alias = "ethereum")]
     Evm,
+    #[serde(rename = "coingecko")]
+    #[value(name = "coingecko")]
+    CoinGecko,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +42,7 @@ pub enum CredentialType {
     Ed25519,
     PrivateKey,
     ReadOnly,
+    ApiKey,
 }
 
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -67,7 +71,11 @@ pub struct AddConnectionArgs {
     /// Expected public wallet address; checked against the protected signer.
     #[arg(long)]
     pub address: Option<String>,
-    /// Credential category only: hmac/rsa/ed25519 or private_key/read_only.
+    /// CoinGecko API plan: demo (default) or pro. Public metadata only.
+    #[arg(long, value_parser = ["demo", "pro"])]
+    pub api_plan: Option<String>,
+    /// Credential category only: hmac/rsa/ed25519, private_key/read_only or api_key.
+    /// api_key names a category; its secret value is collected privately, never through a flag.
     /// Binance prompts privately for both API key and signing secret/key.
     /// PEM input accepts actual line breaks or literal \n separators; include BEGIN/END lines and press Enter.
     #[arg(long, value_enum)]
@@ -183,7 +191,38 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             "A valid Binance account email is required.",
         ));
     }
+    if args.provider != Provider::CoinGecko && args.api_plan.is_some() {
+        return Err(FinError::validation(
+            "--api-plan belongs only to a CoinGecko market-data connection.",
+        ));
+    }
     match args.provider {
+        Provider::CoinGecko => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+            {
+                return Err(FinError::validation(
+                    "CoinGecko market-data connections do not accept account relationships, wallet addresses or networks.",
+                ));
+            }
+            if args
+                .api_plan
+                .as_deref()
+                .is_some_and(|plan| !matches!(plan, "demo" | "pro"))
+            {
+                return Err(FinError::validation(
+                    "Choose --api-plan demo or pro for CoinGecko.",
+                ));
+            }
+            if args.credential_type != Some(CredentialType::ApiKey) {
+                return Err(FinError::validation(
+                    "CoinGecko requires --credential-type api_key; enter its value only in the protected Terminal prompt.",
+                ));
+            }
+        }
         Provider::Binance => {
             let role = args.role.ok_or_else(|| {
                 FinError::validation("Binance requires --role main or --role sub.")
@@ -298,10 +337,12 @@ pub fn operation_definitions() -> Vec<Definition> {
             "fin connections add --provider binance --name main-rsa --role main --credential-type rsa",
             "fin connections add --provider binance --name main-ed25519 --role main --credential-type ed25519",
             "fin connections add --provider binance --name savings --role sub --parent main --email subaccount@example.invalid --credential-type hmac",
+            "fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo",
             "fin connections add --provider evm --name wallet --credential-type private_key",
             "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"sub_requires":["parent main connection","subaccount email"],"checks":["read-only authentication","reported API restrictions","account identity and parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission for internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal."},
+        "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":"Optional read-only enrollment check; defaults to ethereum:1 and does not scope the wallet key.","networks":["ethereum:1","ethereum:42161","ethereum:4663"],"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap and Aave remain Ethereum mainnet only; other networks support wallet discovery and same-chain native/ERC-20 transfers."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
@@ -505,12 +546,14 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
     ];
     let mut connection_schema = schema::<AddConnectionArgs>();
-    connection_schema["$defs"]["Provider"]["enum"] = json!(["binance", "evm", "ethereum"]);
+    connection_schema["$defs"]["Provider"]["enum"] =
+        json!(["binance", "evm", "ethereum", "coingecko"]);
     connection_schema["allOf"] = json!([
         {
             "if": {"properties":{"provider":{"const":"binance"}},"required":["provider"]},
             "then": {
                 "required":["role"],
+                "not":{"required":["api_plan"]},
                 "properties":{"credential_type":{"enum":["hmac","rsa","ed25519"]}},
                 "oneOf":[
                     {"properties":{"role":{"const":"main"}},"not":{"anyOf":[{"required":["parent"]},{"required":["email"]}]}},
@@ -523,11 +566,19 @@ pub fn operation_definitions() -> Vec<Definition> {
             "then": {
                 "required":["credential_type"],
                 "properties":{"network":{"enum":["ethereum:1","ethereum:42161","ethereum:4663",null]},"credential_type":{"enum":["private_key","read_only"]}},
-                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]}]},
+                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["api_plan"]}]},
                 "oneOf":[
                     {"properties":{"credential_type":{"const":"private_key"}}},
                     {"properties":{"credential_type":{"const":"read_only"}},"required":["address"]}
                 ]
+            }
+        },
+        {
+            "if":{"properties":{"provider":{"const":"coingecko"}},"required":["provider"]},
+            "then":{
+                "required":["credential_type"],
+                "properties":{"credential_type":{"const":"api_key"},"api_plan":{"enum":["demo","pro",null],"default":"demo"}},
+                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]}]}
             }
         }
     ]);
@@ -619,7 +670,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             definition.input_schema["allOf"].as_array().unwrap().len(),
-            2
+            3
         );
         assert_eq!(
             definition.output_schema,
@@ -772,7 +823,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             add.input_schema["$defs"]["Provider"]["enum"],
-            json!(["binance", "evm", "ethereum"])
+            json!(["binance", "evm", "ethereum", "coingecko"])
         );
         assert_eq!(
             add.input_schema["allOf"][1]["then"]["required"],
@@ -801,6 +852,123 @@ mod tests {
             let parsed = Cli::try_parse_from(std::iter::once("fin").chain(args)).unwrap();
             validate_add(&parsed.add).unwrap();
             assert!(parsed.add.network.is_none());
+        }
+    }
+
+    #[test]
+    fn coingecko_accepts_only_safe_market_data_metadata_and_supported_plan() {
+        use clap::Parser;
+        for plan in [None, Some("demo"), Some("pro")] {
+            let mut input =
+                json!({"provider":"coingecko","name":"pricing","credential_type":"api_key"});
+            if let Some(plan) = plan {
+                input["api_plan"] = json!(plan);
+            }
+            let args: AddConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(args.provider, Provider::CoinGecko);
+            validate_add(&args).unwrap();
+            assert_eq!(
+                serde_json::to_value(&args).unwrap()["provider"],
+                "coingecko"
+            );
+            for (field, value) in [
+                ("role", json!("main")),
+                ("parent", json!("main")),
+                ("email", json!("synthetic@example.invalid")),
+                ("network", json!("ethereum:1")),
+                (
+                    "address",
+                    json!("0x1111111111111111111111111111111111111111"),
+                ),
+                ("api_plan", json!("unsupported")),
+                ("credential_type", json!("private_key")),
+            ] {
+                let mut wrong = input.clone();
+                wrong[field] = value;
+                let wrong: AddConnectionArgs = serde_json::from_value(wrong).unwrap();
+                assert!(validate_add(&wrong).is_err(), "accepted {field}");
+            }
+            for field in ["api_key", "secret", "credential_ref"] {
+                let mut wrong = input.clone();
+                wrong[field] = json!("SYNTHETIC-NOT-A-REAL-KEY");
+                assert!(serde_json::from_value::<AddConnectionArgs>(wrong).is_err());
+            }
+        }
+        assert!(
+            Cli::try_parse_from([
+                "fin",
+                "--provider",
+                "coingecko",
+                "--name",
+                "pricing",
+                "--credential-type",
+                "api_key",
+                "--api-plan",
+                "pro"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fin",
+                "--provider",
+                "coingecko",
+                "--name",
+                "pricing",
+                "--credential-type",
+                "api_key",
+                "--api-plan",
+                "unsupported"
+            ])
+            .is_err()
+        );
+        let mut binance = main_args();
+        binance.api_plan = Some("demo".into());
+        assert!(validate_add(&binance).is_err());
+        let evm: AddConnectionArgs = serde_json::from_value(json!({"provider":"evm","name":"wallet","credential_type":"private_key","api_plan":"demo"})).unwrap();
+        assert!(validate_add(&evm).is_err());
+    }
+
+    #[test]
+    fn coingecko_discovery_and_enrollment_example_expose_plan_not_key() {
+        use clap::Parser;
+        let add = operation_definitions()
+            .into_iter()
+            .find(|d| d.name == "connections.add")
+            .unwrap();
+        let provider = &add.semantics["coingecko"];
+        assert_eq!(provider["resource"], "market-data:coingecko");
+        assert_eq!(provider["default_api_plan"], "demo");
+        assert_eq!(provider["api_plans"], json!(["demo", "pro"]));
+        assert_eq!(
+            provider["checks"],
+            json!([
+                "read-only authenticated CoinGecko ping",
+                "fresh ETH/USD quote"
+            ])
+        );
+        assert_eq!(
+            add.input_schema["allOf"][2]["then"]["properties"]["credential_type"]["const"],
+            "api_key"
+        );
+        for example in add.semantics["command_line_examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|example| example.contains("--provider coingecko"))
+        {
+            let parsed = Cli::try_parse_from(
+                std::iter::once("fin").chain(
+                    example
+                        .strip_prefix("fin connections add ")
+                        .unwrap()
+                        .split_whitespace(),
+                ),
+            )
+            .unwrap();
+            validate_add(&parsed.add).unwrap();
+            assert_eq!(parsed.add.api_plan.as_deref(), Some("demo"));
         }
     }
 

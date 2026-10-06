@@ -1102,8 +1102,12 @@ impl EthereumAdapter {
                         )?;
                         let mut borrowing_value = U256::ZERO;
                         let mut liquidation_value = U256::ZERO;
-                        let mut debt_value =
-                            u256(&self.quote_usd(&token.reference, quantity(added)).await?.0)?;
+                        let mut debt_value = u256(
+                            &self
+                                .quote_protocol_usd(&token.reference, quantity(added))
+                                .await?
+                                .0,
+                        )?;
                         let configured_pool = &self.aave()?.pool;
                         for position in context
                             .projected
@@ -1125,7 +1129,7 @@ impl EthereumAdapter {
                                 let info = self.reserve(&position.asset.reference, None).await?;
                                 let usd = u256(
                                     &self
-                                        .quote_usd(
+                                        .quote_protocol_usd(
                                             &position.asset.reference,
                                             position.amount.minimum.clone(),
                                         )
@@ -1146,7 +1150,7 @@ impl EthereumAdapter {
                                     debt_value,
                                     u256(
                                         &self
-                                            .quote_usd(
+                                            .quote_protocol_usd(
                                                 &position.asset.reference,
                                                 position.amount.maximum.clone(),
                                             )

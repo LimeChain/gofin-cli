@@ -420,26 +420,58 @@ impl EthereumAdapter {
             .collect()
     }
     pub async fn quote_usd(&self, reference: &str, units: Quantity) -> Result<(Quantity, String)> {
+        let (value, source, _) = self.quote_usd_observed(reference, units).await?;
+        Ok((value, source))
+    }
+    pub async fn quote_usd_observed(
+        &self,
+        reference: &str,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
         self.runtime.assert_chain().await?;
         let token = self.token(reference, None).await?;
-        if self.config.aave.is_none() {
-            let provider = self.wallet_valuation.as_ref().ok_or_else(|| {
-                error(
-                    "VALUATION_UNAVAILABLE",
-                    "valuation",
-                    "No trusted wallet valuation provider is configured on this network.",
-                )
-            })?;
-            let (value, source) = provider
-                .quote_usd(&token.asset(self), units.clone())
+        if let Some(provider) = &self.wallet_valuation {
+            let (value, source, observed_at) = provider
+                .quote_observation(&token.asset(self), units.clone())
                 .await?;
             require(
                 !source.trim().is_empty() && (units.is_zero() || !value.is_zero()),
                 "VALUATION_UNAVAILABLE",
                 "Wallet valuation requires an explicit source and positive priced value.",
             )?;
-            return Ok((value, source));
+            let observed = chrono::DateTime::parse_from_rfc3339(&observed_at).map_err(|_| {
+                error(
+                    "VALUATION_UNAVAILABLE",
+                    "valuation",
+                    "Price observation timestamp is malformed.",
+                )
+            })?;
+            let current = chrono::Utc::now();
+            require(
+                observed <= current + chrono::Duration::seconds(5)
+                    && current.signed_duration_since(observed) <= chrono::Duration::seconds(120),
+                "VALUATION_UNAVAILABLE",
+                "Price observation is stale or future-dated.",
+            )?;
+            return Ok((value, source, observed_at));
         }
+        require(
+            self.config.aave.is_some(),
+            "VALUATION_UNAVAILABLE",
+            "No trusted wallet valuation provider is configured on this network.",
+        )?;
+        let (value, source) = self.quote_protocol_usd(reference, units).await?;
+        Ok((value, source, now()))
+    }
+    // Aave collateral/debt risk uses the protocol's own oracle. The same helper
+    // preserves isolated legacy policy fixtures when no provider is injected.
+    // Broker policy valuation always uses its injected provider, with no fallback.
+    pub(crate) async fn quote_protocol_usd(
+        &self,
+        reference: &str,
+        units: Quantity,
+    ) -> Result<(Quantity, String)> {
+        let token = self.token(reference, None).await?;
         let oracle = address(&self.aave()?.oracle)?;
         self.runtime.code(oracle).await?;
         require(

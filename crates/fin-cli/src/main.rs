@@ -387,6 +387,7 @@ fn capabilities() -> Value {
         "service_required": false,
         "machine_contract": fin_discovery::machine_contract(),
         "evm_networks": fin_discovery::evm_network_profiles(),
+        "pricing": {"provider":"coingecko","authentication":"Optional protected human-enrolled Demo/Pro API key; otherwise anonymous public access is best effort.","enrollment_command":"fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo","api_key_values_accepted_in_arguments":false,"fallback":"none; missing/stale/rate-limited quotes block writes"},
         "platforms": {
             "macos": {"protected_broker": true, "human_enrollment": true},
             "linux": {"offline_discovery": true, "protected_broker": false, "human_enrollment": false},

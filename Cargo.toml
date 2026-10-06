@@ -41,6 +41,7 @@ fin-ethereum = { path = "crates/fin-ethereum" }
 fin-broker = { path = "crates/fin-broker" }
 fin-human-terminal = { path = "crates/fin-human-terminal" }
 fin-presentation = { path = "crates/fin-presentation" }
+fin-pricing = { path = "crates/fin-pricing" }
 
 [profile.release]
 lto = "thin"

@@ -3,21 +3,19 @@
 //! or user input cannot establish a token's USD value.
 
 use async_trait::async_trait;
-use chrono::Utc;
-use fin_binance::BinancePriceProvider;
-use fin_domain::{AssetId, FinError, Quantity, Result};
-use fin_ethereum::{TokenDiscovery, TokenDiscoveryResult, WalletValuation};
+use fin_domain::{FinError, Result};
+use fin_ethereum::{TokenDiscovery, TokenDiscoveryResult};
 use serde_json::Value;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_CANDIDATES: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const INDEXER_WARNING: &str = "Public indexer candidates may omit unindexed or recently changed holdings; indexing freshness and exhaustive ERC-20 coverage are unproven. Balances require separate on-chain reads.";
+#[cfg(test)]
 const ARBITRUM_WETH: &str = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1";
+#[cfg(test)]
 const ARBITRUM_USDC: &str = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
-const ROBINHOOD_WETH: &str = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
-const ROBINHOOD_USDG: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
 fn indexer_base(chain_id: u64) -> Result<&'static str> {
     match chain_id {
@@ -236,83 +234,13 @@ impl TokenDiscovery for PublicTokenDiscovery {
     }
 }
 
-pub struct PublicEvmWalletPrices {
-    prices: Arc<dyn BinancePriceProvider>,
-}
-
-impl PublicEvmWalletPrices {
-    pub fn new(prices: Arc<dyn BinancePriceProvider>) -> Self {
-        Self { prices }
-    }
-}
-
-fn market_product(asset: &AssetId) -> Result<&'static str> {
-    let unsupported = || {
-        FinError::new(
-            "PRICE_ASSET_UNSUPPORTED",
-            "valuation",
-            "Exact network, asset contract and decimals have no reviewed public USD price mapping.",
-            "Use a reviewed asset identity; token symbols cannot establish valuation.",
-        )
-    };
-    let chain_id = match asset.network.as_str() {
-        "ethereum:1" => 1,
-        "ethereum:42161" => 42161,
-        "ethereum:4663" => 4663,
-        _ => return Err(unsupported()),
-    };
-    if asset.reference == "native" && asset.decimals == 18 {
-        return Ok("ETH");
-    }
-    let reference = normalized_address(&asset.reference).ok_or_else(unsupported)?;
-    // Arbitrum's canonical WETH and Circle-native USDC are distinct contracts.
-    // https://developers.circle.com/stablecoins/usdc-contract-addresses
-    // Robinhood publishes its exact WETH/USDG contracts here:
-    // https://docs.robinhood.com/chain/contracts/
-    // USDG decimals() was verified with a read-only eth_call (0x313ce567) on
-    // https://rpc.mainnet.chain.robinhood.com: returned uint256 6, 2026-10-06.
-    match (chain_id, reference.as_str(), asset.decimals) {
-        (42161, ARBITRUM_WETH, 18) | (4663, ROBINHOOD_WETH, 18) => Ok("ETH"),
-        (42161, ARBITRUM_USDC, 6) => Ok("USDC"),
-        (4663, ROBINHOOD_USDG, 6) => Ok("USDG"),
-        _ => Err(unsupported()),
-    }
-}
-
-#[async_trait]
-impl WalletValuation for PublicEvmWalletPrices {
-    async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
-        let product = market_product(asset)?;
-        let quote = self.prices.quote_usd(product).await?;
-        let (price, observed) = super::checked_usd_quote(&quote, Utc::now())?;
-        // Price has 18 USD fractional places. Return USD micros, rounding the
-        // final division upward like the existing Aave/budget valuation path.
-        let denominator = Quantity::new(format!("1{}", "0".repeat(asset.decimals as usize + 12)))?;
-        let usd_micros = units.mul_div_ceil(&price, &denominator)?;
-        Ok((
-            usd_micros,
-            format!(
-                "public-wallet-usd:{}:{}:{}:{}:observed:{}; {}",
-                asset.network,
-                asset.reference,
-                asset.decimals,
-                product,
-                observed.to_rfc3339(),
-                quote.source
-            ),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fin_binance::PriceQuote;
     use serde_json::json;
     use std::{
         io::{Read, Write},
         net::TcpListener,
-        sync::Mutex,
         thread,
     };
 
@@ -536,194 +464,5 @@ mod tests {
             indexer_base(4663).unwrap(),
             "https://robinhoodchain.blockscout.com"
         );
-    }
-
-    struct FakePrices {
-        quote: PriceQuote,
-        requested: Mutex<Vec<String>>,
-        fail: bool,
-    }
-
-    #[async_trait]
-    impl BinancePriceProvider for FakePrices {
-        async fn quote_usd(&self, coin: &str) -> Result<PriceQuote> {
-            self.requested.lock().unwrap().push(coin.into());
-            if self.fail {
-                return Err(FinError::new(
-                    "PRICE_UNAVAILABLE",
-                    "valuation",
-                    "Synthetic missing market.",
-                    "Retry a read.",
-                ));
-            }
-            Ok(self.quote.clone())
-        }
-    }
-
-    fn prices(value: &str, age_seconds: i64) -> Arc<FakePrices> {
-        Arc::new(FakePrices {
-            quote: PriceQuote {
-                usd_per_unit: value.into(),
-                observed_at: (Utc::now() - chrono::Duration::seconds(age_seconds)).to_rfc3339(),
-                source: "synthetic exact Binance product multiplied by independent USDT/USD quote"
-                    .into(),
-            },
-            requested: Mutex::new(Vec::new()),
-            fail: false,
-        })
-    }
-
-    fn asset(chain: u64, reference: &str, decimals: u8) -> AssetId {
-        AssetId {
-            network: format!("ethereum:{chain}"),
-            reference: reference.into(),
-            decimals,
-        }
-    }
-
-    #[tokio::test]
-    async fn reviewed_native_and_contract_identities_select_exact_products() {
-        let prices = prices("0.973421", 1);
-        let provider = PublicEvmWalletPrices::new(prices.clone());
-        for (chain, reference, decimals, product) in [
-            (1, "native", 18, "ETH"),
-            (42161, "native", 18, "ETH"),
-            (4663, "native", 18, "ETH"),
-            (42161, ARBITRUM_WETH, 18, "ETH"),
-            (42161, ARBITRUM_USDC, 6, "USDC"),
-            (4663, ROBINHOOD_WETH, 18, "ETH"),
-            (4663, ROBINHOOD_USDG, 6, "USDG"),
-        ] {
-            let (value, source) = provider
-                .quote_usd(
-                    &asset(chain, reference, decimals),
-                    Quantity::from_decimal("1", decimals).unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(value.as_str(), "973421");
-            assert_eq!(prices.requested.lock().unwrap().last().unwrap(), product);
-            assert!(source.contains("observed:"));
-            assert!(source.contains("independent USDT/USD"));
-        }
-    }
-
-    #[tokio::test]
-    async fn exact_large_and_fractional_quantities_round_only_final_usd_micros_upward() {
-        let provider = PublicEvmWalletPrices::new(prices("1234.567890123456789012", 1));
-        let native = asset(42161, "native", 18);
-        let (one_atom, _) = provider
-            .quote_usd(&native, Quantity::from_u64(1))
-            .await
-            .unwrap();
-        assert_eq!(one_atom.as_str(), "1");
-        let (fraction, _) = provider
-            .quote_usd(
-                &native,
-                Quantity::from_decimal("0.123456789123456789", 18).unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(fraction.as_str(), "152415788");
-        let provider = PublicEvmWalletPrices::new(prices("0.999999", 1));
-        let (large, _) = provider
-            .quote_usd(
-                &asset(4663, ROBINHOOD_USDG, 6),
-                Quantity::new("9007199254740993000001").unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(large.as_str(), "9007190247541738259008");
-        let (zero, _) = provider.quote_usd(&native, Quantity::zero()).await.unwrap();
-        assert!(zero.is_zero());
-    }
-
-    #[tokio::test]
-    async fn unknown_symbols_wrong_chain_decimals_and_bridged_usdc_fail_closed() {
-        let prices = prices("1000", 1);
-        let provider = PublicEvmWalletPrices::new(prices.clone());
-        for selected in [
-            asset(42161, "ETH", 18),
-            asset(42161, "USDC", 6),
-            asset(99, "native", 18),
-            asset(4663, ARBITRUM_USDC, 6),
-            asset(1, ARBITRUM_WETH, 18),
-            asset(42161, ARBITRUM_USDC, 18),
-            asset(4663, ROBINHOOD_USDG, 18),
-            asset(4663, "native", 6),
-            asset(42161, OWNER, 6),
-            asset(42161, "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8", 6),
-        ] {
-            let error = provider
-                .quote_usd(&selected, Quantity::from_u64(1))
-                .await
-                .unwrap_err();
-            assert_eq!(error.code, "PRICE_ASSET_UNSUPPORTED");
-        }
-        assert!(prices.requested.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn stale_future_zero_malformed_and_sourceless_quotes_are_rejected() {
-        for (price, age) in [
-            ("1", 61),
-            ("1", -1),
-            ("0", 1),
-            ("1e3", 1),
-            ("NaN", 1),
-            ("-1", 1),
-            ("1.0000000000000000001", 1),
-        ] {
-            let provider = PublicEvmWalletPrices::new(prices(price, age));
-            assert!(
-                provider
-                    .quote_usd(&asset(42161, ARBITRUM_USDC, 6), Quantity::from_u64(1))
-                    .await
-                    .is_err()
-            );
-        }
-        for (observed_at, source) in [
-            ("invalid", "synthetic"),
-            ("", "synthetic"),
-            ("fresh", ""),
-            ("fresh", "  "),
-        ] {
-            let fake = Arc::new(FakePrices {
-                quote: PriceQuote {
-                    usd_per_unit: "1".into(),
-                    observed_at: if observed_at == "fresh" {
-                        Utc::now().to_rfc3339()
-                    } else {
-                        observed_at.into()
-                    },
-                    source: source.into(),
-                },
-                requested: Mutex::new(Vec::new()),
-                fail: false,
-            });
-            assert!(
-                PublicEvmWalletPrices::new(fake)
-                    .quote_usd(&asset(4663, ROBINHOOD_USDG, 6), Quantity::from_u64(1))
-                    .await
-                    .is_err()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_market_is_unavailable_and_never_assumes_stablecoin_parity() {
-        let fake = Arc::new(FakePrices {
-            quote: prices("1", 1).quote.clone(),
-            requested: Mutex::new(Vec::new()),
-            fail: true,
-        });
-        let error = PublicEvmWalletPrices::new(fake)
-            .quote_usd(
-                &asset(4663, ROBINHOOD_USDG, 6),
-                Quantity::from_decimal("1", 6).unwrap(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "PRICE_UNAVAILABLE");
     }
 }

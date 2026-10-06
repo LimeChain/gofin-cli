@@ -104,7 +104,7 @@ fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
     let help = run(&["connections", "add", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("binance, evm"));
+    assert!(help.contains("binance, evm, coingecko"));
     assert!(help.contains("Optional enrollment read-check network"));
     for provider in ["evm", "ethereum"] {
         let output = run(&[
@@ -129,6 +129,64 @@ fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
     assert_eq!(
         value["semantics"]["evm"]["networks"],
         serde_json::json!(["ethereum:1", "ethereum:42161", "ethereum:4663"])
+    );
+}
+
+#[test]
+fn coingecko_metadata_is_discoverable_and_machine_enrollment_never_collects_key() {
+    let help = run(&["connections", "add", "--help", "--json"]);
+    assert!(help.status.success());
+    let help: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert!(help["help"].as_str().unwrap().contains("coingecko"));
+    assert!(help["help"].as_str().unwrap().contains("--api-plan"));
+    for plan in ["demo", "pro"] {
+        let output = run(&[
+            "connections",
+            "add",
+            "--provider",
+            "coingecko",
+            "--name",
+            "pricing",
+            "--credential-type",
+            "api_key",
+            "--api-plan",
+            plan,
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Mac login password"));
+    }
+    let output = run(&["capabilities", "--json"]);
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["pricing"]["provider"], "coingecko");
+    assert_eq!(
+        value["pricing"]["api_key_values_accepted_in_arguments"],
+        false
+    );
+    let secret = "SYNTHETIC-NOT-A-REAL-KEY";
+    let output = run(&[
+        "connections",
+        "add",
+        "--provider",
+        "coingecko",
+        "--name",
+        "pricing",
+        "--credential-type",
+        "api_key",
+        "--api-key",
+        secret,
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
+        "INVALID_COMMAND"
     );
 }
 

@@ -27,6 +27,7 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "binance": providerName = "Binance"
     case "ethereum": providerName = "Ethereum"
     case "evm": providerName = "EVM"
+    case "coingecko": providerName = "CoinGecko"
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"

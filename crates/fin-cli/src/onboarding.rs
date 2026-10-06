@@ -45,8 +45,13 @@ fn guided_add_with(
         network: None,
         address: None,
         credential_type: None,
+        api_plan: None,
     };
     match args.provider {
+        Provider::CoinGecko => {
+            args.credential_type = Some(CredentialType::ApiKey);
+            args.api_plan = Some(prompt(input, output, "API plan (demo/pro)", Some("demo"))?);
+        }
         Provider::Binance => {
             let role = choice(
                 input,
@@ -232,7 +237,7 @@ mod tests {
         let (result, output) = run("evm\nwallet\n\n\n");
         let args = result.unwrap();
         assert!(args.network.is_none());
-        assert!(output.contains("Provider (binance/evm)"));
+        assert!(output.contains("Provider (binance/evm/coingecko)"));
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));
         assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));
@@ -240,6 +245,29 @@ mod tests {
         let address = "0x1111111111111111111111111111111111111111";
         let (result, _) = run(&format!("ethereum\nwatch\nread_only\n{address}\n"));
         assert_eq!(result.unwrap().address.as_deref(), Some(address));
+    }
+
+    #[test]
+    fn coingecko_guided_add_collects_plan_without_a_secret_prompt() {
+        for (answer, expected) in [("", "demo"), ("pro", "pro")] {
+            let (result, output) = run(&format!("coingecko\npricing\n{answer}\n"));
+            let args = result.unwrap();
+            assert_eq!(args.provider, Provider::CoinGecko);
+            assert_eq!(args.credential_type, Some(CredentialType::ApiKey));
+            assert_eq!(args.api_plan.as_deref(), Some(expected));
+            assert!(output.contains("API plan (demo/pro) [demo]"));
+            assert!(!output.contains("API key:"));
+            assert!(!output.contains("Network"));
+            fin_discovery::validate_add(&args).unwrap();
+        }
+        assert_eq!(
+            run("coingecko\npricing\nenterprise\n").0.unwrap_err().code,
+            "INVALID_INPUT"
+        );
+        assert_eq!(
+            run("coingecko\npricing\n").0.unwrap_err().code,
+            "ONBOARDING_CANCELLED"
+        );
     }
 
     #[test]

@@ -40,6 +40,10 @@ pub enum SecretMaterial {
     EvmPrivateKey {
         private_key: String,
     },
+    CoinGeckoApiKey {
+        api_key: String,
+        plan: String,
+    },
 }
 impl fmt::Debug for SecretMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -65,6 +69,14 @@ impl SecretMaterial {
             Self::EvmPrivateKey { private_key } => {
                 let raw = private_key.strip_prefix("0x").unwrap_or(private_key);
                 raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
+            }
+            Self::CoinGeckoApiKey { api_key, plan } => {
+                matches!(plan.as_str(), "demo" | "pro")
+                    && !api_key.is_empty()
+                    && api_key.len() <= 256
+                    && api_key.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+                    })
             }
         };
         if valid {
@@ -384,6 +396,55 @@ fn reject_acl(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coingecko_keys_are_typed_validated_redacted_and_zeroized() {
+        for plan in ["demo", "pro"] {
+            let mut material = SecretMaterial::CoinGeckoApiKey {
+                api_key: "SYNTHETIC-COINGECKO-API-KEY-NEVER-LIVE".into(),
+                plan: plan.into(),
+            };
+            material.validate_present().unwrap();
+            assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+            let encoded = serde_json::to_string(&material).unwrap();
+            let decoded: SecretMaterial = serde_json::from_str(&encoded).unwrap();
+            assert!(matches!(decoded, SecretMaterial::CoinGeckoApiKey { .. }));
+            decoded.validate_present().unwrap();
+            material.zeroize();
+            let SecretMaterial::CoinGeckoApiKey { api_key, plan } = &material else {
+                panic!("typed credential")
+            };
+            assert!(api_key.is_empty() && plan.is_empty());
+            assert!(material.validate_present().is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_coingecko_keys_and_plans_fail_without_echoing_secrets() {
+        for (key, plan) in [
+            ("", "demo"),
+            ("SYNTHETIC KEY", "demo"),
+            ("SYNTHETIC\r\nInjected: value", "pro"),
+            ("SYNTHETIC\0KEY", "pro"),
+            ("SYNTHETIC-ü", "demo"),
+            ("SYNTHETIC:KEY", "demo"),
+            ("SYNTHETIC-KEY", "unexpected"),
+            ("SYNTHETIC-KEY", "Pro"),
+        ] {
+            let material = SecretMaterial::CoinGeckoApiKey {
+                api_key: key.into(),
+                plan: plan.into(),
+            };
+            let error = material.validate_present().unwrap_err();
+            assert_eq!(error.code, "INVALID_CREDENTIAL");
+            assert!(!error.to_string().contains("SYNTHETIC"));
+        }
+        let material = SecretMaterial::CoinGeckoApiKey {
+            api_key: "S".repeat(257),
+            plan: "demo".into(),
+        };
+        assert!(material.validate_present().is_err());
+    }
+
     #[test]
     fn synthetic_ed25519_pkcs8_is_typed_validated_and_redacted() {
         use ed25519_dalek::pkcs8::EncodePrivateKey;

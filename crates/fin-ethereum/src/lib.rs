@@ -246,6 +246,16 @@ impl EthereumConfig {
 #[async_trait]
 pub trait WalletValuation: Send + Sync {
     async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)>;
+    /// Providers with an external observation timestamp override this method.
+    /// The default supports isolated synthetic providers that observe on call.
+    async fn quote_observation(
+        &self,
+        asset: &AssetId,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
+        let (value, source) = self.quote_usd(asset, units).await?;
+        Ok((value, source, now()))
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TokenDiscoveryResult {
