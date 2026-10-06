@@ -2,7 +2,7 @@
 
 Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the implementation plan](docs/implementation-plan.md), and [the testing guide](docs/testing/README.md) before implementation. The linked Binance and Ethereum guides contain the first acceptance cases.
 
-The next implementation is compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). The current TS source and [foundation report](docs/reports/foundation.md) are behavioral references and historical evidence, not Rust implementation or verification. Do not start the rewrite merely because these docs were updated; the user will issue the implementation goal separately.
+Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). The retired TypeScript source is available in Git history; its [foundation report](docs/reports/foundation.md) is historical evidence, not Rust verification.
 
 ## Product decisions
 
@@ -48,7 +48,7 @@ Use decimal-safe quantities and explicit units and networks. Persist a write's i
 
 Write meaningful tests for financial behavior, approvals, duplicate requests, and partial failures. Distinguish mocked, fork, read-only live, biometric, and live-write verification in reports. A mocked approval is useful for automated tests but cannot establish that Touch ID or credential isolation works.
 
-For the forthcoming Rust goal, finish implementation and reproducible automated/fork verification, then hand off a concrete human installation/onboarding and Touch ID checklist. The user will run that path afterward. Mark those cases pending/not run until observed; their absence does not excuse unfinished independent engineering. Default tests use synthetic credentials and never load production secrets or broadcast to mainnet. Any new live testing needs its applicable explicit authorization and the existing budget/restoration contract; TS results and earlier temporary non-biometric tests do not transfer to Rust. Do not ship a live authorization-disable switch.
+For Rust development, finish implementation and reproducible automated/fork verification, then hand off a concrete human installation/onboarding and Touch ID checklist. The user will run that path afterward. Mark those cases pending/not run until observed; their absence does not excuse unfinished independent engineering. Default tests use synthetic credentials and never load production secrets or broadcast to mainnet. Any new live testing needs its applicable explicit authorization and the existing budget/restoration contract; TS results and earlier temporary non-biometric tests do not transfer to Rust. Do not ship a live authorization-disable switch.
 
 The Rust ledger consumes typed effects backed by application-specific verified evidence. Keep application-name branches out of shared financial accounting. Preserve exact quantities, request/submission identities, reservations, proof-before-terminal settlement, and unresolved records across migrations; upgrading or porting must never silently replay a financial write.
 

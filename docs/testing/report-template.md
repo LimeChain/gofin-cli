@@ -7,7 +7,7 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Date/time and timezone:
 - Fin commit/version:
 - Runtime, CCXT, adapter, and test-tool versions:
-- Implementation: TS foundation / Rust; Rust toolchain, artifact/helper versions and OS provider, where applicable:
+- Implementation: Rust; Rust toolchain, artifact/helper versions and OS provider, where applicable:
 - Delivery stage: implementation/automated handoff / human onboarding and approval / production live acceptance:
 - Cases and journey selected:
 - Environment: mocked / fork / live read-only / real biometric / live write

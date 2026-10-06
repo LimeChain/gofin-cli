@@ -1,6 +1,6 @@
 # Binance funding acceptance
 
-Read the [shared testing rules](README.md) first. These cases specify required behavior, not a live pass. Existing TS implementation/evidence and the upcoming Rust design are recorded in the [handoff](../implementation-plan.md). Rust must establish its own results.
+Read the [shared testing rules](README.md) first. These cases specify required behavior, not a live pass. The current Rust implementation is recorded in the [handoff](../implementation-plan.md); historical TypeScript evidence remains separate in the [foundation report](../reports/foundation.md).
 
 ## Goal and setup
 

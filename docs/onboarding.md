@@ -106,7 +106,7 @@ Unrecognized or incomplete bindings retain the full exact display. The broader
 financial-operation and initial-setup presentations remain unchanged in this
 focused enrollment update.
 
-Store credentials through a broker-controlled backend and return a stable opaque reference. Ordinary connection configuration and agent results contain safe metadata and the reference, never the secret. Optional OS-store/protected import backends must enforce the same boundary and clearly document support; the current TS protected-file importer is not OS Keychain support. Agent-readable `.context/.ai.env` is not a protected store.
+Store credentials through a broker-controlled backend and return a stable opaque reference. Ordinary connection configuration and agent results contain safe metadata and the reference, never the secret. Optional OS-store/protected import backends must enforce the same boundary and clearly document support; the current protected-file backend is not OS Keychain support. Agent-readable `.context/.ai.env` is not a protected store.
 
 Use hidden prompts without collecting secrets into shell history, and do not reflect entered secrets in errors. Account identifiers and observed financial data can be sensitive; expose only necessary metadata through the supported interface and sanitize public reports. Clearing input or importing a file does not retroactively remove earlier readable copies. Give the human concrete provisioning/copy-removal instructions where needed and verify the resulting access.
 

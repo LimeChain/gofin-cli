@@ -1,5 +1,9 @@
 # Foundational verification — 1–2 October 2026
 
+> Historical TypeScript report. The prototype was retired on 6 October 2026.
+> Commands below apply only to the [archived source](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5).
+> Current verification uses the Rust workspace and [Rust report](rust-foundation.md).
+
 The foundational implementation is working, with automated financial and security regressions. **Complete production acceptance remains pending.** This report distinguishes implementation, isolated tests, production reads, real financial writes, and human biometric verification. Restoring a failed attempt does not turn its unexecuted acceptance cases into passes.
 
 ## Implemented and reproducible

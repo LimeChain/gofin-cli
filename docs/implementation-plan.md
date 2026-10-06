@@ -1,6 +1,6 @@
 # Implementation handoff
 
-**Updated:** 2 October 2026. [Product concept](fin-product-concept.md) defines the product. The existing TS foundation follows the recorded decisions below; [verification evidence](reports/foundation.md) separates implemented behavior from acceptance results.
+**Updated:** 6 October 2026. [Product concept](fin-product-concept.md) defines the product. The compiled Rust workspace is the sole implementation; [verification evidence](reports/rust-foundation.md) separates implemented behavior from acceptance results.
 
 ## Rust foundation in progress
 
@@ -145,23 +145,16 @@ accounting and protected enrollment remain unchanged.
 
 Use [testing stages](testing/README.md#rust-implementation-and-later-human-verification). Broader product coverage remains inventoried separately; packaging polish, other OS authorization providers, and formal audits are not additional beta gates.
 
-## Implemented TypeScript foundation
+## TypeScript retirement — 6 October 2026
 
-- Node >=22.13, TypeScript 5.9.3, pinned CCXT 4.5.85, viem 2.57.2, Zod 4.6.5; exact installed versions in `package-lock.json`. Native Swift/AppKit/LocalAuthentication handles the interactive approval display. `npm ci`, `npm run build`, `npm run check`, and `npm test` are runnable.
-- Small adapter interface in `src/core/types.ts`; shared strict operation definitions drive capability discovery, examples, JSON schemas, and validation. Metadata and venue-specific financial schemas remain distinct. New integrations register reviewed operations; there is no arbitrary signed venue-method or raw-sign endpoint.
-- SQLite `DatabaseSync`, WAL, FULL synchronous writes, unique durable request identities, immutable request fingerprints, and records before submission. One protected broker serializes writes, reconciliation, and run mutations across wallets/accounts. Binance uses clientTranId/withdrawOrderId; Ethereum binds the pending nonce before approval and persists the signed transaction hash before broadcast without exposing signed bytes. Unknown results reconcile original identities. Restart refunds interrupted approvals that demonstrably never submitted while retaining uncertain reservations.
-- Reconciliation uses a cloned candidate until all required external evidence is read. Usable exchange deposit credit and exact scoped inventory settlement precede terminal status. The operation record and inventory/USD ledger commit in one synchronous SQLite transaction. Missing or mismatched proof keeps the original submission retriable as unknown with its full reservation; startup repairs older terminal records whose settlement is unresolved. No retry invents a replacement financial identity.
-- Root-owned `/Library/Fin/runtime` code/helper/runtime and root-private credentials/config/approval/state, a constrained UNIX socket, and a configured human console user. Initial setup is human-admin work. The hardened native helper displays the exact binding and uses biometric-only Touch ID with zero reuse; the broker consumes fresh bound approval once. Source mode is read/preview only. [Security evidence and remaining prerequisites](security.md) state the actual claim.
-- Ethereum mainnet chain ID 1, default three confirmations and canonical receipt checks. PublicNode primary and Cloudflare fallback are public RPCs; no borrowed wallet-provider API key. Uniswap v3 original SwapRouter with explicit deadline, QuoterV2 and on-chain pool discovery; Aave v3 Ethereum Pool and provider-resolved reserve metadata. Contract identities are in `config.example.json` and checked in reads/previews. USD valuation uses Aave's USD oracle and freshness checks on underlying Chainlink rounds; stablecoins are not assumed to equal $1. Ethereum gas estimates receive a 20% margin once. New previews select the greater of the RPC priority recommendation and a disclosed 0.01 Gwei tip floor, add any tip increase to the RPC maximum-fee recommendation to retain its base-fee allowance, and apply up to 50% fee headroom within the caller's explicit `maxFeeEth`. Insufficient caps fail instead of lowering the tip floor. The displayed gas, maximum fee, and priority-fee caps remain fixed through revalidation, valuation, simulation, and signing, including previously approved zero tips; the new floor does not rewrite existing authorizations. A fresh raw gas estimate may consume the original margin; exceeding an approved cap requires fresh approval.
-- Aave position snapshots discover every reserve from the Pool, preserve stable and variable debt separately, and fail on incomplete identity/metadata checks. A read resolves the market provider once and processes at most four reserve tasks together. The lean position path omits unused global caps/liquidity totals; full reserve reads, previews, and reconciliation still obtain the checks they need afresh. There is no retained metadata cache shared with writes and no representative-token shortcut for the baseline.
-- Aave supply supports reviewed aToken revision 5. Approval binds the token revision and scaled balance; reconciliation verifies underlying transfer, Supply/Mint events, historical scaled balances and indices, and exact floor arithmetic against the observed backing. Inventory converts only proven backed units while retaining original asset/account provenance. Protocol rounding is reconciled once through the eventual supply/withdraw result; missing proof and unrelated decreases remain unresolved. A changed token revision requires a reviewed adapter update.
-- First Binance route is explicit main-authorized SPOT universal transfers. Sub-authorized transfer is discoverably unsupported. Standard ETH-network withdrawals require observed permission, exact recipient/asset/network mapping, current fee/minimum/precision checks, and Travel Rule `NIL`. Required Travel Rule flows are blocked. Read-only conditional funding preparation independently verifies each selected child's relationship, free funds, transfer permission, exact asset/precision, and aggregate value; its projected main balance is labelled `preparationOnly` and cannot be revalidated or submitted. Separately approved transfers must establish actual main-account credit before the ordinary withdrawal preview can execute. Fee semantics are conservatively bounded, with actual venue and recipient evidence required at reconciliation.
-- Receipt verification correlates the original transaction hash, canonical block, configured finality, and actual financial effects. Ethereum operations also correlate the mined transaction and its approved execution bounds before either success or revert settlement. Binance payouts require the original receipt and direct native transfer or matching ERC-20 contract/recipient logs; native internal/batched payouts need a trace-capable verifier and remain unresolved here. A reverted payout does not establish failure of the venue withdrawal: Fin keeps its original venue identity for reconciliation of any replacement payout.
-- The protected acceptance profile enforces $100 maximum gross movement/authority plus bounded costs, selected exact-unit allocations including borrowed proceeds and return costs, and pending reservations. Gas/unwind reserves are part of selected source holdings; borrowed proceeds add to allocation and cannot be netted against debt. Its custody/conversion provenance requires principal to return to its original asset and account; verified fees consume existing recipient cash first and record any origin funding consumed. Current accrued supplied units enter allocation valuation. After validated inventory settlement, the USD fee ledger retains the proved consumed fee, rounded up proportionally from the original reserved value; unresolved or mismatched evidence retains the maximum. Inventory and its USD cost ledger persist atomically and recover idempotently. The isolated beta profile starts with zero Aave positions across every reserve, zero Pool/router allowances, one non-native principal asset plus native gas, and independently verified asset-specific deposit minimums. Restoration cannot pass with outstanding principal, debt, supply dust, allowances, or ambiguous movements. These are test-profile limits, not permanent product policy.
-- Configuration rejects repeated connection names, wallet addresses, child email identities within one main authority, and credential handles within one connection kind/role. Selected run scopes repeat the physical-identity checks. Distinct Binance main credential handles are still a human-verified account mapping: Fin does not currently query a main account UID to prove those handles belong to different physical accounts.
-- Remaining concept scope is retained in capability discovery: other CCXT trading/funding, Kraken, Derive, Solana wallets, Jupiter, Kamino. Lighter, general bridges, MCP, and unattended/plan approval remain deferred. This foundation does not claim broader coverage.
-
-Sources: [Uniswap v3 Ethereum deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments), [Aave Ethereum address book](https://github.com/bgd-labs/aave-address-book/blob/main/src/AaveV3Ethereum.sol), [Aave Pool semantics](https://www.aave.com/docs/aave-v3/smart-contracts/pool), [reviewed aToken implementation](https://etherscan.io/address/0xadc45df3cf1584624c97338bef33363bf5b97ada#code), [Aave token arithmetic](https://github.com/aave-dao/aave-v3-origin/blob/main/src/contracts/protocol/libraries/helpers/TokenMath.sol), [Binance funding APIs](https://developers.binance.com/en/docs/catalog/vip-and-institutional-sub-account/api/rest-api/asset-management), [Binance capital APIs](https://developers.binance.com/en/docs/catalog/core-trading-wallet/api/rest-api/capital), [PublicNode endpoint](https://ethereum.publicnode.com/), [Cloudflare gateway](https://developers.cloudflare.com/web3/ethereum-gateway/).
+Removed the prototype source/tests, npm dependencies and formatting/build tools,
+example configuration, TypeScript live/fork scripts, old installer, and Node CI
+job. Rust development, packaging and verification use Cargo, Swift and the
+existing shell/Python fixtures. Historical reports remain, with the earlier
+source available in [Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5).
+The read-only legacy journal inspector and refusal to replay unresolved records
+remain unchanged. This removal does not migrate or delete installed financial
+state or credentials.
 
 ## Build objective
 
@@ -171,7 +164,7 @@ Live acceptance must use production exchange accounts and Ethereum mainnet with 
 
 ## Keep the implementation small
 
-For the existing TS foundation, CCXT is the exchange backend, viem handles EVM reads/transactions, and the native macOS helper provides the per-write approval path. The upcoming Rust version uses the [new typed extension contracts](rust-architecture.md); preserve the current behavior while separating shared runtime mechanics from application semantics.
+Rust uses reviewed Binance REST mappings, Alloy for EVM envelopes, and the native macOS helper for per-write approval. Follow the [typed extension contracts](rust-architecture.md), separating shared runtime mechanics from application semantics.
 
 Use a modular local application, not a hosted service or a distributed workflow engine. A durable local store should hold operation records. Shared operation definitions should drive help, schemas, and validation so that a later MCP interface can reuse them.
 
@@ -203,13 +196,13 @@ Do not block these milestones on formal audit programs, signed-release infrastru
 
 ## Implemented CLI contract
 
-In the current TS build, `--help`, `fin explain <operation>`, operation schemas, and structured `--json` output use the shared operation definitions. The implemented verbs are `read`, `preview`, `execute`, `status`, `operations`, and `run`, alongside `capabilities`, connection listing, and `doctor`. Interactive setup/connection enrollment and daemon-management verbs are proposed Rust work. See [README setup and examples](../README.md) for current connected calls; these commands can inspect the interface without credentials:
+In the compiled Rust CLI, help, explanation, schemas and machine output use shared command and operation definitions. Implemented commands include `read`, `preview`, `execute`, `status`, `operations`, `run`, `capabilities`, `doctor`, terminal setup, connection management and daemon lifecycle. See [README setup and examples](../README.md) for current connected calls; these commands can inspect the interface without credentials:
 
 ```text
 fin capabilities --json
 fin schema binance.withdraw --json
 fin explain aave.repay --json
-fin run schema --json
+fin schema run.begin --json
 ```
 
 Define discoverable operations for connection metadata, capabilities, balance/position reads, the writes in the flow guides, and operation-status lookup. Write commands need explicit source, destination, asset/contract, units, network/market where relevant, and applicable fee/slippage bounds. Token symbols alone are insufficient on-chain identities.

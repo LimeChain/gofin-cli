@@ -126,9 +126,9 @@ redirected output never animates.
 
 The client uses `fin read OP --input JSON`, `fin preview OP --input JSON`,
 `fin execute OP --input JSON --id LOGICAL_ID --run RUN_ID`, `fin status ID`, and
-`fin operations`. Discover exact schemas instead of reusing the legacy examples
-below. Reconcile the original logical ID after an uncertain response; do not
-create a replacement write. The acceptance profile requires a broker-captured
+`fin operations`. Discover exact schemas through the installed CLI. Reconcile
+the original logical ID after an uncertain response; do not create a replacement
+write. The acceptance profile requires a broker-captured
 baseline, selected allocations, a funded return plan, and exact restoration net
 of proved costs. Production tests retain the $100 movement and total allocation
 limits.
@@ -139,79 +139,34 @@ account, reconciliation corroborates the route against the child's authenticated
 transfer history and physical account identity. Missing or mismatched evidence
 keeps the original operation unresolved.
 
-## Historical TypeScript foundation
-
-The foundational TypeScript CLI, durable execution engine, Binance SPOT funding adapter, and Ethereum wallet/Uniswap v3/Aave v3 adapter are implemented. A native macOS Touch ID helper and protected root-owned broker installer are included. **Production financial acceptance is still pending:** live reads, fixtures, fork execution, biometric approval, credential isolation, and live writes are reported separately in [the verification report](docs/reports/foundation.md).
-
-The current protected broker runs the $100 acceptance-verification profile. This is a test guard, not a permanent global Fin product limit. The remaining CCXT/protocol/network inventory stays visible through capability discovery; it is not silently described as implemented.
-
 ## Agreed Rust architecture
 
 The implementation follows the [Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md): one public `fin` CLI, a protected local execution role, typed application/network boundaries, verified financial effects, and an OS-specific `fin-authorization` crate containing the macOS Swift helper. Setup is bundled with Fin; the human runs installation and credential enrollment in their own terminal. Custom credential-entry windows and a `.pkg` installer are not required for the beta.
 
-An LLM discovers setup and later credential changes using help, explanation, and schemas before a broker or credentials exist. `fin setup`, `fin daemon ...`, and `fin connections add/list/update/remove` are Rust commands; they are absent from the historical TS build below. Normal agent requests cannot collect secrets or approve configuration/financial writes.
+An LLM discovers setup and later credential changes using help, explanation, and schemas before a broker or credentials exist. `fin setup`, `fin daemon ...`, and `fin connections add/list/update/remove` are Rust commands; they are implemented in the compiled workspace. Normal agent requests cannot collect secrets or approve configuration/financial writes.
 
 Delivery is staged: implement Rust and complete reproducible automated/fork verification first; deliver a concrete checklist for the user's subsequent onboarding, credential-boundary, and Touch ID session. Human and production/mainnet acceptance remain pending until actually verified. Existing TS financial results do not establish Rust results. See [verification stages](docs/testing/README.md#rust-implementation-and-later-human-verification).
-
-## Install and discover the historical TypeScript foundation
-
-Use Node **22.13 or later** (SQLite support required), npm, and macOS for the native approval component. Development reads and automated tests run without live credentials.
-
-```sh
-npm ci
-npm run build
-npm test
-npm link
-fin --help
-fin capabilities --json
-fin schema wallet.transfer --json
-fin explain aave.repay --json
-```
-
-Copy `config.example.json` into private local configuration and replace its placeholder wallet/subaccount metadata. Explicit named accounts, contract identities, units, network IDs, and fee/slippage bounds are required. Source-mode reads/previews load metadata only:
-
-```sh
-fin read wallet.balances --config .context/connections.json --input '{"wallet":"main-wallet","network":"ethereum","chainId":1}' --json
-fin read aave.positions --config .context/connections.json --input '{"wallet":"main-wallet","network":"ethereum","chainId":1}' --json
-fin preview wallet.wrap --config .context/connections.json --input '{"wallet":"main-wallet","network":"ethereum","chainId":1,"requestId":"unique-wrap-1","amount":"0.001","maxFeeEth":"0.0001"}' --json
-```
-
-An insufficient balance, unsupported behavior, missing oracle, stale price, failed simulation, or increased execution bound blocks the write. A preview contains checks actually performed and explicit limitations; it is not financial authorization.
-
-## Historical TypeScript setup and writes
-
-Build the native helper with `sh native/build.sh`. Follow [protected setup](docs/security.md) for the human-admin installation, private provisioning, removal of agent-readable credential copies, and actual biometric/bypass checks. Neither source mode nor a CLI/environment flag can approve a live write. The agent-facing CLI never receives unrestricted signing credentials or signed transactions.
-
-```sh
-fin doctor --json
-fin connections --json
-fin run schema --json
-fin run begin --file .context/run-plan.json --json
-fin execute wallet.wrap --file .context/wrap.json --run RUN_ID --json
-fin status OPERATION_ID --reconcile --json
-fin operations --json
-fin run finish RUN_ID --json
-```
-
-One stable `requestId` identifies one logical write. Repeating it returns/reconciles the existing operation; changed parameters conflict. A deliberately new action uses a new identity and fresh Touch ID. After an unknown result, inspect the original operation instead of submitting another write. Token allowances and every cleanup write have their own approvals.
-
-The current live runner uses selected exact-unit ETH/WETH/USDC allocations, snapshots every Aave reserve, and requires zero starting Aave positions and Pool/router allowances. It tracks custody and conversion provenance so remaining displaced principal cannot count as cleanup. Unsupported valuation or incomplete restoration stays outstanding. Private evidence belongs in ignored `.context/test-runs/`; never commit credentials or unredacted account reports.
-
-Run plans select integer base units keyed by `connection/holding/native` or `connection/holding/TOKEN_CONTRACT`; Fin independently values those observed holdings. Select one non-native principal asset plus native gas in each beta run. Gas/unwind money is part of those selected holdings, while the borrowed-proceeds reserve adds to allocation. Every exchange return route specifies its outward amount/fee/minimum receipt and a `minimumReturnAmount` that meets the observed usable-deposit minimum after the planned unwind. All affected source and receiving wallets require protected return signers and belong in the snapshot. Other tokens, spenders, and unsnapshotted recipients remain unavailable in this verification profile.
 
 ## Reproducible verification
 
 ```sh
-npm run check
-npm run format:check
-npm test
+make check
+make test
+make test-integration
 sh native/build.sh
-native/.build/fin-touch-id --probe
+native/.build/authorization/Fin --probe
 ```
 
-The default tests use isolated adapters and synthetic signing fixtures. A Touch ID availability probe requests no approval. Follow [fork verification](docs/testing/fork.md) for the separately identified fixed mainnet fork. Fixture/fork passes cannot substitute for production round trips and complete cleanup.
+Default tests use isolated adapters and synthetic signing fixtures. The native
+probe requests no approval. Follow [fork verification](docs/testing/fork.md) for
+the separately identified fixed mainnet fork. Production round trips and complete
+cleanup remain separate acceptance cases.
 
-For human-operated production read-only evidence, run `npx tsx scripts/live-snapshot.ts --config .context/connections.json --store PATH_TO_EXISTING_OPERATIONS_SQLITE`. The script uses configured account names and the provisioned `.context/.ai.env`, captures all Aave reserves and the four profile allowances, opens the supplied operation database read-only, and saves its report privately. Missing required reads, inaccessible operation state, or pending movements produce an explicitly blocked report. The default store is `/Library/Fin/private/operations.sqlite`; in the installed protected workflow that file is intentionally inaccessible to the agent. This standalone plaintext-file workflow provides read-only evidence and never authorizes execution or constructs a signer. Installed live verification captures its authoritative baseline with `fin run begin` through the protected broker.
+The TypeScript prototype, npm tooling, and its installer have been removed.
+[Historical source](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5) and the
+[foundation report](docs/reports/foundation.md) retain the earlier evidence.
+The Rust legacy journal inspector remains read-only; removal of the prototype
+never resets or replays existing financial records.
 
 The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. To install it for an agent, copy `skills/fin/` into that agent's skill directory; the installed `fin` binary must be on its PATH.
 
@@ -223,7 +178,7 @@ The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. To in
 | [Implementation plan](docs/implementation-plan.md)     | Build order, component responsibilities, CLI contract, and remaining implementation choices.    |
 | [Rust architecture](docs/rust-architecture.md)         | Selected compiled design, extension contracts, persistence, authorization, and delivery stages. |
 | [Terminal onboarding](docs/onboarding.md)              | Human credential enrollment and complete LLM-readable setup discovery before configuration.     |
-| [Security](docs/security.md)                           | Existing TS protection model and Rust setup/authorization requirements; actual evidence limits. |
+| [Security](docs/security.md)                           | Protected Rust setup and authorization requirements; actual evidence limits. |
 | [Testing guide](docs/testing/README.md)                | Test environments, common acceptance checks, and evidence standards.                            |
 | [Binance flows](docs/testing/binance.md)               | Subaccount consolidation, withdrawal, deposit, and main-to-subaccount acceptance cases.         |
 | [Ethereum flows](docs/testing/ethereum.md)             | Wallet transfers, Uniswap swaps, Aave borrowing and unwind, plus exchange-to-wallet handoff.    |

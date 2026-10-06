@@ -1,5 +1,0 @@
-.context/
-node_modules/
-dist/
-native/.build/
-package-lock.json

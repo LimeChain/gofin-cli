@@ -7,11 +7,11 @@
 - **Binary:** `fin`
 - **Distribution model:** Open source; license to be selected.
 - **Updated:** 2 October 2026
-- **Status:** Agreed product direction; TS foundation implemented with incomplete acceptance; compiled Rust implementation selected and pending.
+- **Status:** Agreed product direction; compiled Rust foundation implemented; acceptance verification in progress.
 
 Implementation starts with the [build plan](implementation-plan.md) and [Binance and Ethereum acceptance guides](testing/README.md). These define the first development milestones within the broader scope below. Release-hardening proposals discussed after this concept were paused; they are not additional beta acceptance gates.
 
-The next implementation follows the [Rust architecture](rust-architecture.md) and [terminal onboarding/discovery contract](onboarding.md). Implementation and automated/fork verification come first; the human subsequently runs onboarding and the real Touch ID path. Production/mainnet acceptance remains separately required and must not be claimed from automated or historical TS results.
+The implementation follows the [Rust architecture](rust-architecture.md) and [terminal onboarding/discovery contract](onboarding.md). Implementation and automated/fork verification come first; the human subsequently runs onboarding and the real Touch ID path. Production/mainnet acceptance remains separately required and must not be claimed from automated or historical TS results.
 
 Fin is an open-source tool that brings **centralized and on-chain order-book trading, wallets and broader DeFi, and shared authorizations and limits into one locally executed interface** for humans and AI agents.
 
@@ -204,7 +204,7 @@ Proposed CLI conventions include `--help`, `fin explain <operation>`, `--schema`
 
 Installing the binary alone does not make an agent aware of Fin. Offer the companion skill in the user's chosen supported agent environment, check that the CLI is accessible, and complete a read-only connection check. The CLI must also expose complete onboarding instructions without the skill, configured credentials, or a running broker. Users supply credentials directly to protected enrollment in their own terminal; the agent receives necessary named handles and permission metadata. Hidden input and terminal choice support this workflow, while the installed protected components establish the credential boundary.
 
-The agent must be able to discover how `fin setup` and `fin connections add/list/update/remove` work: actual syntax, examples and safe argument schemas, supported providers and account/credential types, required permissions/IP access, human-terminal and approval requirements, hidden secret-input mechanics, checks performed, safe results/errors, and next verification commands. These proposed Rust commands are not implemented in the current TS CLI. Help, schemas, descriptions, and validation must share definitions so an LLM can guide a human without inventing flags or requesting secret values.
+The agent must be able to discover how `fin setup` and `fin connections add/list/update/remove` work: actual syntax, examples and safe argument schemas, supported providers and account/credential types, required permissions/IP access, human-terminal and approval requirements, hidden secret-input mechanics, checks performed, safe results/errors, and next verification commands. These commands are implemented in the compiled Rust CLI; use its installed discovery for current syntax. Help, schemas, descriptions, and validation must share definitions so an LLM can guide a human without inventing flags or requesting secret values.
 
 The required onboarding journey starts when the human asks the LLM how to add Binance. The LLM discovers Fin, explains prerequisites, and directs the human to run the advertised enrollment command themselves. After enrollment, it checks safe connection metadata and current capabilities. Adding a new connection later follows the same journey without reinstalling. Saving/replacing credentials requires independent human configuration authorization; it does not authorize future financial operations. See [onboarding acceptance](onboarding.md#acceptance-and-handoff).
 
