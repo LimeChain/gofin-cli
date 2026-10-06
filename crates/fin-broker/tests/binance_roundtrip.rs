@@ -334,6 +334,7 @@ impl BinanceTransport for SyntheticVenue {
                 }
                 Ok(json!({"tranId":tran,"clientTranId":id}))
             }
+            _ => Err(TransportError::InvalidResponse),
         }
     }
 }

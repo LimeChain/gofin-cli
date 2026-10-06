@@ -1,4 +1,5 @@
 use super::*;
+mod trading;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use fin_domain::{
@@ -178,6 +179,14 @@ impl Adapter for BinanceAdapter {
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation, FinError> {
         self.0.prepare(operation, input).await
     }
+    async fn prepare_with_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &fin_domain::PreparationContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.0.prepare_with_context(operation, input, context).await
+    }
     async fn preflight_return_route(
         &self,
         operation: &str,
@@ -210,6 +219,7 @@ impl Adapter for BinanceAdapter {
 pub struct BinanceDispatch {
     authority: String,
     request: BinanceRequest,
+    noop: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -1703,7 +1713,7 @@ fn definitions() -> Vec<Definition> {
             "Matching completed withdrawal, bounded source debit/fee, and verified Ethereum mainnet recipient receipt.",
         ),
     ];
-    defs.into_iter().map(|(name, description, kind, input, completion)| Definition {
+    let mut result: Vec<_> = defs.into_iter().map(|(name, description, kind, input, completion)| Definition {
         name: name.into(), description: description.into(), kind,
         execution_actor: ExecutionActor::AgentInvocable,
         input_schema: serde_json::to_value(input).unwrap_or(Value::Null),
@@ -1711,7 +1721,10 @@ fn definitions() -> Vec<Definition> {
         error_schema: schema_for!(FinError).into(),
         examples: vec![], coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
         completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
-    }).collect()
+    }).collect();
+    result.extend(crate::trading_reads::trading_read_definitions());
+    result.extend(trading::definitions());
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2087,6 +2100,13 @@ impl ExchangeProfile for BinanceProfile {
                 }
             }
         }
+        if let Err(error) = self
+            .trading_snapshot(&mut state, &mut coverage, &mut pending)
+            .await
+        {
+            observer_complete = false;
+            pending.push(format!("Trading observation unavailable ({})", error.code));
+        }
         Ok(StateSnapshot {
             state,
             observed_at: now(),
@@ -2102,6 +2122,9 @@ impl ExchangeProfile for BinanceProfile {
         raw: &Value,
         context: &ReturnRouteContext,
     ) -> Result<ReturnRouteProof, FinError> {
+        if trading::is_write(operation) {
+            return self.trading_preflight(operation, raw, context).await;
+        }
         if operation == "binance.withdraw" {
             return self.preflight_withdrawal(raw, context).await;
         }
@@ -2304,6 +2327,15 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     async fn read(&self, operation: &str, raw: &Value) -> Result<Value, FinError> {
+        if operation.starts_with("binance.spot.") || operation.starts_with("binance.futures.") {
+            return crate::trading_reads::trading_read(
+                operation,
+                raw,
+                &self.config,
+                self.transport.as_ref(),
+            )
+            .await;
+        }
         match operation {
             "binance.account-identity" => {
                 let input: AccountNameInput = self.parse_input(raw).await?;
@@ -2340,7 +2372,7 @@ impl ExchangeProfile for BinanceProfile {
                     json!({"operation": operation, "account": account.name, "observedAt": now(), "permissions": {
                         "enableReading": unknown(permission.enable_reading), "enableWithdrawals": unknown(permission.enable_withdrawals),
                         "enableInternalTransfer": unknown(permission.enable_internal_transfer), "permitsUniversalTransfer": unknown(permission.permits_universal_transfer),
-                        "ipRestrict": unknown(permission.ip_restrict), "enableSpotAndMarginTrading": unknown(permission.enable_spot_and_margin_trading),
+                        "ipRestrict": unknown(permission.ip_restrict), "enableSpotAndMarginTrading": unknown(permission.enable_spot_and_margin_trading), "enableFutures": unknown(permission.enable_futures),
                     }}),
                 )
             }
@@ -2462,6 +2494,9 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation, FinError> {
+        if trading::is_write(operation) {
+            return self.trading_prepare(operation, input, None).await;
+        }
         match operation {
             "binance.transfer" => self.prepare_transfer(self.parse_input(input).await?).await,
             "binance.withdraw" => {
@@ -2476,6 +2511,44 @@ impl ExchangeProfile for BinanceProfile {
         }
     }
 
+    async fn prepare_with_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &fin_domain::PreparationContext,
+    ) -> Result<PreparedOperation, FinError> {
+        if operation == "binance.futures.order-place" {
+            return self
+                .trading_prepare_with_anchor(operation, input, context)
+                .await;
+        }
+        self.prepare(operation, input).await
+    }
+
+    async fn refresh_prepared(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        if prepared.operation == "binance.futures.order-place" {
+            let mut context = fin_domain::PreparationContext::default();
+            if let Some(anchor) = prepared.binding.get("priorAnchor") {
+                context
+                    .positions
+                    .push(serde_json::from_value(anchor.clone()).map_err(|_| {
+                        error(
+                            "PREVIEW_INVALID",
+                            "submission",
+                            "The trusted derivative anchor is invalid.",
+                        )
+                    })?);
+            }
+            return self
+                .trading_prepare_with_anchor(&prepared.operation, &prepared.input, &context)
+                .await;
+        }
+        self.prepare(&prepared.operation, &prepared.input).await
+    }
+
     type Request = BinanceDispatch;
 
     fn submission_kind(&self) -> &str {
@@ -2487,6 +2560,9 @@ impl ExchangeProfile for BinanceProfile {
         approved: &PreparedOperation,
         refreshed: &PreparedOperation,
     ) -> bool {
+        if trading::is_write(&approved.operation) {
+            return trading::valuation_matches(approved, refreshed);
+        }
         approved_native_valuation_matches(approved, refreshed)
     }
 
@@ -2494,6 +2570,9 @@ impl ExchangeProfile for BinanceProfile {
         &self,
         current: &PreparedOperation,
     ) -> Result<PlannedSubmission<Self::Request>, FinError> {
+        if trading::is_write(&current.operation) {
+            return self.trading_submission(current).await;
+        }
         let input: Value = current.input.clone();
         let submission;
         let authority;
@@ -2587,6 +2666,7 @@ impl ExchangeProfile for BinanceProfile {
             request: BinanceDispatch {
                 authority: authority.name.clone(),
                 request,
+                noop: None,
             },
         })
     }
@@ -2596,6 +2676,10 @@ impl ExchangeProfile for BinanceProfile {
         request: &BinanceDispatch,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Value, FinError> {
+        if let Some(response) = &request.noop {
+            journal.assert_authorized()?;
+            return Ok(response.clone());
+        }
         request
             .request
             .validate()
@@ -2611,6 +2695,9 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     fn validate_response(&self, submission: &Submission, response: &Value) -> Result<(), FinError> {
+        if trading::is_write(submission.data["operation"].as_str().unwrap_or_default()) {
+            return trading::validate_response(submission, response);
+        }
         match submission.data["operation"].as_str().unwrap_or_default() {
             "binance.transfer" => {
                 let value = response.get("tranId").ok_or_else(|| error("SUBMISSION_RESPONSE_INVALID", "submission", "Binance transfer response lacks a transaction ID; reconcile its clientTranId."))?;
@@ -2652,6 +2739,9 @@ impl ExchangeProfile for BinanceProfile {
         record: &OperationRecord,
         submission: &Submission,
     ) -> Result<Reconciliation, FinError> {
+        if trading::is_write(&record.operation) {
+            return self.trading_reconcile(record, submission).await;
+        }
         match record.operation.as_str() {
             "binance.transfer" => self.reconcile_transfer(record, submission).await,
             "binance.withdraw" => self.reconcile_withdrawal(record, submission).await,

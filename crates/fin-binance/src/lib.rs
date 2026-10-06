@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 pub mod adapter;
 pub use adapter::*;
+pub mod trading_reads;
 
 pub const MAX_DECIMAL_SCALE: u32 = 36;
 const TRANSFER_ID_PREFIX: &str = "fin";
@@ -193,6 +194,31 @@ pub enum BinanceEndpoint {
     UniversalTransfer,
     StandardWithdrawal,
     TravelRuleRequirements,
+    SpotExchangeInfo,
+    SpotCommission,
+    SpotOpenOrders,
+    SpotOrder,
+    SpotTrades,
+    SpotPlaceOrder,
+    SpotCancelOrder,
+    FuturesExchangeInfo,
+    FuturesAccount,
+    FuturesAccountConfig,
+    FuturesSymbolConfig,
+    FuturesPositions,
+    FuturesPositionMode,
+    FuturesCommission,
+    FuturesFeeBurn,
+    FuturesOrder,
+    FuturesOpenOrders,
+    FuturesTrades,
+    FuturesIncome,
+    FuturesMarkPrice,
+    FuturesLeverageBrackets,
+    FuturesPlaceOrder,
+    FuturesCancelOrder,
+    WalletTransfer,
+    WalletTransferHistory,
 }
 
 impl BinanceEndpoint {
@@ -200,6 +226,32 @@ impl BinanceEndpoint {
         match self {
             Self::ApiRestrictions => ("GET", "/sapi/v1/account/apiRestrictions"),
             Self::Account => ("GET", "/api/v3/account"),
+            Self::SpotExchangeInfo => ("GET", "/api/v3/exchangeInfo"),
+            Self::SpotCommission => ("GET", "/api/v3/account/commission"),
+            Self::SpotOpenOrders => ("GET", "/api/v3/openOrders"),
+            Self::SpotOrder => ("GET", "/api/v3/order"),
+            Self::SpotTrades => ("GET", "/api/v3/myTrades"),
+            Self::SpotPlaceOrder => ("POST", "/api/v3/order"),
+            Self::SpotCancelOrder => ("DELETE", "/api/v3/order"),
+            Self::FuturesExchangeInfo => ("GET", "/fapi/v1/exchangeInfo"),
+            Self::FuturesAccount => ("GET", "/fapi/v3/account"),
+            Self::FuturesAccountConfig => ("GET", "/fapi/v1/accountConfig"),
+            Self::FuturesSymbolConfig => ("GET", "/fapi/v1/symbolConfig"),
+            Self::FuturesPositions => ("GET", "/fapi/v3/positionRisk"),
+            Self::FuturesPositionMode => ("GET", "/fapi/v1/positionSide/dual"),
+            Self::FuturesCommission => ("GET", "/fapi/v1/commissionRate"),
+            Self::FuturesFeeBurn => ("GET", "/fapi/v1/feeBurn"),
+            Self::FuturesOrder => ("GET", "/fapi/v1/order"),
+            Self::FuturesOpenOrders => ("GET", "/fapi/v1/openOrders"),
+            Self::FuturesTrades => ("GET", "/fapi/v1/userTrades"),
+            Self::FuturesIncome => ("GET", "/fapi/v1/income"),
+            Self::FuturesMarkPrice => ("GET", "/fapi/v1/premiumIndex"),
+            Self::FuturesLeverageBrackets => ("GET", "/fapi/v1/leverageBracket"),
+            Self::FuturesPlaceOrder => ("POST", "/fapi/v1/order"),
+            Self::FuturesCancelOrder => ("DELETE", "/fapi/v1/order"),
+            Self::WalletTransfer => ("POST", "/sapi/v1/asset/transfer"),
+            Self::WalletTransferHistory => ("GET", "/sapi/v1/asset/transfer"),
+
             Self::SubAccountList => ("GET", "/sapi/v1/sub-account/list"),
             Self::SubAccountSpotAssets => ("GET", "/sapi/v4/sub-account/assets"),
             Self::CapitalConfig => ("GET", "/sapi/v1/capital/config/getall"),
@@ -263,6 +315,113 @@ impl BinanceRequest {
             | BinanceEndpoint::CapitalConfig
             | BinanceEndpoint::WithdrawAddressList
             | BinanceEndpoint::TravelRuleRequirements => (&[], &["recvWindow"]),
+            BinanceEndpoint::SpotExchangeInfo => (&[], &["symbol"]),
+            BinanceEndpoint::FuturesExchangeInfo => (&[], &[]),
+            BinanceEndpoint::FuturesAccount
+            | BinanceEndpoint::FuturesPositionMode
+            | BinanceEndpoint::FuturesAccountConfig
+            | BinanceEndpoint::FuturesFeeBurn => (&[], &["recvWindow"]),
+            BinanceEndpoint::SpotCommission | BinanceEndpoint::FuturesCommission => {
+                (&["symbol"], &["symbol", "recvWindow"])
+            }
+            BinanceEndpoint::SpotOpenOrders
+            | BinanceEndpoint::FuturesOpenOrders
+            | BinanceEndpoint::FuturesPositions
+            | BinanceEndpoint::FuturesLeverageBrackets
+            | BinanceEndpoint::FuturesSymbolConfig => (&[], &["symbol", "recvWindow"]),
+            BinanceEndpoint::FuturesMarkPrice => (&[], &["symbol"]),
+            BinanceEndpoint::SpotOrder
+            | BinanceEndpoint::FuturesOrder
+            | BinanceEndpoint::FuturesCancelOrder => (
+                &["symbol"],
+                &["symbol", "orderId", "origClientOrderId", "recvWindow"],
+            ),
+            BinanceEndpoint::SpotCancelOrder => (
+                &["symbol"],
+                &[
+                    "symbol",
+                    "orderId",
+                    "origClientOrderId",
+                    "newClientOrderId",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::SpotTrades | BinanceEndpoint::FuturesTrades => (
+                &["symbol"],
+                &[
+                    "symbol",
+                    "orderId",
+                    "fromId",
+                    "startTime",
+                    "endTime",
+                    "limit",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::FuturesIncome => (
+                &[],
+                &[
+                    "symbol",
+                    "incomeType",
+                    "startTime",
+                    "endTime",
+                    "page",
+                    "limit",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::SpotPlaceOrder => (
+                &["symbol", "side", "type", "quantity", "newClientOrderId"],
+                &[
+                    "symbol",
+                    "side",
+                    "type",
+                    "quantity",
+                    "price",
+                    "timeInForce",
+                    "newClientOrderId",
+                    "newOrderRespType",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::FuturesPlaceOrder => (
+                &[
+                    "symbol",
+                    "side",
+                    "type",
+                    "quantity",
+                    "newClientOrderId",
+                    "positionSide",
+                ],
+                &[
+                    "symbol",
+                    "side",
+                    "type",
+                    "quantity",
+                    "price",
+                    "timeInForce",
+                    "newClientOrderId",
+                    "newOrderRespType",
+                    "positionSide",
+                    "reduceOnly",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::WalletTransfer => (
+                &["type", "asset", "amount"],
+                &["type", "asset", "amount", "recvWindow"],
+            ),
+            BinanceEndpoint::WalletTransferHistory => (
+                &["type"],
+                &[
+                    "type",
+                    "startTime",
+                    "endTime",
+                    "current",
+                    "size",
+                    "recvWindow",
+                ],
+            ),
             BinanceEndpoint::SubAccountList => (&[], &["email", "page", "limit", "recvWindow"]),
             BinanceEndpoint::SubAccountSpotAssets => (&["email"], &["email", "recvWindow"]),
             BinanceEndpoint::DepositAddress => {
@@ -354,6 +513,125 @@ impl BinanceRequest {
             .any(|param| !allowed.contains(&param.key.as_str()))
         {
             return Err(BinanceError::UnsupportedParameter);
+        }
+        if matches!(
+            self.endpoint,
+            BinanceEndpoint::SpotExchangeInfo
+                | BinanceEndpoint::SpotCommission
+                | BinanceEndpoint::SpotOpenOrders
+                | BinanceEndpoint::SpotOrder
+                | BinanceEndpoint::SpotTrades
+                | BinanceEndpoint::SpotPlaceOrder
+                | BinanceEndpoint::SpotCancelOrder
+                | BinanceEndpoint::FuturesExchangeInfo
+                | BinanceEndpoint::FuturesAccount
+                | BinanceEndpoint::FuturesAccountConfig
+                | BinanceEndpoint::FuturesSymbolConfig
+                | BinanceEndpoint::FuturesPositions
+                | BinanceEndpoint::FuturesPositionMode
+                | BinanceEndpoint::FuturesCommission
+                | BinanceEndpoint::FuturesOrder
+                | BinanceEndpoint::FuturesOpenOrders
+                | BinanceEndpoint::FuturesTrades
+                | BinanceEndpoint::FuturesIncome
+                | BinanceEndpoint::FuturesMarkPrice
+                | BinanceEndpoint::FuturesLeverageBrackets
+                | BinanceEndpoint::FuturesPlaceOrder
+                | BinanceEndpoint::FuturesCancelOrder
+                | BinanceEndpoint::WalletTransfer
+                | BinanceEndpoint::WalletTransferHistory
+        ) && (self.params.iter().any(|p| p.value.is_empty())
+            || self
+                .get("orderId")
+                .is_some_and(|v| v.parse::<u64>().map_or(true, |id| id == 0))
+            || self.get("origClientOrderId").is_some_and(|v| {
+                v.len() > 36
+                    || !v
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+            }))
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        if self.endpoint == BinanceEndpoint::SpotCancelOrder
+            && self.get("newClientOrderId").is_some_and(|id| {
+                id.is_empty()
+                    || id.len() > 36
+                    || !id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+            })
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        if matches!(
+            self.endpoint,
+            BinanceEndpoint::SpotOrder
+                | BinanceEndpoint::FuturesOrder
+                | BinanceEndpoint::SpotCancelOrder
+                | BinanceEndpoint::FuturesCancelOrder
+        ) && self.get("orderId").is_none() == self.get("origClientOrderId").is_none()
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
+        if matches!(
+            self.endpoint,
+            BinanceEndpoint::SpotPlaceOrder | BinanceEndpoint::FuturesPlaceOrder
+        ) {
+            if !matches!(self.get("side"), Some("BUY" | "SELL"))
+                || !matches!(self.get("type"), Some("MARKET" | "LIMIT"))
+                || ExactDecimal::parse(self.get("quantity").unwrap())?.is_zero()
+                || self.get("newClientOrderId").is_none_or(|id| {
+                    id.is_empty()
+                        || id.len() > 36
+                        || !id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+                })
+                || self
+                    .get("newOrderRespType")
+                    .is_some_and(|v| !matches!(v, "ACK" | "RESULT" | "FULL"))
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
+            match self.get("type") {
+                Some("LIMIT") => {
+                    if self.get("price").is_none_or(|p| {
+                        ExactDecimal::parse(p).is_err()
+                            || ExactDecimal::parse(p).is_ok_and(|n| n.is_zero())
+                    }) || !matches!(self.get("timeInForce"), Some("GTC" | "IOC" | "FOK"))
+                    {
+                        return Err(BinanceError::InvalidRequest);
+                    }
+                }
+                Some("MARKET")
+                    if self.get("price").is_some() || self.get("timeInForce").is_some() =>
+                {
+                    return Err(BinanceError::InvalidRequest);
+                }
+                _ => {}
+            }
+            if self.endpoint == BinanceEndpoint::FuturesPlaceOrder
+                && (!matches!(self.get("positionSide"), Some("BOTH" | "LONG" | "SHORT"))
+                    || self
+                        .get("reduceOnly")
+                        .is_some_and(|v| !matches!(v, "true" | "false"))
+                    || (self.get("positionSide") != Some("BOTH")
+                        && self.get("reduceOnly").is_some())
+                    || self.get("newOrderRespType") == Some("FULL"))
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
+        }
+        if matches!(
+            self.endpoint,
+            BinanceEndpoint::WalletTransfer | BinanceEndpoint::WalletTransferHistory
+        ) && (!matches!(self.get("type"), Some("MAIN_UMFUTURE" | "UMFUTURE_MAIN"))
+            || (self.endpoint == BinanceEndpoint::WalletTransfer
+                && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
+                    || self.get("asset").is_none_or(str::is_empty))))
+        {
+            return Err(BinanceError::InvalidRequest);
         }
         if matches!(self.endpoint, BinanceEndpoint::UniversalTransfer) {
             let amount = ExactDecimal::parse(self.get("amount").unwrap())?;
@@ -497,7 +775,7 @@ impl fmt::Display for BinanceError {
             Self::InvalidIdentity => "invalid logical request identity",
             Self::MissingParameter => "required Binance parameter is missing",
             Self::DuplicateParameter => "duplicate Binance parameter",
-            Self::InvalidRequest => "invalid Binance funding request",
+            Self::InvalidRequest => "invalid Binance request",
             Self::UnsupportedParameter => "unsupported Binance endpoint parameter",
             Self::InvalidResponse => "invalid Binance response",
         })
@@ -702,6 +980,8 @@ pub struct ApiRestrictions {
     #[serde(default)]
     #[serde(rename = "enableSpotAndMarginTrading")]
     pub enable_spot_and_margin_trading: Option<bool>,
+    #[serde(default, rename = "enableFutures")]
+    pub enable_futures: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -1128,6 +1408,32 @@ impl BinanceCcxtTransport {
         let method = match request.endpoint {
             BinanceEndpoint::ApiRestrictions => Method::BinanceApiRestrictions,
             BinanceEndpoint::Account => Method::BinanceAccount,
+            BinanceEndpoint::SpotExchangeInfo => Method::BinanceSpotExchangeInfo,
+            BinanceEndpoint::SpotCommission => Method::BinanceSpotCommission,
+            BinanceEndpoint::SpotOpenOrders => Method::BinanceSpotOpenOrders,
+            BinanceEndpoint::SpotOrder => Method::BinanceSpotOrder,
+            BinanceEndpoint::SpotTrades => Method::BinanceSpotTrades,
+            BinanceEndpoint::SpotPlaceOrder => Method::BinanceSpotPlaceOrder,
+            BinanceEndpoint::SpotCancelOrder => Method::BinanceSpotCancelOrder,
+            BinanceEndpoint::FuturesExchangeInfo => Method::BinanceFuturesExchangeInfo,
+            BinanceEndpoint::FuturesAccount => Method::BinanceFuturesAccount,
+            BinanceEndpoint::FuturesAccountConfig => Method::BinanceFuturesAccountConfig,
+            BinanceEndpoint::FuturesSymbolConfig => Method::BinanceFuturesSymbolConfig,
+            BinanceEndpoint::FuturesPositions => Method::BinanceFuturesPositions,
+            BinanceEndpoint::FuturesPositionMode => Method::BinanceFuturesPositionMode,
+            BinanceEndpoint::FuturesCommission => Method::BinanceFuturesCommission,
+            BinanceEndpoint::FuturesFeeBurn => Method::BinanceFuturesFeeBurn,
+            BinanceEndpoint::FuturesOrder => Method::BinanceFuturesOrder,
+            BinanceEndpoint::FuturesOpenOrders => Method::BinanceFuturesOpenOrders,
+            BinanceEndpoint::FuturesTrades => Method::BinanceFuturesTrades,
+            BinanceEndpoint::FuturesIncome => Method::BinanceFuturesIncome,
+            BinanceEndpoint::FuturesMarkPrice => Method::BinanceFuturesMarkPrice,
+            BinanceEndpoint::FuturesLeverageBrackets => Method::BinanceFuturesLeverageBrackets,
+            BinanceEndpoint::FuturesPlaceOrder => Method::BinanceFuturesPlaceOrder,
+            BinanceEndpoint::FuturesCancelOrder => Method::BinanceFuturesCancelOrder,
+            BinanceEndpoint::WalletTransfer => Method::BinanceWalletTransfer,
+            BinanceEndpoint::WalletTransferHistory => Method::BinanceWalletTransferHistory,
+
             BinanceEndpoint::SubAccountList => Method::BinanceSubAccountList,
             BinanceEndpoint::SubAccountSpotAssets => Method::BinanceSubAccountSpotAssets,
             BinanceEndpoint::CapitalConfig => Method::BinanceCapitalConfig,
@@ -1141,10 +1447,20 @@ impl BinanceCcxtTransport {
             BinanceEndpoint::StandardWithdrawal => Method::BinanceStandardWithdrawal,
             BinanceEndpoint::TravelRuleRequirements => Method::BinanceTravelRuleRequirements,
         };
-        let credentials = self
-            .credentials
-            .credentials(credential.as_str())
-            .map_err(ccxt_transport_error)?;
+        let credentials = if matches!(
+            request.endpoint,
+            BinanceEndpoint::SpotExchangeInfo
+                | BinanceEndpoint::FuturesExchangeInfo
+                | BinanceEndpoint::FuturesMarkPrice
+        ) {
+            None
+        } else {
+            Some(
+                self.credentials
+                    .credentials(credential.as_str())
+                    .map_err(ccxt_transport_error)?,
+            )
+        };
         let params = request
             .params
             .into_iter()
@@ -1153,21 +1469,236 @@ impl BinanceCcxtTransport {
         match guard {
             Some(guard) => {
                 self.client
-                    .request_guarded(
-                        ExchangeId::Binance,
-                        method,
-                        Some(credentials),
-                        params,
-                        guard,
-                    )
+                    .request_guarded(ExchangeId::Binance, method, credentials, params, guard)
                     .await
             }
             None => {
                 self.client
-                    .request(ExchangeId::Binance, method, Some(credentials), params)
+                    .request(ExchangeId::Binance, method, credentials, params)
                     .await
             }
         }
         .map_err(ccxt_transport_error)
+    }
+}
+
+#[cfg(test)]
+mod trading_transport_contract_tests {
+    use super::*;
+
+    fn order(endpoint: BinanceEndpoint) -> BinanceRequest {
+        let request = BinanceRequest::new(endpoint)
+            .push("symbol", "BTCUSDT")
+            .push("side", "BUY")
+            .push("type", "LIMIT")
+            .push("quantity", "0.000000000000000001")
+            .push("price", "12345678901234567890.123456789012345678")
+            .push("timeInForce", "GTC")
+            .push("newClientOrderId", "fin-synthetic-local-only");
+        if endpoint == BinanceEndpoint::FuturesPlaceOrder {
+            request
+                .push("positionSide", "BOTH")
+                .push("reduceOnly", "true")
+        } else {
+            request
+        }
+    }
+
+    #[test]
+    fn fixed_order_requests_require_identity_and_exact_bounded_types() {
+        for endpoint in [
+            BinanceEndpoint::SpotPlaceOrder,
+            BinanceEndpoint::FuturesPlaceOrder,
+        ] {
+            let valid = order(endpoint);
+            valid.validate().unwrap();
+            let mut missing_identity = valid.clone();
+            missing_identity
+                .params
+                .retain(|p| p.key != "newClientOrderId");
+            assert_eq!(
+                missing_identity.validate(),
+                Err(BinanceError::MissingParameter)
+            );
+            let mut invalid_decimal = valid.clone();
+            invalid_decimal
+                .params
+                .iter_mut()
+                .find(|p| p.key == "quantity")
+                .unwrap()
+                .value = "1e-18".into();
+            assert!(invalid_decimal.validate().is_err());
+            let mut unsupported_type = valid.clone();
+            unsupported_type
+                .params
+                .iter_mut()
+                .find(|p| p.key == "type")
+                .unwrap()
+                .value = "STOP_MARKET".into();
+            assert_eq!(
+                unsupported_type.validate(),
+                Err(BinanceError::InvalidRequest)
+            );
+            assert_eq!(
+                valid.clone().push("timestamp", "1").validate(),
+                Err(BinanceError::UnsupportedParameter)
+            );
+            assert_eq!(
+                valid.push("quantity", "1").validate(),
+                Err(BinanceError::DuplicateParameter)
+            );
+        }
+    }
+
+    #[test]
+    fn futures_orders_reject_hedge_reduce_only_and_full_response() {
+        let mut hedge = order(BinanceEndpoint::FuturesPlaceOrder);
+        hedge
+            .params
+            .iter_mut()
+            .find(|p| p.key == "positionSide")
+            .unwrap()
+            .value = "LONG".into();
+        assert_eq!(hedge.validate(), Err(BinanceError::InvalidRequest));
+        hedge.params.retain(|p| p.key != "reduceOnly");
+        hedge.validate().unwrap();
+        assert_eq!(
+            hedge.push("newOrderRespType", "FULL").validate(),
+            Err(BinanceError::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn cancel_and_lookup_require_one_unambiguous_order_identity() {
+        for endpoint in [
+            BinanceEndpoint::SpotOrder,
+            BinanceEndpoint::FuturesOrder,
+            BinanceEndpoint::SpotCancelOrder,
+            BinanceEndpoint::FuturesCancelOrder,
+        ] {
+            let request = BinanceRequest::new(endpoint).push("symbol", "BTCUSDT");
+            assert_eq!(request.validate(), Err(BinanceError::InvalidRequest));
+            request
+                .clone()
+                .push("orderId", "18446744073709551615")
+                .validate()
+                .unwrap();
+            request
+                .clone()
+                .push("origClientOrderId", "fin-synthetic-local-only")
+                .validate()
+                .unwrap();
+            assert_eq!(
+                request
+                    .push("orderId", "1")
+                    .push("origClientOrderId", "fin-synthetic-local-only")
+                    .validate(),
+                Err(BinanceError::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn wallet_transfer_is_only_spot_and_usdm_cash() {
+        for route in ["MAIN_UMFUTURE", "UMFUTURE_MAIN"] {
+            BinanceRequest::new(BinanceEndpoint::WalletTransfer)
+                .push("type", route)
+                .push("asset", "USDT")
+                .push("amount", "0.123456789012345678")
+                .validate()
+                .unwrap();
+            BinanceRequest::new(BinanceEndpoint::WalletTransferHistory)
+                .push("type", route)
+                .validate()
+                .unwrap();
+        }
+        assert_eq!(
+            BinanceRequest::new(BinanceEndpoint::WalletTransfer)
+                .push("type", "MAIN_MARGIN")
+                .push("asset", "USDT")
+                .push("amount", "1")
+                .validate(),
+            Err(BinanceError::InvalidRequest)
+        );
+    }
+
+    #[tokio::test]
+    async fn public_market_transport_never_resolves_credentials() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct RefuseCredentials(Arc<AtomicUsize>);
+        impl fin_exchange::ccxt::CredentialProvider for RefuseCredentials {
+            fn credentials(
+                &self,
+                _: &str,
+            ) -> Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError>
+            {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(fin_exchange::ccxt::CcxtError::new(
+                    fin_exchange::ccxt::CcxtErrorKind::Authentication,
+                ))
+            }
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buf = [0; 2048];
+                    let n = stream.read(&mut buf).unwrap();
+                    bytes.extend_from_slice(&buf[..n]);
+                    if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let wire = String::from_utf8(bytes).unwrap();
+                assert!(!wire.to_ascii_lowercase().contains("x-mbx-apikey"));
+                assert!(!wire.contains("signature="));
+                paths.push(wire.lines().next().unwrap().to_owned());
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}").unwrap();
+            }
+            paths
+        });
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let transport = BinanceCcxtTransport::new(
+            Arc::new(fin_exchange::ccxt::CcxtClient::for_test(&url).unwrap()),
+            Arc::new(RefuseCredentials(lookups.clone())),
+        );
+        let handle = CredentialHandle::new("synthetic-public-market-data").unwrap();
+        for endpoint in [
+            BinanceEndpoint::SpotExchangeInfo,
+            BinanceEndpoint::FuturesExchangeInfo,
+            BinanceEndpoint::FuturesMarkPrice,
+        ] {
+            transport
+                .request(&handle, BinanceRequest::new(endpoint))
+                .await
+                .unwrap();
+        }
+        assert_eq!(lookups.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            worker.join().unwrap(),
+            [
+                "GET /api/v3/exchangeInfo HTTP/1.1",
+                "GET /fapi/v1/exchangeInfo HTTP/1.1",
+                "GET /fapi/v1/premiumIndex HTTP/1.1"
+            ]
+        );
+    }
+
+    #[test]
+    fn futures_permission_is_reported_separately_and_defaults_unknown() {
+        let reported: ApiRestrictions =
+            parse_response(serde_json::json!({"enableFutures": true})).unwrap();
+        assert_eq!(reported.enable_futures, Some(true));
+        assert_eq!(reported.enable_spot_and_margin_trading, None);
+        let unknown: ApiRestrictions = parse_response(serde_json::json!({})).unwrap();
+        assert_eq!(unknown.enable_futures, None);
     }
 }

@@ -131,6 +131,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                         ("permitsUniversalTransfer", "universal transfers"),
                         ("ipRestrict", "IP restriction"),
                         ("enableSpotAndMarginTrading", "spot/margin trading"),
+                        ("enableFutures", "futures trading"),
                     ];
                     let mut enabled = Vec::new();
                     let mut disabled = Vec::new();

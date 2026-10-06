@@ -352,18 +352,106 @@ async fn every_allowlisted_binance_method_routes_through_ccxt() {
             "/sapi/v1/localentity/questionnaire-requirements",
         ),
         (Method::BinanceTickerPrice, "GET", "/api/v3/ticker/price"),
+        (
+            Method::BinanceSpotExchangeInfo,
+            "GET",
+            "/api/v3/exchangeInfo",
+        ),
+        (
+            Method::BinanceSpotCommission,
+            "GET",
+            "/api/v3/account/commission",
+        ),
+        (Method::BinanceSpotOpenOrders, "GET", "/api/v3/openOrders"),
+        (Method::BinanceSpotOrder, "GET", "/api/v3/order"),
+        (Method::BinanceSpotTrades, "GET", "/api/v3/myTrades"),
+        (Method::BinanceSpotPlaceOrder, "POST", "/api/v3/order"),
+        (Method::BinanceSpotCancelOrder, "DELETE", "/api/v3/order"),
+        (
+            Method::BinanceFuturesExchangeInfo,
+            "GET",
+            "/fapi/v1/exchangeInfo",
+        ),
+        (Method::BinanceFuturesAccount, "GET", "/fapi/v3/account"),
+        (
+            Method::BinanceFuturesAccountConfig,
+            "GET",
+            "/fapi/v1/accountConfig",
+        ),
+        (
+            Method::BinanceFuturesSymbolConfig,
+            "GET",
+            "/fapi/v1/symbolConfig",
+        ),
+        (
+            Method::BinanceFuturesPositions,
+            "GET",
+            "/fapi/v3/positionRisk",
+        ),
+        (
+            Method::BinanceFuturesPositionMode,
+            "GET",
+            "/fapi/v1/positionSide/dual",
+        ),
+        (
+            Method::BinanceFuturesCommission,
+            "GET",
+            "/fapi/v1/commissionRate",
+        ),
+        (Method::BinanceFuturesFeeBurn, "GET", "/fapi/v1/feeBurn"),
+        (Method::BinanceFuturesOrder, "GET", "/fapi/v1/order"),
+        (
+            Method::BinanceFuturesOpenOrders,
+            "GET",
+            "/fapi/v1/openOrders",
+        ),
+        (Method::BinanceFuturesTrades, "GET", "/fapi/v1/userTrades"),
+        (Method::BinanceFuturesIncome, "GET", "/fapi/v1/income"),
+        (
+            Method::BinanceFuturesMarkPrice,
+            "GET",
+            "/fapi/v1/premiumIndex",
+        ),
+        (
+            Method::BinanceFuturesLeverageBrackets,
+            "GET",
+            "/fapi/v1/leverageBracket",
+        ),
+        (Method::BinanceFuturesPlaceOrder, "POST", "/fapi/v1/order"),
+        (
+            Method::BinanceFuturesCancelOrder,
+            "DELETE",
+            "/fapi/v1/order",
+        ),
+        (
+            Method::BinanceWalletTransfer,
+            "POST",
+            "/sapi/v1/asset/transfer",
+        ),
+        (
+            Method::BinanceWalletTransferHistory,
+            "GET",
+            "/sapi/v1/asset/transfer",
+        ),
     ];
+    let expected_count = cases.len();
     for (method, verb, path) in cases {
         let key = if method.private() {
             credentials("SYNTHETIC".into())
         } else {
             None
         };
-        CcxtClient::for_test(&server.url)
-            .unwrap()
-            .request(ExchangeId::Binance, method, key, vec![])
-            .await
-            .unwrap_or_else(|error| panic!("{method:?}: {error}"));
+        let client = CcxtClient::for_test(&server.url).unwrap();
+        let result = if method.requires_guard() {
+            client
+                .request_guarded(ExchangeId::Binance, method, key, vec![], Arc::new(|| true))
+                .await
+        } else {
+            client
+                .request(ExchangeId::Binance, method, key, vec![])
+                .await
+        };
+        result.unwrap_or_else(|error| panic!("{method:?}: {error}"));
         let wire = server.request();
         let first = wire.lines().next().unwrap();
         assert!(
@@ -371,7 +459,7 @@ async fn every_allowlisted_binance_method_routes_through_ccxt() {
             "{method:?}: {first}"
         );
     }
-    assert_eq!(server.finish(), 15);
+    assert_eq!(server.finish(), expected_count);
 }
 #[tokio::test]
 async fn raw_observer_keeps_http_and_integer_error_evidence_without_sensitive_messages() {
@@ -609,4 +697,291 @@ async fn additional_venues_redact_errors_and_reject_private_and_credentialed_req
         );
     }
     assert_eq!(server.finish(), 7);
+}
+
+/// GET/DELETE sign the query; POST signs the body. Reconstruct the exact
+/// transport payload rather than parsing amounts through any numeric type.
+fn signed_payload(request: &str) -> (String, String) {
+    if request.starts_with("POST ") {
+        let (payload, signature) = signed_body(request);
+        (payload.to_owned(), signature)
+    } else {
+        let target = request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let query = target.split_once('?').unwrap().1;
+        let (payload, signature) = query.rsplit_once("&signature=").unwrap();
+        (payload.to_owned(), signature.to_owned())
+    }
+}
+
+#[tokio::test]
+async fn trading_signatures_preserve_exact_decimals_and_encoded_identifiers() {
+    use hmac::{Hmac, Mac};
+    let mut servers = Vec::new();
+    for method in [
+        Method::BinanceSpotPlaceOrder,
+        Method::BinanceFuturesPlaceOrder,
+        Method::BinanceSpotCancelOrder,
+        Method::BinanceFuturesCancelOrder,
+        Method::BinanceSpotOrder,
+        Method::BinanceFuturesOrder,
+    ] {
+        let server = Server::new(
+            200,
+            r#"{"orderId":18446744073709551615,"price":"12345678901234567890.123456789012345678"}"#,
+            Duration::ZERO,
+        );
+        let client = CcxtClient::for_test(&server.url).unwrap();
+        let params = vec![
+            ("symbol".into(), "BTCUSDT".into()),
+            ("quantity".into(), "0.000000000000000001".into()),
+            (
+                "price".into(),
+                "12345678901234567890.123456789012345678".into(),
+            ),
+            ("newClientOrderId".into(), "fin-local:/._-".into()),
+            ("origClientOrderId".into(), "synthetic &+=%/é".into()),
+            ("orderId".into(), "18446744073709551615".into()),
+            ("reduceOnly".into(), "true".into()),
+        ];
+        let result = if method.requires_guard() {
+            client
+                .request_guarded(
+                    ExchangeId::Binance,
+                    method,
+                    credentials("SYNTHETIC-HMAC-SECRET".into()),
+                    params,
+                    Arc::new(|| true),
+                )
+                .await
+        } else {
+            client
+                .request(
+                    ExchangeId::Binance,
+                    method,
+                    credentials("SYNTHETIC-HMAC-SECRET".into()),
+                    params,
+                )
+                .await
+        }
+        .unwrap();
+        assert_eq!(result["orderId"], u64::MAX);
+        let request = server.request();
+        let (payload, signature) = signed_payload(&request);
+        let (timestamp, exact_params) = payload.split_once('&').unwrap();
+        assert!(
+            timestamp
+                .strip_prefix("timestamp=")
+                .unwrap()
+                .parse::<u64>()
+                .is_ok()
+        );
+        assert_eq!(
+            exact_params,
+            "symbol=BTCUSDT&quantity=0.000000000000000001&price=12345678901234567890.123456789012345678&newClientOrderId=fin-local%3A%2F._-&origClientOrderId=synthetic%20%26%2B%3D%25%2F%C3%A9&orderId=18446744073709551615&reduceOnly=true&recvWindow=5000"
+        );
+        assert!(payload.contains("quantity=0.000000000000000001"));
+        assert!(payload.contains("price=12345678901234567890.123456789012345678"));
+        assert!(payload.contains("orderId=18446744073709551615"));
+        assert!(payload.contains("newClientOrderId=fin-local%3A%2F._-"));
+        assert!(payload.contains("origClientOrderId=synthetic%20%26%2B%3D%25%2F%C3%A9"));
+        assert!(payload.contains("reduceOnly=true"));
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"SYNTHETIC-HMAC-SECRET").unwrap();
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+        servers.push(server);
+    }
+    for server in servers {
+        assert_eq!(server.finish(), 1);
+    }
+}
+
+#[tokio::test]
+async fn trading_writes_require_guard_and_expired_guard_sends_nothing() {
+    let server = Server::new(200, "{}", Duration::ZERO);
+    let client = CcxtClient::for_test(&server.url).unwrap();
+    for method in [
+        Method::BinanceSpotPlaceOrder,
+        Method::BinanceSpotCancelOrder,
+        Method::BinanceFuturesPlaceOrder,
+        Method::BinanceFuturesCancelOrder,
+        Method::BinanceWalletTransfer,
+    ] {
+        let error = client
+            .request(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC".into()),
+                vec![],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, CcxtErrorKind::PermissionDenied);
+        let error = client
+            .request_guarded(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC".into()),
+                vec![],
+                Arc::new(|| false),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, CcxtErrorKind::PermissionDenied);
+        assert_eq!(error.http_status, None);
+    }
+    assert_eq!(server.finish(), 0);
+}
+
+#[tokio::test]
+async fn trading_write_errors_never_retry_and_keep_safe_exchange_evidence() {
+    let mut servers = Vec::new();
+    for method in [
+        Method::BinanceSpotPlaceOrder,
+        Method::BinanceFuturesPlaceOrder,
+        Method::BinanceSpotCancelOrder,
+        Method::BinanceFuturesCancelOrder,
+    ] {
+        for status in [400, 429, 500, 302] {
+            let server = Server::new(
+                status,
+                r#"{"code":-2010,"msg":"SYNTHETIC-SECRET-UPSTREAM"}"#,
+                Duration::ZERO,
+            );
+            let result = CcxtClient::for_test(&server.url)
+                .unwrap()
+                .request_guarded(
+                    ExchangeId::Binance,
+                    method,
+                    credentials("SYNTHETIC".into()),
+                    vec![],
+                    Arc::new(|| true),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(result.http_status, Some(status));
+            assert_eq!(result.exchange_code, Some(-2010));
+            assert!(!format!("{result:?} {result}").contains("SYNTHETIC"));
+            servers.push(server);
+        }
+    }
+    for server in servers {
+        assert_eq!(server.finish(), 1);
+    }
+}
+
+#[tokio::test]
+async fn trading_write_timeout_never_retries() {
+    let mut servers = Vec::new();
+    for method in [
+        Method::BinanceSpotPlaceOrder,
+        Method::BinanceFuturesPlaceOrder,
+    ] {
+        let server = Server::new(200, "{}", Duration::from_millis(300));
+        let error = CcxtClient::for_test_with_timeout(&server.url, Duration::from_millis(100))
+            .unwrap()
+            .request_guarded(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC".into()),
+                vec![],
+                Arc::new(|| true),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, CcxtErrorKind::Timeout);
+        servers.push(server);
+    }
+    for server in servers {
+        assert_eq!(server.finish(), 1);
+    }
+}
+
+#[tokio::test]
+async fn trading_reads_preserve_bounded_history_and_large_ids_in_signed_query() {
+    use hmac::{Hmac, Mac};
+    let server = Server::new(200, "[]", Duration::ZERO);
+    for method in [
+        Method::BinanceSpotTrades,
+        Method::BinanceFuturesTrades,
+        Method::BinanceFuturesIncome,
+    ] {
+        CcxtClient::for_test(&server.url)
+            .unwrap()
+            .request(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC-HMAC-SECRET".into()),
+                vec![
+                    ("symbol".into(), "BTCUSDT".into()),
+                    ("orderId".into(), "18446744073709551615".into()),
+                    ("startTime".into(), "1770000000001".into()),
+                    ("endTime".into(), "1770000000999".into()),
+                    ("limit".into(), "1000".into()),
+                ],
+            )
+            .await
+            .unwrap();
+        let wire = server.request();
+        assert!(wire.starts_with("GET "));
+        let (payload, signature) = signed_payload(&wire);
+        assert_eq!(
+            payload.split_once('&').unwrap().1,
+            "symbol=BTCUSDT&orderId=18446744073709551615&startTime=1770000000001&endTime=1770000000999&limit=1000&recvWindow=5000"
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"SYNTHETIC-HMAC-SECRET").unwrap();
+        mac.update(payload.as_bytes());
+        mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+    }
+    assert_eq!(server.finish(), 3);
+}
+
+#[tokio::test]
+async fn queued_trading_order_and_cancel_expiry_prevents_signing_and_network() {
+    let mut servers = Vec::new();
+    for method in [
+        Method::BinanceSpotPlaceOrder,
+        Method::BinanceFuturesCancelOrder,
+    ] {
+        let server = Server::new(200, "{}", Duration::from_millis(150));
+        let client = CcxtClient::for_test(&server.url).unwrap();
+        let first = client.clone();
+        let first = tokio::spawn(async move {
+            first
+                .request(
+                    ExchangeId::Binance,
+                    Method::BinanceTickerPrice,
+                    None,
+                    vec![],
+                )
+                .await
+        });
+        while server.count.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let expiry = std::time::Instant::now() + Duration::from_millis(30);
+        let guard = Arc::new(move || std::time::Instant::now() < expiry);
+        assert!(guard());
+        let error = client
+            .request_guarded(
+                ExchangeId::Binance,
+                method,
+                credentials("SYNTHETIC".into()),
+                vec![],
+                guard,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, CcxtErrorKind::PermissionDenied);
+        first.await.unwrap().unwrap();
+        servers.push(server);
+    }
+    for server in servers {
+        assert_eq!(server.finish(), 1);
+    }
 }

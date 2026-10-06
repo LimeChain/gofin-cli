@@ -316,3 +316,45 @@ do not dispatch against stale configuration. Approver changes require socket rep
 Binance identity probes run before account operations instead of blocking startup
 or local management. Verification remains pending after failure and resets on reload;
 financial writes retain the identity gate, run limits and per-write authorization.
+
+
+## Binance trading increment — 6 October 2026
+
+Implement spot and USDⓈ-M **USDT perpetuals** first. Named reads expose market
+metadata, bounded orders/trades, collateral, positions and income without
+flattening venue meanings. All financial quantities and IDs remain exact strings.
+Fixed reviewed raw CCXT routes provide connectivity; shared Fin lifecycle owns
+approval, durable identity, reservation and reconciliation.
+
+The initial scoped spot path uses LIMIT FOK. Its return proof describes the
+successful full-fill branch; verified no-fill returns directly to baseline.
+Price improvement or unexpected partial execution can invalidate the remainder
+and require a fresh return plan. Scoped spot IOC requires correlated partial-fill
+conversion projections and is a follow-up; synthetic IOC evidence tests do not
+claim production support. Quantity-all cleanup consumes only the prior selected
+acquisition and can refuse venue lot/minimum filters rather than rounding or
+selling unrelated holdings. Fee dust and an actual viable return route must be
+checked during the joint live session.
+
+USD-M opens/closes use LIMIT IOC/FOK, isolated leverage 1, one-way single-asset
+USDT collateral and auto-add margin disabled. At most one open futures position
+per account is supported in this increment, including projected plans. Fresh
+mark or the more conservative order limit bounds gross exposure and required
+collateral; opening margin, losses and additional commissions must fit together.
+No account-setting, margin, leverage or spot/futures-wallet funding mutations are
+exposed. Read-only observations distinguish unrealized PnL from wallet collateral.
+
+Add generic derivative exposure and realized/funding settlement effects to the
+ledger, with receipt-backed anchors and independent signed loss/profit ceilings.
+Derivative notional never becomes spendable cash. Settlement gains do not enlarge
+the initial test allocation. Output-asset commission is deducted from gross
+conversion receipts once; collateral/BNB commission is separately reserved.
+Funding since the prior verified anchor is observed during closing, not hidden by
+an intermediate wallet snapshot. A partial closing receipt settles its real effects
+but cannot satisfy a zero-position return proof.
+
+Cancellation is a separately approved sibling of the original unresolved durable
+submission in the same run. A generic cancellation effect proves removal of the
+remainder; original fills, costs and reservation belong to the original order.
+Response loss/restart use the recorded client/numeric order IDs, never another POST.
+Reproduce synthetic results and pending cases in the [trading report](reports/binance-trading.md).

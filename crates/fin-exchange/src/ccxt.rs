@@ -70,6 +70,32 @@ pub enum Method {
     BinanceStandardWithdrawal,
     BinanceTravelRuleRequirements,
     BinanceTickerPrice,
+    BinanceSpotExchangeInfo,
+    BinanceSpotCommission,
+    BinanceSpotOpenOrders,
+    BinanceSpotOrder,
+    BinanceSpotTrades,
+    BinanceSpotPlaceOrder,
+    BinanceSpotCancelOrder,
+    BinanceFuturesExchangeInfo,
+    BinanceFuturesAccount,
+    BinanceFuturesAccountConfig,
+    BinanceFuturesSymbolConfig,
+    BinanceFuturesPositions,
+    BinanceFuturesPositionMode,
+    BinanceFuturesCommission,
+    BinanceFuturesFeeBurn,
+    BinanceFuturesOrder,
+    BinanceFuturesOpenOrders,
+    BinanceFuturesTrades,
+    BinanceFuturesIncome,
+    BinanceFuturesMarkPrice,
+    BinanceFuturesLeverageBrackets,
+    BinanceFuturesPlaceOrder,
+    BinanceFuturesCancelOrder,
+    BinanceWalletTransfer,
+    BinanceWalletTransferHistory,
+
     KrakenTicker,
     KrakenAssetPairs,
     HyperliquidMetaAndAssetContexts,
@@ -120,6 +146,32 @@ impl Method {
                 "sapi_get_localentity_questionnaire_requirements"
             }
             Self::BinanceTickerPrice => "public_get_ticker_price",
+            Self::BinanceSpotExchangeInfo => "public_get_exchange_info",
+            Self::BinanceSpotCommission => "private_get_account_commission",
+            Self::BinanceSpotOpenOrders => "private_get_open_orders",
+            Self::BinanceSpotOrder => "private_get_order",
+            Self::BinanceSpotTrades => "private_get_my_trades",
+            Self::BinanceSpotPlaceOrder => "private_post_order",
+            Self::BinanceSpotCancelOrder => "private_delete_order",
+            Self::BinanceFuturesExchangeInfo => "fapi_public_get_exchange_info",
+            Self::BinanceFuturesAccount => "fapi_private_v3_get_account",
+            Self::BinanceFuturesAccountConfig => "fapi_private_get_account_config",
+            Self::BinanceFuturesSymbolConfig => "fapi_private_get_symbol_config",
+            Self::BinanceFuturesPositions => "fapi_private_v3_get_position_risk",
+            Self::BinanceFuturesPositionMode => "fapi_private_get_position_side_dual",
+            Self::BinanceFuturesCommission => "fapi_private_get_commission_rate",
+            Self::BinanceFuturesFeeBurn => "fapi_private_get_fee_burn",
+            Self::BinanceFuturesOrder => "fapi_private_get_order",
+            Self::BinanceFuturesOpenOrders => "fapi_private_get_open_orders",
+            Self::BinanceFuturesTrades => "fapi_private_get_user_trades",
+            Self::BinanceFuturesIncome => "fapi_private_get_income",
+            Self::BinanceFuturesMarkPrice => "fapi_public_get_premium_index",
+            Self::BinanceFuturesLeverageBrackets => "fapi_private_get_leverage_bracket",
+            Self::BinanceFuturesPlaceOrder => "fapi_private_post_order",
+            Self::BinanceFuturesCancelOrder => "fapi_private_delete_order",
+            Self::BinanceWalletTransfer => "sapi_post_asset_transfer",
+            Self::BinanceWalletTransferHistory => "sapi_get_asset_transfer",
+
             Self::KrakenTicker => "public_get_ticker",
             Self::KrakenAssetPairs => "public_get_asset_pairs",
             Self::HyperliquidMetaAndAssetContexts => "public_post_info",
@@ -152,10 +204,23 @@ impl Method {
                 | Self::BybitTicker
         )
     }
+    fn requires_guard(self) -> bool {
+        matches!(
+            self,
+            Self::BinanceSpotPlaceOrder
+                | Self::BinanceSpotCancelOrder
+                | Self::BinanceFuturesPlaceOrder
+                | Self::BinanceFuturesCancelOrder
+                | Self::BinanceWalletTransfer
+        )
+    }
     fn private(self) -> bool {
         !matches!(
             self,
             Self::BinanceTickerPrice
+                | Self::BinanceSpotExchangeInfo
+                | Self::BinanceFuturesExchangeInfo
+                | Self::BinanceFuturesMarkPrice
                 | Self::KrakenTicker
                 | Self::KrakenAssetPairs
                 | Self::HyperliquidMetaAndAssetContexts
@@ -516,7 +581,7 @@ impl CcxtClient {
             { kraken.internals.http_client = Some(client.clone()); }
             if let Some(base) = endpoint {
                 #[cfg(feature="binance")]
-                { binance.urls = ccxt::Value::from(serde_json::json!({"api":{"public":format!("{base}/api/v3"),"private":format!("{base}/api/v3"),"sapi":format!("{base}/sapi/v1"),"sapiV4":format!("{base}/sapi/v4")}})); }
+                { binance.urls = ccxt::Value::from(serde_json::json!({"api":{"public":format!("{base}/api/v3"),"private":format!("{base}/api/v3"),"sapi":format!("{base}/sapi/v1"),"sapiV4":format!("{base}/sapi/v4"),"fapiPublic":format!("{base}/fapi/v1"),"fapiPrivate":format!("{base}/fapi/v1"),"fapiPrivateV3":format!("{base}/fapi/v3")}})); }
                 #[cfg(feature="kraken")]
                 { kraken.urls = ccxt::Value::from(serde_json::json!({"api":{"public":base}})); }
                 #[cfg(feature="hyperliquid")]
@@ -640,6 +705,9 @@ impl CcxtClient {
                 && params != [("type".to_owned(), "metaAndAssetCtxs".to_owned())])
         {
             return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+        }
+        if method.requires_guard() && guard.is_none() {
+            return Err(CcxtError::new(CcxtErrorKind::PermissionDenied));
         }
         let (reply, result) = oneshot::channel();
         self.sender

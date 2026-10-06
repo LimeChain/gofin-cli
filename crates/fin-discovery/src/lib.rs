@@ -542,7 +542,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
         "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
-        "fin": {"binance": {"scope":"SPOT funding, account discovery and credential validation", "authentication":["hmac","rsa","ed25519"], "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
+        "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "spot":{"execution":"LIMIT FOK scoped return plans", "ioc_partial_fills":"synthetic reconciliation only; scoped IOC return plans unavailable"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
     });
     for (venue, scope) in [

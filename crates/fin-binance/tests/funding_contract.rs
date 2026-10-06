@@ -1944,6 +1944,9 @@ impl fin_binance::BinanceTransport for EmptyHistorySnapshotTransport {
                 };
                 json!({"totalCount":rows.as_array().unwrap().len(),"result":rows})
             }
+            E::ApiRestrictions => {
+                json!({"enableReading":true,"enableSpotAndMarginTrading":false,"enableFutures":false})
+            }
             endpoint => panic!("unexpected snapshot endpoint {endpoint:?}"),
         };
         Ok(response)
@@ -2009,6 +2012,9 @@ impl fin_binance::BinanceTransport for PagedTransferSnapshotTransport {
                     .collect::<Vec<_>>();
                 Ok(json!({"totalCount":self.total_count,"result":result}))
             }
+            E::ApiRestrictions => Ok(
+                json!({"enableReading":true,"enableSpotAndMarginTrading":false,"enableFutures":false}),
+            ),
             endpoint => panic!("unexpected snapshot endpoint {endpoint:?}"),
         }
     }

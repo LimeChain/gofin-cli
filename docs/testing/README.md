@@ -16,6 +16,22 @@ configuration or broadcast to production. Node disposal after a failure does not
 establish financial restoration. Actual human checks are in the
 [Rust handoff checklist](rust-human-handoff.md).
 
+## Binance trading regressions
+
+```sh
+cargo test --locked -p fin-binance --test trading_reads --test trading_contract
+cargo test --locked -p fin-exchange --lib
+make catalog
+cargo test --locked -p fin-cli --test offline_cli
+```
+
+These use only synthetic accounts, prices, approvals, fills and temporary SQLite
+state. The [trading report](../reports/binance-trading.md) records exact coverage;
+[human trading acceptance](binance-trading.md) remains a separate joint session.
+Tests include full/partial/no-fill, price/permission/mode/fee limits, funding,
+order/cancellation races, response loss, restart, duplicate submission, run caps
+and restoration. Synthetic approval never establishes native authorization.
+
 ## Local development loop
 
 Daemon lifecycle tests use an injected service manager/client plus temporary

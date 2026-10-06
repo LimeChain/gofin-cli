@@ -395,12 +395,91 @@ fn replay_step(
         }
     }
 
+    let mut settlements = BTreeMap::<Place, (BigInt, BigInt)>::new();
+    for expected in &proof.intent.expected {
+        if let EffectConstraint::Settlement {
+            resource,
+            asset,
+            minimum_delta,
+            maximum_delta,
+            ..
+        } = expected
+        {
+            let place = Place {
+                location: AccountingLocation::Cash {
+                    resource: resource.clone(),
+                },
+                asset: asset.clone(),
+            };
+            let range = settlements.entry(place).or_default();
+            range.0 += minimum_delta.integer();
+            range.1 += maximum_delta.integer();
+        }
+    }
+    for (place, (minimum, maximum)) in settlements {
+        if minimum > maximum {
+            return Err(provenance_error());
+        }
+        let parents = lots
+            .iter()
+            .filter(|lot| {
+                lot.place() == place
+                    && lot.origin.starts_with("allocation:")
+                    && !lot.maximum.is_zero()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let loss_max = if minimum.sign() == Sign::Minus {
+            minimum.magnitude().clone()
+        } else {
+            BigUint::zero()
+        };
+        let loss_min = if maximum.sign() == Sign::Minus {
+            maximum.magnitude().clone()
+        } else {
+            BigUint::zero()
+        };
+        if !loss_max.is_zero() {
+            consume_lots(
+                lots,
+                &place,
+                Interval {
+                    minimum: loss_min,
+                    maximum: loss_max,
+                },
+                None,
+            )?;
+        }
+        if maximum.sign() == Sign::Plus {
+            let parent = parents.first().ok_or_else(provenance_error)?;
+            let gain_min = if minimum.sign() == Sign::Plus {
+                minimum.magnitude().clone()
+            } else {
+                BigUint::zero()
+            };
+            push_lot(
+                lots,
+                &place,
+                &format!("accrual:{}", parent.origin),
+                Interval {
+                    minimum: gain_min,
+                    maximum: maximum.magnitude().clone(),
+                },
+            );
+        }
+        used_sources.insert(place.clone());
+        used_destinations.insert(place);
+    }
+
     used_sources.extend(cost_sources);
 
     // No typed principal edge may be silently omitted, and no cash delta may
     // mint a provenance label. Cost-only and explicit Debit are the only
     // unpaired cash outflows.
     for (place, (minimum, maximum)) in &deltas.cash {
+        if used_sources.contains(place) && used_destinations.contains(place) {
+            continue;
+        }
         match (minimum.sign(), maximum.sign()) {
             (Sign::Plus | Sign::NoSign, Sign::Plus | Sign::NoSign) => {
                 if !used_destinations.contains(place) {
@@ -428,6 +507,10 @@ fn replay_step(
         }
     }
     for (place, (minimum, maximum)) in &deltas.positions {
+        if matches!(&place.location, AccountingLocation::Position { position_kind, .. } if position_kind.is_derivative())
+        {
+            continue;
+        }
         if minimum.sign() == Sign::Plus || maximum.sign() == Sign::Plus {
             if !used_sources.contains(place)
                 && !used_destinations.contains(place)
@@ -1167,7 +1250,20 @@ fn gross_credit(
         AccountingLocation::Cash { .. } => {
             let (minimum_delta, maximum_delta) =
                 deltas.cash.get(place).ok_or_else(provenance_error)?;
-            let gross_minimum = minimum_delta + BigInt::from(additional_cost_cap(_proof, place));
+            let withheld = _proof
+                .intent
+                .maximum_costs
+                .iter()
+                .filter(|bound| {
+                    bound.treatment == CostTreatment::DeductedFromCredit
+                        && bound.location == place.location
+                        && bound.amount.asset == place.asset
+                })
+                .fold(BigUint::zero(), |sum, bound| {
+                    sum + bound.amount.atoms.integer()
+                });
+            let gross_minimum =
+                minimum_delta + BigInt::from(additional_cost_cap(_proof, place) + withheld);
             if gross_minimum.sign() == Sign::Minus || maximum_delta.sign() == Sign::Minus {
                 return Err(provenance_error());
             }
@@ -1191,7 +1287,24 @@ fn destination_credit(
     place: &Place,
     minimum_credit: BigUint,
 ) -> Result<Interval> {
-    gross_credit(deltas, proof, place, minimum_credit)
+    let mut credit = gross_credit(deltas, proof, place, minimum_credit)?;
+    let withheld = proof
+        .intent
+        .maximum_costs
+        .iter()
+        .filter(|bound| {
+            bound.treatment == CostTreatment::DeductedFromCredit
+                && bound.location == place.location
+                && bound.amount.asset == place.asset
+        })
+        .fold(BigUint::zero(), |sum, bound| {
+            sum + bound.amount.atoms.integer()
+        });
+    if credit.minimum < withheld {
+        return Err(provenance_error());
+    }
+    credit.minimum -= withheld;
+    Ok(credit)
 }
 
 fn consume_flow_source(
@@ -1519,7 +1632,10 @@ fn validate_lots_fit_state(
         if matches!(
             place.location,
             AccountingLocation::Position {
-                position_kind: PositionKind::StableDebt | PositionKind::VariableDebt,
+                position_kind: PositionKind::StableDebt
+                    | PositionKind::VariableDebt
+                    | PositionKind::DerivativeLong
+                    | PositionKind::DerivativeShort,
                 ..
             }
         ) {

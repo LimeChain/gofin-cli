@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fin_domain::{
     Adapter, ConnectionMetadata, Definition, FinError, OperationKind, OperationRecord,
-    PreparedOperation, Reconciliation, ReturnRouteContext, ReturnRouteProof, StateSnapshot, Status,
-    Submission, SubmissionJournal,
+    PreparationContext, PreparedOperation, Reconciliation, ReturnRouteContext, ReturnRouteProof,
+    StateSnapshot, Status, Submission, SubmissionJournal,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -53,6 +53,20 @@ pub trait ExchangeProfile: Send + Sync {
             "preview",
             "This profile supports public reads only.",
         ))
+    }
+    async fn prepare_with_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        _context: &PreparationContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.prepare(operation, input).await
+    }
+    async fn refresh_prepared(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        self.prepare(&prepared.operation, &prepared.input).await
     }
     async fn preflight_return_route(
         &self,
@@ -184,6 +198,17 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         self.require_kind(operation, OperationKind::Write, "preview")?;
         self.profile.prepare(operation, input).await
     }
+    async fn prepare_with_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.require_kind(operation, OperationKind::Write, "preview")?;
+        self.profile
+            .prepare_with_context(operation, input, context)
+            .await
+    }
     async fn preflight_return_route(
         &self,
         operation: &str,
@@ -221,7 +246,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
                 "Prepared operation expired; obtain a fresh preview and approval.",
             ));
         }
-        let current = self.prepare(&prepared.operation, &prepared.input).await?;
+        let current = self.profile.refresh_prepared(prepared).await?;
         if current.operation != prepared.operation
             || current.binding != prepared.binding
             || !self.profile.valuation_matches(prepared, &current)

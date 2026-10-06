@@ -163,6 +163,11 @@ pub enum Direction {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectConstraint {
+    /// A separately authorized request to remove the remainder of one durable submission.
+    SubmissionCancellation {
+        operation_id: String,
+        submission: Submission,
+    },
     OriginMovement {
         from: AccountingLocation,
         to: AccountingLocation,
@@ -204,6 +209,23 @@ pub enum EffectConstraint {
         asset: AssetId,
         direction: Direction,
         maximum_change: Quantity,
+    },
+    /// Long/short exposure quantities, never custody or borrowed principal.
+    DerivativePosition {
+        resource: ResourceId,
+        position: String,
+        asset: AssetId,
+        position_kind: PositionKind,
+        minimum_delta: SignedQuantity,
+        maximum_delta: SignedQuantity,
+    },
+    /// Realized collateral only; mark-to-market and unrealized PnL are excluded.
+    Settlement {
+        resource: ResourceId,
+        asset: AssetId,
+        category: SettlementCategory,
+        minimum_delta: SignedQuantity,
+        maximum_delta: SignedQuantity,
     },
     Debt {
         resource: ResourceId,
@@ -399,6 +421,11 @@ pub struct Submission {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialEffect {
+    /// A separately authorized request to remove the remainder of one durable submission.
+    SubmissionCancellation {
+        operation_id: String,
+        submission: Submission,
+    },
     /// Provenance only: matching cash/position/debt effects apply actual balances once.
     OriginMovement {
         from: AccountingLocation,
@@ -436,6 +463,12 @@ pub enum FinancialEffect {
         scaled_receipt: Option<Quantity>,
         anchor: Option<PositionAnchor>,
     },
+    Settlement {
+        resource: ResourceId,
+        asset: AssetId,
+        category: SettlementCategory,
+        delta: SignedQuantity,
+    },
     DebtChange {
         resource: ResourceId,
         debt: String,
@@ -467,6 +500,8 @@ pub enum FinancialEffect {
 pub enum CostTreatment {
     AdditionalDebit,
     IncludedInDebit,
+    /// Withheld from the gross proved credit, applied exactly once by the ledger.
+    DeductedFromCredit,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -658,7 +693,22 @@ pub enum PositionKind {
     Supply,
     StableDebt,
     VariableDebt,
+    DerivativeLong,
+    DerivativeShort,
 }
+impl PositionKind {
+    pub fn is_derivative(&self) -> bool {
+        matches!(self, Self::DerivativeLong | Self::DerivativeShort)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementCategory {
+    RealizedPnl,
+    Funding,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PositionState {

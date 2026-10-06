@@ -232,11 +232,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -247,6 +256,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -447,6 +478,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -606,7 +709,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -633,6 +738,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -1009,11 +1141,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -1024,6 +1165,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -1224,6 +1387,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -1383,7 +1618,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -1410,6 +1647,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -1919,11 +2183,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -1934,6 +2207,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -2134,6 +2429,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -2293,7 +2660,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -2320,6 +2689,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -2801,11 +3197,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -2816,6 +3221,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -3016,6 +3443,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -3175,7 +3674,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -3202,6 +3703,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -3622,11 +4150,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -3637,6 +4174,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -3837,6 +4396,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -3996,7 +4627,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -4023,6 +4656,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -4537,6 +5197,1601 @@
     }
   },
   {
+    "name": "binance.futures.balances",
+    "description": "USD-M collateral, available balance, margin equity and unrealized PnL by asset.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "title": "TradingAccountInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "balances": {
+          "items": {
+            "properties": {
+              "asset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "availableBalance": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "crossUnPnl": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "crossWalletBalance": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "initialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "maintMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "marginAvailable": {
+                "type": "boolean"
+              },
+              "marginBalance": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "maxWithdrawAmount": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "openOrderInitialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionInitialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "unrealizedProfit": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "walletBalance": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "asset",
+              "walletBalance",
+              "unrealizedProfit",
+              "marginBalance",
+              "availableBalance",
+              "initialMargin",
+              "maintMargin"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.balances"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "balances"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.income",
+    "description": "Bounded recent income events for one USD-M perpetual symbol; signed funding/commission/PnL amounts.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingListInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "income": {
+          "items": {
+            "properties": {
+              "asset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "income": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "incomeType": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "time": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "tranId": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "incomeType",
+              "asset",
+              "income",
+              "tranId",
+              "time"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.income"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "income"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "limit": 100,
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.markets",
+    "description": "USD-M perpetual market identities and exact venue filters; delivery contracts excluded.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "TradingMarketsInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "markets": {
+          "items": {
+            "properties": {
+              "baseAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "contractType": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "filters": {
+                "items": {
+                  "description": "Supported venue filter fields are exact unsigned decimal strings.",
+                  "required": [
+                    "filterType"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "isMarginTradingAllowed": {
+                "type": "boolean"
+              },
+              "isSpotTradingAllowed": {
+                "type": "boolean"
+              },
+              "marginAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "quoteAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "status": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "status",
+              "baseAsset",
+              "quoteAsset",
+              "filters"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.markets"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "markets"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.order",
+    "description": "Query one USD-M perpetual order by exactly one venue or client identifier.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "client_order_id": {
+              "type": "null"
+            },
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ]
+        },
+        {
+          "properties": {
+            "client_order_id": {
+              "type": "string"
+            },
+            "order_id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "client_order_id"
+          ]
+        }
+      ],
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "client_order_id": {
+          "pattern": "^[A-Za-z0-9_.:/-]{1,36}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "order_id": {
+          "description": "Positive u64 venue order identifier, encoded as a decimal string.",
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingOrderInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.order"
+        },
+        "order": {
+          "properties": {
+            "avgPrice": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "clientOrderId": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "closePosition": {
+              "type": "boolean"
+            },
+            "cumQuote": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "cummulativeQuoteQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "executedQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "orderId": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            },
+            "origQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "positionSide": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "price": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "reduceOnly": {
+              "type": "boolean"
+            },
+            "side": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "status": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "stopPrice": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "symbol": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "time": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            },
+            "type": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "updateTime": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "symbol",
+            "clientOrderId",
+            "status",
+            "side",
+            "type",
+            "price",
+            "origQty",
+            "executedQty",
+            "orderId"
+          ],
+          "type": "object"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "order"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "order_id": "123",
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.order-cancel",
+    "description": "Cancel the remaining quantity of one unresolved Fin order with fresh approval. The original order retains fill and fee accounting.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "original_submission": {
+          "$ref": "#/$defs/Submission"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "account",
+        "symbol",
+        "operation_id",
+        "original_submission"
+      ],
+      "title": "CancelInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Synthetic only; real Touch ID and production cancellation pending.",
+    "completion": "The exact original numeric order has no open remainder. Reconcile the original Fin operation separately to settle fills and release its reservation.",
+    "semantics": {
+      "approval": "fresh per write",
+      "fills": "original order owns all accounting, including fills that race cancellation",
+      "run": "same run as the original order",
+      "target": "entire original durable Submission plus its Fin operation_id",
+      "walletType": "USD_M"
+    }
+  },
+  {
+    "name": "binance.futures.order-place",
+    "description": "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way isolated margin, leverage 1; closing requires reduce_only. No configuration changes.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "ImmediateTime": {
+          "enum": [
+            "IOC",
+            "FOK"
+          ],
+          "type": "string"
+        },
+        "Side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "limit_price": {
+          "type": "string"
+        },
+        "maximum_fees": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exact per-asset fee caps. Output-asset commission and optional BNB fee.",
+          "type": "object"
+        },
+        "maximum_funding_loss": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_funding_profit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_loss": {
+          "description": "USD-M realized collateral loss bound, separate from funding and commission.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_profit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_quantity": {
+          "description": "Required upper bound when quantity is `all`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantity": {
+          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg.",
+          "type": "string"
+        },
+        "reduce_only": {
+          "default": false,
+          "type": "boolean"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "time_in_force": {
+          "$ref": "#/$defs/ImmediateTime"
+        }
+      },
+      "required": [
+        "request_id",
+        "account",
+        "symbol",
+        "side",
+        "quantity",
+        "limit_price",
+        "time_in_force",
+        "maximum_fees"
+      ],
+      "title": "OrderInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "master",
+        "limit_price": "2000",
+        "maximum_fees": {
+          "USDT": "0.1"
+        },
+        "maximum_funding_loss": "0.1",
+        "maximum_funding_profit": "0.1",
+        "maximum_loss": "1",
+        "maximum_profit": "1",
+        "quantity": "0.01",
+        "reduce_only": false,
+        "request_id": "example-futures-001",
+        "side": "BUY",
+        "symbol": "ETHUSDT",
+        "time_in_force": "IOC"
+      }
+    ],
+    "coverage": "Synthetic only; production trading and real per-write Touch ID pending. Examples are illustrative bounds, not live quotes.",
+    "completion": "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.",
+    "semantics": {
+      "approval": "fresh per write",
+      "concurrentPositions": 1,
+      "orderType": "LIMIT",
+      "quantity": "exact base decimal; all only for scoped cleanup",
+      "scopedTimeInForce": [
+        "IOC",
+        "FOK"
+      ],
+      "standingOrders": false,
+      "timeInForce": [
+        "IOC",
+        "FOK"
+      ],
+      "walletType": "USD_M"
+    }
+  },
+  {
+    "name": "binance.futures.orders",
+    "description": "Bounded current USD-M perpetual open orders for one symbol.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingListInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.orders"
+        },
+        "orders": {
+          "items": {
+            "properties": {
+              "avgPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "clientOrderId": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "closePosition": {
+                "type": "boolean"
+              },
+              "cumQuote": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "cummulativeQuoteQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "executedQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "orderId": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "origQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionSide": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "price": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "reduceOnly": {
+                "type": "boolean"
+              },
+              "side": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "status": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "stopPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "time": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "type": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "updateTime": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "clientOrderId",
+              "status",
+              "side",
+              "type",
+              "price",
+              "origQty",
+              "executedQty",
+              "orderId"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "orders"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "limit": 100,
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.positions",
+    "description": "USD-M perpetual position quantities and margin/PnL observations, preserving hedge sides.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "title": "TradingPositionsInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.positions"
+        },
+        "positions": {
+          "items": {
+            "properties": {
+              "breakEvenPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "entryPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "initialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "isolatedMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "isolatedWallet": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "liquidationPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "maintMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "marginAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "markPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "notional": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "openOrderInitialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionAmt": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionInitialMargin": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionSide": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "unRealizedProfit": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "positionSide",
+              "marginAsset",
+              "positionAmt",
+              "entryPrice",
+              "markPrice",
+              "unRealizedProfit",
+              "notional"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "positions"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
+    "name": "binance.futures.trades",
+    "description": "Bounded recent USD-M perpetual fills, realized PnL and commissions.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingListInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.futures.trades"
+        },
+        "trades": {
+          "items": {
+            "properties": {
+              "buyer": {
+                "type": "boolean"
+              },
+              "commission": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "commissionAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "isBuyer": {
+                "type": "boolean"
+              },
+              "isMaker": {
+                "type": "boolean"
+              },
+              "maker": {
+                "type": "boolean"
+              },
+              "orderId": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "positionSide": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "price": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "qty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "quoteQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "realizedPnl": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "side": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "time": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "commissionAsset",
+              "price",
+              "qty",
+              "quoteQty",
+              "commission",
+              "id",
+              "orderId",
+              "time"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "trades"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "limit": 100,
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "USD-M perpetual"
+    }
+  },
+  {
     "name": "binance.hierarchy",
     "description": "Configured main/subaccount hierarchy compared with the main account subaccount list.",
     "kind": "read",
@@ -4711,6 +6966,1052 @@
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
       "walletType": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.markets",
+    "description": "Binance SPOT market identities and exact price/quantity filters.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "TradingMarketsInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "markets": {
+          "items": {
+            "properties": {
+              "baseAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "contractType": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "filters": {
+                "items": {
+                  "description": "Supported venue filter fields are exact unsigned decimal strings.",
+                  "required": [
+                    "filterType"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "isMarginTradingAllowed": {
+                "type": "boolean"
+              },
+              "isSpotTradingAllowed": {
+                "type": "boolean"
+              },
+              "marginAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "quoteAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "status": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "status",
+              "baseAsset",
+              "quoteAsset",
+              "filters"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.spot.markets"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "markets"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.order",
+    "description": "Query one SPOT order by exactly one venue or client identifier.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "client_order_id": {
+              "type": "null"
+            },
+            "order_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "order_id"
+          ]
+        },
+        {
+          "properties": {
+            "client_order_id": {
+              "type": "string"
+            },
+            "order_id": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "client_order_id"
+          ]
+        }
+      ],
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "client_order_id": {
+          "pattern": "^[A-Za-z0-9_.:/-]{1,36}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "order_id": {
+          "description": "Positive u64 venue order identifier, encoded as a decimal string.",
+          "pattern": "^[1-9][0-9]{0,19}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingOrderInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.spot.order"
+        },
+        "order": {
+          "properties": {
+            "avgPrice": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "clientOrderId": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "cumQuote": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "cummulativeQuoteQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "executedQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "orderId": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            },
+            "origQty": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "positionSide": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "price": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "side": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "status": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "stopPrice": {
+              "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+              "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            "symbol": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "time": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            },
+            "type": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "updateTime": {
+              "pattern": "^[0-9]{1,40}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "symbol",
+            "clientOrderId",
+            "status",
+            "side",
+            "type",
+            "price",
+            "origQty",
+            "executedQty",
+            "orderId"
+          ],
+          "type": "object"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "order"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "order_id": "123",
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.order-cancel",
+    "description": "Cancel the remaining quantity of one unresolved Fin order with fresh approval. The original order retains fill and fee accounting.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "original_submission": {
+          "$ref": "#/$defs/Submission"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "account",
+        "symbol",
+        "operation_id",
+        "original_submission"
+      ],
+      "title": "CancelInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [],
+    "coverage": "Synthetic only; real Touch ID and production cancellation pending.",
+    "completion": "The exact original numeric order has no open remainder. Reconcile the original Fin operation separately to settle fills and release its reservation.",
+    "semantics": {
+      "approval": "fresh per write",
+      "fills": "original order owns all accounting, including fills that race cancellation",
+      "run": "same run as the original order",
+      "target": "entire original durable Submission plus its Fin operation_id",
+      "walletType": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.order-place",
+    "description": "Place a price-bounded SPOT LIMIT FOK order in a tracked return plan. IOC fill reconciliation is available in synthetic tests; scoped IOC plans are not supported.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "ImmediateTime": {
+          "enum": [
+            "IOC",
+            "FOK"
+          ],
+          "type": "string"
+        },
+        "Side": {
+          "enum": [
+            "BUY",
+            "SELL"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "limit_price": {
+          "type": "string"
+        },
+        "maximum_fees": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Exact per-asset fee caps. Output-asset commission and optional BNB fee.",
+          "type": "object"
+        },
+        "maximum_funding_loss": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_funding_profit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_loss": {
+          "description": "USD-M realized collateral loss bound, separate from funding and commission.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_profit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum_quantity": {
+          "description": "Required upper bound when quantity is `all`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantity": {
+          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg.",
+          "type": "string"
+        },
+        "reduce_only": {
+          "default": false,
+          "type": "boolean"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "time_in_force": {
+          "$ref": "#/$defs/ImmediateTime"
+        }
+      },
+      "required": [
+        "request_id",
+        "account",
+        "symbol",
+        "side",
+        "quantity",
+        "limit_price",
+        "time_in_force",
+        "maximum_fees"
+      ],
+      "title": "OrderInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "master",
+        "limit_price": "2000",
+        "maximum_fees": {
+          "ETH": "0.00002"
+        },
+        "quantity": "0.01",
+        "request_id": "example-spot-001",
+        "side": "BUY",
+        "symbol": "ETHUSDT",
+        "time_in_force": "FOK"
+      }
+    ],
+    "coverage": "Synthetic only; production trading and real per-write Touch ID pending. Examples are illustrative bounds, not live quotes.",
+    "completion": "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.",
+    "semantics": {
+      "approval": "fresh per write",
+      "concurrentPositions": null,
+      "orderType": "LIMIT",
+      "quantity": "exact base decimal; all only for scoped cleanup",
+      "scopedTimeInForce": [
+        "FOK"
+      ],
+      "standingOrders": false,
+      "timeInForce": [
+        "IOC",
+        "FOK"
+      ],
+      "walletType": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.orders",
+    "description": "Bounded current SPOT open orders for one symbol.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingListInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.spot.orders"
+        },
+        "orders": {
+          "items": {
+            "properties": {
+              "avgPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "clientOrderId": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "cumQuote": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "cummulativeQuoteQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "executedQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "orderId": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "origQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "positionSide": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "price": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "side": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "status": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "stopPrice": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "time": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "type": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "updateTime": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "clientOrderId",
+              "status",
+              "side",
+              "type",
+              "price",
+              "origQty",
+              "executedQty",
+              "orderId"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "orders"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "limit": 100,
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "SPOT"
+    }
+  },
+  {
+    "name": "binance.spot.trades",
+    "description": "Bounded recent SPOT fills and commissions for one symbol.",
+    "kind": "read",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "limit": {
+          "default": 100,
+          "format": "uint16",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "symbol": {
+          "pattern": "^[A-Z0-9_]{1,32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
+      "title": "TradingListInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "marketType": {
+          "enum": [
+            "spot",
+            "usdm_perpetual"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.spot.trades"
+        },
+        "trades": {
+          "items": {
+            "properties": {
+              "buyer": {
+                "type": "boolean"
+              },
+              "commission": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "commissionAsset": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "id": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "isBuyer": {
+                "type": "boolean"
+              },
+              "isMaker": {
+                "type": "boolean"
+              },
+              "maker": {
+                "type": "boolean"
+              },
+              "orderId": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              },
+              "positionSide": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "price": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "qty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "quoteQty": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "realizedPnl": {
+                "description": "Exact venue decimal string; signed where the venue field represents PnL or exposure.",
+                "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+                "type": "string"
+              },
+              "side": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "symbol": {
+                "maxLength": 128,
+                "type": "string"
+              },
+              "time": {
+                "pattern": "^[0-9]{1,40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "commissionAsset",
+              "price",
+              "qty",
+              "quoteQty",
+              "commission",
+              "id",
+              "orderId",
+              "time"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5000,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation",
+        "marketType",
+        "observedAt",
+        "trades"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "main",
+        "limit": 100,
+        "symbol": "ETHUSDT"
+      }
+    ],
+    "coverage": "Implemented named read; synthetic fixture verification. Production account and live acceptance pending.",
+    "completion": "A bounded venue observation; not a financial execution or terminal settlement proof.",
+    "semantics": {
+      "amounts": "exact decimal strings",
+      "credentials": "never returned",
+      "history": "bounded recent slice, not complete history",
+      "identifiers": "decimal strings",
+      "marketScope": "SPOT"
     }
   },
   {
@@ -5709,11 +9010,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -5724,6 +9034,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -5924,6 +9256,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -6083,7 +9487,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -6110,6 +9516,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -6616,11 +10049,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -6631,6 +10073,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -6831,6 +10295,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -6990,7 +10526,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -7017,6 +10555,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -7683,11 +11248,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -7698,6 +11272,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -7898,6 +11494,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -8057,7 +11725,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -8084,6 +11754,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -8488,11 +12185,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -8503,6 +12209,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -8703,6 +12431,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -8862,7 +12662,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -8889,6 +12691,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,
@@ -9262,11 +13091,20 @@
         },
         "CostTreatment": {
           "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
-          "enum": [
-            "additional_debit",
-            "included_in_debit"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
         },
         "Direction": {
           "enum": [
@@ -9277,6 +13115,28 @@
         },
         "EffectConstraint": {
           "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
             {
               "additionalProperties": false,
               "properties": {
@@ -9477,6 +13337,78 @@
             },
             {
               "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "properties": {
                 "asset": {
                   "$ref": "#/$defs/AssetId"
@@ -9636,7 +13568,9 @@
           "enum": [
             "supply",
             "stable_debt",
-            "variable_debt"
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
           ],
           "type": "string"
         },
@@ -9663,6 +13597,33 @@
         "ResourceId": {
           "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
           "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
         },
         "Valuation": {
           "additionalProperties": false,

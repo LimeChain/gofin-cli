@@ -21,7 +21,7 @@ fn offline_discovery_commands_work_without_service() {
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 31);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 46);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
@@ -393,4 +393,47 @@ fn invalid_commands_use_plain_human_errors_and_stable_machine_codes() {
     assert!(machine.stderr.is_empty());
     let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
     assert_eq!(value["error"]["code"], "INVALID_COMMAND");
+}
+
+#[test]
+fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
+    for name in [
+        "binance.spot.order-place",
+        "binance.futures.order-place",
+        "binance.spot.order-cancel",
+        "binance.futures.order-cancel",
+    ] {
+        let result = run(&["schema", name, "--json", "--verbose"]);
+        assert!(result.status.success());
+        assert!(result.stderr.is_empty());
+        assert!(!result.stdout.contains(&0x1b));
+        let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(schema["execution_actor"], "agent_invocable");
+        assert_eq!(schema["input"]["additionalProperties"], false);
+    }
+    let result = run(&["explain", "binance.spot.order-place", "--json"]);
+    let definition: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        definition["semantics"]["scopedTimeInForce"],
+        serde_json::json!(["FOK"])
+    );
+    assert_eq!(definition["semantics"]["approval"], "fresh per write");
+    for name in [
+        "binance.spot.markets",
+        "binance.spot.orders",
+        "binance.spot.order",
+        "binance.spot.trades",
+        "binance.futures.markets",
+        "binance.futures.balances",
+        "binance.futures.positions",
+        "binance.futures.orders",
+        "binance.futures.order",
+        "binance.futures.trades",
+        "binance.futures.income",
+    ] {
+        let result = run(&["schema", name, "--json"]);
+        assert!(result.status.success(), "{name}");
+        let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(schema["execution_actor"], "agent_invocable");
+    }
 }

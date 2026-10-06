@@ -417,6 +417,12 @@ impl Engine {
                             && selected_origins.contains(&lot.origin)
                     })
                     .collect::<Vec<_>>(),
+                (AccountingLocation::Cash { .. }, CostTreatment::DeductedFromCredit) => {
+                    selected.principal.iter().collect::<Vec<_>>()
+                }
+                (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
+                    return Err(route_proof_error());
+                }
                 (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
                     return Err(FinError::new(
                         "POSITION_ADDITIONAL_COST_UNSUPPORTED",
@@ -1046,6 +1052,51 @@ impl Engine {
         }
     }
 
+    fn validate_submission_cancellation(
+        &self,
+        prepared: &PreparedOperation,
+        run_id: Option<&str>,
+    ) -> Result<bool> {
+        let Some((operation_id, submission)) = cancellation_target(&prepared.intent) else {
+            if prepared
+                .intent
+                .expected
+                .iter()
+                .any(|effect| matches!(effect, EffectConstraint::SubmissionCancellation { .. }))
+            {
+                return Err(cancellation_error());
+            }
+            return Ok(false);
+        };
+        if !prepared.intent.debits.is_empty() || !prepared.intent.maximum_costs.is_empty() {
+            return Err(cancellation_error());
+        }
+        let original = self.load_record(operation_id)?;
+        if !matches!(
+            original.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) || original.submission.as_ref() != Some(submission)
+            || original.run_id.as_deref() != run_id
+            || original
+                .preview
+                .as_ref()
+                .is_none_or(|preview| preview.intent.locks != prepared.intent.locks)
+            || original
+                .preview
+                .as_ref()
+                .is_some_and(|preview| cancellation_target(&preview.intent).is_some())
+        {
+            return Err(cancellation_error());
+        }
+        if let Some(run_id) = run_id {
+            let run = self.load_run(run_id)?;
+            if run.status == RunStatus::Restored || !run.reservations.contains_key(operation_id) {
+                return Err(cancellation_error());
+            }
+        }
+        Ok(true)
+    }
+
     async fn execute_new(
         &self,
         adapter: Arc<dyn Adapter>,
@@ -1064,7 +1115,11 @@ impl Engine {
         record.preview = Some(prepared.clone());
         record.updated_at = now();
 
-        let mut run_state = if let Some(run_id) = &request.run_id {
+        let cancellation =
+            self.validate_submission_cancellation(&prepared, request.run_id.as_deref())?;
+        let mut run_state = if cancellation {
+            None
+        } else if let Some(run_id) = &request.run_id {
             Some(self.reserve_run_operation(run_id, record, &prepared)?)
         } else {
             None
@@ -1122,6 +1177,10 @@ impl Engine {
             ));
         }
         ensure_approval_fresh(&audit, &challenge, Utc::now())?;
+        if cancellation {
+            self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
+        }
+
         if let (Some(run_id), Some(run)) = (&request.run_id, run_state.as_mut()) {
             self.recheck_run_reservation(run_id, &record.id, &refreshed)?;
             run.reservations.get_mut(&record.id).unwrap().binding_hash =
@@ -1284,7 +1343,13 @@ impl Engine {
                 record.effects = Some(verified.clone());
                 record.error = None;
                 record.updated_at = now();
-                let run = if let Some(run_id) = &record.run_id {
+                let cancellation = record
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| cancellation_target(&preview.intent).is_some());
+                let run = if cancellation {
+                    None
+                } else if let Some(run_id) = &record.run_id {
                     let mut run: RunLedger = self.load_run(run_id)?;
                     self.settle_run(&mut run, &record, &verified)?;
                     Some(run)
@@ -2093,6 +2158,13 @@ impl Engine {
         &self,
         record: &OperationRecord,
     ) -> Result<Option<RunLedger>> {
+        if record
+            .preview
+            .as_ref()
+            .is_some_and(|preview| cancellation_target(&preview.intent).is_some())
+        {
+            return Ok(None);
+        }
         let Some(run_id) = &record.run_id else {
             return Ok(None);
         };
@@ -2176,6 +2248,27 @@ impl SubmissionJournal for OperationSubmissionJournal {
         record.updated_at = now();
         Ok(())
     }
+}
+
+fn cancellation_target(intent: &FinancialIntent) -> Option<(&str, &Submission)> {
+    match intent.expected.as_slice() {
+        [
+            EffectConstraint::SubmissionCancellation {
+                operation_id,
+                submission,
+            },
+        ] => Some((operation_id, submission)),
+        _ => None,
+    }
+}
+
+fn cancellation_error() -> FinError {
+    FinError::new(
+        "CANCELLATION_TARGET_MISMATCH",
+        "validation",
+        "Cancellation must target one unresolved durable submission in the same run with the same resource locks.",
+        "Inspect the original operation and cancel its exact remaining order without replacing it.",
+    )
 }
 
 fn validate_effects(
@@ -2272,6 +2365,39 @@ fn validate_effects(
             "Keep the source reservation and reconcile the original operation.",
         ));
     }
+    let mut losses = BTreeMap::<String, BigUint>::new();
+    for effect in &verified.effects {
+        if let FinancialEffect::Settlement {
+            resource,
+            asset,
+            delta,
+            ..
+        } = effect
+            && delta.is_negative()
+        {
+            *losses
+                .entry(cost_key(
+                    &AccountingLocation::Cash {
+                        resource: resource.clone(),
+                    },
+                    asset,
+                    &CostTreatment::IncludedInDebit,
+                )?)
+                .or_default() += delta.magnitude().integer();
+        }
+    }
+    let actual_costs = aggregate_costs(&verified.effects)?;
+    if losses
+        .iter()
+        .any(|(key, amount)| actual_costs.get(key).cloned().unwrap_or_default() < *amount)
+    {
+        return Err(FinError::new(
+            "SETTLEMENT_LOSS_COST_MISSING",
+            "reconciliation",
+            "Realized collateral loss has no matching typed cost.",
+            "Preserve the reservation and reconcile the complete loss evidence.",
+        ));
+    }
     let actual = actual_debits_and_costs(&verified.effects)?;
     let maximums =
         cash_reservation_amounts(&prepared.intent.debits, &prepared.intent.maximum_costs)?;
@@ -2306,6 +2432,63 @@ fn validate_effects(
 
 fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -> Result<bool> {
     Ok(match (constraint, effect) {
+        (
+            EffectConstraint::SubmissionCancellation {
+                operation_id,
+                submission,
+            },
+            FinancialEffect::SubmissionCancellation {
+                operation_id: actual_id,
+                submission: actual_submission,
+            },
+        ) => operation_id == actual_id && submission == actual_submission,
+        (
+            EffectConstraint::DerivativePosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+            },
+            FinancialEffect::PositionChange {
+                resource: r,
+                position: p,
+                asset: a,
+                delta,
+                anchor: Some(anchor),
+                ..
+            },
+        ) => {
+            position_kind.is_derivative()
+                && r == resource
+                && p == position
+                && a == asset
+                && &anchor.position_kind == position_kind
+                && minimum_delta.integer() <= delta.integer()
+                && delta.integer() <= maximum_delta.integer()
+        }
+        (
+            EffectConstraint::Settlement {
+                resource,
+                asset,
+                category,
+                minimum_delta,
+                maximum_delta,
+            },
+            FinancialEffect::Settlement {
+                resource: r,
+                asset: a,
+                category: c,
+                delta,
+            },
+        ) => {
+            r == resource
+                && a == asset
+                && c == category
+                && minimum_delta.integer() <= delta.integer()
+                && delta.integer() <= maximum_delta.integer()
+        }
         (
             EffectConstraint::OriginMovement {
                 from,
@@ -2422,10 +2605,14 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 position: actual_position,
                 asset: actual_asset,
                 delta,
+                anchor,
                 ..
             },
         ) => {
-            actual_resource == resource
+            anchor
+                .as_ref()
+                .is_none_or(|anchor| anchor.position_kind == PositionKind::Supply)
+                && actual_resource == resource
                 && actual_position == position
                 && actual_asset == asset
                 && matches_direction(delta.is_negative(), delta.is_zero(), direction)
@@ -2519,7 +2706,8 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
             credit,
         } = effect
         {
-            if from == to || debit.atoms.is_zero() || credit.atoms.is_zero() {
+            if [from, to].iter().any(|location| matches!(location, AccountingLocation::Position { position_kind, .. } if position_kind.is_derivative()))
+                || from == to || debit.atoms.is_zero() || credit.atoms.is_zero() {
                 return Err(FinError::new(
                     "INVALID_ORIGIN_MOVEMENT",
                     "reconciliation",
@@ -2564,8 +2752,15 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
                 position,
                 asset,
                 delta,
+                anchor,
                 ..
             } => {
+                if anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.position_kind.is_derivative())
+                {
+                    continue;
+                }
                 let location = position_location(effects, resource, position, asset)?;
                 if delta.is_negative() {
                     add_accounting_leg(
@@ -2719,6 +2914,40 @@ fn cost_within_intent(
     }
     match treatment {
         CostTreatment::AdditionalDebit => Ok(matches!(location, AccountingLocation::Cash { .. })),
+        CostTreatment::DeductedFromCredit => {
+            let AccountingLocation::Cash { resource } = location else {
+                return Ok(false);
+            };
+            let gross = effects.iter().fold(BigUint::zero(), |sum, effect| {
+                sum + match effect {
+                    FinancialEffect::Conversion {
+                        resource: r,
+                        received,
+                        ..
+                    } if r == resource && received.asset == amount.asset => {
+                        received.atoms.integer()
+                    }
+                    FinancialEffect::Transfer { to, credit, .. }
+                        if to == resource && credit.asset == amount.asset =>
+                    {
+                        credit.atoms.integer()
+                    }
+                    _ => BigUint::zero(),
+                }
+            });
+            let withheld = effects.iter().fold(BigUint::zero(), |sum, effect| {
+                sum + match effect {
+                    FinancialEffect::Cost {
+                        location: l,
+                        amount: a,
+                        treatment: CostTreatment::DeductedFromCredit,
+                        ..
+                    } if l == location && a.asset == amount.asset => a.atoms.integer(),
+                    _ => BigUint::zero(),
+                }
+            });
+            Ok(withheld <= gross)
+        }
         CostTreatment::IncludedInDebit => {
             let total_cost = effects
                 .iter()
@@ -2738,6 +2967,14 @@ fn cost_within_intent(
                 AccountingLocation::Cash { resource } => effects
                     .iter()
                     .filter_map(|candidate| match candidate {
+                        FinancialEffect::Settlement {
+                            resource: r,
+                            asset,
+                            delta,
+                            ..
+                        } if r == resource && asset == &amount.asset && delta.is_negative() => {
+                            Some(delta.magnitude().integer())
+                        }
                         FinancialEffect::CashDebit {
                             resource: actual_resource,
                             amount: actual_amount,
@@ -2792,11 +3029,14 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
             delta,
             scaled_receipt,
             anchor,
-        } if !delta.is_zero() => (
+        } if !delta.is_zero() || anchor.is_some() => (
             resource,
             position,
             asset,
-            PositionKind::Supply,
+            anchor
+                .as_ref()
+                .map(|a| a.position_kind.clone())
+                .unwrap_or(PositionKind::Supply),
             anchor.as_ref(),
             scaled_receipt.as_ref(),
         ),
@@ -2827,6 +3067,8 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
     let kind_matches = matches!(
         (&kind, &anchor.position_kind),
         (PositionKind::Supply, PositionKind::Supply)
+            | (PositionKind::DerivativeLong, PositionKind::DerivativeLong)
+            | (PositionKind::DerivativeShort, PositionKind::DerivativeShort)
             | (
                 PositionKind::VariableDebt,
                 PositionKind::VariableDebt | PositionKind::StableDebt
@@ -2838,6 +3080,8 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
         || anchor.position != *name
         || !kind_matches
         || anchor.principal.asset != *asset
+        || (anchor.position_kind.is_derivative()
+            && (scaled_receipt.is_some() || anchor.scaled_receipt.is_some()))
         || anchor.evidence_version == 0
         || anchor.evidence.is_null()
         || anchor_time.is_none()
@@ -2915,7 +3159,8 @@ fn validate_anchor_transitions(
                 };
                 if anchor.resource != *resource
                     || anchor.position != *position
-                    || anchor.position_kind != PositionKind::Supply
+                    || !(anchor.position_kind == PositionKind::Supply
+                        || anchor.position_kind.is_derivative())
                     || anchor.principal.asset != *asset
                 {
                     return Err(ambiguous_anchor());
@@ -3005,7 +3250,7 @@ fn validate_anchor_transitions(
                     || transition
                         .changes
                         .iter()
-                        .any(|delta| delta.sign() != Sign::Plus)
+                        .any(|delta| delta.sign() == Sign::Minus)
                 {
                     return Err(FinError::new(
                         "PRIOR_POSITION_ANCHOR_REQUIRED",
@@ -3112,7 +3357,26 @@ fn route_projection_matches_receipt(
                     asset,
                     position_kind,
                 );
-                delta.sign() != Sign::Plus && (-delta) <= BigInt::from(maximum_amount.integer())
+                let proved_closed = verified.effects.iter().any(|effect| match effect {
+                    FinancialEffect::PositionChange {
+                        anchor: Some(anchor),
+                        ..
+                    }
+                    | FinancialEffect::DebtChange {
+                        anchor: Some(anchor),
+                        ..
+                    } => {
+                        anchor.resource == *resource
+                            && anchor.position == *position
+                            && anchor.position_kind == *position_kind
+                            && anchor.principal.asset == *asset
+                            && anchor.principal.atoms.is_zero()
+                    }
+                    _ => false,
+                });
+                proved_closed
+                    && delta.sign() != Sign::Plus
+                    && (-delta) <= BigInt::from(maximum_amount.integer())
             }
         };
         if !matches {
@@ -3130,6 +3394,14 @@ fn receipt_cash_delta(
     let mut delta = BigInt::zero();
     for effect in effects {
         match effect {
+            FinancialEffect::Settlement {
+                resource: r,
+                asset: a,
+                delta: value,
+                ..
+            } if r == resource && a == asset => {
+                delta += value.integer();
+            }
             FinancialEffect::CashDebit {
                 resource: r,
                 amount,
@@ -3169,7 +3441,7 @@ fn receipt_cash_delta(
             FinancialEffect::Cost {
                 location: AccountingLocation::Cash { resource: r },
                 amount,
-                treatment: CostTreatment::AdditionalDebit,
+                treatment: CostTreatment::AdditionalDebit | CostTreatment::DeductedFromCredit,
                 ..
             } if r == resource && &amount.asset == asset => {
                 delta -= BigInt::from(amount.atoms.integer());
@@ -3631,7 +3903,10 @@ fn include_costs_in_projected_cash(proof: &mut ReturnRouteProof) -> Result<()> {
         }
     }
     for cost in &proof.intent.maximum_costs {
-        if cost.treatment != CostTreatment::AdditionalDebit {
+        if !matches!(
+            cost.treatment,
+            CostTreatment::AdditionalDebit | CostTreatment::DeductedFromCredit
+        ) {
             continue;
         }
         let AccountingLocation::Cash { .. } = cost.location else {
@@ -3773,6 +4048,28 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
             .entry((resource.clone(), bound.amount.asset.clone()))
             .or_default() += bound.amount.atoms.integer();
     }
+    for (key, cost) in &additional_costs {
+        let funded = state
+            .cash
+            .iter()
+            .find(|row| row.resource == key.0 && row.asset == key.1)
+            .map(|row| row.amount.minimum.integer())
+            .unwrap_or_default();
+        if funded < *cost {
+            return Err(route_proof_error());
+        }
+    }
+    let mut credit_costs = additional_costs.clone();
+    for bound in &proof.intent.maximum_costs {
+        if bound.treatment == CostTreatment::DeductedFromCredit {
+            let AccountingLocation::Cash { resource } = &bound.location else {
+                return Err(route_proof_error());
+            };
+            *credit_costs
+                .entry((resource.clone(), bound.amount.asset.clone()))
+                .or_default() += bound.amount.atoms.integer();
+        }
+    }
     let cash_legs = ProjectedCashLegs {
         state,
         proof,
@@ -3801,7 +4098,7 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
                 let debit = (from.clone(), debit_asset.clone());
                 let credit = (to.clone(), credit_asset.clone());
                 validate_cash_debit(&cash_legs, &debit, maximum_debit, false, true)?;
-                validate_cash_credit(state, &cash, &additional_costs, &credit, minimum_credit)?;
+                validate_cash_credit(state, &cash, &credit_costs, &credit, minimum_credit)?;
                 if !used_cash.insert(debit) || !used_cash.insert(credit) {
                     return Err(route_proof_error());
                 }
@@ -3820,7 +4117,7 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
                 let debit = (resource.clone(), input.clone());
                 let credit = (resource.clone(), output.clone());
                 validate_cash_debit(&cash_legs, &debit, maximum_input, true, false)?;
-                validate_cash_credit(state, &cash, &additional_costs, &credit, minimum_output)?;
+                validate_cash_credit(state, &cash, &credit_costs, &credit, minimum_output)?;
                 if !used_cash.insert(debit) || !used_cash.insert(credit) {
                     return Err(route_proof_error());
                 }
@@ -3881,6 +4178,87 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
                 }
             }
             _ => {}
+        }
+    }
+
+    let mut settlements = BTreeMap::<CashKey, (BigInt, BigInt)>::new();
+    for constraint in &proof.intent.expected {
+        match constraint {
+            EffectConstraint::DerivativePosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+            } => {
+                if !position_kind.is_derivative()
+                    || minimum_delta.integer() > maximum_delta.integer()
+                {
+                    return Err(route_proof_error());
+                }
+                let key = (
+                    resource.clone(),
+                    position.clone(),
+                    asset.clone(),
+                    position_kind.clone(),
+                );
+                let legs = positions.get(&key).ok_or_else(route_proof_error)?;
+                if legs.len() != 1 || !used_positions.insert(key) {
+                    return Err(route_proof_error());
+                }
+                match legs[0] {
+                    ProjectedEffect::PositionDelta {
+                        minimum_delta: lo,
+                        maximum_delta: hi,
+                        ..
+                    } if lo.integer() >= minimum_delta.integer()
+                        && hi.integer() <= maximum_delta.integer() => {}
+                    ProjectedEffect::PositionClose { maximum_amount, .. }
+                        if minimum_delta.integer() <= -BigInt::from(maximum_amount.integer())
+                            && !maximum_delta.is_negative() => {}
+                    _ => return Err(route_proof_error()),
+                }
+            }
+            EffectConstraint::Settlement {
+                resource,
+                asset,
+                minimum_delta,
+                maximum_delta,
+                ..
+            } => {
+                if minimum_delta.integer() > maximum_delta.integer() {
+                    return Err(route_proof_error());
+                }
+                let entry = settlements
+                    .entry((resource.clone(), asset.clone()))
+                    .or_default();
+                entry.0 += minimum_delta.integer();
+                entry.1 += maximum_delta.integer();
+                if minimum_delta.is_negative() {
+                    let cap = aggregate_resource_amounts(&proof.intent.debits)?
+                        .get(&resource_asset_key(&ResourceAmount {
+                            resource: resource.clone(),
+                            amount: Amount {
+                                asset: asset.clone(),
+                                atoms: minimum_delta.magnitude(),
+                            },
+                        })?)
+                        .cloned()
+                        .unwrap_or_default();
+                    if cap < minimum_delta.magnitude().integer() {
+                        return Err(route_proof_error());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (key, (minimum, maximum)) in settlements {
+        let cost = additional_costs.get(&key).cloned().unwrap_or_default();
+        let (lo, hi) = cash.get(&key).ok_or_else(route_proof_error)?;
+        if *lo != minimum - BigInt::from(cost) || *hi != maximum || !used_cash.insert(key) {
+            return Err(route_proof_error());
         }
     }
 
@@ -4018,8 +4396,6 @@ fn validate_cash_debit(
         if !allow_sweep
             || legs.cash.contains_key(key)
             || !cost.is_zero()
-            || available.amount.minimum.is_zero()
-            || projected_principal_max.is_zero()
             || projected_principal_max > sweep_cap.integer()
             || sweep_cap.integer() > maximum_debit.integer()
         {
@@ -4067,7 +4443,7 @@ fn validate_cash_debit(
 }
 
 fn validate_cash_credit(
-    state: &ProjectedState,
+    _state: &ProjectedState,
     cash: &BTreeMap<(ResourceId, fin_domain::AssetId), (BigInt, BigInt)>,
     additional_costs: &BTreeMap<(ResourceId, fin_domain::AssetId), BigUint>,
     key: &(ResourceId, fin_domain::AssetId),
@@ -4077,17 +4453,11 @@ fn validate_cash_credit(
     let cost = additional_costs.get(key).cloned().unwrap_or_default();
     let gross_minimum = minimum + BigInt::from(cost.clone());
     let gross_maximum = maximum.clone();
-    let prior_cost_funding = cost.is_zero()
-        || state
-            .cash
-            .iter()
-            .find(|row| row.resource == key.0 && row.asset == key.1)
-            .is_some_and(|row| row.amount.minimum.integer() >= cost);
-    if gross_minimum.sign() != Sign::Plus
-        || gross_maximum.sign() != Sign::Plus
+    let optional = minimum_credit.is_zero();
+    if (gross_minimum.sign() != Sign::Plus && !(optional && gross_minimum.is_zero()))
+        || (gross_maximum.sign() != Sign::Plus && !(optional && gross_maximum.is_zero()))
         || gross_minimum > gross_maximum
         || gross_minimum.magnitude() < &minimum_credit.integer()
-        || !prior_cost_funding
     {
         return Err(route_proof_error());
     }
@@ -4124,6 +4494,9 @@ fn validate_position_leg(
         (PositionKind::Supply, false) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, true) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, false) => Direction::Decrease,
+        (PositionKind::DerivativeLong | PositionKind::DerivativeShort, _) => {
+            return Err(route_proof_error());
+        }
     };
     let has_typed_position_bound = proof.intent.expected.iter().any(|expected| match expected {
         EffectConstraint::Position {
@@ -5085,6 +5458,63 @@ fn intent_within(actual: &FinancialIntent, approved: &FinancialIntent) -> Result
 fn constraint_within(actual: &EffectConstraint, approved: &EffectConstraint) -> bool {
     match (actual, approved) {
         (
+            EffectConstraint::SubmissionCancellation {
+                operation_id: a,
+                submission: sa,
+            },
+            EffectConstraint::SubmissionCancellation {
+                operation_id: b,
+                submission: sb,
+            },
+        ) => a == b && sa == sb,
+        (
+            EffectConstraint::DerivativePosition {
+                resource: ar,
+                position: ap,
+                asset: aa,
+                position_kind: ak,
+                minimum_delta: amin,
+                maximum_delta: amax,
+            },
+            EffectConstraint::DerivativePosition {
+                resource: br,
+                position: bp,
+                asset: ba,
+                position_kind: bk,
+                minimum_delta: bmin,
+                maximum_delta: bmax,
+            },
+        ) => {
+            ar == br
+                && ap == bp
+                && aa == ba
+                && ak == bk
+                && amin.integer() >= bmin.integer()
+                && amax.integer() <= bmax.integer()
+        }
+        (
+            EffectConstraint::Settlement {
+                resource: ar,
+                asset: aa,
+                category: ac,
+                minimum_delta: amin,
+                maximum_delta: amax,
+            },
+            EffectConstraint::Settlement {
+                resource: br,
+                asset: ba,
+                category: bc,
+                minimum_delta: bmin,
+                maximum_delta: bmax,
+            },
+        ) => {
+            ar == br
+                && aa == ba
+                && ac == bc
+                && amin.integer() >= bmin.integer()
+                && amax.integer() <= bmax.integer()
+        }
+        (
             EffectConstraint::OriginMovement {
                 from: actual_from,
                 to: actual_to,
@@ -5270,6 +5700,18 @@ fn actual_cash_debits(
             FinancialEffect::CashDebit { resource, amount } => {
                 add_big_amount(&mut amounts, resource, amount, amount.atoms.integer())?
             }
+            FinancialEffect::Settlement {
+                resource,
+                asset,
+                delta,
+                ..
+            } if delta.is_negative() => {
+                let amount = Amount {
+                    asset: asset.clone(),
+                    atoms: delta.magnitude(),
+                };
+                add_big_amount(&mut amounts, resource, &amount, amount.atoms.integer())?;
+            }
             FinancialEffect::Transfer { from, debit, .. } => {
                 add_big_amount(&mut amounts, from, debit, debit.atoms.integer())?
             }
@@ -5346,8 +5788,14 @@ fn cash_reservation_amounts(
                     amount: cost.amount.clone(),
                 });
             }
-            (AccountingLocation::Cash { .. }, CostTreatment::IncludedInDebit)
+            (
+                AccountingLocation::Cash { .. },
+                CostTreatment::IncludedInDebit | CostTreatment::DeductedFromCredit,
+            )
             | (AccountingLocation::Position { .. }, CostTreatment::IncludedInDebit) => {}
+            (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
+                return Err(route_proof_error());
+            }
             (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
                 return Err(FinError::new(
                     "POSITION_ADDITIONAL_COST_UNSUPPORTED",
@@ -5424,6 +5872,25 @@ fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
                     "An additional debit cannot be reserved against a position without a reviewed generic accounting mechanic.",
                     "Use an explicitly linked IncludedInDebit bound for position-origin loss.",
                 ));
+            }
+            (AccountingLocation::Cash { resource }, CostTreatment::DeductedFromCredit) => {
+                let has_credit = intent.expected.iter().any(|expected| match expected {
+                    EffectConstraint::Conversion {
+                        resource: r,
+                        output,
+                        ..
+                    } => r == resource && output == &bound.amount.asset,
+                    EffectConstraint::Transfer {
+                        to, credit_asset, ..
+                    } => to == resource && credit_asset == &bound.amount.asset,
+                    _ => false,
+                });
+                if !has_credit {
+                    return Err(route_proof_error());
+                }
+            }
+            (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
+                return Err(route_proof_error());
             }
             (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => {}
         }
@@ -5901,7 +6368,45 @@ fn apply_credits(
             _ => {}
         }
     }
-    add_amounts(available, &credits)
+    for effect in effects {
+        if let FinancialEffect::Settlement {
+            resource,
+            asset,
+            delta,
+            ..
+        } = effect
+            && !delta.is_negative()
+            && !delta.is_zero()
+        {
+            if !baseline_resources.contains(resource) {
+                return Err(route_proof_error());
+            }
+            credits.push(ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: asset.clone(),
+                    atoms: delta.magnitude(),
+                },
+            });
+        }
+    }
+    let mut net = add_amounts(available, &credits)?;
+    for effect in effects {
+        if let FinancialEffect::Cost {
+            location: AccountingLocation::Cash { resource },
+            amount,
+            treatment: CostTreatment::DeductedFromCredit,
+            ..
+        } = effect
+        {
+            let deductions = aggregate_resource_amounts(&[ResourceAmount {
+                resource: resource.clone(),
+                amount: amount.clone(),
+            }])?;
+            net = subtract_amounts(&net, &deductions)?;
+        }
+    }
+    Ok(net)
 }
 
 fn apply_effect_provenance(
@@ -5913,8 +6418,57 @@ fn apply_effect_provenance(
     valuation: &fin_domain::Valuation,
 ) -> Result<Vec<ResourceAmount>> {
     let mut movement_origins = BTreeMap::<String, Vec<ProvenanceLot>>::new();
+    let mut credit_cost_origins = BTreeMap::<String, Vec<ProvenanceLot>>::new();
     for effect in effects {
         match effect {
+            FinancialEffect::Settlement {
+                resource,
+                asset,
+                delta,
+                ..
+            } => {
+                let location = AccountingLocation::Cash {
+                    resource: resource.clone(),
+                };
+                if delta.is_negative() {
+                    let origins = take_provenance_in_order(
+                        cash_lots,
+                        &location,
+                        asset,
+                        &delta.magnitude().integer(),
+                    )?;
+                    movement_origins
+                        .entry(accounting_key(&location, asset)?)
+                        .or_default()
+                        .extend(origins);
+                } else if !delta.is_zero() {
+                    let parents = run
+                        .provenance
+                        .iter()
+                        .chain(cash_lots.iter())
+                        .filter(|lot| {
+                            lot.location == location
+                                && lot.asset == *asset
+                                && lot.origin.starts_with("allocation:")
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if parents.is_empty() {
+                        return Err(FinError::new(
+                            "SETTLEMENT_ORIGIN_MISSING",
+                            "reconciliation",
+                            "Realized collateral credit has no selected margin origin.",
+                            "Keep the original operation unresolved and verify selected collateral.",
+                        ));
+                    }
+                    run.provenance.push(ProvenanceLot {
+                        origin: format!("accrual:{}", parents[0].origin),
+                        location,
+                        asset: asset.clone(),
+                        atoms: delta.magnitude().to_string(),
+                    });
+                }
+            }
             FinancialEffect::Transfer {
                 from,
                 to,
@@ -5933,7 +6487,7 @@ fn apply_effect_provenance(
                     &debit.asset,
                     &debit.atoms.integer(),
                 )?;
-                let moved =
+                let mut moved =
                     project_lots(&origins, &target, &credit.asset, &credit.atoms.integer())?;
                 movement_origins
                     .entry(accounting_key(&source, &debit.asset)?)
@@ -5945,6 +6499,23 @@ fn apply_effect_provenance(
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect();
+                let withheld = effects.iter().fold(BigUint::zero(), |sum, effect| {
+                    sum + match effect {
+                        FinancialEffect::Cost {
+                            location: l,
+                            amount,
+                            treatment: CostTreatment::DeductedFromCredit,
+                            ..
+                        } if l == &target && amount.asset == credit.asset => amount.atoms.integer(),
+                        _ => BigUint::zero(),
+                    }
+                });
+                let fee_sources =
+                    take_provenance_in_order(&mut moved, &target, &credit.asset, &withheld)?;
+                credit_cost_origins
+                    .entry(accounting_key(&target, &credit.asset)?)
+                    .or_default()
+                    .extend(fee_sources);
                 run.provenance.extend(moved);
                 run.provenance_events.push(ProvenanceEvent {
                     operation_id: operation_id.into(),
@@ -5969,7 +6540,7 @@ fn apply_effect_provenance(
                     &spent.asset,
                     &spent.atoms.integer(),
                 )?;
-                let moved = project_lots(
+                let mut moved = project_lots(
                     &origins,
                     &location,
                     &received.asset,
@@ -5985,6 +6556,25 @@ fn apply_effect_provenance(
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect();
+                let withheld = effects.iter().fold(BigUint::zero(), |sum, effect| {
+                    sum + match effect {
+                        FinancialEffect::Cost {
+                            location: l,
+                            amount,
+                            treatment: CostTreatment::DeductedFromCredit,
+                            ..
+                        } if l == &location && amount.asset == received.asset => {
+                            amount.atoms.integer()
+                        }
+                        _ => BigUint::zero(),
+                    }
+                });
+                let fee_sources =
+                    take_provenance_in_order(&mut moved, &location, &received.asset, &withheld)?;
+                credit_cost_origins
+                    .entry(accounting_key(&location, &received.asset)?)
+                    .or_default()
+                    .extend(fee_sources);
                 run.provenance.extend(moved);
                 run.provenance_events.push(ProvenanceEvent {
                     operation_id: operation_id.into(),
@@ -6023,6 +6613,10 @@ fn apply_effect_provenance(
                         &debit.atoms.integer(),
                     )?,
                     AccountingLocation::Position {
+                        position_kind: PositionKind::DerivativeLong | PositionKind::DerivativeShort,
+                        ..
+                    } => return Err(route_proof_error()),
+                    AccountingLocation::Position {
                         position_kind: PositionKind::StableDebt | PositionKind::VariableDebt,
                         ..
                     } => vec![ProvenanceLot {
@@ -6044,6 +6638,10 @@ fn apply_effect_provenance(
                         position_kind: PositionKind::StableDebt | PositionKind::VariableDebt,
                         ..
                     } => vec![],
+                    AccountingLocation::Position {
+                        position_kind: PositionKind::DerivativeLong | PositionKind::DerivativeShort,
+                        ..
+                    } => return Err(route_proof_error()),
                 };
                 let source_key = accounting_key(from, &debit.asset)?;
                 movement_origins
@@ -6145,40 +6743,51 @@ fn apply_effect_provenance(
         else {
             continue;
         };
-        let sources =
-            match (location, treatment) {
-                (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => {
-                    take_provenance_in_order(
-                        additional_cost_lots,
-                        location,
-                        &amount.asset,
-                        &amount.atoms.integer(),
-                    )?
-                }
-                (_, CostTreatment::IncludedInDebit) => {
-                    let key = accounting_key(location, &amount.asset)?;
-                    let lots = movement_origins.get_mut(&key).ok_or_else(|| FinError::new(
-                    "COST_ORIGIN_MISSING", "reconciliation",
-                    "An included cost has no matching typed origin flow.",
-                    "Keep the run unresolved and reconcile its exact debit/credit origin link.",
-                ))?;
-                    take_provenance_ordered(
-                        lots,
-                        location,
-                        &amount.asset,
-                        &amount.atoms.integer(),
-                        false,
-                    )?
-                }
-                (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
-                    return Err(FinError::new(
-                        "POSITION_ADDITIONAL_COST_UNSUPPORTED",
+        let sources = match (location, treatment) {
+            (AccountingLocation::Cash { .. }, CostTreatment::AdditionalDebit) => {
+                take_provenance_in_order(
+                    additional_cost_lots,
+                    location,
+                    &amount.asset,
+                    &amount.atoms.integer(),
+                )?
+            }
+            (AccountingLocation::Cash { .. }, CostTreatment::DeductedFromCredit) => {
+                let lots = credit_cost_origins
+                    .get_mut(&accounting_key(location, &amount.asset)?)
+                    .ok_or_else(route_proof_error)?;
+                take_provenance_in_order(lots, location, &amount.asset, &amount.atoms.integer())?
+            }
+            (AccountingLocation::Position { .. }, CostTreatment::DeductedFromCredit) => {
+                return Err(route_proof_error());
+            }
+            (_, CostTreatment::IncludedInDebit) => {
+                let key = accounting_key(location, &amount.asset)?;
+                let lots = movement_origins.get_mut(&key).ok_or_else(|| {
+                    FinError::new(
+                        "COST_ORIGIN_MISSING",
                         "reconciliation",
-                        "An additional cost cannot be charged directly to a position origin.",
-                        "Use a bounded IncludedInDebit cost linked to the exact position flow.",
-                    ));
-                }
-            };
+                        "An included cost has no matching typed origin flow.",
+                        "Keep the run unresolved and reconcile its exact debit/credit origin link.",
+                    )
+                })?;
+                take_provenance_ordered(
+                    lots,
+                    location,
+                    &amount.asset,
+                    &amount.atoms.integer(),
+                    false,
+                )?
+            }
+            (AccountingLocation::Position { .. }, CostTreatment::AdditionalDebit) => {
+                return Err(FinError::new(
+                    "POSITION_ADDITIONAL_COST_UNSUPPORTED",
+                    "reconciliation",
+                    "An additional cost cannot be charged directly to a position origin.",
+                    "Use a bounded IncludedInDebit cost linked to the exact position flow.",
+                ));
+            }
+        };
         for lot in sources {
             if lot.origin.starts_with("accrual:") {
                 continue;
@@ -6748,11 +7357,82 @@ fn ceil_div(numerator: &BigUint, denominator: &BigUint) -> BigUint {
     (numerator + denominator - BigUint::from(1u8)) / denominator
 }
 
+fn validate_trading_bounds(intent: &FinancialIntent) -> Result<()> {
+    let debits = aggregate_resource_amounts(&intent.debits)?;
+    let mut losses = BTreeMap::<String, BigUint>::new();
+    for expected in &intent.expected {
+        match expected {
+            EffectConstraint::DerivativePosition {
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+                ..
+            } => {
+                if !position_kind.is_derivative()
+                    || minimum_delta.integer() > maximum_delta.integer()
+                {
+                    return Err(FinError::validation("Invalid bounded derivative exposure."));
+                }
+            }
+            EffectConstraint::Settlement {
+                resource,
+                asset,
+                minimum_delta,
+                maximum_delta,
+                ..
+            } => {
+                if minimum_delta.integer() > maximum_delta.integer() {
+                    return Err(FinError::validation("Invalid realized collateral bounds."));
+                }
+                if minimum_delta.is_negative() {
+                    let key = resource_asset_key(&ResourceAmount {
+                        resource: resource.clone(),
+                        amount: Amount {
+                            asset: asset.clone(),
+                            atoms: minimum_delta.magnitude(),
+                        },
+                    })?;
+                    *losses.entry(key).or_default() += minimum_delta.magnitude().integer();
+                }
+            }
+            _ => {}
+        }
+    }
+    for (key, loss) in losses {
+        let (resource, asset) = decode_resource_asset_key(&key)?;
+        let costs = intent
+            .maximum_costs
+            .iter()
+            .filter(|bound| {
+                bound.location
+                    == AccountingLocation::Cash {
+                        resource: resource.clone(),
+                    }
+                    && bound.amount.asset == asset
+                    && bound.treatment == CostTreatment::IncludedInDebit
+            })
+            .fold(BigUint::zero(), |sum, bound| {
+                sum + bound.amount.atoms.integer()
+            });
+        if loss > debits.get(&key).cloned().unwrap_or_default() || loss > costs {
+            return Err(FinError::new(
+                "SETTLEMENT_LOSS_UNRESERVED",
+                "budget",
+                "The maximum realized loss needs matching collateral and included cost reserves.",
+                "Reserve the complete realized loss and return costs from selected holdings.",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_prepared(
     prepared: &PreparedOperation,
     operation: &str,
     instant: DateTime<Utc>,
 ) -> Result<()> {
+    validate_trading_bounds(&prepared.intent)?;
+
     if prepared.operation != operation {
         return Err(FinError::new(
             "OPERATION_MISMATCH",
@@ -10979,5 +11659,744 @@ mod tests {
                 .code,
             "RUN_NOT_FOUND"
         );
+    }
+    fn trading_rebind(record: &mut OperationRecord) {
+        record.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(record.preview.as_ref().unwrap())).unwrap();
+    }
+
+    #[test]
+    fn derivative_exposure_requires_own_bound_and_exact_anchor_and_is_never_custody() {
+        let a = asset("synthetic", "BASE", 0);
+        let r = resource("synthetic-margin");
+        let mut anchor = position_anchor(
+            "synthetic-margin",
+            "BASE:LONG",
+            PositionKind::DerivativeLong,
+            "3",
+        );
+        anchor.principal.asset = a.clone();
+        let effect = FinancialEffect::PositionChange {
+            resource: r.clone(),
+            position: "BASE:LONG".into(),
+            asset: a.clone(),
+            delta: SignedQuantity::new("3").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(anchor.clone()),
+        };
+        let bound = EffectConstraint::DerivativePosition {
+            resource: r.clone(),
+            position: "BASE:LONG".into(),
+            asset: a.clone(),
+            position_kind: PositionKind::DerivativeLong,
+            minimum_delta: SignedQuantity::new("0").unwrap(),
+            maximum_delta: SignedQuantity::new("3").unwrap(),
+        };
+        let rec = record(vec![bound.clone()], vec![]);
+        let verified = proof(&rec, vec![effect.clone()]);
+        validate_effects(&rec, &verified, &Status::Completed).unwrap();
+        validate_anchor_transitions(&verified, &PreparationContext::default()).unwrap();
+        validate_origin_links(&verified.effects).unwrap();
+        let supply = EffectConstraint::Position {
+            resource: r.clone(),
+            position: "BASE:LONG".into(),
+            asset: a.clone(),
+            direction: Direction::Increase,
+            maximum_change: quantity("3"),
+        };
+        assert!(!constraint_matches(&supply, &effect).unwrap());
+        let mut wrong = effect.clone();
+        if let FinancialEffect::PositionChange {
+            anchor: Some(anchor),
+            ..
+        } = &mut wrong
+        {
+            anchor.principal.atoms = quantity("4");
+        }
+        assert_eq!(
+            validate_anchor_transitions(&proof(&rec, vec![wrong]), &PreparationContext::default())
+                .unwrap_err()
+                .code,
+            "POSITION_ANCHOR_TRANSITION_MISMATCH"
+        );
+        let mut short = effect.clone();
+        if let FinancialEffect::PositionChange {
+            anchor: Some(anchor),
+            ..
+        } = &mut short
+        {
+            anchor.position_kind = PositionKind::DerivativeShort;
+        }
+        assert!(!constraint_matches(&bound, &short).unwrap());
+        let origin = FinancialEffect::OriginMovement {
+            from: AccountingLocation::Cash {
+                resource: r.clone(),
+            },
+            to: AccountingLocation::Position {
+                resource: r,
+                position: "BASE:LONG".into(),
+                position_kind: PositionKind::DerivativeLong,
+            },
+            debit: Amount {
+                asset: a.clone(),
+                atoms: quantity("3"),
+            },
+            credit: Amount {
+                asset: a,
+                atoms: quantity("3"),
+            },
+        };
+        assert_eq!(
+            validate_origin_links(&[origin, effect]).unwrap_err().code,
+            "INVALID_ORIGIN_MOVEMENT"
+        );
+    }
+
+    #[test]
+    fn realized_collateral_loss_is_reserved_once_bounded_and_must_be_costed() {
+        let r = resource("binance-account");
+        let a = asset("binance", "ETH", 18);
+        let bound = EffectConstraint::Settlement {
+            resource: r.clone(),
+            asset: a.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            minimum_delta: SignedQuantity::new("-3").unwrap(),
+            maximum_delta: SignedQuantity::new("5").unwrap(),
+        };
+        let cost = CostBound {
+            location: AccountingLocation::Cash {
+                resource: r.clone(),
+            },
+            amount: Amount {
+                asset: a.clone(),
+                atoms: quantity("3"),
+            },
+            treatment: CostTreatment::IncludedInDebit,
+        };
+        let mut rec = record(vec![bound], vec![cost]);
+        rec.preview.as_mut().unwrap().intent.debits[0].amount.atoms = quantity("3");
+        trading_rebind(&mut rec);
+        validate_trading_bounds(&rec.preview.as_ref().unwrap().intent).unwrap();
+        let loss = FinancialEffect::Settlement {
+            resource: r.clone(),
+            asset: a.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            delta: SignedQuantity::new("-2").unwrap(),
+        };
+        assert_eq!(
+            validate_effects(&rec, &proof(&rec, vec![loss.clone()]), &Status::Completed)
+                .unwrap_err()
+                .code,
+            "SETTLEMENT_LOSS_COST_MISSING"
+        );
+        let cost = FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: r.clone(),
+            },
+            amount: Amount {
+                asset: a.clone(),
+                atoms: quantity("2"),
+            },
+            category: "realized_loss".into(),
+            treatment: CostTreatment::IncludedInDebit,
+        };
+        let effects = vec![loss, cost];
+        validate_effects(&rec, &proof(&rec, effects.clone()), &Status::Completed).unwrap();
+        assert_eq!(
+            actual_debits_and_costs(&effects)
+                .unwrap()
+                .values()
+                .next()
+                .unwrap(),
+            &BigUint::from(2u8)
+        );
+        let gain = FinancialEffect::Settlement {
+            resource: r,
+            asset: a,
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            delta: SignedQuantity::new("6").unwrap(),
+        };
+        assert_eq!(
+            validate_effects(&rec, &proof(&rec, vec![gain]), &Status::Completed)
+                .unwrap_err()
+                .code,
+            "UNEXPECTED_FINANCIAL_EFFECT"
+        );
+        rec.preview.as_mut().unwrap().intent.maximum_costs.clear();
+        assert_eq!(
+            validate_trading_bounds(&rec.preview.unwrap().intent)
+                .unwrap_err()
+                .code,
+            "SETTLEMENT_LOSS_UNRESERVED"
+        );
+    }
+
+    #[test]
+    fn withheld_output_fee_reduces_only_receipt_credit_and_its_origin_once() {
+        let r = resource("synthetic-spot");
+        let input = asset("synthetic", "INPUT", 0);
+        let output = asset("synthetic", "OUTPUT", 0);
+        let location = AccountingLocation::Cash {
+            resource: r.clone(),
+        };
+        let baseline = StateSnapshot {
+            state: FinancialState {
+                holdings: vec![ResourceAmount {
+                    resource: r.clone(),
+                    amount: Amount {
+                        asset: input.clone(),
+                        atoms: quantity("100"),
+                    },
+                }],
+                ..Default::default()
+            },
+            observed_at: now(),
+            complete: true,
+            coverage: vec![r.0.clone()],
+            pending: vec![],
+        };
+        let mut run = empty_run_for_provenance(baseline);
+        let key = resource_asset_key(&ResourceAmount {
+            resource: r.clone(),
+            amount: Amount {
+                asset: input.clone(),
+                atoms: quantity("100"),
+            },
+        })
+        .unwrap();
+        let mut principal = vec![ProvenanceLot {
+            origin: format!("allocation:{key}"),
+            location: location.clone(),
+            asset: input.clone(),
+            atoms: "100".into(),
+        }];
+        run.provenance.push(ProvenanceLot {
+            origin: "untouched-existing-output".into(),
+            location: location.clone(),
+            asset: output.clone(),
+            atoms: "50".into(),
+        });
+        let conversion = FinancialEffect::Conversion {
+            resource: r.clone(),
+            spent: Amount {
+                asset: input.clone(),
+                atoms: quantity("100"),
+            },
+            received: Amount {
+                asset: output.clone(),
+                atoms: quantity("10"),
+            },
+        };
+        let fee = FinancialEffect::Cost {
+            location: location.clone(),
+            amount: Amount {
+                asset: output.clone(),
+                atoms: quantity("1"),
+            },
+            category: "commission".into(),
+            treatment: CostTreatment::DeductedFromCredit,
+        };
+        let effects = vec![conversion, fee];
+        let valuation = fin_domain::Valuation {
+            movement_usd_micros: quantity("100000000"),
+            maximum_fee_usd_micros: quantity("10000000"),
+            additional_allocation_usd_micros: quantity("0"),
+            observed_at: now(),
+            source: "synthetic".into(),
+            prices: vec![
+                AssetPrice {
+                    asset: input.clone(),
+                    usd_micros_per_unit: quantity("1000000"),
+                    unit_atoms: quantity("1"),
+                    observed_at: now(),
+                    source: "synthetic".into(),
+                },
+                AssetPrice {
+                    asset: output.clone(),
+                    usd_micros_per_unit: quantity("10000000"),
+                    unit_atoms: quantity("1"),
+                    observed_at: now(),
+                    source: "synthetic".into(),
+                },
+            ],
+        };
+        let mapped = apply_effect_provenance(
+            &mut run,
+            "synthetic-conversion",
+            &mut principal,
+            &mut vec![],
+            &effects,
+            &valuation,
+        )
+        .unwrap();
+        assert_eq!(run.provenance[0].atoms, "50");
+        assert_eq!(run.provenance[1].atoms, "9");
+        assert_eq!(mapped[0].amount.asset, input);
+        assert_eq!(mapped[0].amount.atoms, quantity("10"));
+        let available = apply_credits(&run, &[], &effects).unwrap();
+        assert_eq!(available[0].amount.atoms, quantity("9"));
+        assert_eq!(receipt_cash_delta(&effects, &r, &output), BigInt::from(9u8));
+    }
+
+    #[test]
+    fn realized_gain_keeps_original_allocation_cap_and_requires_selected_collateral_origin() {
+        let r = resource("synthetic-margin");
+        let a = asset("synthetic", "USD", 0);
+        let location = AccountingLocation::Cash {
+            resource: r.clone(),
+        };
+        let baseline = StateSnapshot {
+            state: FinancialState::default(),
+            observed_at: now(),
+            complete: true,
+            coverage: vec![r.0.clone()],
+            pending: vec![],
+        };
+        let mut run = empty_run_for_provenance(baseline);
+        let initial = run.initial_allocation_usd_micros.clone();
+        let effect = FinancialEffect::Settlement {
+            resource: r.clone(),
+            asset: a.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            delta: SignedQuantity::new("200").unwrap(),
+        };
+        let valuation = fin_domain::Valuation {
+            movement_usd_micros: quantity("0"),
+            maximum_fee_usd_micros: quantity("0"),
+            additional_allocation_usd_micros: quantity("0"),
+            observed_at: now(),
+            source: "synthetic".into(),
+            prices: vec![],
+        };
+        assert_eq!(
+            apply_effect_provenance(
+                &mut run,
+                "gain",
+                &mut vec![],
+                &mut vec![],
+                std::slice::from_ref(&effect),
+                &valuation
+            )
+            .unwrap_err()
+            .code,
+            "SETTLEMENT_ORIGIN_MISSING"
+        );
+        let key = resource_asset_key(&ResourceAmount {
+            resource: r,
+            amount: Amount {
+                asset: a.clone(),
+                atoms: quantity("10"),
+            },
+        })
+        .unwrap();
+        run.provenance.push(ProvenanceLot {
+            origin: format!("allocation:{key}"),
+            location,
+            asset: a,
+            atoms: "10".into(),
+        });
+        apply_effect_provenance(
+            &mut run,
+            "gain",
+            &mut vec![],
+            &mut vec![],
+            &[effect],
+            &valuation,
+        )
+        .unwrap();
+        assert_eq!(run.initial_allocation_usd_micros, initial);
+        assert!(run.provenance[1].origin.starts_with("accrual:allocation:"));
+        assert_eq!(run.provenance[1].atoms, "200");
+    }
+
+    #[tokio::test]
+    async fn cancellation_targets_exact_unresolved_identity_and_never_releases_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = synthetic_engine(
+            &dir.path().join("cancel.sqlite"),
+            Arc::new(SyntheticAdapter::new()),
+        );
+        let original = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-original".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({"amount":"1"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(original.status, Status::Pending);
+        let mut cancellation = original.preview.clone().unwrap();
+        cancellation.intent.debits.clear();
+        cancellation.intent.maximum_costs.clear();
+        cancellation.intent.expected = vec![EffectConstraint::SubmissionCancellation {
+            operation_id: original.id.clone(),
+            submission: original.submission.clone().unwrap(),
+        }];
+        assert!(
+            engine
+                .validate_submission_cancellation(&cancellation, None)
+                .unwrap()
+        );
+        assert!(
+            engine
+                .validate_submission_cancellation(&cancellation, Some("different-run"))
+                .is_err()
+        );
+        cancellation
+            .intent
+            .debits
+            .push(original.preview.as_ref().unwrap().intent.debits[0].clone());
+        assert!(
+            engine
+                .validate_submission_cancellation(&cancellation, None)
+                .is_err()
+        );
+        cancellation.intent.debits.clear();
+        if let EffectConstraint::SubmissionCancellation { submission, .. } =
+            &mut cancellation.intent.expected[0]
+        {
+            submission.reference = "another-order".into();
+        }
+        assert!(
+            engine
+                .validate_submission_cancellation(&cancellation, None)
+                .is_err()
+        );
+        assert_eq!(
+            engine.status(&original.id, false).await.unwrap().status,
+            Status::Pending
+        );
+    }
+    #[test]
+    fn derivative_return_projection_tracks_exposure_and_funded_realized_settlement() {
+        let r = resource("synthetic-margin");
+        let collateral = asset("synthetic", "USD", 0);
+        let base = asset("synthetic", "BASE", 0);
+        let snapshot = StateSnapshot {
+            state: FinancialState {
+                holdings: vec![ResourceAmount {
+                    resource: r.clone(),
+                    amount: Amount {
+                        asset: collateral.clone(),
+                        atoms: quantity("100"),
+                    },
+                }],
+                ..Default::default()
+            },
+            observed_at: now(),
+            complete: true,
+            coverage: vec![r.0.clone()],
+            pending: vec![],
+        };
+        let allocation = RunAllocation {
+            holding: snapshot.state.holdings[0].clone(),
+            value_usd_micros: "100000000".into(),
+            observed_at: now(),
+            source: "synthetic".into(),
+        };
+        let make = |index: u32, opening: bool| {
+            let delta = |value: &str| SignedQuantity::new(value).unwrap();
+            let lo = if opening { "0" } else { "-3" };
+            let hi = if opening { "3" } else { "0" };
+            ReturnRouteProof {
+                step_index: index,
+                operation: "synthetic.derivative".into(),
+                input_hash: "synthetic".into(),
+                observed_at: now(),
+                expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+                intent: FinancialIntent {
+                    debits: vec![ResourceAmount {
+                        resource: r.clone(),
+                        amount: Amount {
+                            asset: collateral.clone(),
+                            atoms: quantity("5"),
+                        },
+                    }],
+                    maximum_costs: vec![CostBound {
+                        location: AccountingLocation::Cash {
+                            resource: r.clone(),
+                        },
+                        amount: Amount {
+                            asset: collateral.clone(),
+                            atoms: quantity("5"),
+                        },
+                        treatment: CostTreatment::IncludedInDebit,
+                    }],
+                    expected: vec![
+                        EffectConstraint::DerivativePosition {
+                            resource: r.clone(),
+                            position: "BASE:LONG".into(),
+                            asset: base.clone(),
+                            position_kind: PositionKind::DerivativeLong,
+                            minimum_delta: delta(lo),
+                            maximum_delta: delta(hi),
+                        },
+                        EffectConstraint::Settlement {
+                            resource: r.clone(),
+                            asset: collateral.clone(),
+                            category: fin_domain::SettlementCategory::RealizedPnl,
+                            minimum_delta: delta("-5"),
+                            maximum_delta: delta("7"),
+                        },
+                    ],
+                    locks: vec![r.clone()],
+                },
+                effects: vec![
+                    if opening {
+                        ProjectedEffect::PositionDelta {
+                            resource: r.clone(),
+                            position: "BASE:LONG".into(),
+                            asset: base.clone(),
+                            position_kind: PositionKind::DerivativeLong,
+                            minimum_delta: delta("0"),
+                            maximum_delta: delta("3"),
+                        }
+                    } else {
+                        ProjectedEffect::PositionClose {
+                            resource: r.clone(),
+                            position: "BASE:LONG".into(),
+                            asset: base.clone(),
+                            position_kind: PositionKind::DerivativeLong,
+                            maximum_amount: quantity("3"),
+                            source_step: 0,
+                        }
+                    },
+                    ProjectedEffect::CashDelta {
+                        resource: r.clone(),
+                        asset: collateral.clone(),
+                        minimum_delta: delta("-5"),
+                        maximum_delta: delta("7"),
+                    },
+                ],
+                requires: vec![],
+                evidence: json!({"synthetic":true}),
+            }
+        };
+        let opening = make(0, true);
+        let close = make(1, false);
+        let state = projected_state(&snapshot).unwrap();
+        validate_projected_cash_legs(&state, &opening).unwrap();
+        let state = apply_projected_effects(&state, &opening.effects, 0).unwrap();
+        validate_projected_cash_legs(&state, &close).unwrap();
+        let final_state = apply_projected_effects(&state, &close.effects, 1).unwrap();
+        validate_projected_restoration(&snapshot, std::slice::from_ref(&allocation), &final_state)
+            .unwrap();
+        let price = AssetPrice {
+            asset: collateral,
+            usd_micros_per_unit: quantity("1000000"),
+            unit_atoms: quantity("1"),
+            observed_at: now(),
+            source: "synthetic".into(),
+        };
+        projected_provenance::validate_projected_origins(
+            &snapshot,
+            &[allocation],
+            &[opening.clone(), close],
+            &[price],
+            &BigUint::from(10_000_000u64),
+        )
+        .unwrap();
+        let mut forged = opening;
+        if let ProjectedEffect::CashDelta { maximum_delta, .. } = &mut forged.effects[1] {
+            *maximum_delta = SignedQuantity::new("8").unwrap();
+        }
+        assert!(
+            validate_projected_cash_legs(&projected_state(&snapshot).unwrap(), &forged).is_err()
+        );
+    }
+    #[test]
+    fn zero_derivative_open_and_close_are_proved_observations_without_custody() {
+        let a = asset("synthetic", "BASE", 0);
+        let mut anchor = position_anchor(
+            "synthetic-margin",
+            "BASE:LONG",
+            PositionKind::DerivativeLong,
+            "0",
+        );
+        anchor.principal.asset = a.clone();
+        let effect = FinancialEffect::PositionChange {
+            resource: resource("synthetic-margin"),
+            position: "BASE:LONG".into(),
+            asset: a,
+            delta: SignedQuantity::new("0").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(anchor.clone()),
+        };
+        let rec = record(vec![], vec![]);
+        let verified = proof(&rec, vec![effect]);
+        validate_effect_anchor(&verified.effects[0], &verified.observed_at).unwrap();
+        validate_anchor_transitions(&verified, &PreparationContext::default()).unwrap();
+        validate_anchor_transitions(
+            &verified,
+            &PreparationContext {
+                positions: vec![anchor],
+            },
+        )
+        .unwrap();
+        validate_origin_links(&verified.effects).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_sibling_settlement_leaves_pending_run_reservation_and_route_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = synthetic_engine(
+            &dir.path().join("cancel-scoped.sqlite"),
+            Arc::new(SyntheticAdapter::new()),
+        );
+        let mut original = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-scoped-original".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({"amount":"1"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let baseline = StateSnapshot {
+            state: FinancialState::default(),
+            observed_at: now(),
+            complete: true,
+            coverage: vec![],
+            pending: vec![],
+        };
+        let mut run = empty_run_for_provenance(baseline);
+        original.run_id = Some(run.id.clone());
+        engine.update_record(&original).unwrap();
+        run.reservations.insert(
+            original.id.clone(),
+            RunReservation {
+                debits: original.preview.as_ref().unwrap().intent.debits.clone(),
+                maximum_costs: vec![],
+                provenance: vec![],
+                additional_cost_provenance: vec![],
+                cash_provenance_version: 0,
+                cash_sources: None,
+                maximum_fee_usd_micros: "0".into(),
+                additional_allocation_usd_micros: "0".into(),
+                binding_hash: original.approval.as_ref().unwrap().binding_hash.clone(),
+                route_step_index: Some(0),
+            },
+        );
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_run(&run.id, &to_value(&run).unwrap(), &now())
+            .unwrap();
+        let before = to_value(&run).unwrap();
+        let target = EffectConstraint::SubmissionCancellation {
+            operation_id: original.id.clone(),
+            submission: original.submission.clone().unwrap(),
+        };
+        let mut sibling = record(vec![target], vec![]);
+        sibling.id = "synthetic-scoped-cancel".into();
+        sibling.request_id = "synthetic-scoped-cancel-request".into();
+        sibling.run_id = original.run_id.clone();
+        sibling.preview.as_mut().unwrap().intent.debits.clear();
+        sibling.preview.as_mut().unwrap().intent.locks =
+            original.preview.as_ref().unwrap().intent.locks.clone();
+        trading_rebind(&mut sibling);
+        assert!(
+            engine
+                .validate_submission_cancellation(
+                    sibling.preview.as_ref().unwrap(),
+                    sibling.run_id.as_deref()
+                )
+                .unwrap()
+        );
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &sibling.id,
+                &sibling.request_id,
+                &sibling.fingerprint,
+                &sibling.operation,
+                sibling.run_id.as_deref(),
+                "pending",
+                &to_value(&sibling).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        let verified = proof(
+            &sibling,
+            vec![FinancialEffect::SubmissionCancellation {
+                operation_id: original.id.clone(),
+                submission: original.submission.clone().unwrap(),
+            }],
+        );
+        let completed = engine
+            .apply_reconciliation(
+                sibling,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: json!({"synthetic":"cancelled remainder"}),
+                    verified: Some(verified),
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.status, Status::Completed);
+        assert_eq!(
+            to_value(&engine.load_run(&run.id).unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(
+            engine.status(&original.id, false).await.unwrap().status,
+            Status::Pending
+        );
+    }
+    #[test]
+    fn projected_position_close_requires_proved_zero_exposure_after_partial_or_no_fill() {
+        let collateral = asset("ethereum:1", "USDC", 6);
+        let record = record(vec![], vec![]);
+        let route = ReturnRouteProof {
+            step_index: 1,
+            operation: "synthetic.derivative.close".into(),
+            input_hash: "synthetic".into(),
+            observed_at: now(),
+            expires_at: now(),
+            intent: FinancialIntent::default(),
+            effects: vec![ProjectedEffect::PositionClose {
+                resource: resource("synthetic-margin"),
+                position: "BASE:LONG".into(),
+                asset: collateral.clone(),
+                position_kind: PositionKind::DerivativeLong,
+                maximum_amount: quantity("3"),
+                source_step: 0,
+            }],
+            requires: vec![],
+            evidence: json!({"synthetic":true}),
+        };
+        for (delta, post, matches) in [
+            ("-1", "2", false),
+            ("0", "3", false),
+            ("-3", "0", true),
+            ("0", "0", true),
+        ] {
+            let anchor = position_anchor(
+                "synthetic-margin",
+                "BASE:LONG",
+                PositionKind::DerivativeLong,
+                post,
+            );
+            let receipt = proof(
+                &record,
+                vec![FinancialEffect::PositionChange {
+                    resource: resource("synthetic-margin"),
+                    position: "BASE:LONG".into(),
+                    asset: collateral.clone(),
+                    delta: SignedQuantity::new(delta).unwrap(),
+                    scaled_receipt: None,
+                    anchor: Some(anchor),
+                }],
+            );
+            assert_eq!(
+                route_projection_matches_receipt(&route, &receipt).unwrap(),
+                matches,
+                "delta {delta}, remaining {post}"
+            );
+        }
     }
 }

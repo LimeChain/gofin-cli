@@ -2,12 +2,13 @@
 SHELL := /bin/sh
 ARGS ?= --help
 
-.PHONY: help dev build test-ui test-integration test-delivery test check bundle release setup uninstall
+.PHONY: help dev build catalog test-ui test-integration test-delivery test check bundle release setup uninstall
 
 help:
 	@printf '%s\n' \
 	  'make dev [ARGS="..."]  Run the debug CLI (default: help; no installation)' \
 	  'make build             Incrementally build the debug CLI and broker' \
+	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
@@ -23,6 +24,11 @@ dev:
 
 build:
 	@cargo build --locked -p fin-cli -p fin-broker
+
+catalog:
+	@fin_catalog_tmp=$$(mktemp); trap 'rm -f "$$fin_catalog_tmp"' EXIT; \
+	  cargo run --quiet --locked -p fin-broker --example export_catalog > "$$fin_catalog_tmp" && \
+	  mv "$$fin_catalog_tmp" crates/fin-cli/data/financial-catalog.json
 
 test-ui:
 	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli

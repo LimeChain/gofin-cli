@@ -5,8 +5,8 @@
 Fin is a compiled Rust CLI for local financial execution. An agent discovers
 operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
-The current adapters cover Binance funding and Ethereum wallets, Uniswap and
-Aave. The [product concept](docs/fin-product-concept.md) describes the broader
+The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
+orders, and Ethereum wallets, Uniswap and Aave. The [product concept](docs/fin-product-concept.md) describes the broader
 exchange, trading and DeFi scope. MCP and general chain-to-chain bridging follow
 later. Fin is open source; license selection is pending.
 
@@ -130,6 +130,7 @@ The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. Copy
 make dev                              # debug CLI help; no installation
 make dev ARGS='capabilities --json'    # incremental CLI execution
 make build                            # debug CLI and broker
+make catalog                          # regenerate offline financial discovery
 make check                            # formatting and strict Clippy
 make test-ui                          # focused offline CLI/discovery tests
 make test-integration                 # isolated broker/store/installer fixtures
@@ -201,3 +202,50 @@ cargo run --locked -p fin-exchange --example public_read --all-features -- hyper
 Dev/test builds omit debug symbols to limit generated SDK disk use, while retaining
 incremental compilation. Release optimization is unchanged. Human onboarding and
 Touch ID remain pending the joint session.
+
+## Binance spot and USDⓈ-M trading
+
+Discover the exact read and order inputs without credentials or an installed service:
+
+```sh
+fin schema binance.spot.order-place --json
+fin explain binance.futures.order-place --json
+fin schema binance.futures.order-cancel --json
+```
+
+With the protected broker installed, inspect markets and your enrolled account:
+
+```sh
+fin read binance.spot.markets --input '{"symbol":"ETHUSDT"}' --json
+fin read binance.spot.orders --input '{"account":"master","symbol":"ETHUSDT"}' --json
+fin read binance.futures.positions --input '{"account":"master","symbol":"ETHUSDT"}' --json
+fin read binance.permissions --input '{"account":"master"}' --json
+```
+
+The trading increment supports LIMIT **FOK** spot orders in tracked return plans,
+and LIMIT **IOC/FOK** USDT perpetual orders with isolated margin, leverage 1,
+one-way positions and automatic margin additions disabled. Opening requires no
+other futures exposure on the account. Fin does not change those settings or fund
+the futures wallet automatically. Spot IOC reconciliation is covered by synthetic
+tests; scoped spot IOC execution remains unsupported. COIN-M, delivery futures,
+market/standing orders and leverage changes remain follow-ups.
+
+Each placement, cancellation and cleanup requires fresh Touch ID. Fin records
+the client order ID before submission, verifies fills/commissions and reconciles
+original requests after uncertain responses. Cancellation does not release the
+original order's reservation until its fills reconcile. Actual partial cleanup
+cannot satisfy a planned zero-position return: refresh the remaining route.
+Loss, funding and commission bounds use exact decimals; no default fee estimate
+or USDT peg substitutes for observed evidence.
+
+Withdrawal support currently covers ETH to an enrolled Ethereum mainnet wallet.
+Deposit-address lookup is available; explicit address creation and withdrawal
+whitelist editing are not implemented.
+
+[Trading verification and limitations](docs/reports/binance-trading.md) and the
+[human trading checklist](docs/testing/binance-trading.md) separate synthetic
+readiness from pending production/Touch ID acceptance. Reproduce the focused suite:
+
+```sh
+cargo test --locked -p fin-binance --test trading_reads --test trading_contract
+```

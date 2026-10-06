@@ -304,3 +304,35 @@ Prefer service-manager/on-demand activation where practical. Start invokes the f
 | 5. Verification and delivery   | Automated financial/security/CLI tests, recorded fixed-fork run with synthetic restoration, parity/migration checks, allowed read-only production observations, sanitized report and human checklist. |
 
 The report must distinguish implementation readiness from complete live acceptance. The later human session exercises fresh-agent onboarding, actual protected installation and credential denial, real biometric acceptance/cancellation/binding, and approved production/mainnet flows with full unwind. Follow [onboarding acceptance](onboarding.md#acceptance-and-handoff) and [testing stages](testing/README.md#rust-implementation-and-later-human-verification).
+
+
+## Trading profiles and typed settlement
+
+Binance trading builds on the same `ExchangeAdapter` rather than a separate order
+engine. Its profile owns closed CCXT route mapping, permissions, market filters,
+mode checks, deterministic client IDs, fills and before/after account evidence.
+`prepare_with_context` receives broker-owned position anchors;
+`refresh_prepared` preserves that trusted context while rechecking the exact
+approval binding. Clients cannot supply a substitute position provenance record.
+
+Shared domain effects distinguish derivative long/short exposure from cash and
+custody positions. Signed realized-PnL/funding settlements carry separate caps,
+proof and cost attribution. The ledger consumes typed effects without branching
+on exchange names. Output commission deducts from the gross conversion credit
+once; losses consume reserved selected collateral. Positive settlements remain
+attributed to the original collateral lot and never increase the run's original
+allocation. Zero-position return proofs require evidence that actual exposure is
+zero; a partial close must invalidate the remaining planned restoration.
+
+A submission-cancellation effect binds the original durable operation/submission,
+run and locks. This permits an individually approved cancellation while the
+original is unresolved, without transferring its accounting or releasing its
+reservation. Original fill reconciliation remains mandatory even if cancellation
+reports success or races a final fill. Venue profiles implement the observation;
+the shared engine checks the target and owns the durable lifecycle.
+
+The offline CLI financial catalog is generated from the composed broker registry
+with `make catalog`; recursive key ordering keeps changes reproducible. Discovery
+reports scoped operation restrictions separately from CCXT library availability.
+The current profile's conservative single-position and FOK-spot limits can later
+be extended through richer route proofs without changing the approval boundary.
