@@ -23,8 +23,9 @@ The macOS installer registers `/Library/Fin/runtime` in the root-owned
 `/etc/paths.d/fin` file. New Terminal login shells can invoke `fin` directly,
 including when Homebrew owns `/usr/local/bin`. An already-open shell can run
 `export PATH="/Library/Fin/runtime:$PATH"`; an installer cannot modify its parent
-shell environment. Setup does not edit shell profiles or take ownership of
-Homebrew directories. Custom PATH overrides must retain the Fin directory.
+shell environment. Setup adds only Fin-marked completion blocks where needed;
+it does not take ownership of Homebrew directories. Custom PATH overrides must
+retain the Fin directory.
 
 After setup and enrollment, `sudo -K` clears every cached sudo credential for the
 human account, across terminal sessions. This prevents existing cached elevation
@@ -39,6 +40,16 @@ service without sudo; each financial write independently requires fresh Touch ID
 The pre-prompt explanation is flushed before handing control to macOS. If it
 cannot be displayed, Fin refuses to start administrator authentication.
 
+Recent macOS sudo versions create an intermediate terminal owned by root. Fin
+checks its kernel-reported relationship to the human's Terminal, including the
+sudo processes, both terminal devices, foreground groups, open descriptors and
+processes sharing the terminal sessions. During private input, root-only device
+permissions prevent new readers. A separate protected restore process restores
+ownership and input settings on completion, cancellation or enrollment-process
+exit; Fin checks restoration before saving or approving enrollment.
+This requires no sudo configuration changes. Agent, remote and multiplexed
+terminal enrollment remains unavailable.
+
 Implemented public command families (inspect their help for required arguments):
 
 ```text
@@ -52,11 +63,30 @@ fin connections update --provider PROVIDER --name CONNECTION
 fin connections remove CONNECTION
 ```
 
+Daemon status inspects launchd directly and never opens the broker socket. Start
+requests explicit resume and reports observed running state; stop persists
+protected stop intent, waits for process exit, and remains stopped until explicit
+start. Repeated stop/status cannot reactivate the service. Ordinary broker-backed
+commands while explicitly stopped return `DAEMON_STOPPED`. Lifecycle commands
+print one concise state message by default, with structured action/status/
+registration/PID under `--json`. Configuration and financial readiness belong in
+`fin doctor`, after starting the service.
+
 Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling Fin. Preserve the current `fin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
 
 ## Guided credential enrollment
 
-The first Rust beta supplies safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. It does not implement a metadata prompt wizard: a bare add/update command is incomplete. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. Ethereum uses `--network ethereum:1` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. Ethereum uses `--network ethereum:1` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+
+For Binance RSA/Ed25519, the two private prompts collect the API key and the
+complete PEM signing key separately. PEM accepts actual line breaks or literal
+`\n`/`\r\n` separators, including the matching BEGIN/END markers. Paste without
+surrounding quotes and press Enter after the END marker. A receipt message
+acknowledges each secret without displaying it; subsequent messages identify
+read-only checks, Touch ID, and saving. These stage messages use stderr.
+Connection add/update/remove print a concise confirmation and relevant warnings
+by default. `--json` refuses enrollment with a structured human-terminal handoff before sudo or credential access.
+Ctrl-C cancels input.
 
 Examples of provider-specific prompts:
 
@@ -67,6 +97,14 @@ Examples of provider-specific prompts:
 | Future integration | Its registered typed connection definition and reviewed prerequisites.                                                                     | Its own credential fields and read-only checks through the same protected enrollment contract. Unsupported types remain unavailable.                            |
 
 The human reviews the resolved connection and reported permissions, then independently authorizes saving or changing execution credentials/configuration. Keep credential storage and enrollment in `fin-credentials`; OS authentication and exact challenge verification belong in `fin-authorization`. Secret input must reach the protected component directly rather than transit the untrusted CLI process. Implement and verify the actual terminal/session and private-channel mechanics; terminal choice and hidden echo alone are not the credential boundary.
+
+Supported connection approvals show the action, account identity, reported
+permissions, unknowns, and warnings in plain language. A **Details** control
+shows the complete verified JSON, request hash, and expiry. The summary is
+derived from the hash-verified binding; it cannot change what Touch ID approves.
+Unrecognized or incomplete bindings retain the full exact display. The broader
+financial-operation and initial-setup presentations remain unchanged in this
+focused enrollment update.
 
 Store credentials through a broker-controlled backend and return a stable opaque reference. Ordinary connection configuration and agent results contain safe metadata and the reference, never the secret. Optional OS-store/protected import backends must enforce the same boundary and clearly document support; the current TS protected-file importer is not OS Keychain support. Agent-readable `.context/.ai.env` is not a protected store.
 
@@ -115,6 +153,86 @@ Illustrative metadata, not implemented output or an input that accepts credentia
 ```
 
 Structural schemas describe safe arguments and responses. Secret requirements are explanatory enrollment metadata, not secret-bearing fields that an agent can submit through the normal JSON operation API. The CLI must enforce the documented restrictions; a `human-interactive` label is not sufficient on its own.
+
+## Machine execution contract
+
+**Implemented locally 6 October 2026.** `--json` selects the agent-facing
+execution contract. It controls interaction, output, errors, and compatibility,
+not just serialization after an interactive command has finished.
+
+- Select machine mode before prompting, progress output, privilege escalation,
+  or execution. Its behavior must be the same with or without a TTY. `--json`
+  takes precedence over `--verbose` and human presentation preferences.
+- Emit one intentional, documented JSON result on stdout, including failures.
+  Do not mix prose, warnings, spinner frames, ANSI sequences, or debug logs into
+  it. Warnings and recovery guidance belong in defined structured fields.
+  Ordinary machine-mode runs should not emit unstructured chatter on stderr;
+  stderr is reserved for failures that prevent emitting the documented result.
+- Use stable schemas, error codes, status meanings, exit codes, and resource or
+  operation references. Include argument/validation failures, missing setup,
+  authorization refusal, cancellation, timeout, and uncertain submission in
+  that contract. Deterministic structure does not imply fixed timestamps or
+  financial observations. Do not expose arbitrary internal objects or secrets.
+- Never read interactive answers or credentials from stdin, launch sudo password
+  prompts, or substitute default answers in machine mode. Human-only setup and
+  enrollment return a structured requirement for human action with a safe
+  command to run separately. Non-interactive equivalence does not mean accepting
+  credentials through arguments, JSON, environment variables, or agent stdin.
+- Financial commands retain fresh per-write Touch ID. Discovery must explicitly
+  describe any required human approval outside the agent's terminal, how the
+  caller observes waiting/cancellation/expiry, and bounded wait behavior. Machine
+  mode grants no approval and introduces no authentication bypass. A durable
+  pending or uncertain operation keeps its original identity and reconciliation
+  path; it must not be disguised as a completed action or an invitation to replay.
+- Treat schema changes as API changes. Inventory current consumers before adding
+  a common envelope or changing existing outputs; document/version incompatible
+  changes and keep help, discovery, schemas, examples, and tests synchronized.
+
+Implement this through shared execution-mode and interaction policy selected
+before dispatch, plus human and machine renderers over the same operation result.
+A renderer alone cannot prevent an earlier secret prompt or privilege request.
+Keep the actual protected storage backend and approval boundary accurate in
+human explanations; illustrative UX examples do not establish Keychain support
+or permission to move trusted approval into an agent-controlled terminal.
+
+Acceptance should cover machine mode with a TTY and with pipes, `--json` combined
+with `--verbose`, early parse errors, denied human-only commands before side
+effects, warnings, cancellation, and uncertain results. Assert parseable stdout,
+absence of terminal decoration/chatter, no stdin prompts, stable error/exit
+semantics, and preserved approval requirements. Existing financial success shapes
+and the `{ "ok": false, "error": FinError }` error envelope are retained; exit
+status is 0 for success and 1 for errors. Machine help returns `{ "help": string }`,
+version returns `{ "name": "fin", "version": string }`, and completion returns
+`{ "shell": string, "script": string }`. Human mode writes results to stdout and
+progress/warnings/errors to stderr. `--verbose` enables human diagnostics;
+`NO_COLOR` disables color, and redirected output has no animation or ANSI.
+
+Human setup shows actual stage activity and concise results; semantic color covers
+the complete message row. Build/signing diagnostics belong in verbose output or
+failure diagnostics. The initial review confirms this Mac account as Fin's
+approver; exact configuration remains available through `d: details`.
+The Mac login password permits installation; Touch ID separately confirms Fin's
+configuration. A configuration challenge lasts 90 seconds from creation, covering
+terminal review and Touch ID together, not the whole installation or credential
+entry. The prompt shows remaining seconds. Expiry saves no configuration and
+instructs the human to retry setup or the connection command for a fresh approval;
+it does not automatically renew consent. Financial preview/approval deadlines
+and per-write authorization are unchanged.
+Configuration review accepts Y/N and D immediately, in either case, without
+Enter. Enter still means No; Ctrl-C cancels. Terminal input settings are restored
+before Touch ID and on cancellation or expiry.
+The native biometric prompt identifies the app as **Fin** and names the action
+(for example, finishing setup for the Mac account or saving a named Binance
+connection). Configuration and permissions remain in the protected terminal;
+the biometric prompt does not repeat them as an opaque "configuration change".
+
+Setup automatically configures persistent completion from the same Clap command
+definitions as help. It reads the configured human account's login shell and home
+from the account database, runs file changes as that user, and supports Zsh, Bash,
+and Fish. Unsupported shells receive one brief notice without failing setup.
+Fin records exact generated files and marked RC blocks for idempotent updates and
+selective uninstall. Existing or subsequently edited configuration is preserved.
+The [completion reference](shell-completion.md) covers file locations and custom use.
 
 ## LLM-guided journey
 

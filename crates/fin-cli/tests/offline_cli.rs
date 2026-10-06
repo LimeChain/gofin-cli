@@ -109,6 +109,7 @@ fn unknown_secret_flags_and_invalid_json_never_echo_values() {
         "main",
         "--role",
         "main",
+        "--json",
         "--api-key",
         secret,
     ]);
@@ -125,6 +126,7 @@ fn unknown_secret_flags_and_invalid_json_never_echo_values() {
         secret,
         "--id",
         "synthetic-id",
+        "--json",
     ]);
     assert!(!invalid_json.status.success());
     let output = String::from_utf8_lossy(&invalid_json.stdout);
@@ -180,5 +182,126 @@ fn enrollment_requires_human_terminal_before_installer_or_privileged_exec() {
             "noninteractive invocation must not display an administrator notice or password prompt"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("Mac login password"));
+    }
+}
+
+#[test]
+fn machine_contract_covers_help_errors_and_verbose_precedence() {
+    for args in [
+        vec!["--help", "--json"],
+        vec!["connections", "add", "--help", "--json"],
+        vec!["--version", "--json"],
+        vec!["capabilities", "--json", "--verbose"],
+        vec!["--json", "unknown-command"],
+        vec!["explain", "unknown", "--json"],
+    ] {
+        let output = run(&args);
+        assert!(
+            output.stderr.is_empty(),
+            "machine stderr: {:?}",
+            output.stderr
+        );
+        assert!(!output.stdout.contains(&27));
+        let _: Value = serde_json::from_slice(&output.stdout).expect("one intentional JSON result");
+    }
+    assert_eq!(
+        run(&["capabilities", "--json"]).stdout,
+        run(&["capabilities", "--json", "--verbose"]).stdout
+    );
+    let human = run(&["explain", "unknown"]);
+    assert!(!human.status.success());
+    assert!(human.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&human.stderr).contains("Next:"));
+    assert!(!human.stderr.contains(&27));
+    let human = run(&["capabilities"]);
+    assert!(human.status.success());
+    assert!(!human.stdout.starts_with(b"{"));
+    assert!(!human.stdout.contains(&27));
+}
+
+#[test]
+fn completions_are_offline_and_machine_output_is_explicit() {
+    for shell in ["bash", "zsh", "fish"] {
+        let human = run(&["completions", shell]);
+        assert!(!String::from_utf8_lossy(&human.stdout).contains("internal-completions"));
+        assert!(human.status.success());
+        let script = String::from_utf8(human.stdout).unwrap();
+        assert!(script.contains("connections"));
+        assert!(script.contains("ed25519"));
+        let machine = run(&["completions", shell, "--json"]);
+        assert!(machine.status.success());
+        assert!(machine.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+        assert_eq!(value["script"], script);
+        assert_eq!(value["shell"], shell);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_mode_has_no_prompts_or_decoration_on_a_disposable_tty() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    for args in [
+        vec!["setup", "--json", "--verbose"],
+        vec!["connections", "add", "--json"],
+        vec!["explain", "missing", "--json"],
+    ] {
+        let (mut master, mut slave) = (-1, -1);
+        // Synthetic PTY only: no user's terminal, credentials or approvals.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                match master.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => output.extend_from_slice(&buffer[..n]),
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                    Err(error) => panic!("PTY read: {error}"),
+                }
+            }
+            output
+        });
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fin"))
+            .args(args)
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("machine command waited for input");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!status.success());
+        let output = reader.join().unwrap();
+        assert!(!output.contains(&27));
+        let value: Value = serde_json::from_slice(&output).expect("TTY returns only JSON");
+        assert_eq!(value["ok"], false);
     }
 }

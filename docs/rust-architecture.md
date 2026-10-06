@@ -57,12 +57,20 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
 | `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
 | `fin-discovery`         | Shared offline command metadata, safe schemas and enrollment outcomes.                                                                                 |
+| `fin-presentation`     | Shared human/machine rendering, safe terminal text, stderr progress and diagnostic policy; no credentials or financial authority. |
 | `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
 | `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
 
 The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses explicit Binance REST methods rather than claiming a Rust CCXT equivalent. SQLite is handled through `rusqlite`; Ethereum uses Alloy. macOS packages are built locally with hardened ad hoc signatures and checksums. Publisher authentication, Linux/Windows write authorization, and an unattended curl installer are not implemented by that packaging script.
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
+
+The signed helper artifact remains `fin-touch-id` in the seven-component source
+bundle. Installation derives its protected executable at
+`/Library/Fin/runtime/authorization/Fin`, avoiding a filename collision with the
+public CLI on case-insensitive filesystems. Both its signed metadata and native
+application identity use **Fin**. The parent directory and executable retain the
+same root ownership, hardened signature and ACL validation as other runtime code.
 
 ## Independent extension dimensions
 
@@ -89,6 +97,35 @@ The command registry also covers installation, daemon lifecycle, onboarding, and
 Discovery must work before installation of the protected component, without credentials or a running broker. It must say who runs an interactive command, what safe arguments it accepts, how secret input is collected, what human approval is needed, what it changes, what checks actually run, and how success or failure is checked. See the required [onboarding/discovery contract](onboarding.md).
 
 The companion skill teaches agents to inspect the installed CLI. It must not be the only source of onboarding instructions or duplicate provider-specific command catalogs. Refresh it against implemented Rust commands when they exist.
+
+### Reusable CLI command patterns
+
+Keep dispatch separate from presentation. `read`, `preview`, `execute`, `status`
+and run commands return broker values; `fin-presentation` renders those same
+values for humans or preserves the machine JSON shape. A new application adds
+typed operations and discovery, not another output/error/progress stack.
+Financial quantities, units, resource identities and uncertain statuses stay exact.
+
+Select `--json` before side effects: human-only configuration commands return a
+structured handoff before sudo or stdin; financial commands retain native
+per-write approval. `--verbose` is human diagnostics only. The shared UI owns
+TTY/color/progress/stream rules, including `NO_COLOR` across privileged launch.
+Safe argument types drive flag parsing, schema generation and completion; guided
+public metadata becomes the same `AddConnectionArgs` and uses the same validator.
+No wizard owns credentials. Default human discovery omits deep schemas and
+internal metadata, with explicit verbose/machine paths for those details.
+
+Trusted configuration review is a separate responsibility from public CLI
+rendering. The protected human terminal produces a consumed challenge-bound
+review proof only after confirmation and successful terminal restoration.
+The macOS authorizer accepts that proof for configuration only; the helper also
+checks a root-owned, mode-0600, unlinked regular-file input inherited read-only
+and an anonymous response pipe before omitting its duplicate Fin dialog.
+Darwin pipe metadata reports the inspecting process's UID, so it cannot prove
+the creating broker's identity. Invalid terminal proofs fail instead of opening
+a second custom review dialog.
+Financial requests keep native exact review. This division keeps a pleasant
+client presentation from becoming an approval mechanism.
 
 ## Write lifecycle and authorization
 
@@ -197,7 +234,16 @@ Public RPCs must be from trusted public providers without credential-bearing URL
 
 Ship compiled releases requiring no Node/npm or Rust toolchain on the user's machine. A small downloadable shell bootstrap selects the platform/architecture, verifies the release as supported, and invokes bundled `fin setup`. Setup lives with Fin; a separate GUI installer/package is not a beta requirement. Do not publish a speculative install URL or present future commands as runnable before release artifacts exist.
 
-Proposed lifecycle: `fin setup`, `fin daemon start`, `fin daemon status`, and graceful `fin daemon stop`. The human performs initial protected installation and provisioning in their own terminal. The agent can inspect setup/help and safe diagnostics; it cannot grant itself installation or financial authority. Installer elevation is OS administrator authorization, which may require a password; it is distinct from Fin's per-write biometric authorization. Do not silently change system authentication policy or leave the agent with cached/passwordless elevation.
+Implemented lifecycle: `fin setup`, `fin daemon start`, `fin daemon status`, and graceful `fin daemon stop`. The human performs initial protected installation and provisioning in their own terminal. The agent can inspect setup/help and safe diagnostics; it cannot grant itself installation or financial authority. Installer elevation is OS administrator authorization, which may require a password; it is distinct from Fin's per-write biometric authorization. Do not silently change system authentication policy or leave the agent with cached/passwordless elevation.
+
+Status observes the fixed launchd job directly without opening its activation
+socket; readiness/configuration remain in Doctor. Stop records root-owned public
+intent in `/Library/Fin/run/daemon-stopped` before draining/exiting. Ordinary
+clients check this intent before socket connection, and the protected broker
+independently rejects non-lifecycle requests while stopped. Explicit start alone
+clears the marker after protected runtime validation. Launchd keeps its trusted
+socket registration; no new privilege rule or financial authorization exists.
+Start/stop report observed process state rather than submission acknowledgement.
 
 Prefer service-manager/on-demand activation where practical. Start invokes the fixed installed service, never client-selected privileged code or configuration. Stop preserves the journal and unresolved reservations and must not erase or declare pending financial work complete. Source/development execution cannot become a production write bypass. Signing/notarization can improve public distribution later, but is not an additional beta implementation gate.
 

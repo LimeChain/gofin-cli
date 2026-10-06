@@ -12,7 +12,7 @@ pub mod enrollment_contract;
 
 /// Shared human-facing explanation for macOS administrator authentication.
 pub const MACOS_ADMIN_PASSWORD_PROMPT: &str = "Mac login password for %p: ";
-pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS will request administrator authentication. If a password is requested, enter the password you use to log in to this Mac; characters will not appear as you type. macOS checks this password; Fin does not read or store it. Press Ctrl-C to cancel.";
+pub const MACOS_ADMIN_PASSWORD_HELP: &str = "macOS will ask for your Mac login password (typing is hidden). Touch ID follows. Ctrl-C cancels.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +65,8 @@ pub struct AddConnectionArgs {
     #[arg(long)]
     pub address: Option<String>,
     /// Credential category only: hmac/rsa/ed25519 or private_key/read_only.
+    /// Binance prompts privately for both API key and signing secret/key.
+    /// PEM input accepts actual line breaks or literal \n separators; include BEGIN/END lines and press Enter.
     #[arg(long, value_enum)]
     pub credential_type: Option<CredentialType>,
 }
@@ -77,6 +79,25 @@ pub struct NamedConnectionArgs {
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
+
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CompletionShell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionInput {
+    pub shell: CompletionShell,
+}
+
+/// Machine execution policy shared by offline discovery and callers.
+pub fn machine_contract() -> Value {
+    json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable; retain out-of-band trusted review and fresh Touch ID for the exact write. No terminal prompts or approval bypass; client wait bounded to 300 seconds, then reconcile the same request ID."})
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -258,7 +279,10 @@ pub fn operation_definitions() -> Vec<Definition> {
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Each later financial write, including cleanup, requires a separate fresh macOS Touch ID approval. Enrollment and daemon startup grant none.",
-        "metadata_input":"Use the documented flags; no metadata wizard is implemented.",
+        "metadata_input":"Run fin connections add for guided public metadata, or supply complete documented flags. Updates require flags.",
+        "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
+        "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
+        "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
         "command_line_examples":[
             "fin connections add --provider binance --name main --role main --credential-type hmac",
             "fin connections add --provider binance --name main-rsa --role main --credential-type rsa",
@@ -274,6 +298,14 @@ pub fn operation_definitions() -> Vec<Definition> {
         "next_check":"fin connections list --json"
     });
     let mut definitions = vec![
+        definition::<CompletionInput>(
+            "completions",
+            "Generate bash, zsh or fish completion for manual/custom use; setup installs completion automatically.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"shell":"zsh"}),
+            json!({"service_required":false,"command_line_example":"fin completions zsh","human_output":"shell script","machine_output":"object with shell and script"}),
+        ),
         definition::<EmptyArgs>(
             "capabilities",
             "List offline command and financial operation definitions, schemas, examples, and execution metadata.",
@@ -403,7 +435,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"Fin-owned files and exact marked blocks only; preserve user edits"},"installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
         ),
         definition::<AddConnectionArgs>(
             "connections.add",
@@ -443,23 +475,23 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Lifecycle,
             ExecutionActor::AgentInvocable,
             json!({}),
-            json!({"secret_input":"none","financial_authorization":false,"trusted_code":"fixed installed broker; on-demand service activation"}),
+            json!({"secret_input":"none","financial_authorization":false,"trusted_code":"fixed installed broker; on-demand service activation","behavior":"Explicitly resume stopped broker and report observed running state; never grants financial authority."}),
         ),
         definition::<EmptyArgs>(
             "daemon.status",
-            "Read service availability and protected installation diagnostics.",
+            "Report observed running/stopped state without activating the broker.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({}),
-            json!({"secret_input":"none","financial_movement":false,"next_check":"fin setup"}),
+            json!({"secret_input":"none","financial_movement":false,"broker_activation":false,"source":"launchd service state; no broker IPC","readiness":"Use fin doctor for configuration and readiness diagnostics."}),
         ),
         definition::<EmptyArgs>(
             "daemon.stop",
-            "Stop gracefully after preserving submitted identities and reservations.",
+            "Stop gracefully and remain stopped until explicit start, preserving submitted identities and reservations.",
             OperationKind::Lifecycle,
             ExecutionActor::AgentInvocable,
             json!({}),
-            json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup."}),
+            json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup.","restart":"Only explicit fin daemon start clears protected stop intent; ordinary commands cannot reactivate it."}),
         ),
     ];
     let mut connection_schema = schema::<AddConnectionArgs>();
@@ -489,6 +521,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         }
     ]);
     for item in &mut definitions {
+        item.semantics["machine_contract"] = machine_contract();
         if matches!(item.name.as_str(), "connections.add" | "connections.update") {
             item.input_schema = connection_schema.clone();
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
@@ -590,7 +623,7 @@ mod tests {
         assert_eq!(definition.semantics["future_financial_authority"], false);
         assert_eq!(
             definition.semantics["metadata_input"],
-            "Use the documented flags; no metadata wizard is implemented."
+            "Run fin connections add for guided public metadata, or supply complete documented flags. Updates require flags."
         );
         assert_eq!(
             definition.semantics["binance"]["supported_credential_types"],

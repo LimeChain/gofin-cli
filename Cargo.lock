@@ -1122,6 +1122,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1683,6 +1692,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "fin-domain",
+ "fin-human-terminal",
  "libc",
  "serde_json",
  "tempfile",
@@ -1731,6 +1741,7 @@ dependencies = [
  "fin-ethereum",
  "fin-evm",
  "fin-human-terminal",
+ "fin-presentation",
  "fin-protocol",
  "fin-store",
  "hex",
@@ -1755,9 +1766,11 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "clap",
+ "clap_complete",
  "fin-broker",
  "fin-discovery",
  "fin-domain",
+ "fin-presentation",
  "fin-protocol",
  "libc",
  "serde",
@@ -1867,10 +1880,20 @@ dependencies = [
 name = "fin-human-terminal"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "fin-domain",
  "libc",
+ "serde_json",
  "signal-hook",
  "zeroize",
+]
+
+[[package]]
+name = "fin-presentation"
+version = "0.2.0"
+dependencies = [
+ "fin-domain",
+ "serde_json",
 ]
 
 [[package]]

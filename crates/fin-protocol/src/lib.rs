@@ -2,6 +2,8 @@
 //! The wire surface intentionally exposes typed operations, never credentials,
 //! approval receipts, arbitrary venue methods, or client-supplied final state.
 
+pub mod daemon;
+
 use fin_domain::{FinError, OperationRequest, PlanStep, ResourceAmount};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

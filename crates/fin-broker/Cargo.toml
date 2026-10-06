@@ -14,6 +14,7 @@ fin-binance.workspace = true
 fin-credentials.workspace = true
 fin-discovery.workspace = true
 fin-human-terminal.workspace = true
+fin-presentation.workspace = true
 fin-domain.workspace = true
 fin-engine.workspace = true
 fin-ethereum.workspace = true

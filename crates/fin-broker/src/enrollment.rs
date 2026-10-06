@@ -12,9 +12,12 @@ use fin_discovery::{
     validate_name,
 };
 use fin_domain::{
-    AssetId, AuthorizationChallenge, Authorizer, FinError, ResourceId, Result, binding_hash, now,
+    AssetId, AuthorizationChallenge, FinError, ResourceId, Result, binding_hash, now,
 };
 use fin_human_terminal::{HumanTerminal, SecretInput};
+use fin_presentation::Ui;
+#[path = "enrollment_presentation.rs"]
+mod presentation;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -34,6 +37,30 @@ fn error(code: &str, message: &str) -> FinError {
         "Inspect connections and unresolved operations. Run enrollment yourself in a fresh human Terminal; never paste credentials in chat.",
     )
 }
+fn binance_enrollment_error(code: &str, cause: fin_binance::TransportError) -> FinError {
+    use fin_binance::TransportError;
+    // Transport errors contain only fixed classifications and numeric codes,
+    // never upstream messages, response bodies, signed URLs, or credentials.
+    let mut message = match &cause {
+        TransportError::PermissionDenied => {
+            "The protected Binance credential could not be loaded or used for signing".into()
+        }
+        _ => cause.to_string(),
+    };
+    if let TransportError::HttpFailure {
+        status,
+        binance_code,
+        ..
+    } = cause
+    {
+        message.push_str(&format!(" [HTTP {status}"));
+        if let Some(code) = binance_code {
+            message.push_str(&format!("; Binance code {code}"));
+        }
+        message.push(']');
+    }
+    error(code, &message)
+}
 fn parse<T: for<'a> Deserialize<'a>>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(|_| {
         error(
@@ -49,9 +76,13 @@ struct Initialize {
 }
 
 pub async fn handle(action: &str, request: Value) -> Result<Value> {
+    handle_with_ui(action, request, &Ui::new(false, false)).await
+}
+
+pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Value> {
     validate_installation()?;
     if action == "initialize" {
-        return initialize(parse(request)?).await;
+        return initialize(parse(request)?, ui).await;
     }
     let _lock = lock_protected_configuration(true)?;
     let mut config = load_protected_config()?;
@@ -95,12 +126,15 @@ pub async fn handle(action: &str, request: Value) -> Result<Value> {
             }
             let old = existing.map(|index| config.connections[index].clone());
             let material = collect_material(&mut terminal, &args)?;
+            // Restore the human terminal before storing, validating or approving
+            // the candidate. A failed restoration cannot report enrollment success.
+            terminal.finish()?;
             let staged = material
                 .as_ref()
                 .map(|material| store.put(material))
                 .transpose()?;
             let result=async {
-                let (connection,checks,warnings)=validate_connection(&args,&config,store.clone(),staged.as_ref(),material.as_ref()).await?;
+                let (connection,checks,warnings)=validate_connection(&args,&config,store.clone(),staged.as_ref(),material.as_ref(),ui).await?;
                 if let Some(index)=existing {
                     if immutable_identity(&config.connections[index])!=immutable_identity(&connection) {
                         return Err(error("CONNECTION_RESOURCE_CHANGED","Credential replacement must preserve provider, physical identity, network and account relationships. Enroll a separately named connection for a different identity."));
@@ -110,8 +144,8 @@ pub async fn handle(action: &str, request: Value) -> Result<Value> {
                 config.validate()?;
                 let binding=json!({"action":action,"connection":connection,"checks":checks,"warnings":warnings,
                     "configuration_hash":config_hash(&config)?,"financial_movement":false,"future_financial_authority":false});
-                approve_and_audit(config.approver_uid,&binding,&format!("{action} connection {}",args.name)).await?;
-                save_protected_config(&config)?;
+                approve_and_audit(config.approver_uid,&binding,&format!("{action} connection {}",args.name),ui).await?;
+                { let _progress=ui.progress("Saving connection"); save_protected_config(&config)?; }
                 let cleanup_warning=old.as_ref().and_then(credential).filter(|previous|Some(previous.as_str())!=staged.as_ref().map(CredentialRef::as_str))
                     .and_then(|reference|store.remove(&reference).err()).map(|_|"Connection is active; an obsolete protected credential needs cleanup at the next human enrollment.");
                 Ok(outcome(action,Some(&connection),checks,warnings,cleanup_warning))
@@ -142,6 +176,7 @@ pub async fn handle(action: &str, request: Value) -> Result<Value> {
             result
         }
         "remove" => {
+            terminal.finish()?;
             let args: NamedConnectionArgs = parse(request)?;
             validate_name(&args.name)?;
             let index = config
@@ -165,6 +200,7 @@ pub async fn handle(action: &str, request: Value) -> Result<Value> {
                 config.approver_uid,
                 &binding,
                 &format!("Remove connection {}", args.name),
+                ui,
             )
             .await?;
             save_protected_config(&config)?;
@@ -177,16 +213,20 @@ pub async fn handle(action: &str, request: Value) -> Result<Value> {
                 cleanup_warning,
             ))
         }
-        _ => Err(error(
-            "UNKNOWN_ENROLLMENT_ACTION",
-            "The protected enrollment action is not supported.",
-        )),
+        _ => {
+            terminal.finish()?;
+            Err(error(
+                "UNKNOWN_ENROLLMENT_ACTION",
+                "The protected enrollment action is not supported.",
+            ))
+        }
     }
 }
 
-async fn initialize(args: Initialize) -> Result<Value> {
+async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
-    let _terminal = HumanTerminal::open(args.approver_uid)?;
+    let terminal = HumanTerminal::open(args.approver_uid)?;
+    terminal.finish()?;
     if Path::new(CONFIG_PATH).try_exists().map_err(|_| {
         error(
             "CONFIG_UNAVAILABLE",
@@ -214,6 +254,7 @@ async fn initialize(args: Initialize) -> Result<Value> {
         args.approver_uid,
         &binding,
         "Initialize protected Fin configuration",
+        ui,
     )
     .await?;
     save_protected_config(&config)?;
@@ -235,9 +276,9 @@ fn collect_material(
                 let ed25519 = args.credential_type == Some(CredentialType::Ed25519);
                 let key = terminal.read_secret(
                     if ed25519 {
-                        "Binance Ed25519 PKCS#8 PEM key (paste through its END line)"
+                        "Binance Ed25519 PKCS#8 PEM key"
                     } else {
-                        "Binance RSA PEM key (paste through its END line)"
+                        "Binance RSA PEM key"
                     },
                     SecretInput::Pem,
                 )?;
@@ -279,6 +320,7 @@ async fn validate_connection(
     store: Arc<TrustedCredentialStore>,
     staged: Option<&CredentialRef>,
     material: Option<&SecretMaterial>,
+    ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
         Provider::Ethereum => {
@@ -324,8 +366,14 @@ async fn validate_connection(
                 network.chain_id,
             )?);
             let runtime = fin_evm::EvmRuntime::new(rpc, network.chain_id, None);
-            runtime.assert_chain().await?;
-            let balance = runtime.balance(fin_evm::address(&address)?, None).await?;
+            {
+                let _progress = ui.progress("Checking Ethereum network");
+                runtime.assert_chain().await?;
+            }
+            let balance = {
+                let _progress = ui.progress("Checking wallet balance");
+                runtime.balance(fin_evm::address(&address)?, None).await?
+            };
             let resource = ResourceId(format!("ethereum:{}:{address}", network.chain_id));
             let assets = vec![
                 asset(&network.id, "native", 18),
@@ -374,9 +422,28 @@ async fn validate_connection(
                     "The staged credential handle is invalid.",
                 )
             })?;
-            let identity=transport.request(&handle,BinanceRequest::new(BinanceEndpoint::Account)).await.map_err(|_|error("BINANCE_AUTHENTICATION_FAILED","Binance rejected or could not verify the key. Check key activity, outbound IP and read permissions."))?;
+            let identity = {
+                let _progress = ui.progress("Checking Binance account");
+                transport
+                    .request(&handle, BinanceRequest::new(BinanceEndpoint::Account))
+                    .await
+                    .map_err(|cause| {
+                        binance_enrollment_error("BINANCE_AUTHENTICATION_FAILED", cause)
+                    })?
+            };
             let uid = account_uid(&identity)?;
-            let permissions=transport.request(&handle,BinanceRequest::new(BinanceEndpoint::ApiRestrictions)).await.map_err(|_|error("BINANCE_PERMISSIONS_UNAVAILABLE","Reported key restrictions could not be read; no trial movement was attempted."))?;
+            let permissions = {
+                let _progress = ui.progress("Checking Binance API permissions");
+                transport
+                    .request(
+                        &handle,
+                        BinanceRequest::new(BinanceEndpoint::ApiRestrictions),
+                    )
+                    .await
+                    .map_err(|cause| {
+                        binance_enrollment_error("BINANCE_PERMISSIONS_UNAVAILABLE", cause)
+                    })?
+            };
             let permissions: fin_binance::ApiRestrictions = serde_json::from_value(permissions)
                 .map_err(|_| {
                     error(
@@ -448,21 +515,21 @@ async fn validate_connection(
                         "The parent's credential handle is invalid.",
                     )
                 })?;
-                let hierarchy = transport
-                    .request(
-                        &parent_handle,
-                        BinanceRequest::new(BinanceEndpoint::SubAccountList)
-                            .push("email", email)
-                            .push("page", "1")
-                            .push("limit", "200"),
-                    )
-                    .await
-                    .map_err(|_| {
-                        error(
-                            "BINANCE_PARENT_READ_FAILED",
-                            "The main key could not verify the selected child email.",
+                let hierarchy = {
+                    let _progress = ui.progress("Checking Binance subaccount mapping");
+                    transport
+                        .request(
+                            &parent_handle,
+                            BinanceRequest::new(BinanceEndpoint::SubAccountList)
+                                .push("email", email)
+                                .push("page", "1")
+                                .push("limit", "200"),
                         )
-                    })?;
+                        .await
+                        .map_err(|cause| {
+                            binance_enrollment_error("BINANCE_PARENT_READ_FAILED", cause)
+                        })?
+                };
                 let children: fin_binance::SubAccountListResponse =
                     serde_json::from_value(hierarchy).map_err(|_| {
                         error(
@@ -538,7 +605,7 @@ fn account_uid(identity: &Value) -> Result<String> {
     }
     Ok(uid)
 }
-async fn approve_and_audit(uid: u32, binding: &Value, summary: &str) -> Result<()> {
+async fn approve_and_audit(uid: u32, binding: &Value, summary: &str, ui: &Ui) -> Result<()> {
     let challenge = AuthorizationChallenge {
         purpose: "configuration".into(),
         operation_id: format!("configuration:{}", uuid::Uuid::new_v4()),
@@ -552,9 +619,24 @@ async fn approve_and_audit(uid: u32, binding: &Value, summary: &str) -> Result<(
         ),
         expires_at: (chrono::Utc::now() + chrono::Duration::seconds(90)).to_rfc3339(),
     };
-    let approval = MacOsAuthorizer::protected(uid)?
-        .authorize(&challenge)
-        .await?;
+    fin_authorization::validate_challenge(&challenge, &now())?;
+    let review = presentation::review(binding)?;
+    let proof = HumanTerminal::open(uid)?.review_configuration(&challenge, &review)?;
+    let approval = {
+        let _progress = ui.progress("Waiting for Touch ID");
+        MacOsAuthorizer::protected(uid)?
+            .authorize_reviewed_configuration(&challenge, proof)
+            .await
+            .map_err(|failure| {
+                if failure.code == "AUTHORIZATION_EXPIRED" {
+                    fin_human_terminal::configuration_approval_expired(
+                        binding["action"].as_str().unwrap_or(""),
+                    )
+                } else {
+                    failure
+                }
+            })?
+    };
     let path = Path::new("/Library/Fin/private/configuration-audit.jsonl");
     if path.try_exists().map_err(|_| {
         error(
@@ -716,6 +798,48 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enrollment_binance_diagnostic_preserves_only_typed_http_codes() {
+        use fin_binance::{HttpFailureKind, TransportError};
+        for (status, binance_code, suffix) in [
+            (401, Some(-2015), " [HTTP 401; Binance code -2015]"),
+            (400, Some(-1022), " [HTTP 400; Binance code -1022]"),
+            (403, None, " [HTTP 403]"),
+        ] {
+            let failure = binance_enrollment_error(
+                "BINANCE_AUTHENTICATION_FAILED",
+                TransportError::HttpFailure {
+                    status,
+                    binance_code,
+                    kind: HttpFailureKind::PermissionDenied,
+                },
+            );
+            assert_eq!(failure.code, "BINANCE_AUTHENTICATION_FAILED");
+            assert_eq!(failure.stage, "enrollment");
+            assert_eq!(
+                failure.message,
+                format!("Binance request permission denied{suffix}")
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_binance_diagnostic_distinguishes_network_and_local_signing() {
+        use fin_binance::TransportError;
+        for (cause, expected) in [
+            (TransportError::Timeout, "Binance request timed out"),
+            (TransportError::Unavailable, "Binance request unavailable"),
+            (
+                TransportError::PermissionDenied,
+                "The protected Binance credential could not be loaded or used for signing",
+            ),
+        ] {
+            let failure = binance_enrollment_error("BINANCE_AUTHENTICATION_FAILED", cause);
+            assert_eq!(failure.message, expected);
+            assert!(!failure.message.contains("HTTP"));
+        }
+    }
+
     #[test]
     fn key_rotation_preserves_physical_identity_and_relationships() {
         let original = ConnectionConfig::Binance {

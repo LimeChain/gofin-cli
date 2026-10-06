@@ -27,7 +27,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -1262,6 +1262,8 @@ pub struct BrokerRuntime {
     valuator: Arc<dyn AssetValuator>,
     accepting: AtomicBool,
     protected_config_check: AtomicBool,
+    daemon_marker_path: Mutex<PathBuf>,
+    daemon_marker_owner_uid: u32,
 }
 
 struct ValuatorPriceProvider {
@@ -1322,6 +1324,8 @@ pub fn compose_runtime(
         valuator: dependencies.valuator,
         accepting: AtomicBool::new(true),
         protected_config_check: AtomicBool::new(false),
+        daemon_marker_path: Mutex::new(PathBuf::from(fin_protocol::daemon::STOP_MARKER_PATH)),
+        daemon_marker_owner_uid: unsafe { libc::geteuid() },
     }))
 }
 
@@ -1386,6 +1390,22 @@ impl BrokerRuntime {
 
     async fn handle_result(&self, request: BrokerRequest) -> fin_domain::Result<Value> {
         use BrokerRequest as R;
+        let lifecycle_request = matches!(&request, R::DaemonStart | R::DaemonStop);
+        if self.protected_config_check.load(Ordering::SeqCst) {
+            let stopped = fin_protocol::daemon::stop_requested_at(
+                &self.daemon_marker_path.lock().unwrap(),
+                self.daemon_marker_owner_uid,
+            )?;
+            if stopped && !lifecycle_request {
+                self.accepting.store(false, Ordering::SeqCst);
+                return Err(error(
+                    "DAEMON_STOPPED",
+                    "daemon",
+                    "The protected broker is stopped and accepts lifecycle requests only.",
+                    "Explicitly start the Fin broker service before sending other requests.",
+                ));
+            }
+        }
         match request {
             R::Capabilities => Ok(
                 json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES}),
@@ -1434,10 +1454,25 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.finish_run(&id, final_snapshot, Utc::now())?)
                     .map_err(|_| internal_error())
             }
-            R::DaemonStart => Ok(json!({"status":"already_running_or_socket_activated"})),
+            R::DaemonStart => {
+                if self.protected_config_check.load(Ordering::SeqCst) {
+                    fin_protocol::daemon::resume_at(
+                        &self.daemon_marker_path.lock().unwrap(),
+                        self.daemon_marker_owner_uid,
+                    )?;
+                }
+                self.accepting.store(true, Ordering::SeqCst);
+                Ok(json!({"status":"running","pid":std::process::id()}))
+            }
             R::DaemonStop => {
+                if self.protected_config_check.load(Ordering::SeqCst) {
+                    fin_protocol::daemon::request_stop_at(
+                        &self.daemon_marker_path.lock().unwrap(),
+                        self.daemon_marker_owner_uid,
+                    )?;
+                }
                 self.accepting.store(false, Ordering::SeqCst);
-                Ok(json!({"status":"stopping_after_current_request"}))
+                Ok(json!({"status":"stopping"}))
             }
         }
     }
@@ -3441,6 +3476,74 @@ mod tests {
         )
         .unwrap();
         (runtime, captures)
+    }
+
+    fn install_test_stop_marker(runtime: &BrokerRuntime, path: PathBuf) {
+        *runtime.daemon_marker_path.lock().unwrap() = path;
+        runtime.protected_config_check.store(true, Ordering::SeqCst);
+    }
+
+    fn test_directory() -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("fin-broker-daemon-{}-{nonce}", std::process::id()));
+        fs::create_dir(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        path
+    }
+
+    #[tokio::test]
+    async fn daemon_stop_persists_until_explicit_start_after_restart() {
+        let directory = test_directory();
+        let marker = directory.join("daemon-stopped");
+        let initial = runtime();
+        install_test_stop_marker(&initial, marker.clone());
+
+        let stopped = initial.handle(BrokerRequest::DaemonStop).await;
+        assert!(stopped.ok);
+        assert_eq!(stopped.result.unwrap()["status"], "stopping");
+        assert!(!initial.accepting.load(Ordering::SeqCst));
+        assert!(
+            fin_protocol::daemon::stop_requested_at(&marker, initial.daemon_marker_owner_uid)
+                .unwrap()
+        );
+
+        // A newly composed process sees the durable marker and blocks ordinary
+        // requests until the human explicitly starts the service.
+        let restarted = runtime();
+        install_test_stop_marker(&restarted, marker.clone());
+        let blocked = restarted.handle(BrokerRequest::Capabilities).await;
+        assert_eq!(blocked.error.unwrap().code, "DAEMON_STOPPED");
+        assert!(!restarted.accepting.load(Ordering::SeqCst));
+
+        let started = restarted.handle(BrokerRequest::DaemonStart).await;
+        assert!(started.ok);
+        assert_eq!(started.result.as_ref().unwrap()["status"], "running");
+        assert_eq!(started.result.unwrap()["pid"], std::process::id());
+        assert!(
+            !fin_protocol::daemon::stop_requested_at(&marker, restarted.daemon_marker_owner_uid)
+                .unwrap()
+        );
+        assert!(restarted.handle(BrokerRequest::Capabilities).await.ok);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn failed_stop_marker_write_does_not_claim_stopping_or_disable_acceptance() {
+        let runtime = runtime();
+        let missing_parent = test_directory().join("missing").join("daemon-stopped");
+        install_test_stop_marker(&runtime, missing_parent);
+        let response = runtime.handle(BrokerRequest::DaemonStop).await;
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "DAEMON_MARKER_INVALID");
+        assert!(runtime.accepting.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

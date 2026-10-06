@@ -1,10 +1,14 @@
 use async_trait::async_trait;
-use clap::{Args, Parser, Subcommand, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use fin_discovery::CompletionShell;
 use fin_domain::{FinError, OperationRequest};
+use fin_presentation::Ui;
 use fin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES};
-use serde::Serialize;
+mod daemon;
+mod onboarding;
+mod shell_integration;
 use serde_json::{Value, json};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -31,20 +35,35 @@ const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
 #[derive(Parser, Debug)]
 #[command(
     name = "fin",
+    color = clap::ColorChoice::Never,
     version,
     about = "Discover and safely operate Fin's protected financial broker"
 )]
 struct Cli {
-    /// Emit structured JSON (the default output format).
+    /// Machine contract: JSON only, no terminal prompts, progress or color.
     #[arg(long, global = true)]
     json: bool,
+    /// Show additional human-readable diagnostics; ignored with --json.
+    #[arg(long, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Installer-owned shell configuration, always run as the human user.
+    #[command(hide = true)]
+    InternalCompletions {
+        #[arg(value_enum)]
+        action: shell_integration::Action,
+    },
     Capabilities,
+    /// Generate shell completion from the installed command definitions.
+    Completions {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     Explain {
         name: String,
     },
@@ -74,6 +93,13 @@ enum Command {
         #[command(subcommand)]
         command: Option<ConnectionsCommand>,
     },
+}
+
+#[derive(Args, Debug)]
+#[command(mut_arg("provider", |arg| arg.required(false)), mut_arg("name", |arg| arg.required(false)))]
+struct ConnectionCommandArgs {
+    #[command(flatten)]
+    connection: Option<fin_discovery::AddConnectionArgs>,
 }
 
 #[derive(Args, Debug)]
@@ -124,7 +150,7 @@ enum DaemonCommand {
 #[derive(Subcommand, Debug)]
 enum ConnectionsCommand {
     List,
-    Add(fin_discovery::AddConnectionArgs),
+    Add(ConnectionCommandArgs),
     Update(fin_discovery::AddConnectionArgs),
     Remove(fin_discovery::NamedConnectionArgs),
 }
@@ -153,6 +179,11 @@ impl UnixTransport {
 
     #[cfg(target_os = "macos")]
     async fn exchange(&self, request: BrokerRequest) -> Result<Value, FinError> {
+        // Explicit stop blocks ordinary socket activation. Fixture transports
+        // never inspect the installed marker or touch the real service.
+        if self.path == std::path::Path::new(SOCKET_PATH) {
+            daemon::check_activation(&request, fin_protocol::daemon::stop_requested)?;
+        }
         let response_timeout = match &request {
             BrokerRequest::Execute { .. } => FINANCIAL_WRITE_TIMEOUT,
             BrokerRequest::RunBegin { .. }
@@ -354,6 +385,7 @@ fn capabilities() -> Value {
         "commands": definitions(),
         "operations": financial_catalog(),
         "service_required": false,
+        "machine_contract": fin_discovery::machine_contract(),
         "platforms": {
             "macos": {"protected_broker": true, "human_enrollment": true},
             "linux": {"offline_discovery": true, "protected_broker": false, "human_enrollment": false},
@@ -391,9 +423,26 @@ impl Client for UnixTransport {
 }
 
 async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
-    let _json = cli.json;
+    let json = cli.json;
+    let verbose = cli.verbose;
+    if json && human_only(&cli.command) {
+        return Err(human_required());
+    }
     match cli.command {
+        Command::InternalCompletions { action } => shell_integration::run(action),
         Command::Capabilities => Ok(capabilities()),
+        Command::Completions { shell } => {
+            let shell = match shell {
+                CompletionShell::Bash => clap_complete::Shell::Bash,
+                CompletionShell::Zsh => clap_complete::Shell::Zsh,
+                CompletionShell::Fish => clap_complete::Shell::Fish,
+            };
+            let mut bytes = Vec::new();
+            clap_complete::generate(shell, &mut completion_definition(), "fin", &mut bytes);
+            Ok(
+                json!({"shell":shell.to_string(),"script":String::from_utf8(bytes).map_err(|_| generic_input_error())?}),
+            )
+        }
         Command::Explain { name } => find_definition(&name).ok_or_else(|| {
             FinError::new(
                 "UNKNOWN_DEFINITION",
@@ -463,28 +512,44 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
             }
             RunCommand::Finish { id } => client.call(BrokerRequest::RunFinish { id }).await,
         },
-        Command::Daemon { command } => match command {
-            DaemonCommand::Start => client.call(BrokerRequest::DaemonStart).await,
-            DaemonCommand::Status => client.call(BrokerRequest::Doctor).await,
-            DaemonCommand::Stop => client.call(BrokerRequest::DaemonStop).await,
-        },
-        Command::Setup => launch_human_privileged(PrivilegedAction::Setup),
+        Command::Daemon { command } => daemon::run(command, client).await,
+        Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Connections { command } => match command {
             None | Some(ConnectionsCommand::List) => client.call(BrokerRequest::Connections).await,
             Some(ConnectionsCommand::Add(args)) => {
+                let args = match args.connection {
+                    Some(args) => args,
+                    None if stdin_is_terminal() => onboarding::guided_add()?,
+                    None => return Err(human_required()),
+                };
                 fin_discovery::validate_add(&args)?;
-                launch_human_privileged(PrivilegedAction::Add(args))
+                launch_human_privileged(PrivilegedAction::Add(args), json, verbose)
             }
             Some(ConnectionsCommand::Update(args)) => {
                 fin_discovery::validate_add(&args)?;
-                launch_human_privileged(PrivilegedAction::Update(args))
+                launch_human_privileged(PrivilegedAction::Update(args), json, verbose)
             }
             Some(ConnectionsCommand::Remove(args)) => {
                 fin_discovery::validate_name(&args.name)?;
-                launch_human_privileged(PrivilegedAction::Remove(args))
+                launch_human_privileged(PrivilegedAction::Remove(args), json, verbose)
             }
         },
     }
+}
+
+// clap_complete includes hidden subcommands in some generated shells. Keep
+// installer-only plumbing out of both automatic and manual completion menus.
+fn completion_definition() -> clap::Command {
+    let definition = Cli::command();
+    clap::Command::new("fin")
+        .version(env!("CARGO_PKG_VERSION"))
+        .args(definition.get_arguments().cloned())
+        .subcommands(
+            definition
+                .get_subcommands()
+                .filter(|command| !command.is_hide_set())
+                .cloned(),
+        )
 }
 
 enum PrivilegedAction {
@@ -494,14 +559,23 @@ enum PrivilegedAction {
     Remove(fin_discovery::NamedConnectionArgs),
 }
 
-fn launch_human_privileged(action: PrivilegedAction) -> Result<Value, FinError> {
-    launch_human_privileged_with_terminal(action, stdin_is_terminal())
+fn launch_human_privileged(
+    action: PrivilegedAction,
+    json: bool,
+    verbose: bool,
+) -> Result<Value, FinError> {
+    launch_human_privileged_with_terminal(action, stdin_is_terminal(), json, verbose)
 }
 
 fn launch_human_privileged_with_terminal(
     action: PrivilegedAction,
     is_terminal: bool,
+    json: bool,
+    verbose: bool,
 ) -> Result<Value, FinError> {
+    if json {
+        return Err(human_required());
+    }
     if !is_terminal {
         return Err(FinError::new(
             "HUMAN_TERMINAL_REQUIRED",
@@ -512,6 +586,7 @@ fn launch_human_privileged_with_terminal(
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = verbose;
         // Consume the public metadata without starting an installer, privilege
         // command, or secret prompt on an unsupported platform.
         match action {
@@ -530,13 +605,31 @@ fn launch_human_privileged_with_terminal(
     {
         use std::os::unix::process::CommandExt;
         let reason = administrator_authentication_reason(&action);
-        let mut command = prepare_privileged_command(action)?;
+        let mut command = prepare_privileged_command(action, verbose)?;
         exec_after_administrator_notice(reason, &mut std::io::stderr().lock(), || command.exec())
     }
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_privileged_command(action: PrivilegedAction) -> Result<std::process::Command, FinError> {
+fn prepare_privileged_command(
+    action: PrivilegedAction,
+    verbose: bool,
+) -> Result<std::process::Command, FinError> {
+    prepare_privileged_command_with_presentation(
+        action,
+        verbose,
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var_os("TERM").is_some_and(|value| value == "dumb"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_privileged_command_with_presentation(
+    action: PrivilegedAction,
+    verbose: bool,
+    no_color: bool,
+    dumb: bool,
+) -> Result<std::process::Command, FinError> {
     let mut command = std::process::Command::new("/usr/bin/sudo");
     command.env_clear().env("PATH", "/usr/bin:/bin").args([
         "-k",
@@ -544,6 +637,14 @@ fn prepare_privileged_command(action: PrivilegedAction) -> Result<std::process::
         fin_discovery::MACOS_ADMIN_PASSWORD_PROMPT,
         "--",
     ]);
+    // Fixed presentation-only values survive sudo's environment reset. Never
+    // forward arbitrary caller environment into the protected process.
+    if no_color {
+        command.arg("NO_COLOR=1");
+    }
+    if dumb {
+        command.arg("TERM=dumb");
+    }
     match action {
         PrivilegedAction::Setup => {
             let script = std::env::current_exe()
@@ -595,6 +696,9 @@ fn prepare_privileged_command(action: PrivilegedAction) -> Result<std::process::
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
     }
+    if verbose {
+        command.arg("--verbose");
+    }
     Ok(command)
 }
 
@@ -602,17 +706,15 @@ fn prepare_privileged_command(action: PrivilegedAction) -> Result<std::process::
 fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static str {
     match action {
         PrivilegedAction::Setup => {
-            "Fin setup needs administrator access to install the protected service and credential storage. Setup then requests a separate Touch ID configuration approval to initialize Fin. No funds will move."
+            "Fin needs administrator access to install its protected service and keep your secrets safe from the LLMs"
         }
         PrivilegedAction::Add(_) => {
-            "Fin needs administrator access to add a connection in protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before saving the connection; this does not approve future financial writes."
+            "Fin needs administrator access to securely add this connection."
         }
         PrivilegedAction::Update(_) => {
-            "Fin needs administrator access to update a connection in protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before saving the replacement; this does not approve future financial writes."
+            "Fin needs administrator access to securely update this connection."
         }
-        PrivilegedAction::Remove(_) => {
-            "Fin needs administrator access to remove a connection from protected connection storage. No funds will move. The protected enrollment process will separately request Touch ID configuration approval before removing the connection; this does not approve future financial writes."
-        }
+        PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
 }
 
@@ -622,14 +724,20 @@ fn exec_after_administrator_notice(
     output: &mut impl std::io::Write,
     exec: impl FnOnce() -> std::io::Error,
 ) -> Result<Value, FinError> {
-    writeln!(output, "{reason}\nOnly setup and connection add/update/remove request administrator access. Reads, previews, status, service control, and financial writes run without sudo; each financial write requires fresh Touch ID.\n{}", fin_discovery::MACOS_ADMIN_PASSWORD_HELP)
-        .and_then(|_| output.flush())
-        .map_err(|_| FinError::new(
+    writeln!(
+        output,
+        "{reason}\n{}",
+        fin_discovery::MACOS_ADMIN_PASSWORD_HELP
+    )
+    .and_then(|_| output.flush())
+    .map_err(|_| {
+        FinError::new(
             "ADMINISTRATOR_NOTICE_UNAVAILABLE",
             "enrollment",
             "Fin could not display the administrator authentication explanation.",
             "Check terminal output and run the command again in your own Terminal.",
-        ))?;
+        )
+    })?;
     let error = exec();
     Err(FinError::new(
         "PRIVILEGED_EXEC_FAILED",
@@ -667,17 +775,108 @@ fn stdin_is_terminal() -> bool {
     }
 }
 
-fn emit<T: Serialize>(result: Result<T, FinError>) -> i32 {
+fn human_required() -> FinError {
+    FinError::new(
+        "HUMAN_TERMINAL_REQUIRED",
+        "enrollment",
+        "This command requires your own interactive Terminal.",
+        "Run the command yourself without --json; never send credentials through chat or an agent terminal.",
+    )
+}
+
+fn human_only(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Setup
+            | Command::Connections {
+                command: Some(
+                    ConnectionsCommand::Add(_)
+                        | ConnectionsCommand::Update(_)
+                        | ConnectionsCommand::Remove(_)
+                )
+            }
+    )
+}
+
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::InternalCompletions { .. } => "internal-completions",
+        Command::Capabilities => "capabilities",
+        Command::Explain { .. } => "explain",
+        Command::Schema { .. } => "schema",
+        Command::Completions { .. } => "completions",
+        Command::Read(_) => "read",
+        Command::Preview(_) => "preview",
+        Command::Execute(_) => "execute",
+        Command::Status { .. } => "status",
+        Command::Operations => "operations",
+        Command::Doctor => "doctor",
+        Command::Snapshot => "snapshot",
+        Command::Run { .. } => "run",
+        Command::Setup => "setup",
+        Command::Daemon { .. } => "daemon",
+        Command::Connections { .. } => "connections",
+    }
+}
+
+// Resolve output mode even for parse failures, without inspecting or echoing values.
+fn requested_json(args: &[std::ffi::OsString]) -> bool {
+    let mut value = false;
+    for argument in args.iter().skip(1) {
+        if value {
+            value = false;
+            continue;
+        }
+        if argument == "--" {
+            break;
+        }
+        if argument == "--json" {
+            return true;
+        }
+        value = matches!(
+            argument.to_str(),
+            Some(
+                "--input"
+                    | "--id"
+                    | "--run"
+                    | "--provider"
+                    | "--name"
+                    | "--role"
+                    | "--parent"
+                    | "--email"
+                    | "--network"
+                    | "--address"
+                    | "--credential-type"
+            )
+        );
+    }
+    false
+}
+
+fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
     match result {
         Ok(value) => {
-            let output = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-            println!("{output}");
-            0
+            let output = if command == "completions" && !ui.is_machine() {
+                use std::io::Write;
+                std::io::stdout()
+                    .lock()
+                    .write_all(value["script"].as_str().unwrap_or_default().as_bytes())
+            } else if command == "internal-completions" && !ui.is_machine() {
+                let message = value["message"].as_str().unwrap_or_default();
+                if matches!(value["status"].as_str(), Some("installed" | "removed")) {
+                    ui.success(message)
+                } else {
+                    ui.warning(message)
+                }
+            } else if command == "daemon" && !ui.is_machine() {
+                ui.success(fin_presentation::render_human(command, &value, false).trim_end())
+            } else {
+                ui.write_result(&value, command)
+            };
+            i32::from(output.is_err())
         }
         Err(error) => {
-            let output = serde_json::to_string(&json!({"ok":false,"error":error}))
-                .unwrap_or_else(|_| "{}".into());
-            println!("{output}");
+            let _ = ui.write_error(&error);
             1
         }
     }
@@ -685,7 +884,9 @@ fn emit<T: Serialize>(result: Result<T, FinError>) -> i32 {
 
 #[tokio::main]
 async fn main() {
-    let cli = match Cli::try_parse() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let machine = requested_json(&arguments);
+    let cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -693,6 +894,14 @@ async fn main() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
+            if machine {
+                let value = if error.kind() == ErrorKind::DisplayVersion {
+                    json!({"name":"fin", "version":env!("CARGO_PKG_VERSION")})
+                } else {
+                    json!({"help":error.to_string()})
+                };
+                std::process::exit(emit(Ok(value), &Ui::new(true, false), "help"));
+            }
             let _ = error.print();
             std::process::exit(0);
         }
@@ -703,11 +912,41 @@ async fn main() {
                 "The command or arguments are invalid.",
                 "Run fin --help to inspect supported commands.",
             );
-            std::process::exit(emit::<Value>(Err(error)));
+            std::process::exit(emit(Err(error), &Ui::new(machine, false), "cli"));
         }
     };
+    let ui = Ui::new(cli.json, cli.verbose);
+    let name = command_name(&cli.command);
+    // Privileged commands replace this process; never leave a spinner alive across exec.
+    let offline = matches!(
+        cli.command,
+        Command::Capabilities
+            | Command::Explain { .. }
+            | Command::Schema { .. }
+            | Command::Completions { .. }
+            | Command::InternalCompletions { .. }
+    );
+    let progress = if !offline && !human_only(&cli.command) {
+        Some(ui.progress(match &cli.command {
+            Command::Daemon {
+                command: DaemonCommand::Start,
+            } => "Starting Fin daemon...",
+            Command::Daemon {
+                command: DaemonCommand::Stop,
+            } => "Stopping Fin daemon...",
+            Command::Daemon {
+                command: DaemonCommand::Status,
+            } => "Checking daemon status...",
+            Command::Execute(_) => "Waiting for review, Touch ID and execution...",
+            _ => "Checking Fin...",
+        }))
+    } else {
+        None
+    };
     let client = UnixTransport::installed();
-    std::process::exit(emit(dispatch(cli, &client).await));
+    let result = dispatch(cli, &client).await;
+    drop(progress);
+    std::process::exit(emit(result, &ui, name));
 }
 
 #[cfg(test)]
@@ -840,7 +1079,8 @@ mod tests {
     #[test]
     fn enrollment_fails_closed_before_privileged_action_without_terminal() {
         let error =
-            launch_human_privileged_with_terminal(PrivilegedAction::Setup, false).unwrap_err();
+            launch_human_privileged_with_terminal(PrivilegedAction::Setup, false, false, false)
+                .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
     }
 
@@ -880,20 +1120,11 @@ mod tests {
         for (action, expected_reason) in [
             (
                 PrivilegedAction::Setup,
-                "install the protected service and credential storage",
+                "Fin needs administrator access to install its protected service and keep your secrets safe from the LLMs",
             ),
-            (
-                PrivilegedAction::Add(args()),
-                "add a connection in protected connection storage",
-            ),
-            (
-                PrivilegedAction::Update(args()),
-                "update a connection in protected connection storage",
-            ),
-            (
-                PrivilegedAction::Remove(remove),
-                "remove a connection from protected connection storage",
-            ),
+            (PrivilegedAction::Add(args()), "add this connection"),
+            (PrivilegedAction::Update(args()), "update this connection"),
+            (PrivilegedAction::Remove(remove), "remove this connection"),
         ] {
             let flushes = std::cell::Cell::new(0);
             let mut output = NoticeWriter {
@@ -915,14 +1146,7 @@ mod tests {
             assert_eq!(error.code, "PRIVILEGED_EXEC_FAILED");
             let notice = String::from_utf8(output.bytes).unwrap();
             assert!(notice.contains(expected_reason));
-            assert!(notice.contains("No funds will move"));
-            assert!(
-                notice.contains("separate") && notice.contains("Touch ID configuration approval")
-            );
-            assert!(notice.contains("financial writes run without sudo"));
-            if matches!(action, PrivilegedAction::Setup) {
-                assert!(notice.contains("Setup then requests a separate Touch ID configuration approval to initialize Fin"));
-            }
+            assert!(notice.contains("Touch ID follows"));
             assert!(notice.contains(fin_discovery::MACOS_ADMIN_PASSWORD_HELP));
             assert!(!notice.contains("synthetic-main"));
         }
@@ -967,7 +1191,8 @@ mod tests {
             (PrivilegedAction::Update(args()), "update"),
             (PrivilegedAction::Remove(remove), "remove"),
         ] {
-            let command = prepare_privileged_command(action).unwrap();
+            let command =
+                prepare_privileged_command_with_presentation(action, false, false, false).unwrap();
             assert_eq!(command.get_program(), "/usr/bin/sudo");
             let arguments = command
                 .get_args()
@@ -997,6 +1222,86 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn presentation_preferences_cross_sudo_as_fixed_values_only() {
+        let args = fin_discovery::NamedConnectionArgs {
+            name: "synthetic-main".into(),
+        };
+        let command = prepare_privileged_command_with_presentation(
+            PrivilegedAction::Remove(args),
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        let arguments: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(&arguments[4..7], &["NO_COLOR=1", "TERM=dumb", BROKER_PATH]);
+        assert_eq!(arguments.last(), Some(&"--verbose"));
+    }
+
+    #[test]
+    fn machine_mode_refuses_privilege_even_with_terminal() {
+        let error =
+            launch_human_privileged_with_terminal(PrivilegedAction::Setup, true, true, true)
+                .unwrap_err();
+        assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn guided_add_is_optional_but_partial_metadata_is_not_silently_discarded() {
+        let bare = Cli::try_parse_from(["fin", "connections", "add"]).unwrap();
+        assert!(matches!(
+            bare.command,
+            Command::Connections {
+                command: Some(ConnectionsCommand::Add(ConnectionCommandArgs {
+                    connection: None
+                }))
+            }
+        ));
+        for arguments in [
+            vec!["fin", "connections", "add", "--provider", "binance"],
+            vec!["fin", "connections", "add", "--role", "main"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+        let full = Cli::try_parse_from([
+            "fin",
+            "connections",
+            "add",
+            "--provider",
+            "binance",
+            "--name",
+            "main",
+            "--role",
+            "main",
+        ])
+        .unwrap();
+        assert!(matches!(
+            full.command,
+            Command::Connections {
+                command: Some(ConnectionsCommand::Add(ConnectionCommandArgs {
+                    connection: Some(_)
+                }))
+            }
+        ));
+    }
+
+    #[test]
+    fn output_mode_does_not_read_flag_values_as_options() {
+        for args in [
+            vec!["fin", "read", "x", "--input", "--json"],
+            vec!["fin", "--", "--json"],
+        ] {
+            assert!(!requested_json(
+                &args.into_iter().map(Into::into).collect::<Vec<_>>()
+            ));
+        }
+        assert!(requested_json(
+            &["fin", "--verbose", "--json", "bad"].map(Into::into)
+        ));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn unsupported_platform_refuses_every_privileged_action_even_with_a_terminal() {
@@ -1014,7 +1319,8 @@ mod tests {
             PrivilegedAction::Update(update),
             PrivilegedAction::Remove(remove),
         ] {
-            let error = launch_human_privileged_with_terminal(action, true).unwrap_err();
+            let error =
+                launch_human_privileged_with_terminal(action, true, false, false).unwrap_err();
             assert_eq!(error.code, "PROTECTED_PROVIDER_UNAVAILABLE");
             assert_eq!(error.stage, "enrollment");
             assert!(

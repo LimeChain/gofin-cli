@@ -33,6 +33,33 @@ cargo run --locked -p fin-cli -- schema connections.add --json
 cargo test --locked --workspace
 ```
 
+For everyday local development, use Make from the repository:
+
+```sh
+make dev                              # debug CLI help; no install
+make dev ARGS='capabilities --json'    # same CLI, incremental build
+make test-ui                          # focused offline UX tests
+make test-integration                 # isolated real broker/store/engine + OS fixtures
+```
+
+`make setup` builds a **debug** macOS bundle and starts the real protected installer
+in your own Terminal. `make uninstall` deletes installed credentials/configuration
+without backup, refusing financial history. Both identify the Mac login password
+and clear cached sudo on exit. They are explicit human actions, never part of
+`make dev` or the test targets. Setup retains Touch ID and installed-code protections.
+
+Use `make bundle` to build a debug bundle without installing; use `make release`
+only for an optimized delivery build. `make help` lists all targets. No release
+bundle is needed for ordinary CLI changes. Build artifacts stay under ignored
+`target/` and `work/dev-bundles/`; no target loads `.context/.ai.env`.
+
+The integration target runs the existing synthetic tests through the actual Rust
+broker/engine/store, with temporary journals, local IPC and test authorizers.
+Installer/reset tests use isolated filesystem fixtures. This is **not yet a
+standalone interactive sandbox broker**: broker-backed `make dev` commands still
+connect to the protected installation and retain its approvals. Discovery/help
+work with Fin uninstalled. See [local testing](docs/testing/README.md#local-development-loop).
+
 The toolchain is pinned in `rust-toolchain.toml`; runtime users need no Rust,
 Node.js, or npm. Build an inspectable local macOS bundle with
 `sh scripts/package-rust-macos.sh /absolute/path/to/new-fin-bundle`. The human
@@ -53,9 +80,17 @@ then requests separate Touch ID approval for its initial configuration. Sudo is
 used for setup and connection add/update/remove; everyday Fin commands use the
 background service without sudo, and financial writes require fresh Touch ID.
 
+`fin daemon start` starts/resumes the installed broker and confirms it is running.
+`fin daemon stop` waits for it to stop and keeps ordinary Fin requests from
+reactivating it until explicit start. `fin daemon status` reports the observed
+running/stopped state without connecting to or waking the broker. Each prints one
+short human message; add `--json` for action, status, registration and PID fields.
+Use `fin doctor` for configuration and readiness diagnostics.
+
 The human enrolls connections through the installed CLI:
 
 ```sh
+fin connections add  # guided public metadata, in your own Terminal
 fin connections add --provider binance --name main --role main --credential-type ed25519
 fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
 fin connections list --json
@@ -68,6 +103,26 @@ independent configuration approval before activation. Updates rotate credentials
 while preserving physical identity and account relationships. Each financial
 write still needs its own fresh approval. Agent terminals, secret-bearing JSON,
 raw signing, and authentication-disable switches are unavailable.
+
+For RSA/Ed25519, enter the API key first, then the complete private PEM key,
+including its BEGIN/END lines. Both multiline PEM and literal `\n` separators
+are accepted; omit surrounding quotes and press Enter after the END line.
+Fin acknowledges receipt without showing the input, then reports its validation
+and Touch ID stages. Inspect `fin connections add --help` before starting.
+Commands return readable text by default. `--verbose` adds human diagnostics;
+`--json` selects the stable machine contract and suppresses terminal prompts,
+progress and color. Setup/enrollment with `--json` return a human-terminal handoff
+before sudo or credential access. Financial writes still require fresh native
+Touch ID. Human enrollment shows a protected terminal summary, then Touch ID;
+configuration approval moves no funds. Warnings appear on stderr.
+
+Setup automatically enables persistent completion for your account's login shell
+(Zsh, Bash, or Fish). Open a new shell to use it; there is no extra opt-in step.
+Uninstall removes Fin's completion files and marked configuration blocks while
+preserving your own settings and subsequent edits. See the
+[completion reference](docs/shell-completion.md) for locations and custom setups.
+`NO_COLOR` disables color;
+redirected output never animates.
 
 The client uses `fin read OP --input JSON`, `fin preview OP --input JSON`,
 `fin execute OP --input JSON --id LOGICAL_ID --run RUN_ID`, `fin status ID`, and

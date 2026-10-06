@@ -1,0 +1,319 @@
+//! Guided public connection metadata. Secret entry remains in protected enrollment.
+
+use clap::ValueEnum;
+use fin_discovery::{AddConnectionArgs, BinanceRole, CredentialType, Provider};
+use fin_domain::FinError;
+use fin_presentation::safe_text;
+use std::io::{self, BufRead, IsTerminal, Read, Write};
+
+pub(crate) fn guided_add() -> Result<AddConnectionArgs, FinError> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() || !io::stderr().is_terminal() {
+        return Err(FinError::new(
+            "HUMAN_TERMINAL_REQUIRED",
+            "onboarding",
+            "Guided connection setup requires your own interactive Terminal.",
+            "Run fin connections add in your Terminal, or inspect fin connections add --help for public metadata flags.",
+        ));
+    }
+    guided_add_with(&mut io::stdin().lock(), &mut io::stderr().lock())
+}
+
+fn guided_add_with(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<AddConnectionArgs, FinError> {
+    writeln!(
+        output,
+        "Connection details only. Credentials are requested privately afterward."
+    )
+    .map_err(|_| output_error())?;
+    let provider = choice(
+        input,
+        output,
+        "Provider",
+        Provider::value_variants(),
+        &Provider::Binance,
+    )?;
+    let name = prompt(input, output, "Connection name", None)?;
+    fin_discovery::validate_name(&name)?;
+    let mut args = AddConnectionArgs {
+        provider,
+        name,
+        role: None,
+        parent: None,
+        email: None,
+        network: None,
+        address: None,
+        credential_type: None,
+    };
+    match args.provider {
+        Provider::Binance => {
+            let role = choice(
+                input,
+                output,
+                "Account role",
+                BinanceRole::value_variants(),
+                &BinanceRole::Main,
+            )?;
+            args.role = Some(role);
+            if role == BinanceRole::Sub {
+                args.parent = Some(prompt(input, output, "Parent connection name", None)?);
+                args.email = Some(prompt(input, output, "Subaccount email", None)?);
+            }
+            args.credential_type = Some(choice(
+                input,
+                output,
+                "Credential type",
+                &[
+                    CredentialType::Hmac,
+                    CredentialType::Rsa,
+                    CredentialType::Ed25519,
+                ],
+                &CredentialType::Hmac,
+            )?);
+        }
+        Provider::Ethereum => {
+            args.network = Some(prompt(input, output, "Network", Some("ethereum:1"))?);
+            let kind = choice(
+                input,
+                output,
+                "Credential type",
+                &[CredentialType::PrivateKey, CredentialType::ReadOnly],
+                &CredentialType::PrivateKey,
+            )?;
+            args.credential_type = Some(kind);
+            let label = if kind == CredentialType::ReadOnly {
+                "Public wallet address"
+            } else {
+                "Public wallet address (optional; checked against signing key)"
+            };
+            let address = prompt(input, output, label, None)?;
+            if !address.is_empty() {
+                args.address = Some(address);
+            }
+        }
+    }
+    // The same validation serves flags, schemas, and this guided path.
+    fin_discovery::validate_add(&args)?;
+    Ok(args)
+}
+
+fn choice<T: ValueEnum + PartialEq>(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+    choices: &[T],
+    default: &T,
+) -> Result<T, FinError> {
+    let names: Vec<_> = choices
+        .iter()
+        .filter_map(|value| value.to_possible_value())
+        .map(|value| value.get_name().to_owned())
+        .collect();
+    let default = default.to_possible_value().expect("visible enum default");
+    let value = prompt(
+        input,
+        output,
+        &format!("{label} ({})", names.join("/")),
+        Some(default.get_name()),
+    )?;
+    T::from_str(&value, true)
+        .ok()
+        .filter(|value| choices.contains(value))
+        .ok_or_else(|| {
+            FinError::validation(format!(
+                "Choose {} for {}.",
+                names.join(" or "),
+                label.to_lowercase()
+            ))
+        })
+}
+
+fn prompt(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    label: &str,
+    default: Option<&str>,
+) -> Result<String, FinError> {
+    write!(output, "{}", safe_text(label)).map_err(|_| output_error())?;
+    if let Some(default) = default {
+        write!(output, " [{}]", safe_text(default)).map_err(|_| output_error())?;
+    }
+    write!(output, ": ")
+        .and_then(|_| output.flush())
+        .map_err(|_| output_error())?;
+
+    // Every supported public field fits this bound. Never consume unbounded
+    // pasted input or echo it in an error; this process must not collect secrets.
+    let mut bytes = Vec::new();
+    let count = input
+        .take(1025)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|_| {
+            FinError::new(
+                "ONBOARDING_INPUT_FAILED",
+                "onboarding",
+                "Could not read the connection detail.",
+                "Retry fin connections add in your Terminal.",
+            )
+        })?;
+    if count == 0 {
+        return Err(FinError::new(
+            "ONBOARDING_CANCELLED",
+            "onboarding",
+            "Connection setup ended before all details were entered.",
+            "Run fin connections add when ready to continue.",
+        ));
+    }
+    if count > 1024 {
+        return Err(FinError::validation(
+            "The connection detail is too long. Enter public metadata only.",
+        ));
+    }
+    let value = String::from_utf8(bytes)
+        .map_err(|_| FinError::validation("Connection details must be valid text."))?;
+    let value = value.trim();
+    Ok(if value.is_empty() {
+        default.unwrap_or_default().to_owned()
+    } else {
+        value.to_owned()
+    })
+}
+
+fn output_error() -> FinError {
+    FinError::new(
+        "ONBOARDING_OUTPUT_FAILED",
+        "onboarding",
+        "Could not display the connection prompt.",
+        "Retry fin connections add in your Terminal.",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use std::io::Cursor;
+
+    fn run(text: &str) -> (Result<AddConnectionArgs, FinError>, String) {
+        let mut output = Vec::new();
+        let result = guided_add_with(&mut Cursor::new(text.as_bytes()), &mut output);
+        (result, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn main_defaults_build_the_shared_validated_args_without_secret_prompts() {
+        let (result, output) = run("\nmain\n\n\n");
+        let args = result.unwrap();
+        assert_eq!(args.provider, Provider::Binance);
+        assert_eq!(args.name, "main");
+        assert_eq!(args.role, Some(BinanceRole::Main));
+        assert_eq!(args.credential_type, Some(CredentialType::Hmac));
+        assert!(args.parent.is_none() && args.email.is_none());
+        fin_discovery::validate_add(&args).unwrap();
+        assert!(!output.contains("API key:"));
+        assert!(!output.contains("Private key:"));
+        assert!(!output.contains("secret:"));
+        assert!(!output.contains('\x1b'));
+    }
+
+    #[test]
+    fn subaccount_collects_public_relationship_fields() {
+        let (result, output) = run("binance\nsavings\nsub\nmain\nchild@example.invalid\ned25519\n");
+        let args = result.unwrap();
+        assert_eq!(args.role, Some(BinanceRole::Sub));
+        assert_eq!(args.parent.as_deref(), Some("main"));
+        assert_eq!(args.email.as_deref(), Some("child@example.invalid"));
+        assert_eq!(args.credential_type, Some(CredentialType::Ed25519));
+        assert!(output.contains("Parent connection name"));
+    }
+
+    #[test]
+    fn ethereum_signing_and_read_only_use_exact_supported_network() {
+        let (result, _) = run("ethereum\nwallet\n\n\n\n");
+        let args = result.unwrap();
+        assert_eq!(args.network.as_deref(), Some("ethereum:1"));
+        assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));
+        assert!(args.address.is_none());
+        let address = "0x1111111111111111111111111111111111111111";
+        let (result, _) = run(&format!("ethereum\nwatch\n\nread_only\n{address}\n"));
+        assert_eq!(result.unwrap().address.as_deref(), Some(address));
+    }
+
+    #[test]
+    fn shared_validation_rejects_bad_address_network_relationship_and_name() {
+        for input in [
+            "ethereum\nwatch\n\nread_only\n\n",
+            "ethereum\nwatch\n\nread_only\n0x0000000000000000000000000000000000000000\n",
+            "ethereum\nwatch\nethereum-mainnet\nprivate_key\n\n",
+            "binance\nchild\nsub\nmain\ninvalid-email\nhmac\n",
+            "binance\nINVALID NAME\n",
+        ] {
+            assert_eq!(run(input).0.unwrap_err().code, "INVALID_INPUT");
+        }
+    }
+
+    #[test]
+    fn invalid_choice_never_echoes_pasted_input() {
+        let input = "synthetic-not-a-credential\x1b[2J";
+        let (result, output) = run(&format!("{input}\n"));
+        let error = result.unwrap_err();
+        assert!(!error.to_string().contains(input));
+        assert!(!output.contains(input));
+        let (result, _) = run("binance\nmain\nmain\nprivate_key\n");
+        assert_eq!(result.unwrap_err().code, "INVALID_INPUT");
+    }
+
+    #[test]
+    fn eof_at_every_prompt_cancels_without_retries() {
+        for input in ["", "\n", "\nmain\n", "\nmain\n\n", "ethereum\nwallet\n\n\n"] {
+            let (result, output) = run(input);
+            assert_eq!(result.unwrap_err().code, "ONBOARDING_CANCELLED");
+            assert!(output.lines().count() <= 2);
+        }
+    }
+
+    #[test]
+    fn oversized_input_and_output_failure_do_not_continue() {
+        assert_eq!(run(&"x".repeat(1025)).0.unwrap_err().code, "INVALID_INPUT");
+        struct Unwritable;
+        impl Write for Unwritable {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("synthetic"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = Cursor::new(b"binance\nmain\n");
+        assert_eq!(
+            guided_add_with(&mut input, &mut Unwritable)
+                .unwrap_err()
+                .code,
+            "ONBOARDING_OUTPUT_FAILED"
+        );
+        assert_eq!(input.position(), 0);
+    }
+
+    #[derive(Parser)]
+    struct OptionalFlatten {
+        #[command(flatten)]
+        args: Option<AddConnectionArgs>,
+    }
+
+    #[test]
+    fn optional_flatten_retains_required_inner_arguments() {
+        assert!(OptionalFlatten::try_parse_from(["test"]).is_err());
+        let parsed = OptionalFlatten::try_parse_from([
+            "test",
+            "--provider",
+            "binance",
+            "--name",
+            "main",
+            "--role",
+            "main",
+        ])
+        .unwrap();
+        assert!(parsed.args.is_some());
+    }
+}

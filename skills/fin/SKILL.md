@@ -1,6 +1,6 @@
 ---
 name: fin
-description: Discover and invoke the local Fin financial CLI for configured Binance funding and Ethereum wallet, Uniswap, and Aave operations, with individual human approvals and durable recovery.
+description: Discover and invoke the local Fin financial CLI with individual human approvals and durable recovery.
 ---
 
 Start with `fin --help` and `fin capabilities --json`, even before setup exists. Inspect `fin explain setup --json`, `fin schema connections.add --json`, and `fin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and evidence limits; mocked/fork/live verification are separate.

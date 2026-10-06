@@ -1,11 +1,17 @@
 use clap::{Parser, Subcommand, error::ErrorKind};
 use fin_domain::FinError;
+use fin_presentation::Ui;
 use serde_json::Value;
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
-#[command(name = "fin-broker", version, about = "Protected Fin broker service")]
+#[command(name = "fin-broker", color = clap::ColorChoice::Never, version, about = "Protected Fin broker service")]
 struct Args {
+    /// Machine mode: enrollment returns a human-terminal handoff.
+    #[arg(long, global = true)]
+    json: bool,
+    #[arg(long, global = true)]
+    verbose: bool,
     /// Export the shared operation registry without opening protected state.
     #[arg(long)]
     export_registry: bool,
@@ -49,7 +55,17 @@ enum EnrollmentAction {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = match Args::try_parse() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    let mut request_value = false;
+    let machine = arguments.iter().skip(1).any(|arg| {
+        if request_value {
+            request_value = false;
+            return false;
+        }
+        request_value = arg == "--request";
+        arg == "--json"
+    });
+    let args = match Args::try_parse_from(arguments) {
         Ok(args) => args,
         Err(error)
             if matches!(
@@ -57,18 +73,29 @@ async fn main() -> ExitCode {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
             ) =>
         {
-            let _ = error.print();
+            if machine {
+                let _ = Ui::new(true, false)
+                    .write_result(&serde_json::json!({"help":error.to_string()}), "help");
+            } else {
+                let _ = error.print();
+            }
             return ExitCode::SUCCESS;
         }
         Err(_) => {
-            eprintln!("ARGUMENTS_INVALID: The broker command line is invalid.");
+            let _ = Ui::new(machine, false).write_error(&FinError::new(
+                "ARGUMENTS_INVALID",
+                "cli",
+                "The broker command line is invalid.",
+                "Use fin --help for the public command interface.",
+            ));
             return ExitCode::FAILURE;
         }
     };
+    let ui = Ui::new(args.json, args.verbose);
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{}: {}", error.code, error.message);
+            let _ = ui.write_error(&error);
             ExitCode::FAILURE
         }
     }
@@ -90,6 +117,15 @@ async fn run(args: Args) -> fin_domain::Result<()> {
     }
 
     if let Some(Command::Enrollment { action }) = args.command {
+        if args.json {
+            return Err(FinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "enrollment",
+                "Enrollment requires your own interactive Terminal.",
+                "Run fin connections add or fin setup yourself without --json.",
+            ));
+        }
+        let ui = Ui::new(false, args.verbose);
         let (action_name, request) = match action {
             EnrollmentAction::Initialize { request } => ("initialize", request),
             EnrollmentAction::Add { request } => ("add", request),
@@ -97,14 +133,26 @@ async fn run(args: Args) -> fin_domain::Result<()> {
             EnrollmentAction::Remove { request } => ("remove", request),
         };
         let request = validate_public_enrollment_request(&request)?;
-        let result = fin_broker::enrollment::handle(action_name, request).await?;
-        let output = serde_json::to_string(&result).map_err(|_| FinError::new(
-            "ENROLLMENT_RESULT_FAILED",
-            "enrollment",
-            "The safe enrollment result could not be encoded.",
-            "Inspect protected configuration and retry only after confirming its current state.",
-        ))?;
-        println!("{output}");
+        let result = fin_broker::enrollment::handle_with_ui(action_name, request, &ui).await?;
+        let output = render_enrollment_result(result.clone(), false)?;
+        let summary = output.lines().next().unwrap_or_default();
+        ui.success(summary).map_err(|_| {
+            FinError::validation(
+                "Could not display enrollment result; inspect connection status before retrying.",
+            )
+        })?;
+        for warning in result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .chain(result["cleanup_warning"].as_str())
+        {
+            let _ = ui.warning(warning);
+        }
+        if let Some(next) = result["next_action"].as_str() {
+            ui.detail(next);
+        }
         return Ok(());
     }
 
@@ -128,6 +176,49 @@ async fn run(args: Args) -> fin_domain::Result<()> {
         ));
     }
     fin_broker::serve_protected(runtime).await
+}
+
+fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<String> {
+    use fin_discovery::enrollment_contract::{EnrollmentOutcome, PublicConnection};
+    let invalid = || {
+        FinError::new(
+            "ENROLLMENT_RESULT_FAILED",
+            "enrollment",
+            "The enrollment result could not be displayed.",
+            "Inspect protected configuration before retrying; the change may already be active.",
+        )
+    };
+    if json {
+        return serde_json::to_string(&value).map_err(|_| invalid());
+    }
+    let result: EnrollmentOutcome = serde_json::from_value(value).map_err(|_| invalid())?;
+    if !result.configuration_authorized
+        || result.financial_movement
+        || result.future_financial_authority
+    {
+        return Err(invalid());
+    }
+    let mut output = if result.action == "initialize" {
+        "Fin configuration approved.".to_owned()
+    } else {
+        let name = match result.connection.as_ref().ok_or_else(invalid)? {
+            PublicConnection::Binance { name, .. } | PublicConnection::Ethereum { name, .. } => {
+                name
+            }
+        };
+        let verb = match result.action.as_str() {
+            "add" => "added",
+            "update" => "updated",
+            "remove" => "removed",
+            _ => return Err(invalid()),
+        };
+        format!("Connection {name:?} {verb}.")
+    };
+    for warning in result.warnings.iter().chain(result.cleanup_warning.iter()) {
+        output.push_str("\nWarning: ");
+        output.push_str(warning);
+    }
+    Ok(output)
 }
 
 fn validate_public_enrollment_request(text: &str) -> fin_domain::Result<Value> {
@@ -169,6 +260,76 @@ fn validate_public_enrollment_request(text: &str) -> fin_domain::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn machine_enrollment_stops_before_metadata_or_protected_access() {
+        let args = Args::try_parse_from([
+            "fin-broker",
+            "enrollment",
+            "add",
+            "--request",
+            "INVALID_SYNTHETIC_INPUT",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(run(args).await.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    fn saved_connection(action: &str) -> Value {
+        serde_json::json!({
+            "action":action,
+            "connection":{"provider":"binance","name":"main","resource":"binance:uid:123:SPOT","role":"main","parent":null,"email":null,"wallet_type":"SPOT","physical_identity":"123"},
+            "checks":[{"name":"synthetic read check","status":"passed"}],
+            "warnings":[],"cleanup_warning":null,"configuration_authorized":true,
+            "financial_movement":false,"future_financial_authority":false,
+            "next_action":"Run fin connections list --json and fin doctor --json."
+        })
+    }
+
+    #[test]
+    fn enrollment_result_defaults_to_concise_text_and_preserves_explicit_json() {
+        for (action, verb) in [
+            ("add", "added"),
+            ("update", "updated"),
+            ("remove", "removed"),
+        ] {
+            let result = saved_connection(action);
+            assert_eq!(
+                render_enrollment_result(result.clone(), false).unwrap(),
+                format!("Connection \"main\" {verb}.")
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    &render_enrollment_result(result.clone(), true).unwrap()
+                )
+                .unwrap(),
+                result
+            );
+        }
+        let parsed = Args::try_parse_from([
+            "fin-broker",
+            "enrollment",
+            "add",
+            "--request",
+            "{}",
+            "--json",
+        ])
+        .unwrap();
+        assert!(parsed.json);
+    }
+
+    #[test]
+    fn human_result_keeps_warnings_and_never_calls_unapproved_configuration_successful() {
+        let mut result = saved_connection("update");
+        result["warnings"] = serde_json::json!(["Reading permission was not reported."]);
+        result["cleanup_warning"] = serde_json::json!("An obsolete credential needs cleanup.");
+        assert_eq!(
+            render_enrollment_result(result.clone(), false).unwrap(),
+            "Connection \"main\" updated.\nWarning: Reading permission was not reported.\nWarning: An obsolete credential needs cleanup."
+        );
+        result["configuration_authorized"] = serde_json::json!(false);
+        assert!(render_enrollment_result(result, false).is_err());
+    }
 
     #[test]
     fn public_enrollment_json_rejects_secret_fields_but_accepts_opaque_refs() {

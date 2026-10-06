@@ -19,7 +19,8 @@ The [terminal onboarding/discovery contract](onboarding.md) is part of the imple
 The macOS installer registers the protected runtime in `/etc/paths.d/fin` so
 new Terminal login shells can invoke `fin` without an absolute path. It verifies
 the root-owned PATH directory and preserves existing entries; it does not claim
-Homebrew directories or edit user shell profiles. Setup reports the current-shell
+Homebrew directories. Setup adds only marked shell-completion blocks to user
+profiles where needed. Setup reports the current-shell
 PATH export as well as the new-Terminal option. Cached sudo credentials are
 cleared separately with `sudo -K` before agent credential-isolation checks.
 
@@ -30,7 +31,98 @@ discovery constants supply the password explanation and labelled sudo prompt.
 Only setup and connection add/update/remove use sudo; routine broker requests
 do not. A failed explanation write/flush must prevent the privileged launch.
 
+Keep terminal notices brief: explain the immediate action and required input.
+Put background details in help and discovery rather than repeating them before
+each password prompt.
+Follow the repository's [CLI experience conventions](../AGENTS.md#cli-experience-conventions):
+shared full-row semantic styles, truthful stage indicators, concise setup review,
+and explicit approval expiry with actionable recovery. The existing configuration
+approval window remains 90 seconds across terminal review and Touch ID; technical
+configuration is available through details rather than the default setup summary.
+
+### Local development commands — 6 October 2026
+
+Daemon lifecycle is separate from broker readiness: a client-only launchd observer
+implements nonactivating status; start/stop use fixed peer-authenticated lifecycle
+IPC and confirm process state. A root-owned public stop marker persists explicit
+stop across reloads. Both client and broker enforce it; ordinary calls and repeated
+stop/status cannot resume the broker. No sudo rule, financial policy, credential
+path or ledger migration changed. Synthetic service-manager/marker fixtures cover
+activation, persistent stop, missing service, failures and output without modifying
+the installed job.
+
+Automatic completion setup is implemented in the compiled CLI as an internal
+installer entry point, executed as the configured human user. Account database
+lookup selects the login shell and home independently of the terminal app and
+sudo's environment. Standard user completion paths plus small marked Zsh/Bash
+blocks support persistent completion; Fish needs no RC block. A user-owned
+manifest records exact managed content, while a protected installation marker
+distinguishes new installations from older binaries without completion cleanup.
+Updates are repeatable; uninstall preserves modified user content and uses the
+original installed account even if its login shell changed. No shell files are
+sourced during installation, and all development tests use temporary homes.
+
+Make is a thin entry point over Cargo and the existing reviewed scripts, not a
+second CLI implementation. Default help, incremental debug execution/builds and
+focused UI/integration tests are separate from human setup/uninstall and optimized
+release packaging. Debug setup uses the same protected install and real Touch ID;
+only compiler optimization and test repetition differ. Apple Make ancestry is
+supported through the existing terminal provenance checks, with no agent exception.
+The existing synthetic broker/store/engine tests are the current isolated loop;
+a standalone interactive synthetic broker is not yet implemented. No dependency,
+financial policy, credential backend, or live authorization mode was added.
+
+### Shared CLI UX — implemented locally 6 October 2026
+
+`fin-presentation` centralizes human rendering, safe terminal text, restrained
+semantic color, stderr progress guards, diagnostics and machine serialization.
+The public CLI selects mode before dispatch; setup/enrollment refuse `--json`
+before privilege escalation. Human success goes to stdout and errors/warnings/
+progress to stderr. JSON keeps existing financial result shapes and the error
+envelope; verbose cannot change machine behavior. TTY/NO_COLOR handling stays
+in one layer, not each application adapter.
+
+Shared typed discovery arguments remain the source for flag validation, help,
+Schemars and shell completion (clap_complete). The guided add flow collects only
+public metadata into those same types; full flags avoid repeated metadata input.
+Operation handlers continue returning typed broker results and never own terminal
+formatting. The renderer preserves exact quantities and unrecognized fields.
+New adapters reuse the read/preview/execute/status pattern and retain their own
+financial schemas rather than flattening venue semantics into presentation.
+
+Protected configuration enrollment owns its terminal review and default-No
+confirmation, then requests fresh OS Touch ID. An opaque consumed proof binds
+terminal review to the exact configuration challenge; ordinary financial writes
+retain trusted native review. Actual protected file storage is disclosed, with
+reported permissions and warnings. Setup emits one completion/next-command line;
+verbose reveals paths and diagnostics. No live approval bypass is introduced.
+Human-installed verification remains separate from synthetic tests.
+
+PEM enrollment accepts real line breaks and literal `\n`/`\r\n` separators.
+Normalization is restricted to these separators, with matching BEGIN/END
+markers, bounded hidden input, and safe errors. PEM input uses noncanonical
+terminal mode to avoid the OS's short canonical line limit on long escaped keys;
+single-line API-key/secret input keeps its existing mode. Both paths restore
+terminal settings before validation or approval. Synthetic disposable PTYs
+exercise this without human credentials.
+
+Human enrollment supports both a direct human-owned Terminal device and sudo's
+root-owned intermediate PTY. The latter must be linked to the human's outer
+terminal through kernel-verified sudo ancestry, device identities and foreground
+groups. Private input temporarily restricts the verified devices to root and
+checks both open descriptors and processes attached to their sessions; environment
+variables cannot establish that relationship. A pre-input restore guardian
+returns device ownership, modes and input settings on normal completion or parent
+exit. Fin verifies restoration before saving or approving enrollment. This does
+not disable sudo's PTY policy or allow arbitrary root-owned terminals.
+
 Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The subsequent implementation goal explicitly authorizes a temporary private lead-owned non-biometric verification harness; the shipped entrypoint still requires real per-write Touch ID and exposes no authorization-disable switch.
+
+During human onboarding and Touch ID iteration, keep fixes and verification
+local. Run focused regression checks and rebuild the retry bundle as needed;
+do not push or trigger CI for each adjustment. Once the flow works locally with
+the human, push the accumulated changes and run CI once for that batch. Existing
+CI runs may finish independently and do not gate the next local retry.
 
 Binance's implicit master destination is a role, not an absent receipt identity.
 SPOT funding previews verify the selected child's own history access, physical UID

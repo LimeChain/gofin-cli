@@ -13,7 +13,7 @@ use tokio::{
 };
 
 pub const PROTECTED_ROOT: &str = "/Library/Fin";
-pub const HELPER_PATH: &str = "/Library/Fin/runtime/fin-touch-id";
+pub const HELPER_PATH: &str = "/Library/Fin/runtime/authorization/Fin";
 pub const BROKER_PATH: &str = "/Library/Fin/runtime/fin-broker";
 
 fn denied(code: &str, message: &str) -> FinError {
@@ -85,6 +85,36 @@ pub struct MacOsAuthorizer {
     approver_uid: u32,
 }
 impl MacOsAuthorizer {
+    /// Only a completed protected terminal review can select configuration-only
+    /// biometric presentation. The ordinary financial Authorizer path cannot.
+    pub async fn authorize_reviewed_configuration(
+        &self,
+        challenge: &AuthorizationChallenge,
+        review: fin_human_terminal::ConfigurationReview,
+    ) -> Result<ApprovalAudit> {
+        review.validate_for(challenge, self.approver_uid)?;
+        self.authorize_with_review(challenge, Some(review)).await
+    }
+
+    async fn authorize_with_review(
+        &self,
+        challenge: &AuthorizationChallenge,
+        review: Option<fin_human_terminal::ConfigurationReview>,
+    ) -> Result<ApprovalAudit> {
+        validate_installation()?;
+        let issued = fin_domain::now();
+        validate_challenge(challenge, &issued)?;
+        if let Some(review) = &review {
+            review.validate_for(challenge, self.approver_uid)?;
+        }
+        let millis = (parse_time(&challenge.expires_at)? - parse_time(&issued)?).num_milliseconds();
+        let input = helper_challenge(challenge, review.as_ref())?;
+        let response = self
+            .helper(&input, std::time::Duration::from_millis(millis as u64))
+            .await?;
+        validate_response(challenge, &response, &issued, &fin_domain::now())
+    }
+
     pub fn protected(approver_uid: u32) -> Result<Self> {
         if !cfg!(target_os = "macos") || approver_uid < 501 {
             return Err(denied(
@@ -104,6 +134,20 @@ impl MacOsAuthorizer {
     }
 
     async fn helper(&self, input: &Value, timeout: std::time::Duration) -> Result<Value> {
+        let encoded = serde_json::to_vec(input)
+            .map_err(|_| denied("INVALID_CHALLENGE", "The challenge could not be encoded."))?;
+        let review_input = if input.get("terminalReview").is_some() {
+            Some(
+                review_input_file(Path::new("/Library/Fin/private"), &encoded).map_err(|_| {
+                    denied(
+                        "AUTHORIZATION_UNAVAILABLE",
+                        "The protected terminal review channel could not be created.",
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
         let username = format!("#{}", self.approver_uid);
         let mut command = Command::new("/bin/launchctl");
         command.args([
@@ -121,7 +165,7 @@ impl MacOsAuthorizer {
             .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C");
         command
-            .stdin(Stdio::piped())
+            .stdin(review_input.map_or_else(Stdio::piped, Stdio::from))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -131,28 +175,22 @@ impl MacOsAuthorizer {
                 "The trusted OS approval component could not start.",
             )
         })?;
-        let encoded = serde_json::to_vec(input)
-            .map_err(|_| denied("INVALID_CHALLENGE", "The challenge could not be encoded."))?;
         let result = tokio::time::timeout(timeout, async {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                denied(
-                    "AUTHORIZATION_UNAVAILABLE",
-                    "The private approval channel is unavailable.",
-                )
-            })?;
-            stdin.write_all(&encoded).await.map_err(|_| {
-                denied(
-                    "AUTHORIZATION_UNAVAILABLE",
-                    "The private approval channel failed.",
-                )
-            })?;
-            stdin.shutdown().await.map_err(|_| {
-                denied(
-                    "AUTHORIZATION_UNAVAILABLE",
-                    "The private approval channel failed.",
-                )
-            })?;
-            drop(stdin);
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&encoded).await.map_err(|_| {
+                    denied(
+                        "AUTHORIZATION_UNAVAILABLE",
+                        "The private approval channel failed.",
+                    )
+                })?;
+                stdin.shutdown().await.map_err(|_| {
+                    denied(
+                        "AUTHORIZATION_UNAVAILABLE",
+                        "The private approval channel failed.",
+                    )
+                })?;
+                drop(stdin);
+            }
             let stdout = child.stdout.take().ok_or_else(|| {
                 denied(
                     "AUTHORIZATION_UNAVAILABLE",
@@ -230,19 +268,35 @@ impl MacOsAuthorizer {
     }
 }
 
+/// Root creates this inside validated private storage, reopens it read-only,
+/// then unlinks it before launch. Unlike Darwin pipe stat, regular-file ownership
+/// identifies its creator even after the helper drops to the human's UID.
+fn review_input_file(directory: &Path, encoded: &[u8]) -> std::io::Result<std::fs::File> {
+    use std::io::Write;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    temporary.write_all(encoded)?;
+    temporary.flush()?;
+    let input = std::fs::File::open(temporary.path())?;
+    temporary.close()?;
+    Ok(input)
+}
+
 #[async_trait]
 impl Authorizer for MacOsAuthorizer {
     async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
-        validate_installation()?;
-        let issued = fin_domain::now();
-        validate_challenge(challenge, &issued)?;
-        let millis = (parse_time(&challenge.expires_at)? - parse_time(&issued)?).num_milliseconds();
-        let input = json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":challenge.binding_hash,"canonicalBinding":canonical_json(&challenge.binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at});
-        let response = self
-            .helper(&input, std::time::Duration::from_millis(millis as u64))
-            .await?;
-        validate_response(challenge, &response, &issued, &fin_domain::now())
+        self.authorize_with_review(challenge, None).await
     }
+}
+
+fn helper_challenge(
+    challenge: &AuthorizationChallenge,
+    reviewed: Option<&fin_human_terminal::ConfigurationReview>,
+) -> Result<Value> {
+    let mut input = json!({"version":1,"mode":"approve","nonce":challenge.nonce,"bindingHash":challenge.binding_hash,"canonicalBinding":canonical_json(&challenge.binding)?,"operation":challenge.operation_id,"summary":challenge.summary,"expiresAt":challenge.expires_at});
+    if reviewed.is_some() {
+        input["terminalReview"] = json!({"purpose":challenge.purpose,"bindingHash":challenge.binding_hash,"nonce":challenge.nonce,"operation":challenge.operation_id,"expiresAt":challenge.expires_at});
+    }
+    Ok(input)
 }
 
 /// Root ownership plus hardened code and OS-only dependencies are the beta installation boundary.
@@ -277,6 +331,7 @@ pub fn validate_installation() -> Result<()> {
         PathBuf::from("/Library"),
         PathBuf::from(PROTECTED_ROOT),
         PathBuf::from("/Library/Fin/runtime"),
+        PathBuf::from("/Library/Fin/runtime/authorization"),
         executable,
         PathBuf::from(HELPER_PATH),
         PathBuf::from("/Library/Fin/private"),
@@ -505,6 +560,31 @@ pub fn validate_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn review_input_is_unlinked_read_only_private_and_inherited_exactly() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let input = review_input_file(directory.path(), b"SYNTHETIC review binding").unwrap();
+        let metadata = input.metadata().unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 0);
+        assert_eq!(
+            unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) } & libc::O_ACCMODE,
+            libc::O_RDONLY
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        let output = std::process::Command::new("/bin/cat")
+            .stdin(Stdio::from(input))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"SYNTHETIC review binding");
+    }
     const ISSUED: &str = "2026-10-02T12:00:00.000Z";
     const APPROVED: &str = "2026-10-02T12:00:10.000Z";
     const NOW: &str = "2026-10-02T12:00:20.000Z";
@@ -522,6 +602,17 @@ mod tests {
     }
     fn response(c: &AuthorizationChallenge) -> Value {
         json!({"version":1,"status":"accepted","nonce":c.nonce,"bindingHash":c.binding_hash,"approvedAt":APPROVED,"expiresAt":c.expires_at})
+    }
+    #[test]
+    fn ordinary_authorization_keeps_native_review_for_financial_and_configuration() {
+        let mut c = challenge();
+        for purpose in ["financial_write", "configuration"] {
+            c.purpose = purpose.into();
+            let input = helper_challenge(&c, None).unwrap();
+            assert!(input.get("terminalReview").is_none());
+            assert_eq!(input["bindingHash"], c.binding_hash);
+            assert_eq!(input["nonce"], c.nonce);
+        }
     }
     #[test]
     fn accepts_exact_private_child_response() {

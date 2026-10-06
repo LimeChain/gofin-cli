@@ -7,8 +7,11 @@ actual root ownership, human enrollment, launchd operation, or Touch ID behavior
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import selectors
+import time
 import stat
 import subprocess
 import tempfile
@@ -24,14 +27,14 @@ args = sys.argv[1:]
 options = json.loads((root / "options.json").read_text())
 with (root / "events.jsonl").open("a") as log:
     log.write(json.dumps([name, args]) + "\n")
-if name in ("mkdir", "cp", "rm", "mv", "mktemp", "chmod"):
+if name in ("mkdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
     # No fixture command may mutate a system path, even if rewriting breaks.
     for argument in args:
         if argument.startswith("/") and not argument.startswith(str(root) + "/"):
             sys.exit("Refusing non-fixture path: " + argument)
     os.execv("/bin/" + name if name != "mktemp" else "/usr/bin/mktemp",
              [name] + args)
-elif name in ("awk", "shasum", "cat"):
+elif name in ("awk", "shasum", "cat", "cmp"):
     os.execv(("/bin/" if name == "cat" else "/usr/bin/") + name, [name] + args)
 elif name == "uname":
     print("Darwin")
@@ -50,6 +53,10 @@ elif name == "codesign":
 elif name == "otool":
     print(args[-1] + ":\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)")
 elif name == "fin-broker":
+    if options.get("require_terminal"):
+        if not all(os.isatty(fd) for fd in (0, 1, 2)):
+            sys.exit("SYNTHETIC: enrollment descriptors must remain terminals")
+        print("SYNTHETIC: enrollment inherited three terminal descriptors")
     if options.get("enrollment") == "fail-before":
         sys.exit(1)
     (root / "Library/Fin/private/config.json").write_text("{}\n")
@@ -60,6 +67,12 @@ elif name == "launchctl":
         sys.exit(1)
     if options.get("late_path_conflict"):
         (root / "private/etc/paths.d/fin").symlink_to(root / "absent")
+elif name == "sudo":
+    marker = root / "Library/Fin/private/completion-owner"
+    if not marker.is_file() or stat.S_IMODE(marker.stat().st_mode) != 0o600 or marker.read_text() != "501\n":
+        sys.exit("SYNTHETIC: completion owner marker must be secured before helper invocation")
+    if options.get("completion_failure"):
+        sys.exit(1)
 elif name not in ("chown", "plutil"):
     sys.exit("Unexpected mock command: " + name)
 '''
@@ -85,7 +98,7 @@ class InstallerFixture(unittest.TestCase):
         driver = DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "launchctl",
                      "plutil", "chown", "mkdir", "cp", "rm", "mv", "mktemp", "chmod",
-                     "awk", "shasum", "cat"):
+                     "awk", "shasum", "cat", "cmp", "sleep", "sudo"):
             executable = self.bin / name
             executable.write_text(driver)
             executable.chmod(0o755)
@@ -108,12 +121,18 @@ class InstallerFixture(unittest.TestCase):
             hashlib.sha256((self.bundle / name).read_bytes()).hexdigest() + "  " + name + "\n"
             for name in names))
 
-    def run_installer(self):
+    def run_installer(self, verbose=False, environment=None):
         (self.root / "options.json").write_text(json.dumps(self.options))
+        arguments = ["/bin/bash", str(self.bundle / "install.sh"), "--approver-uid", "501",
+                     "--approver-gid", "20"]
+        if verbose:
+            arguments.append("--verbose")
+        env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+        if environment:
+            env.update(environment)
         return subprocess.run(
-            ["/bin/bash", str(self.bundle / "install.sh"), "--approver-uid", "501",
-             "--approver-gid", "20"], capture_output=True, text=True, timeout=15,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+            arguments, capture_output=True, text=True, timeout=15,
+            env=env)
 
     def events(self):
         return [json.loads(line) for line in (self.root / "events.jsonl").read_text().splitlines()]
@@ -131,14 +150,124 @@ class InstallerFixture(unittest.TestCase):
         self.assertEqual(self.path_file.read_text(), str(self.installed / "runtime") + "\n")
         self.assertEqual(stat.S_IMODE(self.path_file.stat().st_mode), 0o644)
         self.assertFalse((self.root / "usr/local/bin/fin").exists())
+        helper = self.installed / "runtime/authorization/Fin"
+        self.assertEqual(helper.read_bytes(), (self.installed / "runtime/fin-touch-id").read_bytes())
+        self.assertEqual(stat.S_IMODE(helper.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(helper.parent.stat().st_mode), 0o755)
         events = self.events()
         owner = ["chown", ["root:wheel", str(self.path_file)]]
         self.assertIn(owner, events)
         names = [event[0] for event in events]
         self.assertLess(names.index("fin-broker"), names.index("launchctl"))
         self.assertLess(names.index("launchctl"), events.index(owner))
-        self.assertIn("Open a new Terminal window", result.stdout)
-        self.assertIn('export PATH="', result.stdout)
+        self.assertTrue(any(name == "codesign" and "authorization/Fin" in args[-1]
+                            for name, args in events))
+        self.assertTrue(any(name == "cmp" and args[-2].endswith("runtime/fin-touch-id")
+                            and args[-1].endswith("runtime/authorization/Fin")
+                            for name, args in events))
+        self.assertEqual(result.stdout, "Fin installed. Next: open a new Terminal and run fin daemon start.\n")
+        broker_args = next(args for name, args in events if name == "fin-broker")
+        self.assertNotIn("--verbose", broker_args)
+        sudo_args = next(args for name, args in events if name == "sudo")
+        self.assertEqual(sudo_args[:6], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "TERM=dumb"])
+        self.assertEqual(sudo_args[6:], [str(self.installed / "runtime/fin"), "internal-completions", "install"])
+        marker = self.installed / "private/completion-owner"
+        self.assertEqual(marker.read_text(), "501\n")
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        events = self.events()
+        marker_owner = ["chown", ["root:wheel", str(marker)]]
+        self.assertIn(marker_owner, events)
+        self.assertLess(events.index(marker_owner), events.index(["sudo", sudo_args]))
+        self.assertIn("✓ Preparing protected runtime files", result.stderr)
+        self.assertIn("✓ Verifying signed binaries and system libraries", result.stderr)
+        self.assertNotIn("\033[", result.stderr)
+
+    def test_verbose_adds_setup_details_and_passes_flag_to_enrollment(self):
+        result = self.run_installer(verbose=True, environment={"TERM": "xterm-256color", "NO_COLOR": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "Fin installed. Next: open a new Terminal and run fin daemon start.\n")
+        self.assertIn("Fin setup: bundle", result.stderr)
+        self.assertIn("Fin setup: protected configuration and operation journal", result.stderr)
+        self.assertNotIn("credential verification", result.stderr.lower())
+        self.assertNotIn("\033[", result.stderr)
+        broker_args = next(args for name, args in self.events() if name == "fin-broker")
+        self.assertEqual(broker_args[-1], "--verbose")
+        sudo_args = next(args for name, args in self.events() if name == "sudo")
+        self.assertEqual(sudo_args[5:8], ["TERM=xterm-256color", "NO_COLOR=1", str(self.installed / "runtime/fin")])
+
+    def test_completion_install_failure_warns_without_undoing_installation(self):
+        self.options["completion_failure"] = True
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.installed.exists())
+        self.assertTrue(self.path_file.exists())
+        self.assertIn("shell completion setup did not finish", result.stderr)
+
+    def check_enrollment_terminal_descriptors(self, verbose, no_color=False):
+        self.options["require_terminal"] = True
+        (self.root / "options.json").write_text(json.dumps(self.options))
+        arguments = ["/bin/bash", str(self.bundle / "install.sh"), "--approver-uid", "501",
+                     "--approver-gid", "20"]
+        if verbose:
+            arguments.append("--verbose")
+        master, slave = os.openpty()
+        try:
+            env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TERM": "xterm-256color"}
+            if no_color:
+                env["NO_COLOR"] = ""
+            process = subprocess.Popen(arguments, stdin=slave, stdout=slave, stderr=slave, env=env)
+            # Drain while running: verbose output can fill macOS's small PTY
+            # buffer. Keep our slave open until the final output is collected.
+            os.set_blocking(master, False)
+            chunks = []
+            deadline = time.monotonic() + 30
+            with selectors.DefaultSelector() as ready:
+                ready.register(master, selectors.EVENT_READ)
+                while True:
+                    ready.select(timeout=0.1)
+                    while True:
+                        try:
+                            data = os.read(master, 4096)
+                        except BlockingIOError:
+                            break
+                        if not data:
+                            break
+                        chunks.append(data)
+                    if process.poll() is not None:
+                        break
+                    if time.monotonic() >= deadline:
+                        process.kill()
+                        process.wait()
+                        self.fail("Synthetic installer timed out")
+            output = b"".join(chunks).decode()
+            self.assertEqual(process.returncode, 0, output)
+            self.assertIn("enrollment inherited three terminal descriptors", output)
+            self.assertIn("Fin installed.", output)
+            self.assertIn("Registering Fin for new Terminal sessions", output)
+            self.assertNotIn("… ", output)
+            self.assertEqual(output.count("Installing protected runtime"), 1)
+            rows = [re.sub(r'\x1b\[[0-9;]*[mK]', '', row.rsplit('\r', 1)[-1])
+                    for row in output.replace('\r\n', '\n').split('\n') if row]
+            self.assertEqual(rows.count("✓ Installing protected runtime"), 1)
+            self.assertFalse(any(row.startswith(("… ", "⠋", "⠙", "⠹", "⠸")) for row in rows))
+            self.assertNotIn("credential verification", output.lower())
+            if no_color:
+                self.assertNotIn("\x1b[", output)
+            else:
+                self.assertIn("\x1b[36m⠋ Preparing protected runtime files\x1b[0m", output)
+                self.assertIn("\x1b[32m✓ Preparing protected runtime files\x1b[0m", output)
+        finally:
+            os.close(slave)
+            os.close(master)
+
+    def test_default_setup_preserves_enrollment_terminal_descriptors(self):
+        self.check_enrollment_terminal_descriptors(False)
+
+    def test_verbose_setup_preserves_enrollment_terminal_descriptors(self):
+        self.check_enrollment_terminal_descriptors(True)
+
+    def test_no_color_is_respected_in_human_terminal(self):
+        self.check_enrollment_terminal_descriptors(False, no_color=True)
 
     def test_existing_path_file_is_preserved_before_staging(self):
         self.path_file.write_text("preserve\n")

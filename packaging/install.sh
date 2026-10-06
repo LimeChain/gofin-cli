@@ -6,11 +6,67 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 unset BASH_ENV ENV CDPATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
 fin_uid=''
 fin_gid=''
-usage() { echo 'Run fin setup from a reviewed macOS bundle in your own Terminal.' >&2; exit 2; }
+fin_verbose=0
+usage() { echo 'Usage: install.sh --approver-uid UID --approver-gid GID [--verbose]' >&2; exit 2; }
+run_stage() {
+  local label=$1 pid frame log status animate
+  shift
+  log=$(/usr/bin/mktemp /Library/.fin-setup.XXXXXX)
+  if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then animate=1; else animate=0; fi
+  "$@" >"$log" 2>&1 &
+  pid=$!
+  fin_active_pid=$pid
+  fin_active_log=$log
+  frame='⠋'
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$animate" = 1 ]; then
+      printf '\r\033[2K\033[36m%s %s\033[0m' "$frame" "$label" >&2
+      case "$frame" in '⠋') frame='⠙' ;; '⠙') frame='⠹' ;; '⠹') frame='⠸' ;; *) frame='⠋' ;; esac
+    fi
+    /bin/sleep 0.12
+  done
+  if wait "$pid"; then
+    if [ "$animate" = 1 ]; then printf '\r\033[2K' >&2; fi
+    if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[32m✓ %s\033[0m\n' "$label" >&2; else printf '✓ %s\n' "$label" >&2; fi
+    if [ "$fin_verbose" = 1 ]; then /bin/cat "$log" >&2; fi
+    fin_active_pid=''
+    fin_active_log=''
+    /bin/rm -f "$log"
+  else
+    status=$?
+    if [ "$animate" = 1 ]; then printf '\r\033[2K' >&2; fi
+    if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[31m✗ %s\033[0m\n' "$label" >&2; else printf '✗ %s\n' "$label" >&2; fi
+    /bin/cat "$log" >&2
+    fin_active_pid=''
+    fin_active_log=''
+    /bin/rm -f "$log"
+    return "$status"
+  fi
+}
+fin_active_pid=''
+fin_active_log=''
+cancel_active_stage() {
+  local status=$1
+  if [ -n "$fin_active_pid" ]; then
+    kill -TERM "$fin_active_pid" 2>/dev/null || true
+    wait "$fin_active_pid" 2>/dev/null || true
+  fi
+  if [ -n "$fin_active_log" ]; then /bin/rm -f "$fin_active_log"; fi
+  exit "$status"
+}
 while [ "$#" -gt 0 ]; do
-  [ "$#" -ge 2 ] || usage
-  case "$1" in --approver-uid) fin_uid=$2 ;; --approver-gid) fin_gid=$2 ;; *) usage ;; esac
-  shift 2
+  case "$1" in
+    --verbose) fin_verbose=1; shift ;;
+    --approver-uid|--approver-gid)
+      [ "$#" -ge 2 ] || usage
+      case "$1" in
+        --approver-uid) fin_uid=$2 ;;
+        --approver-gid) fin_gid=$2 ;;
+      esac
+      shift 2
+      ;;
+    *) usage ;;
+  esac
 done
 [ "$(/usr/bin/uname -s)" = Darwin ] || { echo 'Protected installation requires macOS.' >&2; exit 1; }
 [ "$(/usr/bin/id -u)" = 0 ] || { echo 'Run fin setup yourself to request administrator authorization.' >&2; exit 1; }
@@ -40,9 +96,11 @@ done
 /usr/bin/awk 'NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ {bad=1}
  $2 != "fin" && $2 != "fin-broker" && $2 != "fin-touch-id" && $2 != "install.sh" && $2 != "README.md" && $2 != "BUILDINFO" {bad=1}
  {if (++seen[$2] > 1) bad=1; count++} END {if (count != 6) bad=1; exit bad}' "$fin_source/SHA256SUMS" || { echo 'Bundle checksum manifest is invalid.' >&2; exit 1; }
-echo 'Fin installs compiled binaries in /Library/Fin/runtime, private state, and a launchd socket service.'
-echo 'Setup registers /Library/Fin/runtime in /private/etc/paths.d/fin so new Terminal sessions can run fin.'
-echo 'Touch ID approves initial configuration. Each later financial write needs a separate fresh approval.'
+if [ "$fin_verbose" = 1 ]; then
+  echo "Fin setup: bundle $fin_source" >&2
+  echo "Fin setup: runtime $fin_root/runtime" >&2
+  echo "Fin setup: PATH registration $fin_path_file" >&2
+fi
 fin_stage=$(/usr/bin/mktemp -d /Library/.fin-rust-install.XXXXXX)
 fin_installed=0
 fin_configured=0
@@ -59,30 +117,49 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-/bin/mkdir "$fin_stage/runtime" "$fin_stage/private" "$fin_stage/run"
-/bin/mkdir "$fin_stage/private/credentials"
-# Enrollment requires this fixed private lock before any configuration exists.
-: > "$fin_stage/private/maintenance.lock"
-for fin_name in fin fin-broker fin-touch-id install.sh README.md BUILDINFO SHA256SUMS; do /bin/cp "$fin_source/$fin_name" "$fin_stage/runtime/$fin_name"; done
-(cd "$fin_stage/runtime" && /usr/bin/shasum -a 256 -c SHA256SUMS >/dev/null) || { echo 'Copied checksum verification failed.' >&2; exit 1; }
-/usr/sbin/chown -R root:wheel "$fin_stage"
-/bin/chmod -RN "$fin_stage"
-/bin/chmod 755 "$fin_stage" "$fin_stage/runtime" "$fin_stage/run"
-/bin/chmod 700 "$fin_stage/private" "$fin_stage/private/credentials"
-/bin/chmod 600 "$fin_stage/private/maintenance.lock"
-/bin/chmod 644 "$fin_stage/runtime/README.md" "$fin_stage/runtime/BUILDINFO" "$fin_stage/runtime/SHA256SUMS"
-/bin/chmod 755 "$fin_stage/runtime/fin" "$fin_stage/runtime/fin-broker" "$fin_stage/runtime/fin-touch-id" "$fin_stage/runtime/install.sh"
-for fin_name in fin fin-broker fin-touch-id; do
-  /usr/bin/codesign --verify --strict "$fin_stage/runtime/$fin_name"
-  /usr/bin/codesign -d --verbose=4 "$fin_stage/runtime/$fin_name" 2>&1 | /usr/bin/awk '/^CodeDirectory / && /flags=0x[0-9a-f]+\([^)]*runtime[,)]/ {valid=1} END {exit !valid}' || { echo 'Bundle lacks hardened signing.' >&2; exit 1; }
-  /usr/bin/otool -L "$fin_stage/runtime/$fin_name" | /usr/bin/awk 'NR > 1 {if ($1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\//) bad=1} END {exit bad}' || { echo 'Bundle uses unprotected non-OS libraries.' >&2; exit 1; }
-done
+trap 'cancel_active_stage 129' HUP
+trap 'cancel_active_stage 130' INT
+trap 'cancel_active_stage 143' TERM
+prepare_runtime() {
+  /bin/mkdir "$fin_stage/runtime" "$fin_stage/private" "$fin_stage/run"
+  /bin/mkdir "$fin_stage/runtime/authorization"
+  /bin/mkdir "$fin_stage/private/credentials"
+  # Enrollment requires this fixed private lock before any configuration exists.
+  : > "$fin_stage/private/maintenance.lock"
+  for fin_name in fin fin-broker fin-touch-id install.sh README.md BUILDINFO SHA256SUMS; do /bin/cp "$fin_source/$fin_name" "$fin_stage/runtime/$fin_name"; done
+  /bin/cp "$fin_stage/runtime/fin-touch-id" "$fin_stage/runtime/authorization/Fin"
+  /usr/bin/cmp -s "$fin_stage/runtime/fin-touch-id" "$fin_stage/runtime/authorization/Fin" || { echo 'Human-named authorization helper copy does not match the signed bundle helper.' >&2; return 1; }
+  (cd "$fin_stage/runtime" && /usr/bin/shasum -a 256 -c SHA256SUMS >/dev/null) || { echo 'Copied checksum verification failed.' >&2; return 1; }
+  /usr/sbin/chown -R root:wheel "$fin_stage"
+  /bin/chmod -RN "$fin_stage"
+  /bin/chmod 755 "$fin_stage" "$fin_stage/runtime" "$fin_stage/runtime/authorization" "$fin_stage/run"
+  /bin/chmod 700 "$fin_stage/private" "$fin_stage/private/credentials"
+  /bin/chmod 600 "$fin_stage/private/maintenance.lock"
+  /bin/chmod 644 "$fin_stage/runtime/README.md" "$fin_stage/runtime/BUILDINFO" "$fin_stage/runtime/SHA256SUMS"
+  /bin/chmod 755 "$fin_stage/runtime/fin" "$fin_stage/runtime/fin-broker" "$fin_stage/runtime/fin-touch-id" "$fin_stage/runtime/authorization/Fin" "$fin_stage/runtime/install.sh"
+}
+verify_binaries() {
+  for fin_binary in "$fin_stage/runtime/fin" "$fin_stage/runtime/fin-broker" "$fin_stage/runtime/fin-touch-id" "$fin_stage/runtime/authorization/Fin"; do
+    /usr/bin/codesign --verify --strict "$fin_binary"
+    /usr/bin/codesign -d --verbose=4 "$fin_binary" 2>&1 | /usr/bin/awk '/^CodeDirectory / && /flags=0x[0-9a-f]+\([^)]*runtime[,)]/ {valid=1} END {exit !valid}' || { echo 'Bundle lacks hardened signing.' >&2; return 1; }
+    /usr/bin/otool -L "$fin_binary" | /usr/bin/awk 'NR > 1 {if ($1 !~ /^\/usr\/lib\// && $1 !~ /^\/System\/Library\//) bad=1} END {exit bad}' || { echo 'Bundle uses unprotected non-OS libraries.' >&2; return 1; }
+  done
+}
+run_stage 'Preparing protected runtime files' prepare_runtime
+run_stage 'Verifying signed binaries and system libraries' verify_binaries
 /bin/mv "$fin_stage" "$fin_root"
 fin_installed=1
-/Library/Fin/runtime/fin-broker enrollment initialize --request "{\"approver_uid\":$fin_uid}"
+if [ -t 2 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[32m✓ Installing protected runtime\033[0m\n' >&2; else printf '✓ Installing protected runtime\n' >&2; fi
+# Enrollment verifies all three descriptors. Keep stdout attached to the human
+# terminal as well; suppressing it would make the protected input check fail.
+if [ "$fin_verbose" = 1 ]; then
+  /Library/Fin/runtime/fin-broker enrollment initialize --request "{\"approver_uid\":$fin_uid}" --verbose
+else
+  /Library/Fin/runtime/fin-broker enrollment initialize --request "{\"approver_uid\":$fin_uid}"
+fi
 # Preserve approved configuration and journal even if later service setup fails.
 fin_configured=1
+install_service() {
 /bin/cat > "$fin_plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -107,15 +184,42 @@ PLIST
 /bin/chmod 644 "$fin_plist"
 /usr/bin/plutil -lint "$fin_plist" >/dev/null
 /bin/launchctl bootstrap system "$fin_plist"
+}
+run_stage 'Starting protected local broker service' install_service
 # Register only after approved configuration and service bootstrap. Failures
 # retain the protected configuration/journal for inspection rather than retry.
+register_fin_command() {
 check_path_directories
 [ ! -e "$fin_path_file" ] && [ ! -L "$fin_path_file" ] || { echo 'The Fin PATH registration already exists. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
 (set -o noclobber; printf '%s\n' /Library/Fin/runtime > "$fin_path_file") || { echo 'Fin PATH registration failed. Protected installation was preserved; inspect it before retrying setup.' >&2; exit 1; }
 /usr/sbin/chown root:wheel "$fin_path_file"
 /bin/chmod -N "$fin_path_file"
 /bin/chmod 644 "$fin_path_file"
-echo 'Fin installed. Open a new Terminal window, then run fin daemon start, fin doctor --json, and fin connections add yourself.'
-echo 'Or in your current shell: export PATH="/Library/Fin/runtime:$PATH"'
-echo 'Human: run sudo -K and close elevated shells. Verify the actual agent cannot obtain noninteractive sudo before asserting isolation.'
-echo 'Remove agent-readable credential copies after protected enrollment. Old disclosures are not retroactively protected; rotate exposed keys where needed.'
+}
+run_stage 'Registering Fin for new Terminal sessions' register_fin_command
+# The completion helper runs as the configured interactive account so its
+# getpwuid-based home and shell selection cannot be redirected by root env.
+fin_completion_marker=/Library/Fin/private/completion-owner
+if (umask 077; printf '%s\n' "$fin_uid" > "$fin_completion_marker") &&
+   /usr/sbin/chown root:wheel "$fin_completion_marker" &&
+   /bin/chmod -N "$fin_completion_marker" &&
+   /bin/chmod 600 "$fin_completion_marker"; then
+  fin_completion_env=("TERM=${TERM:-dumb}")
+  if [ "${NO_COLOR+x}" = x ]; then fin_completion_env+=("NO_COLOR=$NO_COLOR"); fi
+  if ! /usr/bin/sudo -n -H -u "#$fin_uid" /usr/bin/env "${fin_completion_env[@]}" \
+    /Library/Fin/runtime/fin internal-completions install; then
+    echo 'Fin is installed, but shell completion setup did not finish. Run `fin internal-completions install` from your account.' >&2
+  fi
+else
+  /bin/rm -f "$fin_completion_marker" || true
+  echo 'Fin is installed, but shell completion setup was skipped because its owner marker could not be secured.' >&2
+fi
+echo 'Fin installed. Next: open a new Terminal and run fin daemon start.'
+if [ "$fin_verbose" = 1 ]; then
+  echo 'Fin setup: installed runtime: /Library/Fin/runtime' >&2
+  echo 'Fin setup: protected configuration and operation journal: /Library/Fin/private' >&2
+  echo 'Fin setup: broker socket: /Library/Fin/run/broker.sock' >&2
+  echo 'Fin setup: run sudo -K and close elevated shells after setup.' >&2
+  echo 'Fin setup: remove agent-readable credential copies after protected enrollment; rotate any keys that were disclosed.' >&2
+  echo 'Fin setup: after starting the broker, run fin doctor --json and fin connections add.' >&2
+fi

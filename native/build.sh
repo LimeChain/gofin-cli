@@ -6,9 +6,18 @@ if [ "$(uname -s)" != Darwin ]; then
   exit 1
 fi
 mkdir -p .build
-/usr/bin/xcrun swiftc -O -framework AppKit -framework LocalAuthentication -framework CryptoKit FinTouchID.swift -o .build/fin-touch-id
+cp FinTouchID.swift .build/main.swift
+/usr/bin/plutil -lint Info.plist >/dev/null
+/usr/bin/xcrun swiftc -O -framework AppKit -framework LocalAuthentication -framework CryptoKit \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
+  .build/main.swift ApprovalPresentation.swift -o .build/fin-touch-id
 # Ad-hoc hardened signing supports a local beta; developer release signing is separate.
 # No debugging, DYLD injection, or library-validation exceptions are granted.
 /usr/bin/codesign --force --sign - --options runtime .build/fin-touch-id
 /usr/bin/codesign --verify --strict .build/fin-touch-id
+# Verify the same basename used at the protected installed location. The source
+# bundle keeps its existing artifact name and checksum contract.
+mkdir -p .build/authorization
+cp .build/fin-touch-id .build/authorization/Fin
+/usr/bin/codesign --verify --strict .build/authorization/Fin
 echo 'Built native/.build/fin-touch-id (hardened runtime).'

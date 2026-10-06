@@ -24,8 +24,9 @@ published download script, Apple Developer signing, and notarized distribution
 have not been released or verified.
 
 Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
-Terminal can run `fin` directly. It leaves Homebrew directories and shell profiles
-unchanged. For the Terminal already open during setup, run:
+Terminal can run `fin` directly. It leaves Homebrew directories untouched and
+automatically configures completion for the user's login shell, using only
+Fin-owned files and marked shell blocks. For the Terminal already open during setup, run:
 
 ```sh
 export PATH="/Library/Fin/runtime:$PATH"
@@ -61,3 +62,18 @@ the cache does not revoke either. After enrollment,
 remove all agent-readable credential copies before testing isolation. Native
 approval, cancellation, credential denial, and cleanup must be observed with the
 human; synthetic tests do not establish those results.
+
+## Local Make workflow
+
+From the repository, `make dev` runs the debug CLI without packaging or installing.
+`make bundle` creates a signed debug bundle; `make release` creates an optimized
+bundle. `BUILDINFO` records `profile=debug` or `profile=release`. Debug bundles
+retain the same installed-code, credential and Touch ID checks as release builds.
+
+In your own macOS Terminal, `make setup` builds and installs a debug bundle for
+an intentional human checkpoint. Run Make as your normal user, not with sudo;
+Fin requests elevation when needed and the wrapper clears it on exit.
+`make uninstall` is a destructive local reset: it deletes installed credentials
+and configuration, refusing financial history. Neither target runs implicitly.
+Use Apple's Make supplied with macOS/Xcode/Command Line Tools; other executable
+paths remain outside the protected terminal ancestry allowlist.

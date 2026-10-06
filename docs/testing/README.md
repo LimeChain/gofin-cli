@@ -16,6 +16,52 @@ configuration or broadcast to production. Node disposal after a failure does not
 establish financial restoration. Actual human checks are in the
 [Rust handoff checklist](rust-human-handoff.md).
 
+## Local development loop
+
+Daemon lifecycle tests use an injected service manager/client plus temporary
+stop-marker paths: `cargo test --locked -p fin-cli daemon` and
+`cargo test --locked -p fin-protocol daemon`. Broker tests cover persisted stop
+across runtime reload, blocked ordinary requests, explicit resume, and failed
+marker writes. No test starts/stops or inspects the installed launchd service.
+
+Automatic completion regressions run with `cargo test --locked -p fin-cli
+shell_integration`. They use temporary homes and explicit account records, cover
+login-shell selection, repeated installation, Bash profile precedence, existing
+and edited files, selective removal, and isolated Bash/Zsh loading. Installer and
+uninstaller Python fixtures cover UID routing, legacy-install compatibility and
+cleanup failure handling. Never invoke completion installation against the real
+account during development; manual generation remains read-only.
+
+- `make dev ARGS='COMMAND ...'`: real debug CLI via incremental `cargo run`; defaults
+  to help. Uses the same parsing, presentation and protocol as the shipped client.
+  This is not a mock financial endpoint: broker-backed commands require the
+  installed service and its ordinary authorizations. No auto-install or dotenv load.
+- `make test-ui`: focused CLI/discovery/presentation tests, including temporary PTYs.
+- `make test-integration`: actual Rust broker, engine, store, human-terminal and
+  authorization tests with injected synthetic dependencies, temporary databases
+  and local IPC; isolated installer/update/uninstall/Make fixtures afterward.
+  No production secrets, real approval or financial calls are used. A standalone
+  interactive synthetic broker/enrollment demo remains a follow-up, not an
+  implemented claim of these targets.
+- `make setup`: human macOS Terminal only. Incrementally builds a debug bundle,
+  validates/signs it through the same packaging path, then invokes `fin setup`.
+  Existing installations are refused before rebuilding. Real configuration Touch
+  ID remains mandatory; financial approvals are unaffected. Apple system/CLT/Xcode
+  Make paths are accepted as ancestors only with the existing kernel identity,
+  root-owned executable, human Terminal, descriptor and topology checks.
+- `make uninstall`: human Terminal only; runs the reviewed credential-deleting reset
+  with labelled fresh sudo and clears cached elevation even on failure. The
+  financial-history and maintenance-lock checks remain mandatory.
+- `make bundle` builds an uninstalled debug bundle in a fresh ignored directory;
+  `make release` uses the optimized release path. Debug packaging reuses the native
+  helper when its sources/build script have not changed; it still verifies code
+  signatures, dependencies and checksums. Run relevant tests explicitly before
+  a human checkpoint; debug packaging does not rerun the suite automatically.
+
+No Make target supplies an authentication-disable flag or implicitly uninstalls,
+installs, loads production credentials, or performs a live test. Use public metadata
+only in `ARGS`; secret entry belongs to the protected human enrollment prompt.
+
 ## Rust implementation and later human verification
 
 The agreed order is to finish the Rust implementation and reproducible verification first, then hand off the user's actual terminal onboarding and Touch ID session. Distinguish **implementation/automated readiness** from **complete human and production acceptance**. Unrun human checks must not become passes, but must not block independent engineering and automated verification.

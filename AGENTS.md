@@ -9,6 +9,7 @@ The next implementation is compiled Rust. Read [the Rust architecture](docs/rust
 - Product Fin, repository/package `fin-cli`, binary `fin`; open source, license pending.
 - CLI plus a small companion skill first. MCP and general chain-to-chain bridging are later work.
 - Setup is bundled with Fin and terminal-driven. The human runs installation and credential enrollment in their own terminal; custom credential-entry UI and a graphical installer are not beta requirements. Keep later add/update/remove flows available without reinstalling.
+- Setup automatically configures persistent completion for the human account's login shell (Zsh, Bash, Fish), without an opt-in prompt. Use standard user locations and minimal Fin-marked blocks; preserve user configuration and remove only Fin-owned content on uninstall. Keep manual generation available for custom use, outside normal onboarding steps. Development tests must use temporary homes.
 - LLM discovery includes setup, service lifecycle, and connection management, before a broker/configuration/credentials exist. Shared definitions drive help, explanation, safe input/output/error schemas, examples, validation, and human-versus-agent execution metadata. Never ask for credentials in chat or pass them through an agent-controlled terminal.
 - One public CLI talks to a protected execution role. Keep OS authentication behind `fin-authorization`, with the compiled Swift helper internal to its macOS provider. Define other platform boundaries without claiming unimplemented write authorization works.
 - The LLM plans and invokes steps. Fin validates and executes individual operations, with durable records and reconciliation.
@@ -19,6 +20,23 @@ The next implementation is compiled Rust. Read [the Rust architecture](docs/rust
 - Keep beta engineering practical. Do not introduce additional release-hardening or formal audit gates from unaccepted review suggestions.
 - Acceptance verification targets production exchange accounts and Ethereum mainnet with real funds. Every movement is capped at $100 equivalent, with total test allocation also at most $100 including execution/unwind costs. Follow the [live-test contract](docs/testing/README.md#live-test-contract); these are test limits, not global product limits.
 - Snapshot the initial financial state and plan the complete return path before a live write. Restore account allocation, holdings/exposure, positions/debt, and test-modified allowances, net unavoidable costs. Never mark a run complete while restoration is unresolved; cleanup writes also require fresh Touch ID.
+
+## CLI experience conventions
+
+- Default human output is brief: the current action, its result, and one useful next step. Avoid JSON dumps, implementation inventories, repeated disclaimers, and unrelated network or policy details during setup. Put technical detail behind `--verbose` or an explicit details option.
+- Show meaningful activity while work actually runs, for example `⠋ Checking Binance credentials...`, then a verified result such as `✓ Binance credentials added`. Never imply completion before success, invent progress percentages, or animate while waiting for terminal input. Clear an active indicator before prompts, results, or errors.
+- Apply semantic color to the entire message row, including its symbol and text, not only a label or error code. Use consistent success, warning, error, and activity styles. Respect `NO_COLOR`, `TERM=dumb`, and redirected output; keep text and symbols understandable without color.
+- Explain each password or biometric request immediately before it, including what it authorizes. Distinguish the Mac login password for installation from Touch ID for Fin configuration or a specific financial write. Keep approval summaries concise but retain material amounts, destinations, permissions, and warnings; expose exact technical bindings through details.
+- State what an approval timeout applies to and the remaining time. Expiry should explain what did not happen and give the correct retry action, rather than a generic terminal or credential warning. Do not automatically refresh consent or replay a financial write.
+- Treat `--json` as a stable agent execution contract, not merely a formatter: no terminal input prompts, animation, color, or human chatter; preserve structured results, errors, exit behavior, and explicit human handoffs. Required OS approvals still apply. Keep machine discovery, help, examples, and behavior aligned.
+- Reuse shared presentation and command patterns. Do not weaken terminal checks or redirect protected enrollment streams to hide output. Credentials remain hidden; approval and isolation requirements still apply.
+- Verify changed terminal behavior with focused synthetic tests, including relevant TTY, redirected, no-color, machine, cancellation, and expiry paths. Human Touch ID verification remains explicitly pending until observed.
+
+## Development cadence
+
+- Make the smallest correct change for the current issue. Keep unrelated improvements as follow-ups; handle small fixes directly and delegate only substantial independent work when it saves time.
+- Prefer the local development workflow and targeted tests. Batch packaging, installation updates, commits, and CI when practical; do not require a release bundle for ordinary CLI iteration.
+- Keep progress updates brief: what was found, what remains, and when the user can test. If a small fix exceeds ten minutes, explain the concrete blocker and shortest remaining path.
 
 ## Implementation and verification
 

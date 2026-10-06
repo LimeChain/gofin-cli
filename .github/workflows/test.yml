@@ -16,10 +16,17 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - if: runner.os == 'macOS'
-        run: python3 scripts/test-rust-macos-installer.py
+        run: |
+          python3 scripts/test-rust-macos-installer.py
+          python3 scripts/test-rust-macos-runtime-update.py
+          python3 scripts/test-rust-macos-uninstall.py
+          python3 scripts/test-dev-workflow.py
       - run: cargo build --locked --release -p fin-cli -p fin-broker
       - if: runner.os == 'macOS'
-        run: sh native/build.sh
+        run: |
+          sh native/build.sh
+          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
+          native/.build/approval-presentation-tests
   fixtures:
     runs-on: macos-latest
     steps:
