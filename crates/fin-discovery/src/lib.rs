@@ -279,11 +279,13 @@ pub fn operation_definitions() -> Vec<Definition> {
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
         "financial_authorization":"Each later financial write, including cleanup, requires a separate fresh macOS Touch ID approval. Enrollment and daemon startup grant none.",
-        "metadata_input":"Run fin connections add for guided public metadata, or supply complete documented flags. Updates require flags.",
+        "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
         "output_format":"Concise human summary on stdout; warnings/progress on stderr. --json returns a structured HUMAN_TERMINAL_REQUIRED handoff before enrollment.",
         "command_line_examples":[
+            "fin connections add binance",
+            "fin connections add binance --name master --role main --credential-type ed25519",
             "fin connections add --provider binance --name main --role main --credential-type hmac",
             "fin connections add --provider binance --name main-rsa --role main --credential-type rsa",
             "fin connections add --provider binance --name main-ed25519 --role main --credential-type ed25519",
@@ -431,7 +433,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "setup",
-            "Install the bundled protected broker and native approval helper from a reviewed release.",
+            "Install the bundled protected broker and native approval helper, then start and check the service.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
@@ -536,6 +538,28 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions
 }
 
+/// Library reach is deliberately separate from Fin's reviewed named operations.
+pub fn exchange_capabilities() -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
+        "fin": {"binance": {"scope":"SPOT funding, account discovery and credential validation", "authentication":["hmac","rsa","ed25519"], "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
+        "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
+    });
+    for (venue, scope) in [
+        ("kraken", "spot"),
+        ("hyperliquid", "perpetuals; primary dex"),
+        ("okx", "spot"),
+        (
+            "coinbase",
+            "Coinbase Advanced public products; market discovery capped at 1000 spot products",
+        ),
+        ("bybit", "spot"),
+    ] {
+        value["fin"][venue] = serde_json::json!({"operations":["exchange.markets","exchange.ticker"],"scope":scope,"public_only":true,"account_enrollment":false,"writes":false});
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,10 +645,10 @@ mod tests {
         );
         assert_eq!(definition.semantics["financial_movement"], false);
         assert_eq!(definition.semantics["future_financial_authority"], false);
-        assert_eq!(
-            definition.semantics["metadata_input"],
-            "Run fin connections add for guided public metadata, or supply complete documented flags. Updates require flags."
-        );
+        let metadata = definition.semantics["metadata_input"].as_str().unwrap();
+        assert!(metadata.contains("fin connections add binance/ethereum"));
+        assert!(metadata.contains("--provider are alternatives"));
+        assert!(metadata.contains("Updates require flags."));
         assert_eq!(
             definition.semantics["binance"]["supported_credential_types"],
             json!(["hmac", "rsa", "ed25519"])

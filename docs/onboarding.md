@@ -70,7 +70,11 @@ start. Repeated stop/status cannot reactivate the service. Ordinary broker-backe
 commands while explicitly stopped return `DAEMON_STOPPED`. Lifecycle commands
 print one concise state message by default, with structured action/status/
 registration/PID under `--json`. Configuration and financial readiness belong in
-`fin doctor`, after starting the service.
+`fin doctor`. Setup starts and checks the service automatically. Connection changes
+reload under the protected configuration lock before the next request is dispatched,
+without stopping the service or replaying that request. Local management does not
+depend on Binance network authentication; account operations retain the required
+identity verification, which resets when the runtime is reloaded.
 
 Adding, replacing, or removing supported credentials later must use the same protected enrollment path without reinstalling Fin. Preserve the current `fin connections --json` listing as an alias where practical; document any migration. Starting the broker authorizes no financial action. Setup/provisioning authorization cannot be reused for writes.
 
@@ -254,3 +258,24 @@ A fresh-agent rehearsal must start from CLI discovery alone and produce correct 
 The later human session uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
 
 Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).
+
+## Exchange connectivity and discovery
+
+Binance enrollment still accepts HMAC, RSA and Ed25519 through the same protected
+terminal path. Validation now uses official CCXT Rust; supported account roles,
+UID evidence and human-confirmed parent/email associations are unchanged.
+`capabilities --json` exposes separate `exchanges.library`, `exchanges.fin` and
+`exchanges.verification` metadata. A compiled CCXT venue is not automatically a Fin
+connection provider or writable operation. Kraken, Hyperliquid, OKX, Coinbase
+and Bybit offer named public market/ticker reads through the default profile.
+They need no credential enrollment. Use `schema exchange.ticker --json` for each
+venue's native pair format and examples; market scopes and pagination limitations
+are included in discovery. Private balances, positions and writes for these new
+venues are not implemented.
+
+`fin connections add binance` (or `ethereum`) preselects the provider and asks for
+remaining public metadata. `--provider` remains supported; use one provider form.
+Complete metadata flags retain the existing protected enrollment path. The JSON
+input schema still uses the canonical `provider` field, and machine mode returns
+a human handoff without prompting. Human errors show `✗` plus their explanation;
+error codes and stages remain in `--verbose` and unchanged JSON errors.

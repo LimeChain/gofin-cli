@@ -11,7 +11,7 @@ repository = "https://github.com/LimeChain/fin-cli"
 [workspace.dependencies]
 async-trait = "0.1.89"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
 schemars = "1.2.2"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "process", "fs"] }
@@ -32,6 +32,7 @@ fin-domain = { path = "crates/fin-domain" }
 fin-store = { path = "crates/fin-store" }
 fin-engine = { path = "crates/fin-engine" }
 fin-binance = { path = "crates/fin-binance" }
+fin-exchange = { path = "crates/fin-exchange", default-features = false }
 fin-authorization = { path = "crates/fin-authorization" }
 fin-credentials = { path = "crates/fin-credentials" }
 fin-discovery = { path = "crates/fin-discovery" }
@@ -46,6 +47,14 @@ fin-presentation = { path = "crates/fin-presentation" }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Generated exchange/protocol SDK debug symbols dwarf the local Fin code.
+# Keep incremental debug builds practical without changing runtime optimizations.
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -51,7 +51,8 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-engine`            | Registry, lifecycle, policy and reservations, effect ledger, reconciliation coordination, run/baseline/return checks.                                  |
 | `fin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
 | `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
-| `fin-binance`           | Reviewed Binance HTTP transport, authentication contracts, exact venue quantities and funding evidence.                                                |
+| `fin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
+| `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `fin-ethereum`          | Wallet, Uniswap and Aave requests, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
 | `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
@@ -61,7 +62,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
 | `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
 
-The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses explicit Binance REST methods rather than claiming a Rust CCXT equivalent. SQLite is handled through `rusqlite`; Ethereum uses Alloy. macOS packages are built locally with hardened ad hoc signatures and checksums. Publisher authentication, Linux/Windows write authorization, and an unattended curl installer are not implemented by that packaging script.
+The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses official `ccxt-base =4.5.85` (the raw engine underlying `ccxt`) with Binance, Kraken, Hyperliquid, OKX, Coinbase and Bybit features. SQLite uses `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. The release downloader is implemented; publication remains pending. Publisher authentication and Linux/Windows write authorization are not established by these packages.
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
 
@@ -216,18 +217,64 @@ Carry forward these demonstrated TS requirements:
 
 The $100 acceptance profile is configurable verification policy, not a permanent product ceiling. Persist its scoped cumulative allocation and consumed costs through retries/restarts. Selected physical holdings include the actual cash that finances gas and unwind costs; the cost reserve earmarks those holdings and is not a second funding source. Gross borrowed proceeds add to the physical allocation without netting debt. Prove every forward/return prefix, including maximum additional cash costs, is funded solely from selected holdings and bounded prior credits. Snapshot all affected resources, reserve the complete unwind, and price exposures independently. Each unwind action is a newly prepared and authorized operation; the engine does not choose financial compensation autonomously.
 
-## Library choices and implementation spikes
+## Exchange connectivity and extension
 
-Use Tokio, Alloy for EVM types/providers/contract bindings/signing, CCXT Rust behind an exchange interface, Serde/Schemars for contracts, clap for the public CLI, and SQLite/rusqlite for storage. Pin the actual Rust toolchain and dependencies during implementation in repository build files and `Cargo.lock`; document reproducible build and release commands.
+`fin-exchange::ExchangeAdapter<P>` implements the domain Adapter contract. Its
+`ExchangeProfile` composes venue operation definitions, account/route planning,
+valuation comparison and completion evidence with shared operation gates, preview
+freshness, immutable binding checks, journal-before-dispatch and recovery.
+`BinanceAdapter` remains a compatibility constructor around `BinanceProfile` and
+that shared adapter. Existing `binance.*` names, exact inputs, fingerprints,
+serialized `binding.params`, submission kind `binance`, stable client IDs and
+history selectors are unchanged. No journal migration or replay occurs.
 
-Before committing the financial ports, verify two concrete library boundaries:
+`DefaultExchangeProfile` implements the named public reads `exchange.markets`
+and `exchange.ticker` for Kraken, Hyperliquid, OKX, Coinbase and Bybit without
+additional Adapters. It has
+no credentials, account enrollment or writes, and contributes an explicitly empty
+financial snapshot. OKX and Bybit are spot-only; Coinbase uses Advanced public
+products and one capped market page; Hyperliquid reads the primary perpetual
+market's metadata and contexts through a fixed read-only POST to `/info`.
+Hyperliquid ticker selection verifies metadata/context array alignment and exact
+market name. Other venue envelopes remain intact, including pagination metadata.
+Native pair formats are schema-validated and arbitrary parameters are rejected.
+New venue support first adds reviewed routing/capability data
+to the internal wrapper and default profile. Add specialized profile behavior only
+for actual differences in authority, routing or evidence; installing a CCXT feature
+does not automatically expose its methods through Fin.
 
-1. **CCXT Rust funding and exact quantities.** Verify the required Binance authentication schemes, endpoint mappings, client identifiers/history, and raw response precision against the pinned crate. The inspected upstream typed Binance withdrawal wrapper accepts `f64`. Use a reviewed decimal-string endpoint path or a small native implementation behind the same exchange interface where necessary. Discovery, quantities, and execution must not silently inherit floating-point normalization. Compile only the intended exchanges initially.
-2. **Alloy transaction preparation.** Recommended fillers can populate nonce, gas, and chain fields. Complete preparation before approval, freeze the approved fields, and control or disable filling at dispatch. Verify the serialized sender and every bound payload/fee field before broadcasting. Changing a filler/provider must not change an approved transaction.
+The wrapper pins **official CCXT Rust `ccxt-base =4.5.85`**, rather than a similarly
+named third-party crate. CCXT types stay inside `fin-exchange::ccxt`. The protected
+broker owns clients and credential access; the public CLI links no exchange SDK.
+Per-exchange `binance`, `kraken`, `hyperliquid`, `okx`, `coinbase` and `bybit`
+features avoid compiling the full venue catalog.
+A bounded runtime worker keeps CCXT client and rate-limit state. Library and HTTP
+retries are zero, redirects are disabled, and an uncertain write is reconciled by
+its original persisted identity. A protected journal guard checks authorization
+after queueing/throttling immediately before CCXT signs each write.
 
-Sources: [CCXT Rust workspace](https://github.com/ccxt/ccxt/blob/master/rust/README.md), [inspected Binance typed wrapper](https://github.com/ccxt/ccxt/blob/master/rust/ccxt/src/exchanges/binance_typed.rs), [Alloy](https://alloy.rs/), [Alloy fillers](https://alloy.rs/rpc-providers/understanding-fillers/), [Serde](https://serde.rs/), [Schemars](https://docs.rs/schemars/latest/schemars/), [rusqlite](https://docs.rs/rusqlite/latest/rusqlite/).
+Authoritative quantities use exact strings and Fin's integer accounting. Typed
+CCXT convenience amounts (`f64`) are never used. A small forwarding observer of
+CCXT's `DerivedExchange::handle_errors` captures original response text and status;
+Serde arbitrary-precision JSON preserves number tokens independently of CCXT's
+dynamic floating-point conversion. Existing Binance parsers still reject numeric financial
+amounts where the venue contract requires strings. No raw CCXT exception, signed
+URL, secret or upstream error body reaches public diagnostics.
 
-Public RPCs must be from trusted public providers without credential-bearing URLs or borrowed wallet-provider keys. Verify chain identity and record provider/finality assumptions. Cache static metadata only where safe; refresh write prerequisites and keep bounded read concurrency and venue rate limiting.
+Compatibility shims are deliberately limited to demonstrated 4.5.85 gaps:
+
+- Normalize RSA PKCS#8 to PKCS#1 and Ed25519 PKCS#8 to minimal RFC8410 form so
+  CCXT selects and parses the correct key. CCXT performs the actual signing.
+- Escape data values for Binance methods whose CCXT implementation uses
+  `rawencode`, before CCXT computes the signature.
+- Route the missing Travel Rule questionnaire lookup through CCXT's fixed
+  `request_typed` path; callers cannot select a URL, method or arbitrary params.
+- Suppress only CCXT-thread panic logging because upstream uses panic-based
+  exceptions containing request data; return safe categories and numeric codes.
+
+Alloy remains the Ethereum runtime, and `rusqlite` owns durable state. These
+changes do not add trading, derivatives, broad exchange enrollment or a sidecar.
+See the [CCXT refactor report](reports/ccxt-exchange.md) for verification and limits.
 
 ## Installation and daemon lifecycle
 

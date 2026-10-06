@@ -63,7 +63,8 @@ make setup
 
 `make setup` builds a debug bundle and runs the real protected installer. Fin
 explains the **Mac login password** request for installation and separately asks
-for Touch ID to approve configuration. Setup moves no funds. It registers the
+for Touch ID to approve configuration. Both setup entry points start the broker and verify its reply and running process
+before reporting success. Setup moves no funds. It registers the
 runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). Open a new Terminal afterward and run `fin doctor`.
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
@@ -75,6 +76,7 @@ Enroll credentials yourself in macOS Terminal:
 
 ```sh
 fin connections add
+fin connections add binance --name master --role main --credential-type ed25519
 fin connections list --json
 fin doctor --json
 fin daemon status
@@ -88,6 +90,14 @@ chat, flags, JSON, environment variables or an agent terminal. Later
 reinstalling. Binance supports HMAC, RSA and Ed25519; Ethereum supports signing
 and read-only wallets. Inspect provider-specific prerequisites with
 `fin connections add --help`.
+
+Binance can be enrolled before an Ethereum wallet. Withdrawals require an enrolled
+Ethereum mainnet destination and its receipt observer. Connection changes reload
+automatically before the next broker request, without stopping the daemon or
+replaying a request. Local connection listing and service commands remain available
+during venue authentication failures; account operations retain identity checks.
+For RSA/Ed25519, hidden input accepts complete multiline PEM or literal `\n`
+separators; press Enter after its END line.
 
 Discover current schemas before preparing an operation:
 
@@ -151,3 +161,43 @@ mainnet. Each movement and the total allocation are capped at **$100 equivalent*
 including costs; capture the baseline and fund the complete return path before
 writing. Restoration must finish before a run can pass. These are test limits,
 not global product limits. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
+
+## Exchange architecture and local verification
+
+Fin uses official **CCXT Rust 4.5.85** through `fin-exchange`, with Binance,
+Kraken, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
+compatible. Shared lifecycle checks, journaling and recovery stay in Fin; CCXT
+handles exchange connectivity and signing. Exact wire responses bypass floating
+point convenience types. [Architecture and limitations](docs/reports/ccxt-exchange.md).
+
+The shared default profile exposes public market and ticker reads:
+
+```sh
+fin read exchange.markets --input '{"exchange":"kraken"}' --json
+fin read exchange.ticker --input '{"exchange":"kraken","pair":"XBTUSD"}' --json
+fin read exchange.ticker --input '{"exchange":"hyperliquid","pair":"BTC"}' --json
+fin read exchange.ticker --input '{"exchange":"okx","pair":"BTC-USDT"}' --json
+fin read exchange.ticker --input '{"exchange":"coinbase","pair":"BTC-USD"}' --json
+fin read exchange.ticker --input '{"exchange":"bybit","pair":"BTCUSDT"}' --json
+```
+
+These use an installed broker and require no exchange credentials. They add no
+account enrollment or writes for these venues. `fin capabilities --json` distinguishes
+library reach, Fin's supported operations and verification status. Use the same
+`exchange.markets` command with each exchange name to discover native identifiers.
+OKX/Bybit use spot, Coinbase uses Advanced public products (market discovery is
+one page of up to 1000 spot products), and Hyperliquid covers its primary perpetual
+market. Returned prices retain venue meanings such as mark price versus last trade;
+these reads do not claim to value holdings or enumerate an entire venue catalog.
+[Public read verification](docs/reports/public-exchange-reads.md).
+
+```sh
+# Offline, synthetic: no credentials, production API calls or installation
+cargo test --locked -p fin-exchange -p fin-binance -p fin-broker --all-features
+# Explicit public-only smoke test; no broker installation or credentials
+cargo run --locked -p fin-exchange --example public_read --all-features -- hyperliquid okx coinbase bybit kraken
+```
+
+Dev/test builds omit debug symbols to limit generated SDK disk use, while retaining
+incremental compilation. Release optimization is unchanged. Human onboarding and
+Touch ID remain pending the joint session.

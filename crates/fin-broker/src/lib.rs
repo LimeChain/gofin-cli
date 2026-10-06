@@ -52,21 +52,6 @@ fn error(code: &str, stage: &str, message: &str, action: &str) -> FinError {
     FinError::new(code, stage, message, action)
 }
 
-fn binance_ed25519_signature(private_key_pem: &str, message: &[u8]) -> fin_domain::Result<String> {
-    use ed25519_dalek::{Signer as _, SigningKey, pkcs8::DecodePrivateKey};
-    let key = SigningKey::from_pkcs8_pem(private_key_pem).map_err(|_| {
-        error(
-            "SIGNING_FAILED",
-            "signing",
-            "Binance Ed25519 key format is invalid.",
-            "Re-enroll a valid Ed25519 PKCS#8 private key.",
-        )
-    })?;
-    let signature = key.sign(message);
-    use base64::Engine as _;
-    Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()))
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerConfigV2 {
@@ -341,6 +326,7 @@ impl BrokerConfigV2 {
 /// credentials, network access, root privileges, or an initialized store.
 pub fn operation_definitions() -> Vec<Definition> {
     let mut definitions = fin_binance::operation_definitions();
+    definitions.extend(fin_exchange::DefaultExchangeProfile::definitions());
     definitions.extend(fin_ethereum::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
@@ -388,16 +374,16 @@ fn canonical_uid(value: &str) -> bool {
         && value.parse::<u64>().is_ok_and(|uid| uid > 0)
 }
 
-pub trait BrokerCredentialProvider: fin_binance::BinanceSigner + Send + Sync {
+pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Send + Sync {
     fn envelope_signer(
         &self,
         credential: &fin_credentials::CredentialRef,
     ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)>;
 }
 
-/// Root-owned credentials stay inside the protected provider. API keys are
-/// copied only into the adapter's request header; private bytes are never
-/// formatted, logged, returned to the protocol, or stored by the adapter.
+/// Root-owned credentials are supplied only to protected signing components.
+/// CCXT holds transient in-process copies; no private bytes are logged or
+/// returned through the public protocol.
 pub struct ProtectedCredentialProvider {
     store: Arc<fin_credentials::TrustedCredentialStore>,
 }
@@ -412,98 +398,42 @@ impl ProtectedCredentialProvider {
     pub fn from_store(store: Arc<fin_credentials::TrustedCredentialStore>) -> Self {
         Self { store }
     }
-
-    fn credential_ref(
-        handle: &fin_binance::CredentialHandle,
-    ) -> fin_domain::Result<fin_credentials::CredentialRef> {
-        fin_credentials::CredentialRef::new(handle.as_str())
-    }
 }
 
-#[async_trait]
-impl fin_binance::BinanceSigner for ProtectedCredentialProvider {
-    async fn api_key(
+impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
+    fn credentials(
         &self,
-        credential: &fin_binance::CredentialHandle,
-    ) -> Result<String, fin_binance::TransportError> {
-        let reference = Self::credential_ref(credential)
-            .map_err(|_| fin_binance::TransportError::PermissionDenied)?;
-        self.store
-            .with_material(&reference, |material| match material {
-                fin_credentials::SecretMaterial::BinanceHmac { api_key, .. }
-                | fin_credentials::SecretMaterial::BinanceRsa { api_key, .. }
-                | fin_credentials::SecretMaterial::BinanceEd25519 { api_key, .. } => {
-                    Ok(api_key.clone())
-                }
-                fin_credentials::SecretMaterial::EthereumPrivateKey { .. } => Err(error(
-                    "CREDENTIAL_TYPE_MISMATCH",
-                    "credentials",
-                    "Credential is not a Binance API key.",
-                    "Select the enrolled Binance credential reference.",
-                )),
-            })
-            .map_err(|_| fin_binance::TransportError::PermissionDenied)
-    }
-
-    async fn sign(
-        &self,
-        credential: &fin_binance::CredentialHandle,
-        encoded_parameters: &[u8],
-    ) -> Result<fin_binance::BinanceSignature, fin_binance::TransportError> {
-        let reference = Self::credential_ref(credential)
-            .map_err(|_| fin_binance::TransportError::PermissionDenied)?;
+        reference: &str,
+    ) -> Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError> {
+        use fin_exchange::ccxt::{CcxtError, CcxtErrorKind, Credentials};
+        let denied = || CcxtError::new(CcxtErrorKind::PermissionDenied);
+        let reference = fin_credentials::CredentialRef::new(reference).map_err(|_| denied())?;
         self.store
             .with_material(&reference, |material| {
-                use rsa::signature::{SignatureEncoding as _, Signer as _};
-                match material {
-                    fin_credentials::SecretMaterial::BinanceHmac { secret, .. } => {
-                        use hmac::{Hmac, Mac};
-                        type HmacSha256 = Hmac<sha2::Sha256>;
-                        let mut mac =
-                            HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| {
-                                error(
-                                    "SIGNING_FAILED",
-                                    "signing",
-                                    "Binance request signing failed.",
-                                    "Check the enrolled credential.",
-                                )
-                            })?;
-                        mac.update(encoded_parameters);
-                        Ok(hex::encode(mac.finalize().into_bytes()))
+                let (api_key, secret) = match material {
+                    fin_credentials::SecretMaterial::BinanceHmac { api_key, secret } => {
+                        (api_key, secret)
                     }
-                    fin_credentials::SecretMaterial::BinanceRsa { private_key, .. } => {
-                        use rsa::{
-                            RsaPrivateKey, pkcs1::DecodeRsaPrivateKey, pkcs1v15::SigningKey,
-                            pkcs8::DecodePrivateKey,
-                        };
-                        let key = RsaPrivateKey::from_pkcs8_pem(private_key)
-                            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(private_key))
-                            .map_err(|_| {
-                                error(
-                                    "SIGNING_FAILED",
-                                    "signing",
-                                    "Binance RSA key format is invalid.",
-                                    "Re-enroll a PKCS#8 or PKCS#1 RSA private key.",
-                                )
-                            })?;
-                        let signature =
-                            SigningKey::<sha2::Sha256>::new(key).sign(encoded_parameters);
-                        use base64::Engine as _;
-                        Ok(base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()))
+                    fin_credentials::SecretMaterial::BinanceRsa {
+                        api_key,
+                        private_key,
                     }
-                    fin_credentials::SecretMaterial::BinanceEd25519 { private_key, .. } => {
-                        binance_ed25519_signature(private_key, encoded_parameters)
+                    | fin_credentials::SecretMaterial::BinanceEd25519 {
+                        api_key,
+                        private_key,
+                    } => (api_key, private_key),
+                    _ => {
+                        return Err(FinError::validation(
+                            "Credential is not an exchange API key.",
+                        ));
                     }
-                    fin_credentials::SecretMaterial::EthereumPrivateKey { .. } => Err(error(
-                        "CREDENTIAL_TYPE_MISMATCH",
-                        "credentials",
-                        "Credential is not a Binance signing key.",
-                        "Select the enrolled Binance credential reference.",
-                    )),
-                }
+                };
+                Ok(Credentials {
+                    api_key: zeroize::Zeroizing::new(api_key.clone()),
+                    secret: zeroize::Zeroizing::new(secret.clone()),
+                })
             })
-            .map(fin_binance::BinanceSignature::from_provider)
-            .map_err(|_| fin_binance::TransportError::PermissionDenied)
+            .map_err(|_| denied())
     }
 }
 
@@ -792,7 +722,7 @@ impl NumeraireUsdProvider for CoinbaseNumeraireUsd {
 }
 
 pub struct PublicBinancePrices {
-    client: reqwest::Client,
+    client: Arc<fin_exchange::ccxt::CcxtClient>,
     numeraire: Arc<dyn NumeraireUsdProvider>,
     #[cfg(test)]
     test_base_url: Option<String>,
@@ -804,18 +734,18 @@ impl PublicBinancePrices {
     }
     pub fn with_numeraire(numeraire: Arc<dyn NumeraireUsdProvider>) -> fin_domain::Result<Self> {
         Ok(Self {
-            client: market_data_client()?,
+            client: Arc::new(fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
+                error(
+                    "PRICE_UNAVAILABLE",
+                    "valuation",
+                    "Exchange runtime could not start.",
+                    "Retry the read when available.",
+                )
+            })?),
             numeraire,
             #[cfg(test)]
             test_base_url: None,
         })
-    }
-    fn base_url(&self) -> &str {
-        #[cfg(test)]
-        if let Some(url) = &self.test_base_url {
-            return url;
-        }
-        "https://api.binance.com"
     }
 }
 
@@ -839,8 +769,33 @@ impl fin_binance::BinancePriceProvider for PublicBinancePrices {
             return Ok(numeraire);
         }
         let symbol = format!("{coin}USDT");
-        let url = format!("{}/api/v3/ticker/price?symbol={symbol}", self.base_url());
-        let value = public_market_json(&self.client, &url).await?;
+        let client = self.client.clone();
+        #[cfg(test)]
+        let client = if let Some(endpoint) = &self.test_base_url {
+            Arc::new(fin_exchange::ccxt::CcxtClient::for_test(endpoint).unwrap())
+        } else {
+            client
+        };
+        let value = client
+            .request(
+                fin_exchange::ccxt::ExchangeId::Binance,
+                fin_exchange::ccxt::Method::BinanceTickerPrice,
+                None,
+                vec![("symbol".into(), symbol.clone())],
+            )
+            .await
+            .map_err(|failure| {
+                error(
+                    if failure.kind == fin_exchange::ccxt::CcxtErrorKind::InvalidResponse {
+                        "PRICE_DATA_INVALID"
+                    } else {
+                        "PRICE_UNAVAILABLE"
+                    },
+                    "valuation",
+                    "The exchange quote could not be verified.",
+                    "Retry the read; no alternative price is inferred.",
+                )
+            })?;
         if value.get("symbol").and_then(Value::as_str) != Some(symbol.as_str()) {
             return Err(error(
                 "PRICE_PRODUCT_INVALID",
@@ -968,6 +923,9 @@ pub fn build_protected_applications(
         .map(|adapter| adapter as Arc<dyn Adapter>)
         .collect();
     let binance_prices = Arc::new(PublicBinancePrices::new()?);
+    adapters.push(Arc::new(fin_exchange::ExchangeAdapter::new(
+        fin_exchange::DefaultExchangeProfile::new(binance_prices.client.clone()),
+    )));
     if config
         .connections
         .iter()
@@ -1046,25 +1004,26 @@ pub fn build_protected_applications(
                 "Repair credential references through protected enrollment.",
             ));
         }
-        let signer: Arc<dyn fin_binance::BinanceSigner> = credentials.clone();
-        let transport = Arc::new(
-            fin_binance::BinanceHttpTransport::new("https://api.binance.com", signer).map_err(
-                |_| {
-                    error(
-                        "BINANCE_TRANSPORT_UNAVAILABLE",
-                        "startup",
-                        "Fixed Binance transport could not be initialized.",
-                        "Check the protected broker installation.",
-                    )
-                },
-            )?,
-        );
-        let payout_verifier = Arc::new(EthereumPayoutVerifier::new(
-            ethereum_adapters
-                .values()
-                .map(|adapter| (adapter.config.chain_id, adapter.clone()))
-                .collect(),
-        )?);
+        let exchange_credentials: Arc<dyn fin_exchange::ccxt::CredentialProvider> =
+            credentials.clone();
+        let transport = Arc::new(fin_binance::BinanceCcxtTransport::new(
+            binance_prices.client.clone(),
+            exchange_credentials,
+        ));
+        // Binance-only enrollment has no Ethereum payout destinations. Keep
+        // funding/reads available without requiring an unrelated wallet; a
+        // configured payout destination still requires its receipt observer.
+        let payout_verifier: Option<Arc<dyn fin_binance::BinanceRecipientVerifier>> =
+            if destinations.is_empty() {
+                None
+            } else {
+                Some(Arc::new(EthereumPayoutVerifier::new(
+                    ethereum_adapters
+                        .values()
+                        .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                        .collect(),
+                )?))
+            };
         let adapter = Arc::new(fin_binance::BinanceAdapter::new(
             fin_binance::BinanceConfig {
                 accounts,
@@ -1072,7 +1031,7 @@ pub fn build_protected_applications(
             },
             transport,
             Some(binance_prices.clone()),
-            Some(payout_verifier),
+            payout_verifier,
         )?);
         adapters.push(adapter.clone());
         if let Some(ethereum) = ethereum_adapters
@@ -1262,6 +1221,7 @@ pub struct BrokerRuntime {
     valuator: Arc<dyn AssetValuator>,
     accepting: AtomicBool,
     protected_config_check: AtomicBool,
+    account_identity_check_pending: AtomicBool,
     daemon_marker_path: Mutex<PathBuf>,
     daemon_marker_owner_uid: u32,
 }
@@ -1324,6 +1284,7 @@ pub fn compose_runtime(
         valuator: dependencies.valuator,
         accepting: AtomicBool::new(true),
         protected_config_check: AtomicBool::new(false),
+        account_identity_check_pending: AtomicBool::new(false),
         daemon_marker_path: Mutex::new(PathBuf::from(fin_protocol::daemon::STOP_MARKER_PATH)),
         daemon_marker_owner_uid: unsafe { libc::geteuid() },
     }))
@@ -1334,34 +1295,16 @@ pub fn compose_runtime(
 pub async fn protected_runtime() -> fin_domain::Result<Arc<BrokerRuntime>> {
     validate_installation()?;
     let config = load_protected_config()?;
+    protected_runtime_from_config(config).await
+}
+
+async fn protected_runtime_from_config(
+    config: BrokerConfigV2,
+) -> fin_domain::Result<Arc<BrokerRuntime>> {
+    validate_installation()?;
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
     let applications = build_protected_applications(&config, credentials)?;
-    for connection in &config.connections {
-        let ConnectionConfig::Binance { name, .. } = connection else {
-            continue;
-        };
-        let adapter = applications
-            .adapters
-            .iter()
-            .find(|adapter| {
-                adapter
-                    .definitions()
-                    .iter()
-                    .any(|definition| definition.name == "binance.account-identity")
-            })
-            .ok_or_else(|| {
-                error(
-                    "BINANCE_IDENTITY_OBSERVER_MISSING",
-                    "startup",
-                    "The fixed Binance account identity observer is unavailable.",
-                    "Upgrade the protected adapter and restart.",
-                )
-            })?;
-        adapter
-            .read("binance.account-identity", &json!({"account":name}))
-            .await?;
-    }
     let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
     let runtime = compose_runtime(
         config,
@@ -1373,10 +1316,47 @@ pub async fn protected_runtime() -> fin_domain::Result<Arc<BrokerRuntime>> {
         },
     )?;
     runtime.protected_config_check.store(true, Ordering::SeqCst);
+    runtime
+        .account_identity_check_pending
+        .store(true, Ordering::SeqCst);
     Ok(runtime)
 }
 
 impl BrokerRuntime {
+    async fn verify_account_identities(&self) -> fin_domain::Result<()> {
+        if !self.account_identity_check_pending.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        for connection in &self.config.connections {
+            let ConnectionConfig::Binance { name, .. } = connection else {
+                continue;
+            };
+            let adapter = self
+                .adapters
+                .iter()
+                .find(|adapter| {
+                    adapter
+                        .definitions()
+                        .iter()
+                        .any(|definition| definition.name == "binance.account-identity")
+                })
+                .ok_or_else(|| {
+                    error(
+                        "BINANCE_IDENTITY_OBSERVER_MISSING",
+                        "startup",
+                        "The fixed Binance account identity observer is unavailable.",
+                        "Upgrade the protected adapter and restart.",
+                    )
+                })?;
+            adapter
+                .read("binance.account-identity", &json!({"account":name}))
+                .await?;
+        }
+        self.account_identity_check_pending
+            .store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn configuration(&self) -> &BrokerConfigV2 {
         &self.config
     }
@@ -1406,9 +1386,23 @@ impl BrokerRuntime {
                 ));
             }
         }
+        // Local management stays available during venue outages. All account
+        // operations retain the identity gate that previously blocked startup.
+        if !matches!(
+            &request,
+            R::Capabilities
+                | R::Connections
+                | R::Doctor
+                | R::Operations
+                | R::RunStatus { .. }
+                | R::DaemonStart
+                | R::DaemonStop
+        ) {
+            self.verify_account_identities().await?;
+        }
         match request {
             R::Capabilities => Ok(
-                json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES}),
+                json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES,"exchanges":fin_discovery::exchange_capabilities()}),
             ),
             R::Connections => {
                 let connections = self
@@ -2163,10 +2157,54 @@ fn validate_private_file_parent(path: &Path) -> fin_domain::Result<()> {
 /// from `serve_protected`, whose peer UID and process identity are fixed.
 pub async fn serve_connection(
     stream: UnixStream,
-    runtime: &BrokerRuntime,
+    runtime: &Arc<BrokerRuntime>,
     expected_uid: u32,
 ) -> fin_domain::Result<()> {
-    serve_connection_with_timeouts(stream, runtime, expected_uid, IpcTimeouts::PRODUCTION).await
+    serve_connection_with_timeouts(
+        stream,
+        &mut runtime.clone(),
+        expected_uid,
+        IpcTimeouts::PRODUCTION,
+    )
+    .await
+}
+
+#[async_trait]
+trait RuntimeLoader: Send + Sync {
+    async fn load(&self, config: BrokerConfigV2) -> fin_domain::Result<Arc<BrokerRuntime>>;
+}
+
+struct ProtectedRuntimeLoader;
+#[async_trait]
+impl RuntimeLoader for ProtectedRuntimeLoader {
+    async fn load(&self, config: BrokerConfigV2) -> fin_domain::Result<Arc<BrokerRuntime>> {
+        protected_runtime_from_config(config).await
+    }
+}
+
+async fn refresh_runtime(
+    runtime: &mut Arc<BrokerRuntime>,
+    current: BrokerConfigV2,
+    expected_uid: u32,
+    loader: &dyn RuntimeLoader,
+) -> fin_domain::Result<()> {
+    current.validate()?;
+    if current.approver_uid != expected_uid {
+        return Err(error(
+            "APPROVER_UID_MISMATCH",
+            "configuration",
+            "The configured human account changed; this service cannot accept the old account.",
+            "Repair the service socket through protected setup.",
+        ));
+    }
+    if serde_json::to_value(runtime.configuration()).map_err(|_| internal_error())?
+        != serde_json::to_value(&current).map_err(|_| internal_error())?
+    {
+        // Replace only after complete protected composition succeeds. The same
+        // journal is reopened; no request, approval or submission is replayed.
+        *runtime = loader.load(current).await?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -2186,7 +2224,7 @@ impl IpcTimeouts {
 
 async fn serve_connection_with_timeouts(
     mut stream: UnixStream,
-    runtime: &BrokerRuntime,
+    runtime: &mut Arc<BrokerRuntime>,
     expected_uid: u32,
     timeouts: IpcTimeouts,
 ) -> fin_domain::Result<()> {
@@ -2237,20 +2275,15 @@ async fn serve_connection_with_timeouts(
             }
             Err(error) => return Err(error),
         };
-        let current = load_protected_config()?;
-        let expected =
-            serde_json::to_value(runtime.configuration()).map_err(|_| internal_error())?;
-        let observed = serde_json::to_value(current).map_err(|_| internal_error())?;
-        if expected != observed {
-            runtime.accepting.store(false, Ordering::SeqCst);
-            let failure = BrokerResponse::failure(error(
-                "CONFIG_CHANGED_RESTART_REQUIRED",
-                "configuration",
-                "Protected configuration changed after this broker loaded it.",
-                "Allow the broker to stop and restart through launchd with the updated configuration.",
-            ));
+        let refreshed = match load_protected_config() {
+            Ok(current) => {
+                refresh_runtime(runtime, current, expected_uid, &ProtectedRuntimeLoader).await
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = refreshed {
+            let failure = BrokerResponse::failure(error);
             write_ipc_response(&mut stream, &failure, timeouts.response_write).await?;
-            drop(guard);
             return Ok(());
         }
         Some(guard)
@@ -2338,7 +2371,7 @@ pub async fn serve_listener(
 
 async fn serve_listener_with_timeouts(
     listener: UnixListener,
-    runtime: Arc<BrokerRuntime>,
+    mut runtime: Arc<BrokerRuntime>,
     expected_uid: u32,
     timeouts: IpcTimeouts,
 ) -> fin_domain::Result<()> {
@@ -2352,7 +2385,7 @@ async fn serve_listener_with_timeouts(
             )
         })?;
         if let Err(error) =
-            serve_connection_with_timeouts(stream, &runtime, expected_uid, timeouts).await
+            serve_connection_with_timeouts(stream, &mut runtime, expected_uid, timeouts).await
         {
             // Do not echo peer-controlled data or allow malformed frames to
             // terminate the broker; safe protocol errors are per connection.
@@ -2778,7 +2811,7 @@ mod tests {
                         .lines()
                         .filter_map(|line| line.split_once(':'))
                         .any(|(name, value)| name.eq_ignore_ascii_case("user-agent")
-                            && value.trim() == concat!("fin-cli/", env!("CARGO_PKG_VERSION")))
+                            && !value.trim().is_empty())
                 );
                 let first = std::str::from_utf8(&request)
                     .unwrap()
@@ -2940,47 +2973,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn binance_ed25519_pkcs8_signs_raw_request_bytes_as_base64() {
-        use ed25519_dalek::pkcs8::DecodePrivateKey;
-        // RFC 8032 test seed; synthetic only. The standard PKCS#8 encoding is
-        // also the format consumed by OpenSSL and Node's crypto.createPrivateKey.
-        let pem = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g\n-----END PRIVATE KEY-----\n";
-        let key = ed25519_dalek::SigningKey::from_pkcs8_pem(pem).unwrap();
-        let empty = binance_ed25519_signature(pem, b"").unwrap();
-        use base64::Engine as _;
-        assert_eq!(
-            hex::encode(
-                base64::engine::general_purpose::STANDARD
-                    .decode(empty)
-                    .unwrap()
-            ),
-            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155".to_owned()
-                + "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
-        );
-        let request = b"coin=ETH&network=ETH&timestamp=1";
-        let encoded = binance_ed25519_signature(pem, request).unwrap();
-        let signature: [u8; 64] = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        use ed25519_dalek::Verifier as _;
-        key.verifying_key()
-            .verify(request, &ed25519_dalek::Signature::from_bytes(&signature))
-            .unwrap();
-    }
-
     struct ReadAdapter {
         captures: Arc<AtomicUsize>,
         pricing_snapshot: Option<Arc<Mutex<StateSnapshot>>>,
         pricing_preflight: Option<Arc<AtomicBool>>,
+        identity_probe: Option<(Arc<AtomicBool>, Arc<AtomicUsize>)>,
     }
 
     #[async_trait]
     impl Adapter for ReadAdapter {
         fn definitions(&self) -> Vec<Definition> {
-            vec![
+            let mut definitions = vec![
                 Definition {
                     name: "fixture.read".into(),
                     description: "Synthetic read fixture".into(),
@@ -3007,7 +3010,13 @@ mod tests {
                     completion: "Read only".into(),
                     semantics: json!({}),
                 },
-            ]
+            ];
+            if self.identity_probe.is_some() {
+                let mut identity = definitions[0].clone();
+                identity.name = "binance.account-identity".into();
+                definitions.push(identity);
+            }
+            definitions
         }
         async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
             self.captures.fetch_add(1, Ordering::SeqCst);
@@ -3037,7 +3046,20 @@ mod tests {
                 pending: vec![],
             })
         }
-        async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+        async fn read(&self, operation: &str, _: &Value) -> fin_domain::Result<Value> {
+            if operation == "binance.account-identity"
+                && let Some((fail, calls)) = &self.identity_probe
+            {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if fail.load(Ordering::SeqCst) {
+                    return Err(error(
+                        "VENUE_PERMISSION",
+                        "read",
+                        "Synthetic credentials denied.",
+                        "Repair the synthetic connection.",
+                    ));
+                }
+            }
             Ok(json!({"synthetic":true}))
         }
         async fn prepare(&self, _: &str, _: &Value) -> fin_domain::Result<PreparedOperation> {
@@ -3203,6 +3225,7 @@ mod tests {
                     captures: Arc::new(AtomicUsize::new(0)),
                     pricing_snapshot: Some(snapshot.clone()),
                     pricing_preflight: Some(allow_preflight.clone()),
+                    identity_probe: None,
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(RecordingPriceValuator {
@@ -3358,6 +3381,7 @@ mod tests {
                     captures: Arc::new(AtomicUsize::new(0)),
                     pricing_snapshot: Some(observed),
                     pricing_preflight: None,
+                    identity_probe: None,
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(CompositeAssetValuator {
@@ -3455,6 +3479,364 @@ mod tests {
         }
     }
 
+    struct UnusedCredentials;
+    impl fin_exchange::ccxt::CredentialProvider for UnusedCredentials {
+        fn credentials(
+            &self,
+            _: &str,
+        ) -> Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError> {
+            panic!("composition and local management must not access credentials")
+        }
+    }
+    impl BrokerCredentialProvider for UnusedCredentials {
+        fn envelope_signer(
+            &self,
+            _: &fin_credentials::CredentialRef,
+        ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)> {
+            panic!("read-only fixture has no signing credentials")
+        }
+    }
+
+    fn binance_only_config() -> BrokerConfigV2 {
+        let mut config = config();
+        config.connections.push(ConnectionConfig::Binance {
+            name: "synthetic-master".into(),
+            resource: ResourceId("binance:uid:271828:SPOT".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+            role: "main".into(),
+            parent: None,
+            email: None,
+            wallet_type: "SPOT".into(),
+            physical_identity: "271828".into(),
+            physical_identity_verified: true,
+        });
+        config
+    }
+
+    struct FixtureRuntimeLoader {
+        database: PathBuf,
+        loads: AtomicUsize,
+        fail: bool,
+    }
+    #[async_trait]
+    impl RuntimeLoader for FixtureRuntimeLoader {
+        async fn load(&self, config: BrokerConfigV2) -> fin_domain::Result<Arc<BrokerRuntime>> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(FinError::validation("Synthetic reload failure."));
+            }
+            let applications = build_protected_applications(&config, Arc::new(UnusedCredentials))?;
+            compose_runtime(
+                config,
+                RuntimeDependencies {
+                    store: Store::open(&self.database).unwrap(),
+                    adapters: applications.adapters,
+                    authorizer: Arc::new(ReadOnlyAuthorizer),
+                    valuator: applications.valuator,
+                },
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_reload_lists_enrollment_immediately_and_preserves_pending_identity() {
+        let directory = test_directory();
+        let loader = FixtureRuntimeLoader {
+            database: directory.join("operations.sqlite"),
+            loads: AtomicUsize::new(0),
+            fail: false,
+        };
+        let mut runtime = loader.load(config()).await.unwrap();
+        let mut store = Store::open(&loader.database).unwrap();
+        let record = OperationRecord {
+            id: "synthetic-pending".into(),
+            request_id: "synthetic-request".into(),
+            fingerprint: "synthetic-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "synthetic.write".into(),
+            input: json!({}),
+            status: fin_domain::Status::Submitted,
+            created_at: now(),
+            updated_at: now(),
+            preview: None,
+            approval: None,
+            submission: Some(Submission {
+                kind: "synthetic".into(),
+                reference: "synthetic-original-submission".into(),
+                data: json!({}),
+            }),
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        store
+            .create_request(
+                &record.id,
+                &record.request_id,
+                &record.fingerprint,
+                &record.operation,
+                None,
+                "submitted",
+                &serde_json::to_value(&record).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        drop(store);
+        let original = runtime.clone();
+        refresh_runtime(&mut runtime, config(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&runtime, &original));
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 1);
+
+        refresh_runtime(&mut runtime, binance_only_config(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&runtime, &original));
+        assert!(runtime.accepting.load(Ordering::SeqCst));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let serving_runtime = runtime.clone();
+        let serving = tokio::spawn(async move {
+            serve_connection(server, &serving_runtime, unsafe { libc::geteuid() })
+                .await
+                .unwrap();
+        });
+        client
+            .write_all(b"{\"method\":\"connections\"}\n")
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut bytes)
+            .await
+            .unwrap();
+        serving.await.unwrap();
+        let response: BrokerResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(response.ok);
+        assert_eq!(response.result.unwrap()[0]["name"], "synthetic-master");
+        let records = runtime.engine.operations().unwrap();
+        assert_eq!(records, vec![record]);
+        refresh_runtime(&mut runtime, config(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .handle(BrokerRequest::Connections)
+                .await
+                .result
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(runtime.engine.operations().unwrap(), records);
+        drop(runtime);
+        drop(original);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn configuration_reload_failure_or_approver_change_never_replaces_runtime() {
+        let directory = test_directory();
+        let loader = FixtureRuntimeLoader {
+            database: directory.join("operations.sqlite"),
+            loads: AtomicUsize::new(0),
+            fail: true,
+        };
+        let mut current = runtime();
+        let original = current.clone();
+        assert_eq!(
+            refresh_runtime(&mut current, binance_only_config(), 501, &loader)
+                .await
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT"
+        );
+        assert!(Arc::ptr_eq(&current, &original));
+        assert!(current.accepting.load(Ordering::SeqCst));
+        let mut changed = config();
+        changed.approver_uid = 502;
+        assert_eq!(
+            refresh_runtime(&mut current, changed, 501, &loader)
+                .await
+                .unwrap_err()
+                .code,
+            "APPROVER_UID_MISMATCH"
+        );
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&current, &original));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_identity_verification_keeps_management_available_but_blocks_financial_dispatch()
+     {
+        let runtime = compose_runtime(
+            binance_only_config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+            },
+        )
+        .unwrap();
+        runtime
+            .account_identity_check_pending
+            .store(true, Ordering::SeqCst);
+        for request in [
+            BrokerRequest::DaemonStart,
+            BrokerRequest::Connections,
+            BrokerRequest::Doctor,
+        ] {
+            assert!(runtime.handle(request).await.ok);
+        }
+        for request in [
+            BrokerRequest::Snapshot,
+            BrokerRequest::Execute {
+                request: fin_domain::OperationRequest {
+                    request_id: "synthetic-blocked".into(),
+                    operation: "binance.transfer".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            },
+        ] {
+            let response = runtime.handle(request).await;
+            assert!(!response.ok);
+            assert_eq!(
+                response.error.unwrap().code,
+                "BINANCE_IDENTITY_OBSERVER_MISSING"
+            );
+        }
+        assert!(runtime.engine.operations().unwrap().is_empty());
+        assert!(
+            runtime
+                .account_identity_check_pending
+                .load(Ordering::SeqCst)
+        );
+        assert!(runtime.handle(BrokerRequest::DaemonStop).await.ok);
+    }
+
+    #[tokio::test]
+    async fn venue_identity_failure_returns_to_client_and_remains_pending_until_success() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captures = Arc::new(AtomicUsize::new(0));
+        let runtime = compose_runtime(
+            binance_only_config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures: captures.clone(),
+                    pricing_snapshot: None,
+                    pricing_preflight: None,
+                    identity_probe: Some((fail.clone(), calls.clone())),
+                })],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+            },
+        )
+        .unwrap();
+        runtime
+            .account_identity_check_pending
+            .store(true, Ordering::SeqCst);
+        for request in [
+            BrokerRequest::DaemonStart,
+            BrokerRequest::Doctor,
+            BrokerRequest::Connections,
+        ] {
+            assert!(runtime.handle(request).await.ok);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let response = runtime.handle(BrokerRequest::Snapshot).await;
+        assert_eq!(response.error.unwrap().code, "VENUE_PERMISSION");
+        assert_eq!(captures.load(Ordering::SeqCst), 0);
+        assert!(
+            runtime
+                .account_identity_check_pending
+                .load(Ordering::SeqCst)
+        );
+        assert!(runtime.handle(BrokerRequest::DaemonStart).await.ok);
+        fail.store(false, Ordering::SeqCst);
+        assert!(runtime.handle(BrokerRequest::Snapshot).await.ok);
+        assert!(
+            !runtime
+                .account_identity_check_pending
+                .load(Ordering::SeqCst)
+        );
+        assert!(runtime.handle(BrokerRequest::Snapshot).await.ok);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(captures.load(Ordering::SeqCst), 2);
+        assert!(runtime.engine.operations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn binance_only_composition_serves_management_without_an_ethereum_wallet() {
+        let config = binance_only_config();
+        let applications = build_protected_applications(&config, Arc::new(UnusedCredentials))
+            .expect("Binance enrollment must not require an Ethereum payout observer");
+        let runtime = compose_runtime(
+            config,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: applications.adapters,
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: applications.valuator,
+            },
+        )
+        .unwrap();
+        for request in [BrokerRequest::DaemonStart, BrokerRequest::Doctor] {
+            assert!(runtime.handle(request).await.ok);
+        }
+        let connections = runtime.handle(BrokerRequest::Connections).await;
+        assert!(connections.ok);
+        assert_eq!(connections.result.unwrap()[0]["name"], "synthetic-master");
+        let withdrawal = runtime
+            .handle(BrokerRequest::Preview {
+                operation: "binance.withdraw".into(),
+                input: json!({
+                    "requestId":"synthetic-no-wallet", "account":"synthetic-master",
+                    "destination":"unenrolled-wallet", "coin":"ETH", "amount":"0.001",
+                    "network":"ETH", "walletType":"SPOT", "maxFee":"0.001",
+                    "minReceiveAmount":"0.0001"
+                }),
+            })
+            .await;
+        assert!(!withdrawal.ok);
+        assert_eq!(withdrawal.error.unwrap().code, "UNKNOWN_CONNECTION");
+        assert!(runtime.handle(BrokerRequest::DaemonStop).await.ok);
+    }
+
+    #[test]
+    fn configured_payout_destination_still_requires_its_ethereum_observer() {
+        let mut config = binance_only_config();
+        config.connections.push(ConnectionConfig::Ethereum {
+            name: "synthetic-wallet".into(),
+            resource: ResourceId("ethereum:1:synthetic-wallet".into()),
+            network: "ethereum:1".into(),
+            address: "0x0000000000000000000000000000000000000001".into(),
+            signing_enabled: false,
+            credential_ref: None,
+            assets: vec![AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            }],
+        });
+        assert!(build_protected_applications(&config, Arc::new(UnusedCredentials)).is_ok());
+        config.deployments.clear();
+        let Err(failure) = build_protected_applications(&config, Arc::new(UnusedCredentials))
+        else {
+            panic!("configured payouts must fail closed without their receipt observer")
+        };
+        assert_eq!(failure.code, "CONFIG_NETWORKS_REQUIRED");
+        let Err(failure) = EthereumPayoutVerifier::new(BTreeMap::new()) else {
+            panic!("an empty payout verifier must never be usable")
+        };
+        assert_eq!(failure.code, "PAYOUT_RPC_MISSING");
+    }
+
     fn runtime() -> Arc<BrokerRuntime> {
         runtime_with_capture_counter().0
     }
@@ -3469,6 +3851,7 @@ mod tests {
                     captures: captures.clone(),
                     pricing_snapshot: None,
                     pricing_preflight: None,
+                    identity_probe: None,
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),

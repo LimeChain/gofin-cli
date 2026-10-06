@@ -10,6 +10,7 @@ use fin_domain::{
     StateSnapshot, Status, Submission, SubmissionJournal, Valuation, VerifiedEffects, binding_hash,
     now,
 };
+use fin_exchange::{ExchangeAdapter, ExchangeProfile, PlannedSubmission};
 use num_bigint::BigUint;
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -91,15 +92,135 @@ pub trait BinanceRecipientVerifier: Send + Sync {
     async fn verify(&self, request: PayoutRequest) -> PayoutResult;
 }
 
+fn transport_error(stage: &str, error_value: TransportError) -> FinError {
+    match error_value {
+        TransportError::Unavailable => {
+            error("VENUE_UNAVAILABLE", stage, "Binance could not be reached.")
+        }
+        TransportError::RateLimited => error(
+            "VENUE_RATE_LIMIT",
+            stage,
+            "Binance rate limited the request.",
+        ),
+        TransportError::PermissionDenied => error(
+            "VENUE_PERMISSION",
+            stage,
+            "The selected Binance credential was denied.",
+        ),
+        TransportError::InvalidResponse => error(
+            "VENUE_RESPONSE_INVALID",
+            stage,
+            "Binance returned an invalid response; reconcile any persisted submission before retrying.",
+        ),
+        TransportError::Timeout => error(
+            "VENUE_TIMEOUT",
+            stage,
+            "Binance timed out; reconcile any persisted submission before retrying.",
+        ),
+        TransportError::Rejected => error(
+            "VENUE_REQUEST_FAILED",
+            stage,
+            "Binance rejected the request; reconcile any persisted submission before retrying.",
+        ),
+        TransportError::HttpFailure {
+            status,
+            binance_code,
+            kind,
+        } => http_failure_error(stage, status, binance_code, kind),
+    }
+}
+
+/// Backwards-compatible constructor around the shared exchange lifecycle.
 #[derive(Clone)]
-pub struct BinanceAdapter {
+pub struct BinanceAdapter(ExchangeAdapter<BinanceProfile>);
+
+impl BinanceAdapter {
+    pub fn new(
+        config: BinanceConfig,
+        transport: Arc<dyn BinanceTransport>,
+        price_provider: Option<Arc<dyn BinancePriceProvider>>,
+        recipient_verifier: Option<Arc<dyn BinanceRecipientVerifier>>,
+    ) -> Result<Self, FinError> {
+        Ok(Self(ExchangeAdapter::new(BinanceProfile::new(
+            config,
+            transport,
+            price_provider,
+            recipient_verifier,
+        )?)))
+    }
+
+    pub async fn preview_withdrawal_after_funding(
+        &self,
+        withdrawal: &Value,
+        sources: Vec<ConditionalFundingSource>,
+    ) -> Result<PreparedOperation, FinError> {
+        self.0
+            .profile()
+            .preview_withdrawal_after_funding(withdrawal, sources)
+            .await
+    }
+}
+
+#[async_trait]
+impl Adapter for BinanceAdapter {
+    fn definitions(&self) -> Vec<Definition> {
+        self.0.definitions()
+    }
+    fn connections(&self) -> Vec<ConnectionMetadata> {
+        self.0.connections()
+    }
+    async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
+        self.0.snapshot().await
+    }
+    async fn read(&self, operation: &str, input: &Value) -> Result<Value, FinError> {
+        self.0.read(operation, input).await
+    }
+    async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation, FinError> {
+        self.0.prepare(operation, input).await
+    }
+    async fn preflight_return_route(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &ReturnRouteContext,
+    ) -> Result<ReturnRouteProof, FinError> {
+        self.0
+            .preflight_return_route(operation, input, context)
+            .await
+    }
+    async fn revalidate(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        self.0.revalidate(prepared).await
+    }
+    async fn submit(
+        &self,
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        self.0.submit(prepared, journal).await
+    }
+    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, FinError> {
+        self.0.reconcile(record).await
+    }
+}
+
+/// Venue request mapping only: dispatch timing and journaling belong to fin-exchange.
+pub struct BinanceDispatch {
+    authority: String,
+    request: BinanceRequest,
+}
+
+#[derive(Clone)]
+pub struct BinanceProfile {
     config: Arc<BinanceConfig>,
     transport: Arc<dyn BinanceTransport>,
     price_provider: Option<Arc<dyn BinancePriceProvider>>,
     recipient_verifier: Option<Arc<dyn BinanceRecipientVerifier>>,
 }
 
-impl BinanceAdapter {
+impl BinanceProfile {
     pub fn new(
         config: BinanceConfig,
         transport: Arc<dyn BinanceTransport>,
@@ -299,27 +420,7 @@ impl BinanceAdapter {
         self.transport
             .request(&account.credential, request)
             .await
-            .map_err(|e| match e {
-                TransportError::Unavailable => {
-                    error("VENUE_UNAVAILABLE", stage, "Binance could not be reached.")
-                }
-                TransportError::RateLimited => {
-                    error("VENUE_RATE_LIMIT", stage, "Binance rate limited the request.")
-                }
-                TransportError::PermissionDenied => error(
-                    "VENUE_PERMISSION",
-                    stage,
-                    "The selected Binance credential was denied.",
-                ),
-                TransportError::InvalidResponse => error("VENUE_RESPONSE_INVALID", stage, "Binance returned an invalid response; reconcile any persisted submission before retrying."),
-                TransportError::Timeout => error("VENUE_TIMEOUT", stage, "Binance timed out; reconcile any persisted submission before retrying."),
-                TransportError::Rejected => error("VENUE_REQUEST_FAILED", stage, "Binance rejected the request; reconcile any persisted submission before retrying."),
-                TransportError::HttpFailure {
-                    status,
-                    binance_code,
-                    kind,
-                } => http_failure_error(stage, status, binance_code, kind),
-            })
+            .map_err(|e| transport_error(stage, e))
     }
 
     async fn permissions(&self, account: &BinanceAccount) -> Result<ApiRestrictions, FinError> {
@@ -1740,7 +1841,7 @@ fn valid_eth_address(value: &str) -> bool {
 }
 
 #[async_trait]
-impl Adapter for BinanceAdapter {
+impl ExchangeProfile for BinanceProfile {
     fn definitions(&self) -> Vec<Definition> {
         definitions()
     }
@@ -2375,58 +2476,24 @@ impl Adapter for BinanceAdapter {
         }
     }
 
-    async fn revalidate(
-        &self,
-        prepared: &PreparedOperation,
-    ) -> Result<PreparedOperation, FinError> {
-        if prepared.binding.get("preparationOnly") == Some(&json!(true)) {
-            return Err(error(
-                "PREPARATION_ONLY",
-                "submission",
-                "Conditional funding preparation cannot be revalidated or submitted.",
-            ));
-        }
-        let expires = DateTime::parse_from_rfc3339(&prepared.expires_at).map_err(|_| {
-            error(
-                "PREVIEW_INVALID",
-                "submission",
-                "Prepared operation expiry is invalid.",
-            )
-        })?;
-        if expires.with_timezone(&Utc) <= Utc::now() {
-            return Err(error(
-                "PREVIEW_EXPIRED",
-                "submission",
-                "Prepared operation expired; obtain a fresh preview and approval.",
-            ));
-        }
-        let current = self.prepare(&prepared.operation, &prepared.input).await?;
-        if current.binding != prepared.binding
-            || !approved_native_valuation_matches(prepared, &current)
-        {
-            return Err(error(
-                "PREVIEW_CHANGED",
-                "submission",
-                "Material Binance parameters or valuation changed; obtain fresh authorization.",
-            ));
-        }
-        Ok(current)
+    type Request = BinanceDispatch;
+
+    fn submission_kind(&self) -> &str {
+        "binance"
     }
 
-    async fn submit(
+    fn valuation_matches(
         &self,
-        prepared: &PreparedOperation,
-        journal: Arc<dyn SubmissionJournal>,
-    ) -> Result<Submission, FinError> {
-        if prepared.binding.get("preparationOnly") == Some(&json!(true)) {
-            return Err(error(
-                "PREPARATION_ONLY",
-                "submission",
-                "Conditional funding preparation cannot be submitted.",
-            ));
-        }
-        let current = self.revalidate(prepared).await?;
-        journal.assert_authorized()?;
+        approved: &PreparedOperation,
+        refreshed: &PreparedOperation,
+    ) -> bool {
+        approved_native_valuation_matches(approved, refreshed)
+    }
+
+    async fn plan_submission(
+        &self,
+        current: &PreparedOperation,
+    ) -> Result<PlannedSubmission<Self::Request>, FinError> {
         let input: Value = current.input.clone();
         let submission;
         let authority;
@@ -2515,10 +2582,36 @@ impl Adapter for BinanceAdapter {
                 ));
             }
         }
-        journal.assert_authorized()?;
-        journal.persist_submission(&submission)?;
-        let response = self.call(authority, request.clone(), "submission").await?;
-        match current.operation.as_str() {
+        Ok(PlannedSubmission {
+            submission,
+            request: BinanceDispatch {
+                authority: authority.name.clone(),
+                request,
+            },
+        })
+    }
+
+    async fn dispatch(
+        &self,
+        request: &BinanceDispatch,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Value, FinError> {
+        request
+            .request
+            .validate()
+            .map_err(|e| error("INVALID_ENDPOINT_REQUEST", "submission", e.to_string()))?;
+        self.transport
+            .request_authorized(
+                &self.account(&request.authority)?.credential,
+                request.request.clone(),
+                journal,
+            )
+            .await
+            .map_err(|e| transport_error("submission", e))
+    }
+
+    fn validate_response(&self, submission: &Submission, response: &Value) -> Result<(), FinError> {
+        match submission.data["operation"].as_str().unwrap_or_default() {
             "binance.transfer" => {
                 let value = response.get("tranId").ok_or_else(|| error("SUBMISSION_RESPONSE_INVALID", "submission", "Binance transfer response lacks a transaction ID; reconcile its clientTranId."))?;
                 // Validate any response transaction ID, but retain the
@@ -2551,24 +2644,14 @@ impl Adapter for BinanceAdapter {
             }
             _ => unreachable!(),
         }
-        Ok(submission)
+        Ok(())
     }
 
-    async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, FinError> {
-        let Some(submission) = &record.submission else {
-            return Ok(Reconciliation {
-                status: Status::Unknown,
-                evidence: json!({"reason":"No persisted Binance submission identity exists."}),
-                verified: None,
-            });
-        };
-        if submission.kind != "binance" {
-            return Ok(Reconciliation {
-                status: Status::Unknown,
-                evidence: json!({"reason":"Persisted submission kind does not match Binance."}),
-                verified: None,
-            });
-        }
+    async fn reconcile_submission(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+    ) -> Result<Reconciliation, FinError> {
         match record.operation.as_str() {
             "binance.transfer" => self.reconcile_transfer(record, submission).await,
             "binance.withdraw" => self.reconcile_withdrawal(record, submission).await,
@@ -2581,7 +2664,7 @@ impl Adapter for BinanceAdapter {
     }
 }
 
-impl BinanceAdapter {
+impl BinanceProfile {
     async fn preflight_withdrawal(
         &self,
         raw: &Value,

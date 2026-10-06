@@ -1,8 +1,8 @@
-//! Reviewed Binance SPOT funding endpoint boundary.
+//! Binance SPOT funding profiles and exact evidence.
 //!
 //! The adapter exposes a closed endpoint enum instead of a caller-selected
-//! method/path pair. Credentials, request signing and HTTP live outside this
-//! crate and are supplied by the protected broker through [`BinanceTransport`].
+//! method/path pair. The shared CCXT runtime owns connectivity and signing;
+//! protected broker credentials are supplied through [`BinanceCcxtTransport`].
 
 use std::fmt;
 use std::sync::Arc;
@@ -421,6 +421,18 @@ pub trait BinanceTransport: Send + Sync {
         credential: &CredentialHandle,
         request: BinanceRequest,
     ) -> Result<Value, TransportError>;
+
+    async fn request_authorized(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+        journal: Arc<dyn fin_domain::SubmissionJournal>,
+    ) -> Result<Value, TransportError> {
+        journal
+            .assert_authorized()
+            .map_err(|_| TransportError::PermissionDenied)?;
+        self.request(credential, request).await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -510,61 +522,6 @@ impl CredentialHandle {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BinanceSignature(String);
-
-impl BinanceSignature {
-    pub fn from_provider(signature: impl Into<String>) -> Self {
-        Self(signature.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Narrow broker boundary for signing Binance's exact URL-encoded preimage.
-/// Private key bytes remain inside the provider implementation.
-#[async_trait]
-pub trait BinanceSigner: Send + Sync {
-    async fn api_key(&self, credential: &CredentialHandle) -> Result<String, TransportError>;
-    async fn sign(
-        &self,
-        credential: &CredentialHandle,
-        encoded_parameters: &[u8],
-    ) -> Result<BinanceSignature, TransportError>;
-}
-
-/// Configurable endpoint family is intentionally absent: the transport must
-/// derive its URL solely from `BinanceEndpoint::method_path()`.
-pub fn signed_preimage(params: &[Param]) -> Vec<u8> {
-    params
-        .iter()
-        .map(|param| {
-            format!(
-                "{}={}",
-                percent_encode(&param.key),
-                percent_encode(&param.value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("&")
-        .into_bytes()
-}
-
-fn percent_encode(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push_str(&format!("{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1088,184 +1045,129 @@ pub fn redact_funding_row(row: &FundingHistoryRow) -> serde_json::Value {
     })
 }
 
-/// Signed Binance REST transport. A broker-owned signer and credential handle
-/// are injected; this type never loads a key or accepts an arbitrary URL path.
-pub struct BinanceHttpTransport {
-    client: reqwest::Client,
-    base_url: String,
-    signer: Arc<dyn BinanceSigner>,
-    now_ms: Arc<dyn Fn() -> u64 + Send + Sync>,
-    recv_window_ms: u64,
+/// Binance-specific dispatch into the shared, protected CCXT runtime.
+/// Persisted BinanceRequest remains unchanged; only connectivity is replaced.
+pub struct BinanceCcxtTransport {
+    client: Arc<fin_exchange::ccxt::CcxtClient>,
+    credentials: Arc<dyn fin_exchange::ccxt::CredentialProvider>,
 }
 
-impl BinanceHttpTransport {
+impl BinanceCcxtTransport {
     pub fn new(
-        base_url: impl Into<String>,
-        signer: Arc<dyn BinanceSigner>,
-    ) -> Result<Self, BinanceError> {
-        Self::with_clock(base_url, signer, || {
-            chrono::Utc::now().timestamp_millis().max(0) as u64
-        })
-    }
-
-    pub fn with_clock(
-        base_url: impl Into<String>,
-        signer: Arc<dyn BinanceSigner>,
-        now_ms: impl Fn() -> u64 + Send + Sync + 'static,
-    ) -> Result<Self, BinanceError> {
-        let base_url = base_url.into().trim_end_matches('/').to_owned();
-        let parsed = reqwest::Url::parse(&base_url).map_err(|_| BinanceError::InvalidRequest)?;
-        let loopback = parsed
-            .host_str()
-            .map(|host| host == "localhost" || host == "127.0.0.1" || host == "[::1]")
-            .unwrap_or(false);
-        if parsed.query().is_some()
-            || parsed.fragment().is_some()
-            || (parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback))
-        {
-            return Err(BinanceError::InvalidRequest);
-        }
-        let host = parsed
-            .host_str()
-            .unwrap_or_default()
-            .trim_matches(['[', ']']);
-        let trusted_binance_host = matches!(
-            host,
-            "api.binance.com"
-                | "api-gcp.binance.com"
-                | "api1.binance.com"
-                | "api2.binance.com"
-                | "api3.binance.com"
-                | "api4.binance.com"
-        );
-        if !loopback
-            && (!trusted_binance_host
-                || parsed.port().is_some_and(|port| port != 443)
-                || !matches!(parsed.path(), "" | "/"))
-        {
-            return Err(BinanceError::InvalidRequest);
-        }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(20))
-            .build()
-            .map_err(|_| BinanceError::InvalidRequest)?;
-        Ok(Self {
+        client: Arc<fin_exchange::ccxt::CcxtClient>,
+        credentials: Arc<dyn fin_exchange::ccxt::CredentialProvider>,
+    ) -> Self {
+        Self {
             client,
-            base_url,
-            signer,
-            now_ms: Arc::new(now_ms),
-            recv_window_ms: 5000,
-        })
-    }
-
-    pub fn with_recv_window_ms(mut self, recv_window_ms: u64) -> Result<Self, BinanceError> {
-        if recv_window_ms == 0 || recv_window_ms > 60_000 {
-            return Err(BinanceError::InvalidRequest);
+            credentials,
         }
-        self.recv_window_ms = recv_window_ms;
-        Ok(self)
     }
+}
 
-    fn signed_params(&self, request: &BinanceRequest) -> Vec<Param> {
-        let mut params = request.params.clone();
-        if !params.iter().any(|param| param.key == "recvWindow") {
-            params.push(Param {
-                key: "recvWindow".into(),
-                value: self.recv_window_ms.to_string(),
-            });
-        }
-        params.push(Param {
-            key: "timestamp".into(),
-            value: (self.now_ms)().to_string(),
-        });
-        params
+pub fn ccxt_transport_error(error: fin_exchange::ccxt::CcxtError) -> TransportError {
+    use fin_exchange::ccxt::CcxtErrorKind as Kind;
+    let kind = match error.kind {
+        Kind::RateLimited => HttpFailureKind::RateLimited,
+        Kind::Authentication | Kind::PermissionDenied => HttpFailureKind::PermissionDenied,
+        Kind::Rejected => HttpFailureKind::Rejected,
+        _ => HttpFailureKind::InvalidResponse,
+    };
+    if let Some(status) = error.http_status {
+        return TransportError::HttpFailure {
+            status,
+            binance_code: error.exchange_code,
+            kind,
+        };
+    }
+    match error.kind {
+        Kind::Unavailable => TransportError::Unavailable,
+        Kind::RateLimited => TransportError::RateLimited,
+        Kind::Authentication | Kind::PermissionDenied => TransportError::PermissionDenied,
+        Kind::Timeout => TransportError::Timeout,
+        Kind::Rejected => TransportError::Rejected,
+        _ => TransportError::InvalidResponse,
     }
 }
 
 #[async_trait]
-impl BinanceTransport for BinanceHttpTransport {
+impl BinanceTransport for BinanceCcxtTransport {
     async fn request(
         &self,
         credential: &CredentialHandle,
         request: BinanceRequest,
     ) -> Result<Value, TransportError> {
+        self.request_inner(credential, request, None).await
+    }
+
+    async fn request_authorized(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+        journal: Arc<dyn fin_domain::SubmissionJournal>,
+    ) -> Result<Value, TransportError> {
+        self.request_inner(
+            credential,
+            request,
+            Some(Arc::new(move || journal.assert_authorized().is_ok())),
+        )
+        .await
+    }
+}
+
+impl BinanceCcxtTransport {
+    async fn request_inner(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+        guard: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<Value, TransportError> {
+        use fin_exchange::ccxt::{ExchangeId, Method};
         request
             .validate()
             .map_err(|_| TransportError::InvalidResponse)?;
-        let (method, path) = request.endpoint.method_path();
-        let params = self.signed_params(&request);
-        let preimage = signed_preimage(&params);
-        let signature = self.signer.sign(credential, &preimage).await?;
-        let api_key = self.signer.api_key(credential).await?;
-        if api_key.is_empty() || api_key.contains(['\r', '\n']) {
-            return Err(TransportError::PermissionDenied);
-        }
-        let signature_param = format!("signature={}", percent_encode(signature.as_str()));
-        let mut url = format!("{}{}", self.base_url, path);
-        let builder = if method == "GET" || method == "POST" {
-            url.push('?');
-            url.push_str(
-                std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
-            );
-            url.push('&');
-            url.push_str(&signature_param);
-            if method == "GET" {
-                self.client.get(url)
-            } else {
-                // Binance permits signed POST parameters in the query string;
-                // its Ed25519 example uses this placement. Keeping the exact
-                // signing preimage and signature together avoids depending on
-                // venue form-body parsing for characters such as '+' and '@'.
-                self.client.post(url)
+        let method = match request.endpoint {
+            BinanceEndpoint::ApiRestrictions => Method::BinanceApiRestrictions,
+            BinanceEndpoint::Account => Method::BinanceAccount,
+            BinanceEndpoint::SubAccountList => Method::BinanceSubAccountList,
+            BinanceEndpoint::SubAccountSpotAssets => Method::BinanceSubAccountSpotAssets,
+            BinanceEndpoint::CapitalConfig => Method::BinanceCapitalConfig,
+            BinanceEndpoint::DepositAddress => Method::BinanceDepositAddress,
+            BinanceEndpoint::WithdrawAddressList => Method::BinanceWithdrawAddressList,
+            BinanceEndpoint::DepositHistory => Method::BinanceDepositHistory,
+            BinanceEndpoint::WithdrawalHistory => Method::BinanceWithdrawalHistory,
+            BinanceEndpoint::UniversalTransferHistory => Method::BinanceUniversalTransferHistory,
+            BinanceEndpoint::SubAccountTransferHistory => Method::BinanceSubAccountTransferHistory,
+            BinanceEndpoint::UniversalTransfer => Method::BinanceUniversalTransfer,
+            BinanceEndpoint::StandardWithdrawal => Method::BinanceStandardWithdrawal,
+            BinanceEndpoint::TravelRuleRequirements => Method::BinanceTravelRuleRequirements,
+        };
+        let credentials = self
+            .credentials
+            .credentials(credential.as_str())
+            .map_err(ccxt_transport_error)?;
+        let params = request
+            .params
+            .into_iter()
+            .map(|p| (p.key, p.value))
+            .collect();
+        match guard {
+            Some(guard) => {
+                self.client
+                    .request_guarded(
+                        ExchangeId::Binance,
+                        method,
+                        Some(credentials),
+                        params,
+                        guard,
+                    )
+                    .await
             }
-        } else {
-            return Err(TransportError::InvalidResponse);
-        };
-        let response = builder
-            .header("X-MBX-APIKEY", api_key)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    TransportError::Timeout
-                } else {
-                    TransportError::Unavailable
-                }
-            })?;
-        let status = response.status();
-        let status_code = status.as_u16();
-        // Retain only Binance's numeric `code` in failure diagnostics; never
-        // retain other response fields or body text in the error.
-        // A malformed/non-JSON body still receives the HTTP classification.
-        let body = response.bytes().await.ok();
-        let parsed = body
-            .as_deref()
-            .and_then(|body| serde_json::from_slice::<Value>(body).ok());
-        let binance_code = parsed
-            .as_ref()
-            .and_then(|value| value.get("code"))
-            .and_then(Value::as_i64);
-        let failure_kind = if status_code == 418 || status_code == 429 {
-            Some(HttpFailureKind::RateLimited)
-        } else if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
-            Some(HttpFailureKind::PermissionDenied)
-        } else if !status.is_success() || binance_code.is_some_and(|code| code < 0) {
-            Some(HttpFailureKind::Rejected)
-        } else if parsed.is_none() {
-            Some(HttpFailureKind::InvalidResponse)
-        } else {
-            None
-        };
-        if let Some(kind) = failure_kind {
-            return Err(TransportError::HttpFailure {
-                status: status_code,
-                binance_code,
-                kind,
-            });
+            None => {
+                self.client
+                    .request(ExchangeId::Binance, method, Some(credentials), params)
+                    .await
+            }
         }
-        parsed.ok_or(TransportError::InvalidResponse)
+        .map_err(ccxt_transport_error)
     }
 }

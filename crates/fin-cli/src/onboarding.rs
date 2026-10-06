@@ -6,7 +6,7 @@ use fin_domain::FinError;
 use fin_presentation::safe_text;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
-pub(crate) fn guided_add() -> Result<AddConnectionArgs, FinError> {
+pub(crate) fn guided_add(provider: Option<Provider>) -> Result<AddConnectionArgs, FinError> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() || !io::stderr().is_terminal() {
         return Err(FinError::new(
             "HUMAN_TERMINAL_REQUIRED",
@@ -15,25 +15,29 @@ pub(crate) fn guided_add() -> Result<AddConnectionArgs, FinError> {
             "Run fin connections add in your Terminal, or inspect fin connections add --help for public metadata flags.",
         ));
     }
-    guided_add_with(&mut io::stdin().lock(), &mut io::stderr().lock())
+    guided_add_with(&mut io::stdin().lock(), &mut io::stderr().lock(), provider)
 }
 
 fn guided_add_with(
     input: &mut impl BufRead,
     output: &mut impl Write,
+    provider: Option<Provider>,
 ) -> Result<AddConnectionArgs, FinError> {
     writeln!(
         output,
         "Connection details only. Credentials are requested privately afterward."
     )
     .map_err(|_| output_error())?;
-    let provider = choice(
-        input,
-        output,
-        "Provider",
-        Provider::value_variants(),
-        &Provider::Binance,
-    )?;
+    let provider = match provider {
+        Some(provider) => provider,
+        None => choice(
+            input,
+            output,
+            "Provider",
+            Provider::value_variants(),
+            &Provider::Binance,
+        )?,
+    };
     let name = prompt(input, output, "Connection name", None)?;
     fin_discovery::validate_name(&name)?;
     let mut args = AddConnectionArgs {
@@ -192,12 +196,11 @@ fn output_error() -> FinError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use std::io::Cursor;
 
     fn run(text: &str) -> (Result<AddConnectionArgs, FinError>, String) {
         let mut output = Vec::new();
-        let result = guided_add_with(&mut Cursor::new(text.as_bytes()), &mut output);
+        let result = guided_add_with(&mut Cursor::new(text.as_bytes()), &mut output, None);
         (result, String::from_utf8(output).unwrap())
     }
 
@@ -287,7 +290,7 @@ mod tests {
         }
         let mut input = Cursor::new(b"binance\nmain\n");
         assert_eq!(
-            guided_add_with(&mut input, &mut Unwritable)
+            guided_add_with(&mut input, &mut Unwritable, None)
                 .unwrap_err()
                 .code,
             "ONBOARDING_OUTPUT_FAILED"
@@ -295,25 +298,16 @@ mod tests {
         assert_eq!(input.position(), 0);
     }
 
-    #[derive(Parser)]
-    struct OptionalFlatten {
-        #[command(flatten)]
-        args: Option<AddConnectionArgs>,
-    }
-
     #[test]
-    fn optional_flatten_retains_required_inner_arguments() {
-        assert!(OptionalFlatten::try_parse_from(["test"]).is_err());
-        let parsed = OptionalFlatten::try_parse_from([
-            "test",
-            "--provider",
-            "binance",
-            "--name",
-            "main",
-            "--role",
-            "main",
-        ])
-        .unwrap();
-        assert!(parsed.args.is_some());
+    fn positional_provider_skips_only_provider_question() {
+        let mut output = Vec::new();
+        let mut input = Cursor::new(b"master\nmain\ned25519\n");
+        let args = guided_add_with(&mut input, &mut output, Some(Provider::Binance)).unwrap();
+        assert_eq!(args.provider, Provider::Binance);
+        assert_eq!(args.name, "master");
+        assert_eq!(args.credential_type, Some(CredentialType::Ed25519));
+        let output = String::from_utf8(output).unwrap();
+        assert!(!output.contains("Provider"));
+        assert!(output.contains("Connection name"));
     }
 }

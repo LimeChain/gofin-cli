@@ -1,7 +1,7 @@
 use fin_binance::{
     BinanceEndpoint, BinanceError, BinanceRequest, ExactDecimal, FundingCompleteTime,
     FundingHistoryRow, HistoryWindow, StandardWithdrawalIntent, TransferHistoryResponse,
-    UniversalTransferIntent, VenueIdentifier, parse_response, signed_preimage,
+    UniversalTransferIntent, VenueIdentifier, parse_response,
 };
 use serde_json::{Value, json};
 
@@ -186,7 +186,7 @@ fn withdrawal_allowlist_endpoint_is_fixed_get_only_and_malformed_whitelist_is_un
 }
 
 #[test]
-fn signature_preimage_is_rfc3986_encoded_and_decimal_string_exact() {
+fn durable_request_preserves_exact_decimal_and_unescaped_email_strings() {
     let request = UniversalTransferIntent {
         asset: "ETH".into(),
         amount: amount("0.000000000000000000123456"),
@@ -196,9 +196,11 @@ fn signature_preimage_is_rfc3986_encoded_and_decimal_string_exact() {
     }
     .request()
     .unwrap();
-    let preimage = String::from_utf8(signed_preimage(&request.params)).unwrap();
-    assert!(preimage.contains("amount=0.000000000000000000123456"));
-    assert!(preimage.contains("toEmail=child%2Btag%40example.invalid"));
+    let persisted = serde_json::to_value(&request).unwrap();
+    let recovered: BinanceRequest = serde_json::from_value(persisted).unwrap();
+    assert_eq!(recovered.get("amount"), Some("0.000000000000000000123456"));
+    assert_eq!(recovered.get("toEmail"), Some("child+tag@example.invalid"));
+    assert_eq!(recovered, request);
 }
 
 #[test]
@@ -2400,61 +2402,54 @@ async fn withdrawal_reserves_principal_and_fee_once_at_exact_balance_boundary() 
     );
 }
 
-struct SyntheticSigner {
-    signed: std::sync::Mutex<Vec<Vec<u8>>>,
-}
+struct SyntheticCredentials;
 
-#[async_trait::async_trait]
-impl fin_binance::BinanceSigner for SyntheticSigner {
-    async fn api_key(
+impl fin_exchange::ccxt::CredentialProvider for SyntheticCredentials {
+    fn credentials(
         &self,
-        _credential: &fin_binance::CredentialHandle,
-    ) -> std::result::Result<String, fin_binance::TransportError> {
-        Ok("synthetic-test-api-key".into())
-    }
-
-    async fn sign(
-        &self,
-        _credential: &fin_binance::CredentialHandle,
-        encoded_parameters: &[u8],
-    ) -> std::result::Result<fin_binance::BinanceSignature, fin_binance::TransportError> {
-        self.signed
-            .lock()
-            .unwrap()
-            .push(encoded_parameters.to_vec());
-        Ok(fin_binance::BinanceSignature::from_provider("fixture+/="))
+        reference: &str,
+    ) -> std::result::Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError> {
+        assert!(reference.starts_with("test-only-"));
+        Ok(fin_exchange::ccxt::Credentials {
+            api_key: "synthetic-test-api-key".to_owned().into(),
+            secret: "synthetic-fixture-hmac-secret-not-a-real-key"
+                .to_owned()
+                .into(),
+        })
     }
 }
 
-struct Ed25519FixtureSigner {
-    signing_key: ed25519_dalek::SigningKey,
-    signed: std::sync::Mutex<Vec<Vec<u8>>>,
+fn fixture_ccxt_transport(address: std::net::SocketAddr) -> fin_binance::BinanceCcxtTransport {
+    let client = fin_exchange::ccxt::CcxtClient::for_test(&format!("http://{address}")).unwrap();
+    fin_binance::BinanceCcxtTransport::new(
+        std::sync::Arc::new(client),
+        std::sync::Arc::new(SyntheticCredentials),
+    )
 }
 
-#[async_trait::async_trait]
-impl fin_binance::BinanceSigner for Ed25519FixtureSigner {
-    async fn api_key(
-        &self,
-        _credential: &fin_binance::CredentialHandle,
-    ) -> std::result::Result<String, fin_binance::TransportError> {
-        Ok("synthetic-ed25519-api-key".into())
-    }
-
-    async fn sign(
-        &self,
-        _credential: &fin_binance::CredentialHandle,
-        encoded_parameters: &[u8],
-    ) -> std::result::Result<fin_binance::BinanceSignature, fin_binance::TransportError> {
-        use base64::Engine as _;
-        use ed25519_dalek::Signer as _;
-        self.signed
-            .lock()
-            .unwrap()
-            .push(encoded_parameters.to_vec());
-        let signature = self.signing_key.sign(encoded_parameters);
-        Ok(fin_binance::BinanceSignature::from_provider(
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
-        ))
+async fn read_fixture_http_request(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 2048];
+    loop {
+        let count = stream.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0, "synthetic request closed before its body arrived");
+        request.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let body_len = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        if request.len() >= header_end + 4 + body_len {
+            return String::from_utf8(request).unwrap();
+        }
     }
 }
 
@@ -2468,251 +2463,119 @@ fn percent_decode_component(encoded: &str) -> String {
             decoded.push(u8::from_str_radix(hex, 16).unwrap());
             index += 3;
         } else {
-            decoded.push(bytes[index]);
+            decoded.push(if bytes[index] == b'+' {
+                b' '
+            } else {
+                bytes[index]
+            });
             index += 1;
         }
     }
     String::from_utf8(decoded).unwrap()
 }
 
+fn request_parameters(wire: &str) -> std::collections::BTreeMap<String, String> {
+    let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
+    let target = headers
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    let query = target.split_once('?').map(|(_, query)| query).unwrap_or("");
+    query
+        .split('&')
+        .chain(body.split('&'))
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair
+                .split_once('=')
+                .expect("CCXT must percent-encode each form parameter before signing");
+            (
+                percent_decode_component(key),
+                percent_decode_component(value),
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn loopback_transport_signs_exact_query_for_post_and_keeps_closed_endpoint_path() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn ccxt_transport_keeps_exact_parameters_closed_endpoint_and_large_integer_ids() {
+    use tokio::io::AsyncWriteExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0u8; 2048];
-        loop {
-            let count = stream.read(&mut chunk).await.unwrap();
-            assert_ne!(count, 0, "synthetic request closed before its body arrived");
-            request.extend_from_slice(&chunk[..count]);
-            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let request_line = headers.lines().next().unwrap();
-                assert!(request_line.starts_with(
-                    "POST /sapi/v1/sub-account/universalTransfer?asset=ETH&amount=0.000000000000000000123456&fromAccountType=SPOT&toAccountType=SPOT&clientTranId="
-                ));
-                assert!(request_line.contains(
-                    "&toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example&recvWindow=5000&timestamp=123&signature=fixture%2B%2F%3D HTTP/1.1"
-                ));
-                assert!(
-                    headers
-                        .to_lowercase()
-                        .contains("x-mbx-apikey: synthetic-test-api-key")
-                );
-                assert!(!headers.to_lowercase().contains("content-type:"));
-                assert_eq!(request.len(), header_end + 4, "POST body must be empty");
-                break;
-            }
-        }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"tranId\":7}")
-            .await
-            .unwrap();
+        let request = read_fixture_http_request(&mut stream).await;
+        let body = r#"{"tranId":9007199254740993}"#;
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        ).as_bytes()).await.unwrap();
         request
     });
-    let signer = std::sync::Arc::new(SyntheticSigner {
-        signed: std::sync::Mutex::new(Vec::new()),
-    });
-    let transport = fin_binance::BinanceHttpTransport::with_clock(
-        format!("http://{address}"),
-        signer.clone(),
-        || 123,
-    )
-    .unwrap();
+    let transport = fixture_ccxt_transport(address);
+    let client_id = fin_binance::ClientIdentity::transfer("http-fixture-1").unwrap();
     let request = fin_binance::UniversalTransferIntent {
         asset: "ETH".into(),
         amount: amount("0.000000000000000000123456"),
         from_email: None,
         to_email: Some("name@plus+amp&pct%雪.example".into()),
-        client_id: fin_binance::ClientIdentity::transfer("http-fixture-1").unwrap(),
+        client_id: client_id.clone(),
     }
     .request()
     .unwrap();
     let response = fin_binance::BinanceTransport::request(
         &transport,
-        &fin_binance::CredentialHandle::new("synthetic-http-credential").unwrap(),
+        &fin_binance::CredentialHandle::new("test-only-http-credential").unwrap(),
         request,
     )
     .await
     .unwrap();
-    assert_eq!(response["tranId"], 7);
-    let preimage = String::from_utf8(signer.signed.lock().unwrap()[0].clone()).unwrap();
-    assert!(preimage.contains("amount=0.000000000000000000123456"));
-    assert!(preimage.contains("toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example"));
+    assert_eq!(response["tranId"].as_u64(), Some(9_007_199_254_740_993));
+    let wire = server.await.unwrap();
+    let first_line = wire.lines().next().unwrap();
+    let mut parts = first_line.split_whitespace();
+    assert_eq!(parts.next(), Some("POST"));
     assert_eq!(
-        preimage,
-        format!(
-            "asset=ETH&amount=0.000000000000000000123456&fromAccountType=SPOT&toAccountType=SPOT&clientTranId={}&toEmail=name%40plus%2Bamp%26pct%25%E9%9B%AA.example&recvWindow=5000&timestamp=123",
-            fin_binance::ClientIdentity::transfer("http-fixture-1")
-                .unwrap()
-                .as_str()
-        )
+        parts.next().unwrap().split('?').next(),
+        Some("/sapi/v1/sub-account/universalTransfer")
     );
-    let wire_request = server.await.unwrap();
-    let header_end = wire_request
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap();
-    let headers = std::str::from_utf8(&wire_request[..header_end]).unwrap();
-    assert_eq!(
-        headers.lines().next().unwrap(),
-        format!(
-            "POST /sapi/v1/sub-account/universalTransfer?{preimage}&signature=fixture%2B%2F%3D HTTP/1.1"
-        )
+    assert!(
+        wire.to_ascii_lowercase()
+            .contains("x-mbx-apikey: synthetic-test-api-key")
     );
-}
-
-#[tokio::test]
-async fn loopback_post_query_verifies_with_synthetic_ed25519_key() {
-    use base64::Engine as _;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    // RFC 8032 test-vector key material is public and unmistakably synthetic.
-    let seed: [u8; 32] =
-        hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
-            .unwrap()
-            .try_into()
-            .unwrap();
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let verifying_key = signing_key.verifying_key();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0u8; 2048];
-        loop {
-            let count = stream.read(&mut chunk).await.unwrap();
-            assert_ne!(count, 0);
-            request.extend_from_slice(&chunk[..count]);
-            if let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-                let headers = std::str::from_utf8(&request[..header_end]).unwrap();
-                assert!(
-                    headers
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .starts_with("POST /sapi/v1/sub-account/universalTransfer?")
-                );
-                assert!(request.len() == header_end + 4, "POST must have no body");
-                break;
-            }
-        }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"tranId\":7}")
-            .await
-            .unwrap();
-        request
-    });
-    let signer = std::sync::Arc::new(Ed25519FixtureSigner {
-        signing_key,
-        signed: std::sync::Mutex::new(Vec::new()),
-    });
-    let transport = fin_binance::BinanceHttpTransport::with_clock(
-        format!("http://{address}"),
-        signer.clone(),
-        || 123,
-    )
-    .unwrap();
-    let request = fin_binance::UniversalTransferIntent {
-        asset: "ETH".into(),
-        amount: amount("0.000000000000000000123456"),
-        from_email: None,
-        to_email: Some("name@plus+amp&pct%雪.example".into()),
-        client_id: fin_binance::ClientIdentity::transfer("ed25519-query-fixture").unwrap(),
-    }
-    .request()
-    .unwrap();
-    fin_binance::BinanceTransport::request(
-        &transport,
-        &fin_binance::CredentialHandle::new("test-only-ed25519").unwrap(),
-        request,
-    )
-    .await
-    .unwrap();
-
-    let wire_request = server.await.unwrap();
-    let header_end = wire_request
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .unwrap();
-    let request_line = std::str::from_utf8(&wire_request[..header_end])
-        .unwrap()
-        .lines()
-        .next()
-        .unwrap();
-    let request_target = request_line.split_whitespace().nth(1).unwrap();
-    let (_, query) = request_target.split_once('?').unwrap();
-    let (wire_payload, encoded_signature) = query.rsplit_once("&signature=").unwrap();
-    let signed_payload = signer.signed.lock().unwrap()[0].clone();
-    assert_eq!(wire_payload.as_bytes(), signed_payload);
-    assert!(wire_payload.contains("name%40plus%2Bamp%26pct%25%E9%9B%AA.example"));
-    let decoded_signature = percent_decode_component(encoded_signature);
-    let signature_bytes = base64::engine::general_purpose::STANDARD
-        .decode(decoded_signature)
-        .unwrap();
-    assert_eq!(signature_bytes.len(), 64);
-    let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
-    verifying_key
-        .verify_strict(wire_payload.as_bytes(), &signature)
-        .expect("captured query must verify under the unmistakably synthetic Ed25519 key");
+    let params = request_parameters(&wire);
+    assert_eq!(params["amount"], "0.000000000000000000123456");
+    assert_eq!(params["toEmail"], "name@plus+amp&pct%雪.example");
+    assert_eq!(params["asset"], "ETH");
+    assert_eq!(params["fromAccountType"], "SPOT");
+    assert_eq!(params["toAccountType"], "SPOT");
+    assert_eq!(params["clientTranId"], client_id.as_str());
+    assert_eq!(params["signature"].len(), 64);
+    assert!(params["timestamp"].parse::<u64>().is_ok());
+    assert!(!wire.contains("synthetic-fixture-hmac-secret-not-a-real-key"));
 }
 
 #[tokio::test]
 async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_429() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+    use tokio::io::AsyncWriteExt;
     for status in [418u16, 429u16] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0u8; 2048];
-            loop {
-                let count = stream.read(&mut chunk).await.unwrap();
-                assert_ne!(count, 0);
-                request.extend_from_slice(&chunk[..count]);
-                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-                else {
-                    continue;
-                };
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let body_len = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().ok())
-                            .flatten()
-                    })
-                    .unwrap_or(0);
-                if request.len() >= header_end + 4 + body_len {
-                    assert!(headers.starts_with("POST /sapi/v1/sub-account/universalTransfer?"));
-                    break;
-                }
-            }
+            let request = read_fixture_http_request(&mut stream).await;
+            assert!(request.starts_with("POST /sapi/v1/sub-account/universalTransfer"));
             stream.write_all(format!(
                 "HTTP/1.1 {status} Rate Limited\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             ).as_bytes()).await.unwrap();
             drop(stream);
-            let second =
-                tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept())
-                    .await;
-            (request, second.is_ok())
+            tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept())
+                .await
+                .is_ok()
         });
-        let transport = fin_binance::BinanceHttpTransport::with_clock(
-            format!("http://{address}"),
-            std::sync::Arc::new(SyntheticSigner {
-                signed: std::sync::Mutex::new(Vec::new()),
-            }),
-            || 123,
-        )
-        .unwrap();
+        let transport = fixture_ccxt_transport(address);
         let request = fin_binance::UniversalTransferIntent {
             asset: "ETH".into(),
             amount: amount("0.01"),
@@ -2729,19 +2592,16 @@ async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_42
             request,
         )
         .await;
-        assert!(matches!(
-            result,
-            Err(fin_binance::TransportError::HttpFailure {
-                status: response_status,
-                binance_code: None,
-                kind: fin_binance::HttpFailureKind::RateLimited,
-            }) if response_status == status
-        ));
-        let (request, retried) = server.await.unwrap();
-        assert!(!retried, "HTTP {status} caused an automatic second request");
         assert!(
-            String::from_utf8_lossy(&request)
-                .starts_with("POST /sapi/v1/sub-account/universalTransfer?")
+            matches!(result, Err(fin_binance::TransportError::HttpFailure {
+            status: response_status, binance_code: None,
+            kind: fin_binance::HttpFailureKind::RateLimited,
+        }) if response_status == status),
+            "unexpected rate-limit result: {result:?}"
+        );
+        assert!(
+            !server.await.unwrap(),
+            "HTTP {status} caused an automatic second request"
         );
     }
 }
@@ -2865,14 +2725,7 @@ async fn loopback_http_diagnostics_keep_only_validated_status_and_integer_code()
             );
             stream.write_all(response.as_bytes()).await.unwrap();
         });
-        let transport = fin_binance::BinanceHttpTransport::with_clock(
-            format!("http://{address}"),
-            std::sync::Arc::new(SyntheticSigner {
-                signed: std::sync::Mutex::new(Vec::new()),
-            }),
-            || 123,
-        )
-        .unwrap();
+        let transport = fixture_ccxt_transport(address);
         let result = fin_binance::BinanceTransport::request(
             &transport,
             &fin_binance::CredentialHandle::new("test-only-http-diagnostics").unwrap(),

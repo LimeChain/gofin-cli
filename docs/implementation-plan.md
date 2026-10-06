@@ -25,7 +25,7 @@ that compiler output is bit-for-bit reproducible. See [release maintenance](rele
 
 The selected implementation is a compiled Rust workspace. The [Rust architecture](rust-architecture.md) defines the protected client/service roles, domain/engine/storage/runtime/application boundaries, exact financial-effect ledger, versioned contracts, recovery/migration, and `fin-authorization` platform providers. The small compiled Swift helper is bundled behind the macOS authorization provider; the human does not install it separately.
 
-Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Reviewed Binance REST operations and HMAC/RSA/Ed25519 authentication are implemented directly; this build does not depend on or claim a maintained Rust CCXT port. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The macOS bundle contains all three, an inspectable terminal installer, and checksums. Build and discovery commands are in the [README](../README.md); the [Rust architecture](rust-architecture.md) describes component responsibilities.
+Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Official CCXT Rust `ccxt-base =4.5.85` supplies exchange connectivity and HMAC/RSA/Ed25519 signing behind `fin-exchange`; `fin-binance` retains venue-specific policy, mapping and evidence. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The macOS bundle contains all three, an inspectable terminal installer, and checksums. Commands and the current crate layout are in the [README](../README.md); [exchange verification](reports/ccxt-exchange.md) and [runtime lifecycle verification](reports/runtime-lifecycle.md) distinguish automated results from pending human acceptance.
 
 The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
 
@@ -264,3 +264,55 @@ These are implementation choices, not reasons for another product-concept cycle.
 An earlier CCXT experiment verified public Binance market reads and inspected transfer/withdrawal method mappings; it did not execute funding operations. The CCXT library and its standalone CLI are separate packages. Reuse the library under Fin and adopt the useful help/discovery and flexible credential-input conventions. Direct environment provisioning must reach Fin's protected component, not expose secrets in the agent's shell environment. [Official CCXT CLI reference](https://github.com/ccxt/ccxt/blob/master/cli/README.md)
 
 Avoid copying the earlier raw CLI experiment into Fin's authorization path. A direct call to a venue method does not establish Fin's approval, account resolution, or retry behavior.
+
+## CCXT exchange refactor — 6 October 2026
+
+Shared `ExchangeAdapter` and composed profiles replace a Binance-owned lifecycle.
+The internal CCXT wrapper retains exact raw responses, disables retries/redirects,
+and rechecks protected approval at signing after any queue delay. Durable Binance
+request/submission identities and recovery evidence stay compatible; the ledger
+and schema are unchanged. Kraken public metadata/ticker reads demonstrate the
+default profile. Per-exchange Cargo features and symbol-free dev/test profiles
+keep the generated SDK practical locally; incremental compilation remains enabled.
+See [architecture](rust-architecture.md#exchange-connectivity-and-extension) and
+[verification](reports/ccxt-exchange.md). No new live financial, credential access,
+installation or human approval is authorized by this refactor.
+
+## Additional public exchange reads — 6 October 2026
+
+Extend the existing two named reads through the default profile to Hyperliquid,
+OKX, Coinbase Advanced and Bybit. Preserve venue identifiers/envelopes and decimal
+strings; expose market scope in schemas/discovery. Hyperliquid context rows are
+associated with the exact asset through checked metadata indices. No new accounts,
+private reads, orders or writes are added. Each venue has a separate CCXT Cargo
+feature. Public network checks are separate from offline synthetic tests; report
+endpoint restrictions explicitly instead of substituting another venue/domain.
+
+## Enrollment shorthand and human errors — 6 October 2026
+
+Support a positional provider for `connections add`, alongside the existing flag.
+CLI convenience arguments resolve to the same enrollment DTO; provider-only input
+enters guided metadata with that provider selected. Reject conflicting providers
+and incomplete metadata instead of discarding flags. Shared error presentation
+uses a full-row red cross/explanation; diagnostic codes remain verbose/machine.
+
+## Binance-only startup correction — 6 October 2026
+
+Construct the Ethereum payout verifier only when Binance payout destinations are
+configured. Binance-only enrollment must compose without a wallet; configured
+payouts still require their receipt observer. Offline regressions cover composition,
+local management, rejected unenrolled withdrawals and missing observer failures.
+Read/lifecycle timeout guidance points to service diagnostics; uncertain financial
+writes retain the original request-ID reconciliation guidance.
+
+## Setup readiness and automatic configuration reload — 6 October 2026
+
+The shared installer starts the service through the configured human's client and
+checks its reply and observed process before success. Both setup entry points use
+that path. At each authenticated request, the broker holds the shared configuration
+lock and replaces a changed runtime only after protected composition succeeds,
+reopening the same journal without replay. Composition errors return directly and
+do not dispatch against stale configuration. Approver changes require socket repair.
+Binance identity probes run before account operations instead of blocking startup
+or local management. Verification remains pending after failure and resets on reload;
+financial writes retain the identity gate, run limits and per-write authorization.

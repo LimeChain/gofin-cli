@@ -1,0 +1,89 @@
+{
+  "id": "synthetic-legacy-operation",
+  "request_id": "synthetic-legacy-transfer-v1",
+  "fingerprint": "75c5aba864ac8e3d678b2f92dd4f9aa5c2e9270f4d3ac1fa063a8124c95471a2",
+  "fingerprint_version": 1,
+  "operation": "binance.transfer",
+  "input": {
+    "requestId": "synthetic-legacy-transfer-v1",
+    "authority": "main-fixture",
+    "from": "main-fixture",
+    "to": "child-fixture",
+    "coin": "ETH",
+    "amount": "0.000000000000000001",
+    "fromWallet": "SPOT",
+    "toWallet": "SPOT"
+  },
+  "status": "unknown",
+  "created_at": "2020-01-01T00:00:00Z",
+  "updated_at": "2020-01-01T00:00:00Z",
+  "preview": null,
+  "approval": null,
+  "submission": {
+    "kind": "binance",
+    "reference": "finb6b1eaf8415152486463b5254df00",
+    "data": {
+      "operation": "binance.transfer",
+      "binding": {
+        "authority": "main-fixture",
+        "from": "main-fixture",
+        "to": "child-fixture",
+        "coin": "ETH",
+        "amount": "0.000000000000000001",
+        "fromWallet": "SPOT",
+        "toWallet": "SPOT",
+        "clientTranId": "finb6b1eaf8415152486463b5254df00",
+        "asset": {
+          "network": "binance",
+          "reference": "ETH",
+          "decimals": 36
+        },
+        "fromEmail": null,
+        "toEmail": "child@example.invalid",
+        "params": {
+          "endpoint": "universal_transfer",
+          "params": [
+            {
+              "key": "asset",
+              "value": "ETH"
+            },
+            {
+              "key": "amount",
+              "value": "0.000000000000000001"
+            },
+            {
+              "key": "fromAccountType",
+              "value": "SPOT"
+            },
+            {
+              "key": "toAccountType",
+              "value": "SPOT"
+            },
+            {
+              "key": "clientTranId",
+              "value": "finb6b1eaf8415152486463b5254df00"
+            },
+            {
+              "key": "toEmail",
+              "value": "child@example.invalid"
+            }
+          ]
+        }
+      },
+      "submittedAt": "2020-01-01T00:00:00Z",
+      "sourceFreeBefore": "1",
+      "destinationFreeBefore": "0",
+      "authority": "main-fixture",
+      "from": "main-fixture",
+      "to": "child-fixture",
+      "coin": "ETH",
+      "amount": "0.000000000000000001",
+      "fromEmail": null,
+      "toEmail": "child@example.invalid"
+    }
+  },
+  "effects": null,
+  "last_reconciliation_evidence": null,
+  "error": null,
+  "run_id": "synthetic-legacy-run"
+}

@@ -68,6 +68,13 @@ elif name == "launchctl":
     if options.get("late_path_conflict"):
         (root / "private/etc/paths.d/fin").symlink_to(root / "absent")
 elif name == "sudo":
+    if args[-2:] == ["daemon", "start"]:
+        if not (root / "Library/Fin/private/config.json").is_file():
+            sys.exit("SYNTHETIC: broker start requires initialized configuration")
+        if options.get("daemon_start_failure"):
+            sys.exit("SYNTHETIC: broker failed to respond")
+        print("Fin daemon running.")
+        sys.exit(0)
     marker = root / "Library/Fin/private/completion-owner"
     if not marker.is_file() or stat.S_IMODE(marker.stat().st_mode) != 0o600 or marker.read_text() != "501\n":
         sys.exit("SYNTHETIC: completion owner marker must be secured before helper invocation")
@@ -144,7 +151,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.installed.exists())
         self.assertNotIn("mktemp", [event[0] for event in self.events()])
-        self.assertNotIn("Fin installed.", result.stdout)
+        self.assertNotIn("Fin installed", result.stdout)
 
     def test_registers_path_after_configuration_and_bootstrap(self):
         result = self.run_installer()
@@ -167,10 +174,16 @@ class InstallerFixture(unittest.TestCase):
         self.assertTrue(any(name == "cmp" and args[-2].endswith("runtime/fin-touch-id")
                             and args[-1].endswith("runtime/authorization/Fin")
                             for name, args in events))
-        self.assertEqual(result.stdout, "Fin installed. Next: open a new Terminal and run fin daemon start.\n")
+        self.assertEqual(result.stdout, "Fin installed and running. Next: open a new Terminal and run fin connections add.\n")
         broker_args = next(args for name, args in events if name == "fin-broker")
         self.assertNotIn("--verbose", broker_args)
-        sudo_args = next(args for name, args in events if name == "sudo")
+        start_args = next(args for name, args in events if name == "sudo" and args[-2:] == ["daemon", "start"])
+        self.assertEqual(start_args, ["-n", "-H", "-u", "#501", str(self.bin / "env"),
+                                    "TERM=dumb", str(self.installed / "runtime/fin"), "daemon", "start"])
+        start_index = events.index(["sudo", start_args])
+        self.assertLess(names.index("launchctl"), start_index)
+        self.assertLess(start_index, events.index(owner))
+        sudo_args = next(args for name, args in events if name == "sudo" and args[-2:] == ["internal-completions", "install"])
         self.assertEqual(sudo_args[:6], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "TERM=dumb"])
         self.assertEqual(sudo_args[6:], [str(self.installed / "runtime/fin"), "internal-completions", "install"])
         marker = self.installed / "private/completion-owner"
@@ -187,14 +200,14 @@ class InstallerFixture(unittest.TestCase):
     def test_verbose_adds_setup_details_and_passes_flag_to_enrollment(self):
         result = self.run_installer(verbose=True, environment={"TERM": "xterm-256color", "NO_COLOR": "1"})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout, "Fin installed. Next: open a new Terminal and run fin daemon start.\n")
+        self.assertEqual(result.stdout, "Fin installed and running. Next: open a new Terminal and run fin connections add.\n")
         self.assertIn("Fin setup: bundle", result.stderr)
         self.assertIn("Fin setup: protected configuration and operation journal", result.stderr)
         self.assertNotIn("credential verification", result.stderr.lower())
         self.assertNotIn("\033[", result.stderr)
         broker_args = next(args for name, args in self.events() if name == "fin-broker")
         self.assertEqual(broker_args[-1], "--verbose")
-        sudo_args = next(args for name, args in self.events() if name == "sudo")
+        sudo_args = next(args for name, args in self.events() if name == "sudo" and args[-2:] == ["internal-completions", "install"])
         self.assertEqual(sudo_args[5:8], ["TERM=xterm-256color", "NO_COLOR=1", str(self.installed / "runtime/fin")])
 
     def test_completion_install_failure_warns_without_undoing_installation(self):
@@ -204,6 +217,15 @@ class InstallerFixture(unittest.TestCase):
         self.assertTrue(self.installed.exists())
         self.assertTrue(self.path_file.exists())
         self.assertIn("shell completion setup did not finish", result.stderr)
+
+    def test_daemon_start_failure_preserves_configuration_without_claiming_success(self):
+        self.options["daemon_start_failure"] = True
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.installed / "private/config.json").is_file())
+        self.assertFalse(self.path_file.exists())
+        self.assertNotIn("Fin installed", result.stdout)
+        self.assertIn("broker failed to respond", result.stderr)
 
     def check_enrollment_terminal_descriptors(self, verbose, no_color=False):
         self.options["require_terminal"] = True
@@ -244,7 +266,7 @@ class InstallerFixture(unittest.TestCase):
             output = b"".join(chunks).decode()
             self.assertEqual(process.returncode, 0, output)
             self.assertIn("enrollment inherited three terminal descriptors", output)
-            self.assertIn("Fin installed.", output)
+            self.assertIn("Fin installed", output)
             self.assertIn("Registering Fin for new Terminal sessions", output)
             self.assertNotIn("… ", output)
             self.assertEqual(output.count("Installing protected runtime"), 1)
@@ -321,7 +343,7 @@ class InstallerFixture(unittest.TestCase):
                 result = self.run_installer()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.path_file.exists())
-                self.assertNotIn("Fin installed.", result.stdout)
+                self.assertNotIn("Fin installed", result.stdout)
                 self.assertEqual(self.installed.exists(), failure == "fail-after")
                 if failure == "fail-after":
                     self.assertIn("Configuration may already be committed", result.stderr)
@@ -332,7 +354,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.installed / "private/config.json").exists())
         self.assertFalse(self.path_file.exists())
-        self.assertNotIn("Fin installed.", result.stdout)
+        self.assertNotIn("Fin installed", result.stdout)
 
     def test_late_conflict_preserves_configuration_and_symlink(self):
         self.options["late_path_conflict"] = True
@@ -340,7 +362,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.installed / "private/config.json").exists())
         self.assertTrue(self.path_file.is_symlink())
-        self.assertNotIn("Fin installed.", result.stdout)
+        self.assertNotIn("Fin installed", result.stdout)
         self.assertIn("Protected installation was preserved", result.stderr)
 
 

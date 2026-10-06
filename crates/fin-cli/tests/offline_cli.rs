@@ -21,7 +21,38 @@ fn offline_discovery_commands_work_without_service() {
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 29);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 31);
+    assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
+    assert_eq!(
+        capabilities["exchanges"]["library"]["all_library_methods_exposed"],
+        false
+    );
+    for venue in ["kraken", "hyperliquid", "okx", "coinbase", "bybit"] {
+        assert_eq!(capabilities["exchanges"]["fin"][venue]["writes"], false);
+        assert_eq!(
+            capabilities["exchanges"]["fin"][venue]["account_enrollment"],
+            false
+        );
+    }
+    assert_eq!(
+        capabilities["exchanges"]["verification"]["touch_id"],
+        "pending"
+    );
+    for name in ["exchange.markets", "exchange.ticker"] {
+        let schema = run(&["schema", name, "--json"]);
+        assert!(schema.status.success());
+        let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+        assert_eq!(schema["input"]["additionalProperties"], false);
+        assert_eq!(schema["execution_actor"], "agent_readable");
+        for venue in ["kraken", "hyperliquid", "okx", "coinbase", "bybit"] {
+            assert!(
+                schema["input"]["properties"]["exchange"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(venue))
+            );
+        }
+    }
 
     let explanation = run(&["explain", "setup", "--json"]);
     assert!(explanation.status.success());
@@ -304,4 +335,62 @@ fn machine_mode_has_no_prompts_or_decoration_on_a_disposable_tty() {
         let value: Value = serde_json::from_slice(&output).expect("TTY returns only JSON");
         assert_eq!(value["ok"], false);
     }
+}
+
+#[test]
+fn positional_provider_help_discovery_and_machine_handoff() {
+    let help = run(&["connections", "add", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("[PROVIDER]"));
+    assert!(help.contains("--provider"));
+    for arguments in [
+        vec!["connections", "add", "binance", "--json"],
+        vec!["connections", "add", "ethereum", "--json"],
+        vec![
+            "connections",
+            "add",
+            "binance",
+            "--name",
+            "master",
+            "--role",
+            "main",
+            "--credential-type",
+            "ed25519",
+            "--json",
+        ],
+    ] {
+        let output = run(&arguments);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+    }
+    let explanation = run(&["explain", "connections.add", "--json"]);
+    let value: Value = serde_json::from_slice(&explanation.stdout).unwrap();
+    assert!(
+        value["semantics"]["command_line_examples"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("fin connections add binance"))
+    );
+}
+
+#[test]
+fn invalid_commands_use_plain_human_errors_and_stable_machine_codes() {
+    let human = run(&["connections", "--provider", "binance"]);
+    assert!(!human.status.success());
+    let text = String::from_utf8(human.stderr).unwrap();
+    assert!(text.starts_with("✗ "));
+    assert!(!text.contains("INVALID_COMMAND"));
+    let verbose = run(&["connections", "--provider", "binance", "--verbose"]);
+    assert!(
+        String::from_utf8(verbose.stderr)
+            .unwrap()
+            .contains("Code: INVALID_COMMAND")
+    );
+    let machine = run(&["connections", "--provider", "binance", "--json"]);
+    assert!(machine.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "INVALID_COMMAND");
 }

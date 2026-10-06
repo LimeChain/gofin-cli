@@ -83,7 +83,7 @@ enum Command {
         #[command(subcommand)]
         command: RunCommand,
     },
-    /// Install protected service/storage; macOS may request your Mac login password.
+    /// Install and start the protected service; macOS may request your Mac login password.
     Setup,
     Daemon {
         #[command(subcommand)]
@@ -96,10 +96,55 @@ enum Command {
 }
 
 #[derive(Args, Debug)]
-#[command(mut_arg("provider", |arg| arg.required(false)), mut_arg("name", |arg| arg.required(false)))]
+#[command(group(clap::ArgGroup::new("provider_choice").args(["provider_positional", "provider"]).multiple(false)))]
 struct ConnectionCommandArgs {
-    #[command(flatten)]
-    connection: Option<fin_discovery::AddConnectionArgs>,
+    /// Provider to enroll; omit to choose it interactively.
+    #[arg(value_enum, value_name = "PROVIDER")]
+    provider_positional: Option<fin_discovery::Provider>,
+    /// Provider to enroll (alternative to the positional provider).
+    #[arg(long, value_enum)]
+    provider: Option<fin_discovery::Provider>,
+    /// Stable local connection name.
+    #[arg(long, requires = "provider_choice")]
+    name: Option<String>,
+    /// Binance account role: main or sub.
+    #[arg(long, value_enum, requires_all = ["provider_choice", "name"])]
+    role: Option<fin_discovery::BinanceRole>,
+    /// Existing main connection for a Binance subaccount.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    parent: Option<String>,
+    /// Binance subaccount email; not a credential. Accepted only for role=sub.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    email: Option<String>,
+    /// Reviewed wallet network: ethereum:1.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    network: Option<String>,
+    /// Expected public wallet address; checked against the protected signer.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    address: Option<String>,
+    /// Credential category only; keys are requested privately afterward.
+    /// Binance requires an API key and signing secret/key. PEM input accepts real
+    /// line breaks or literal \n separators; include BEGIN/END and press Enter.
+    #[arg(long, value_enum, requires_all = ["provider_choice", "name"])]
+    credential_type: Option<fin_discovery::CredentialType>,
+}
+
+impl ConnectionCommandArgs {
+    fn provider(&self) -> Option<fin_discovery::Provider> {
+        self.provider_positional.or(self.provider)
+    }
+    fn connection(self) -> Option<fin_discovery::AddConnectionArgs> {
+        Some(fin_discovery::AddConnectionArgs {
+            provider: self.provider()?,
+            name: self.name?,
+            role: self.role,
+            parent: self.parent,
+            email: self.email,
+            network: self.network,
+            address: self.address,
+            credential_type: self.credential_type,
+        })
+    }
 }
 
 #[derive(Args, Debug)]
@@ -193,7 +238,7 @@ impl UnixTransport {
         };
         let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path))
             .await
-            .map_err(|_| broker_timeout())?
+            .map_err(|_| broker_timeout(&request))?
             .map_err(|_| broker_unavailable())?;
         if peer_uid(&stream)? != self.expected_uid {
             return Err(protocol_error());
@@ -205,12 +250,12 @@ impl UnixTransport {
         }
         tokio::time::timeout(CONNECT_TIMEOUT, stream.write_all(&request_bytes))
             .await
-            .map_err(|_| broker_timeout())?
+            .map_err(|_| broker_timeout(&request))?
             .map_err(|_| broker_unavailable())?;
         stream.shutdown().await.map_err(|_| broker_unavailable())?;
         tokio::time::timeout(response_timeout, read_response(BufReader::new(stream)))
             .await
-            .map_err(|_| broker_timeout())?
+            .map_err(|_| broker_timeout(&request))?
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -337,13 +382,18 @@ fn broker_unavailable() -> FinError {
         "Start the installed Fin service and retry the same request ID.",
     )
 }
-#[cfg(target_os = "macos")]
-fn broker_timeout() -> FinError {
+#[cfg(any(target_os = "macos", test))]
+fn broker_timeout(request: &BrokerRequest) -> FinError {
+    let next_action = if matches!(request, BrokerRequest::Execute { .. }) {
+        "Check status with the same request ID; do not create another financial request."
+    } else {
+        "Run fin daemon status --json to check the service; if startup is failing, inspect the broker error log in your own Terminal."
+    };
     FinError::new(
         "BROKER_TIMEOUT",
         "transport",
         "The protected broker did not respond before the local timeout.",
-        "Check status with the same request ID; do not create another financial request.",
+        next_action,
     )
 }
 
@@ -386,6 +436,7 @@ fn capabilities() -> Value {
         "operations": financial_catalog(),
         "service_required": false,
         "machine_contract": fin_discovery::machine_contract(),
+        "exchanges": fin_discovery::exchange_capabilities(),
         "platforms": {
             "macos": {"protected_broker": true, "human_enrollment": true},
             "linux": {"offline_discovery": true, "protected_broker": false, "human_enrollment": false},
@@ -517,9 +568,10 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
         Command::Connections { command } => match command {
             None | Some(ConnectionsCommand::List) => client.call(BrokerRequest::Connections).await,
             Some(ConnectionsCommand::Add(args)) => {
-                let args = match args.connection {
+                let provider = args.provider();
+                let args = match args.connection() {
                     Some(args) => args,
-                    None if stdin_is_terminal() => onboarding::guided_add()?,
+                    None if stdin_is_terminal() => onboarding::guided_add(provider)?,
                     None => return Err(human_required()),
                 };
                 fin_discovery::validate_add(&args)?;
@@ -821,6 +873,10 @@ fn command_name(command: &Command) -> &'static str {
 
 // Resolve output mode even for parse failures, without inspecting or echoing values.
 fn requested_json(args: &[std::ffi::OsString]) -> bool {
+    requested_flag(args, "--json")
+}
+
+fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
     let mut value = false;
     for argument in args.iter().skip(1) {
         if value {
@@ -830,7 +886,7 @@ fn requested_json(args: &[std::ffi::OsString]) -> bool {
         if argument == "--" {
             break;
         }
-        if argument == "--json" {
+        if argument == flag {
             return true;
         }
         value = matches!(
@@ -886,6 +942,7 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
 async fn main() {
     let arguments: Vec<_> = std::env::args_os().collect();
     let machine = requested_json(&arguments);
+    let verbose = requested_flag(&arguments, "--verbose");
     let cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error)
@@ -912,7 +969,7 @@ async fn main() {
                 "The command or arguments are invalid.",
                 "Run fin --help to inspect supported commands.",
             );
-            std::process::exit(emit(Err(error), &Ui::new(machine, false), "cli"));
+            std::process::exit(emit(Err(error), &Ui::new(machine, verbose), "cli"));
         }
     };
     let ui = Ui::new(cli.json, cli.verbose);
@@ -985,6 +1042,36 @@ mod tests {
     }
 
     #[test]
+    fn timeout_guidance_distinguishes_service_requests_from_uncertain_writes() {
+        for request in [
+            BrokerRequest::Connections,
+            BrokerRequest::Doctor,
+            BrokerRequest::DaemonStart,
+            BrokerRequest::DaemonStop,
+        ] {
+            let error = broker_timeout(&request);
+            assert_eq!(error.code, "BROKER_TIMEOUT");
+            assert!(error.next_action.contains("fin daemon status --json"));
+            assert!(!error.next_action.contains("request ID"));
+        }
+        let error = broker_timeout(&BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: "synthetic-timeout".into(),
+                operation: "wallet.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            },
+        });
+        assert!(error.next_action.contains("same request ID"));
+        assert!(
+            error
+                .next_action
+                .contains("do not create another financial request")
+        );
+        assert!(!error.next_action.contains("synthetic-timeout"));
+    }
+
+    #[test]
     fn enrollment_dtos_reject_secret_fields_and_unknown_flags() {
         let args: fin_discovery::AddConnectionArgs = serde_json::from_value(json!({
             "provider":"binance","name":"main","role":"main","credential_type":"hmac"
@@ -1015,7 +1102,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 29);
+        assert_eq!(financial_catalog().len(), 31);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 
@@ -1249,42 +1336,61 @@ mod tests {
     }
 
     #[test]
-    fn guided_add_is_optional_but_partial_metadata_is_not_silently_discarded() {
-        let bare = Cli::try_parse_from(["fin", "connections", "add"]).unwrap();
-        assert!(matches!(
-            bare.command,
-            Command::Connections {
-                command: Some(ConnectionsCommand::Add(ConnectionCommandArgs {
-                    connection: None
-                }))
-            }
-        ));
+    fn add_accepts_positional_or_flag_provider_without_discarding_metadata() {
         for arguments in [
+            vec!["fin", "connections", "add"],
+            vec!["fin", "connections", "add", "binance"],
             vec!["fin", "connections", "add", "--provider", "binance"],
+        ] {
+            let parsed = Cli::try_parse_from(arguments).unwrap();
+            let Command::Connections {
+                command: Some(ConnectionsCommand::Add(args)),
+            } = parsed.command
+            else {
+                panic!("add command");
+            };
+            assert!(args.connection().is_none());
+        }
+        for prefix in [
+            vec!["fin", "connections", "add", "binance"],
+            vec!["fin", "connections", "add", "--provider", "binance"],
+        ] {
+            let mut arguments = prefix;
+            arguments.extend([
+                "--name",
+                "master",
+                "--role",
+                "main",
+                "--credential-type",
+                "ed25519",
+            ]);
+            let parsed = Cli::try_parse_from(arguments).unwrap();
+            let Command::Connections {
+                command: Some(ConnectionsCommand::Add(args)),
+            } = parsed.command
+            else {
+                panic!("add command");
+            };
+            let args = args.connection().unwrap();
+            assert_eq!(args.provider, fin_discovery::Provider::Binance);
+            assert_eq!(args.name, "master");
+            fin_discovery::validate_add(&args).unwrap();
+        }
+        for arguments in [
             vec!["fin", "connections", "add", "--role", "main"],
+            vec!["fin", "connections", "add", "binance", "--role", "main"],
+            vec![
+                "fin",
+                "connections",
+                "add",
+                "binance",
+                "--provider",
+                "ethereum",
+            ],
+            vec!["fin", "connections", "add", "unknown"],
         ] {
             assert!(Cli::try_parse_from(arguments).is_err());
         }
-        let full = Cli::try_parse_from([
-            "fin",
-            "connections",
-            "add",
-            "--provider",
-            "binance",
-            "--name",
-            "main",
-            "--role",
-            "main",
-        ])
-        .unwrap();
-        assert!(matches!(
-            full.command,
-            Command::Connections {
-                command: Some(ConnectionsCommand::Add(ConnectionCommandArgs {
-                    connection: Some(_)
-                }))
-            }
-        ));
     }
 
     #[test]

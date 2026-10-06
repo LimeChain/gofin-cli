@@ -10,6 +10,9 @@ which checks the password directly; Fin does not read or store it. Characters do
 not appear as you type. Press Ctrl-C to cancel. A separate Touch ID prompt then
 approves the initial Fin configuration.
 
+Setup then starts the broker and verifies its response and running process before
+reporting success. This service check requests no additional Touch ID approval.
+
 Administrator authentication is used for setup and connection add/update/remove.
 Everyday reads, previews, status, service commands and financial operations use
 the protected background service without sudo. Each financial write still needs

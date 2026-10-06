@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 fin-domain.workspace = true
+fin-exchange = { path = "../fin-exchange", default-features = false }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -19,6 +20,7 @@ chrono.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]
+fin-exchange = { path = "../fin-exchange", features = ["test-support", "binance"] }
 tokio.workspace = true
 fin-engine.workspace = true
 fin-store.workspace = true

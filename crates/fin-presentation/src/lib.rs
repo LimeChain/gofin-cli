@@ -134,10 +134,7 @@ impl Ui {
         writeln!(
             stderr,
             "{}",
-            self.styled(
-                &format!("{}: {}", safe_text(&error.code), safe_text(&error.message)),
-                "31"
-            )
+            self.styled(&format!("✗ {}", safe_text(&error.message)), "31")
         )?;
         if !error.next_action.is_empty() {
             writeln!(
@@ -147,6 +144,7 @@ impl Ui {
             )?;
         }
         if self.is_verbose() {
+            writeln!(stderr, "Code: {}", safe_text(&error.code))?;
             writeln!(stderr, "Stage: {}", safe_text(&error.stage))?;
         }
         Ok(())
@@ -619,7 +617,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
-            "\x1b[31mEXPIRED: Approval expired.\x1b[0m\n\x1b[33mNext: Retry setup.\x1b[0m\n"
+            "\x1b[31m✗ Approval expired.\x1b[0m\n\x1b[33mNext: Retry setup.\x1b[0m\n"
         );
         ui.message_to("✓ Ready", "32", &mut stdout).unwrap();
         assert_eq!(
@@ -650,7 +648,8 @@ mod tests {
                 .unwrap();
             let text = String::from_utf8(stderr).unwrap();
             assert!(stdout.is_empty());
-            assert!(text.contains("PENDING: Result uncertain.\nNext: Inspect original ID.\n"));
+            assert!(text.contains("✗ Result uncertain.\nNext: Inspect original ID.\n"));
+            assert_eq!(text.contains("Code: PENDING"), verbose);
             assert_eq!(text.contains("Stage: reconciliation"), verbose);
             assert!(!text.contains('\x1b'));
         }

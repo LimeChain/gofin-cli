@@ -4979,6 +4979,295 @@
     }
   },
   {
+    "name": "exchange.markets",
+    "description": "Read public market metadata (venue snapshot/page).",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "exchange": {
+          "enum": [
+            "kraken",
+            "hyperliquid",
+            "okx",
+            "coinbase",
+            "bybit"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "exchange"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": [
+            "object",
+            "array"
+          ]
+        },
+        "exchange": {
+          "enum": [
+            "kraken",
+            "hyperliquid",
+            "okx",
+            "coinbase",
+            "bybit"
+          ]
+        }
+      },
+      "required": [
+        "exchange",
+        "data"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "exchange": "kraken"
+      },
+      {
+        "exchange": "hyperliquid"
+      },
+      {
+        "exchange": "okx"
+      },
+      {
+        "exchange": "coinbase"
+      },
+      {
+        "exchange": "bybit"
+      }
+    ],
+    "coverage": "Public market/ticker reads through official CCXT Rust. No account enrollment or writes. Coinbase market discovery returns at most 1000 spot products; venue pagination metadata is retained, completeness is not asserted.",
+    "completion": "Returns venue public data; does not imply any financial settlement.",
+    "semantics": {
+      "credentials": false,
+      "exactness": "Venue decimal strings and envelopes preserved; Hyperliquid ticker selects its matching market/context. Market observations are not authoritative accounting.",
+      "finImplemented": [
+        "public_market_metadata",
+        "public_ticker"
+      ],
+      "library": "ccxt-rust",
+      "marketScopes": {
+        "bybit": "spot",
+        "coinbase": "Coinbase Advanced public products",
+        "hyperliquid": "perpetuals; primary dex",
+        "kraken": "spot",
+        "okx": "spot"
+      },
+      "verification": "offline_synthetic; see verification report for public network checks",
+      "writes": false
+    }
+  },
+  {
+    "name": "exchange.ticker",
+    "description": "Read public ticker data for a venue pair.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "exchange": {
+              "const": "kraken"
+            },
+            "pair": {
+              "pattern": "^[A-Z0-9]{2,24}$"
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "const": "hyperliquid"
+            },
+            "pair": {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "const": "okx"
+            },
+            "pair": {
+              "pattern": "^[A-Z0-9]+-[A-Z0-9]+$"
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "const": "coinbase"
+            },
+            "pair": {
+              "pattern": "^[A-Z0-9]+-[A-Z0-9]+$"
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "const": "bybit"
+            },
+            "pair": {
+              "pattern": "^[A-Z0-9]{2,24}$"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "exchange": {
+          "enum": [
+            "kraken",
+            "hyperliquid",
+            "okx",
+            "coinbase",
+            "bybit"
+          ],
+          "type": "string"
+        },
+        "pair": {
+          "description": "Native venue identifier from exchange.markets: XBTUSD (Kraken), BTC (Hyperliquid perpetual), BTC-USDT (OKX), BTC-USD (Coinbase), BTCUSDT (Bybit).",
+          "maxLength": 64,
+          "type": "string"
+        }
+      },
+      "required": [
+        "exchange",
+        "pair"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": [
+            "object",
+            "array"
+          ]
+        },
+        "exchange": {
+          "enum": [
+            "kraken",
+            "hyperliquid",
+            "okx",
+            "coinbase",
+            "bybit"
+          ]
+        }
+      },
+      "required": [
+        "exchange",
+        "data"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "exchange": "kraken",
+        "pair": "XBTUSD"
+      },
+      {
+        "exchange": "hyperliquid",
+        "pair": "BTC"
+      },
+      {
+        "exchange": "okx",
+        "pair": "BTC-USDT"
+      },
+      {
+        "exchange": "coinbase",
+        "pair": "BTC-USD"
+      },
+      {
+        "exchange": "bybit",
+        "pair": "BTCUSDT"
+      }
+    ],
+    "coverage": "Public market/ticker reads through official CCXT Rust. No account enrollment or writes. Coinbase market discovery returns at most 1000 spot products; venue pagination metadata is retained, completeness is not asserted.",
+    "completion": "Returns venue public data; does not imply any financial settlement.",
+    "semantics": {
+      "credentials": false,
+      "exactness": "Venue decimal strings and envelopes preserved; Hyperliquid ticker selects its matching market/context. Market observations are not authoritative accounting.",
+      "finImplemented": [
+        "public_market_metadata",
+        "public_ticker"
+      ],
+      "library": "ccxt-rust",
+      "marketScopes": {
+        "bybit": "spot",
+        "coinbase": "Coinbase Advanced public products",
+        "hyperliquid": "perpetuals; primary dex",
+        "kraken": "spot",
+        "okx": "spot"
+      },
+      "verification": "offline_synthetic; see verification report for public network checks",
+      "writes": false
+    }
+  },
+  {
     "name": "fin.snapshot",
     "description": "Capture a broker-combined financial snapshot for every configured resource and unresolved journal identity.",
     "kind": "read",

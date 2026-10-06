@@ -185,7 +185,14 @@ PLIST
 /usr/bin/plutil -lint "$fin_plist" >/dev/null
 /bin/launchctl bootstrap system "$fin_plist"
 }
-run_stage 'Starting protected local broker service' install_service
+run_stage 'Registering protected local broker service' install_service
+start_broker() {
+  # Use the configured human's authenticated client, not a root socket client.
+  # daemon start checks the broker reply and observed launchd process state.
+  /usr/bin/sudo -n -H -u "#$fin_uid" /usr/bin/env TERM=dumb \
+    /Library/Fin/runtime/fin daemon start
+}
+run_stage 'Starting and checking Fin daemon' start_broker
 # Register only after approved configuration and service bootstrap. Failures
 # retain the protected configuration/journal for inspection rather than retry.
 register_fin_command() {
@@ -214,12 +221,12 @@ else
   /bin/rm -f "$fin_completion_marker" || true
   echo 'Fin is installed, but shell completion setup was skipped because its owner marker could not be secured.' >&2
 fi
-echo 'Fin installed. Next: open a new Terminal and run fin daemon start.'
+echo 'Fin installed and running. Next: open a new Terminal and run fin connections add.'
 if [ "$fin_verbose" = 1 ]; then
   echo 'Fin setup: installed runtime: /Library/Fin/runtime' >&2
   echo 'Fin setup: protected configuration and operation journal: /Library/Fin/private' >&2
   echo 'Fin setup: broker socket: /Library/Fin/run/broker.sock' >&2
   echo 'Fin setup: run sudo -K and close elevated shells after setup.' >&2
   echo 'Fin setup: remove agent-readable credential copies after protected enrollment; rotate any keys that were disclosed.' >&2
-  echo 'Fin setup: after starting the broker, run fin doctor --json and fin connections add.' >&2
+  echo 'Fin setup: run fin doctor --json and fin connections add.' >&2
 fi

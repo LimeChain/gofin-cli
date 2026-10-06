@@ -24,6 +24,13 @@ stop-marker paths: `cargo test --locked -p fin-cli daemon` and
 across runtime reload, blocked ordinary requests, explicit resume, and failed
 marker writes. No test starts/stops or inspects the installed launchd service.
 
+`cargo test --locked -p fin-broker --lib configuration_reload` checks enrollment
+and removal reload, local IPC results, pending request/submission preservation,
+failed composition and approver changes. `cargo test --locked -p fin-broker --lib
+pending_identity_verification` checks available local management with blocked account
+dispatch. `python3 scripts/test-rust-macos-installer.py` covers automatic startup
+as the human account, failure preservation and real synthetic PTY presentation.
+
 Automatic completion regressions run with `cargo test --locked -p fin-cli
 shell_integration`. They use temporary homes and explicit account records, cover
 login-shell selection, repeated installation, Bash profile precedence, existing
@@ -183,3 +190,21 @@ Use [the report template](report-template.md). Automated testing may use a fake 
 - Agent experience: a fresh conversation discovers the CLI, guides the human through missing setup without receiving secrets, inspects state, explains the plan, invokes individual steps, and reports reconciled results. Record human interventions and time spent approving separately from chain/exchange waiting time.
 
 General bridging, Lighter, MCP, unattended execution, full-plan approvals, and aggregate portfolio valuation are outside these initial milestones. The remaining integrations and networks in the product concept stay on the delivery inventory.
+
+## CCXT exchange regression checks
+
+Run the synthetic raw-HTTP, profile, funding, legacy-record and broker checks:
+
+```sh
+cargo test --locked -p fin-exchange -p fin-binance -p fin-broker --all-features
+cargo test --locked -p fin-exchange --no-default-features --lib
+```
+
+Tests use loopback fixtures and synthetic keys;
+`test-support` exposes only loopback transport construction and no approval bypass.
+The second command tests the shared profile without connectivity features.
+
+`cargo run --locked -p fin-exchange --example public_read --all-features -- hyperliquid okx coinbase bybit kraken` is a
+separate explicit public-only network smoke check, never part of default tests.
+Authenticated production, installation, onboarding and real Touch ID are not
+covered by it. See the [CCXT report](../reports/ccxt-exchange.md).

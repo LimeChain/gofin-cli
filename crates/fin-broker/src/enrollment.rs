@@ -406,16 +406,14 @@ async fn validate_connection(
                     "Binance enrollment needs a protected credential.",
                 )
             })?;
-            let signer = Arc::new(ProtectedCredentialProvider::from_store(store));
-            let transport =
-                fin_binance::BinanceHttpTransport::new("https://api.binance.com", signer).map_err(
-                    |_| {
-                        error(
-                            "VENUE_UNAVAILABLE",
-                            "The trusted Binance transport could not be initialized.",
-                        )
-                    },
-                )?;
+            let credentials = Arc::new(ProtectedCredentialProvider::from_store(store));
+            let client = fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
+                error(
+                    "VENUE_UNAVAILABLE",
+                    "The trusted exchange runtime could not be initialized.",
+                )
+            })?;
+            let transport = fin_binance::BinanceCcxtTransport::new(Arc::new(client), credentials);
             let handle = CredentialHandle::new(reference.as_str()).map_err(|_| {
                 error(
                     "CREDENTIAL_REFERENCE_INVALID",
