@@ -80,7 +80,43 @@ Adding, replacing, or removing supported credentials later must use the same pro
 
 ## Guided credential enrollment
 
-The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. Ethereum uses `--network ethereum:1` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. EVM wallets use `--provider evm` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. One wallet is reusable across reviewed chains; no network is required at enrollment. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+
+EVM examples for the human's own Terminal:
+
+```sh
+fin connections add --provider evm --name wallet --credential-type private_key
+fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
+```
+
+The second address is an unmistakable example; substitute the wallet you intend
+to observe. Signing enrollment may supply `--address` for an independent
+match check. The optional `--network ethereum:1`, `ethereum:42161` or
+`ethereum:4663` selects the read-only enrollment check, defaulting to mainnet;
+it does not restrict the key to that chain. `--provider ethereum` remains a
+legacy alias. Financial inputs use `"network":"evm"` plus `chain_id`.
+Existing chain-scoped Ethereum connections retain their authority until the
+human uses protected `connections update --provider evm` to broaden them; no
+upgrade silently widens a legacy signer's scope. See [EVM wallets](testing/evm-wallets.md).
+
+CoinGecko pricing accepts an optional protected market-data connection:
+
+```sh
+fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
+```
+
+Choose `--api-plan pro` for a Pro key; omitting it defaults to Demo. A bare add
+prompts for provider, name and plan, then the protected process requests the key
+through hidden input. `api_key` is a credential category, never its value.
+CoinGecko enrollment accepts no Binance relationships, wallet address or network.
+Read-only authenticated ping and a fresh ETH/USD quote check the key/pricing
+before configuration Touch ID; they do not prove quotes for every asset. The approval saves
+one pricing connection and authorizes no financial movement. Its requests may
+consume market-data quota/billing; it grants no exchange or wallet access.
+Anonymous pricing remains available without enrollment, on a best-effort basis;
+missing/stale/rate-limited quotes block writes. Keys are not loaded from environment
+variables or supplied through CLI/JSON/chat. Later protected update/remove is
+available without reinstalling.
 
 For Binance RSA/Ed25519, the two private prompts collect the API key and the
 complete PEM signing key separately. PEM accepts actual line breaks or literal
@@ -97,7 +133,8 @@ Examples of provider-specific prompts:
 | Provider           | Non-secret setup information                                                                                                               | Secret input and checks                                                                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Binance            | Stable name, main/subaccount role, parent relationship and subaccount identity where relevant, selected wallet type and credential scheme. | API/signing credential through hidden input; read-only authentication, reported permissions and account mapping. Report unknown permission/identity explicitly. |
-| Ethereum wallet    | Stable name, supported network, address, read-only versus signing connection.                                                              | A signing credential only for a signing connection; independently verify its derived address matches the chosen wallet.                                         |
+| EVM wallet         | Stable name, address, read-only versus signing connection; reusable across reviewed chains.                                                              | A signing credential only for a signing connection; independently verify its derived address matches the chosen wallet.                                         |
+| CoinGecko          | Stable name and Demo/Pro plan; one pricing provider, no wallet/account relationship.                                                     | API key through hidden input; authenticated ping and fresh ETH/USD quote, then approval to save market-data configuration.                                                    |
 | Future integration | Its registered typed connection definition and reviewed prerequisites.                                                                     | Its own credential fields and read-only checks through the same protected enrollment contract. Unsupported types remain unavailable.                            |
 
 The human reviews the resolved connection and reported permissions, then independently authorizes saving or changing execution credentials/configuration. Keep credential storage and enrollment in `fin-credentials`; OS authentication and exact challenge verification belong in `fin-authorization`. Secret input must reach the protected component directly rather than transit the untrusted CLI process. Implement and verify the actual terminal/session and private-channel mechanics; terminal choice and hidden echo alone are not the credential boundary.

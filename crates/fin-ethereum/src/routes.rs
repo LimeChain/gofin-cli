@@ -351,6 +351,7 @@ impl EthereumAdapter {
             "PLAN_WRITE_REQUIRED",
             "A planned route must name a supported write.",
         )?;
+        self.require_operation(operation)?;
         let r = request::parse(operation, input)?;
         let wallet = self.resolve(&r, true)?;
         let owner = address(&wallet.address)?;
@@ -373,7 +374,7 @@ impl EthereumAdapter {
         )?;
         self.runtime.assert_chain().await?;
         let reference = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
-            self.config.weth.as_str()
+            self.weth()?
         } else if operation == "uniswap.swap" {
             r.token_in.as_deref().expect("schema")
         } else {
@@ -664,11 +665,8 @@ impl EthereumAdapter {
                 let spender = address(r.spender.as_deref().expect("schema"))?;
                 require(
                     spender != Address::ZERO
-                        && [
-                            self.config.aave.pool.as_str(),
-                            self.config.uniswap.router.as_str(),
-                        ]
-                        .contains(&lower_address(spender).as_str()),
+                        && [self.aave()?.pool.as_str(), self.uniswap()?.router.as_str()]
+                            .contains(&lower_address(spender).as_str()),
                     "PLAN_SPENDER_UNSUPPORTED",
                     "This restoration profile approves only its reviewed Pool and router.",
                 )?;
@@ -752,7 +750,7 @@ impl EthereumAdapter {
                     context,
                     &resource,
                     &token.reference,
-                    &self.config.uniswap.router,
+                    &self.uniswap()?.router,
                     hi,
                 )?;
                 require(
@@ -769,9 +767,7 @@ impl EthereumAdapter {
                         None,
                     )
                     .await?;
-                self.runtime
-                    .code(address(&self.config.uniswap.router)?)
-                    .await?;
+                self.runtime.code(address(&self.uniswap()?.router)?).await?;
                 let output = quote.token_out.asset(self);
                 let minimum = exact(r.min_output.as_deref().expect("schema"), output.decimals)?;
                 let quoted = u256(&quote.output)?;
@@ -866,8 +862,8 @@ impl EthereumAdapter {
                     "PLAN_POSITION_BASELINE_UNSUPPORTED",
                     "This practical full-close route requires zero initial Aave positions and debt.",
                 )?;
-                let supply_name = position(&self.config.aave.pool, &token.reference, "supply");
-                let debt_name = position(&self.config.aave.pool, &token.reference, "variable-debt");
+                let supply_name = position(&self.aave()?.pool, &token.reference, "supply");
+                let debt_name = position(&self.aave()?.pool, &token.reference, "variable-debt");
                 let (kind, name, receipt) = if matches!(operation, "aave.borrow" | "aave.repay") {
                     (
                         PositionKind::VariableDebt,
@@ -898,7 +894,7 @@ impl EthereumAdapter {
                 let p = planned_position(context, &resource, &name, &kind, &principal)?;
                 let current_min = u256(&p.minimum)?;
                 let current_max = u256(&p.maximum)?;
-                let pool = address(&self.config.aave.pool)?;
+                let pool = address(&self.aave()?.pool)?;
                 let index = if kind == PositionKind::Supply {
                     self.runtime
                         .call(
@@ -929,7 +925,7 @@ impl EthereumAdapter {
                     (index + pow10(27)? - U256::from(1)) / pow10(27)?,
                     U256::from(2),
                 )?;
-                let collateral_name = collateral(&self.config.aave.pool, &token.reference);
+                let collateral_name = collateral(&self.aave()?.pool, &token.reference);
                 let prior_collateral = context
                     .projected
                     .authorities
@@ -1020,7 +1016,7 @@ impl EthereumAdapter {
                             context,
                             &resource,
                             &token.reference,
-                            &self.config.aave.pool,
+                            &self.aave()?.pool,
                             cap,
                         )?;
                         let minimum = sub(cap, quantum)?;
@@ -1106,8 +1102,13 @@ impl EthereumAdapter {
                         )?;
                         let mut borrowing_value = U256::ZERO;
                         let mut liquidation_value = U256::ZERO;
-                        let mut debt_value =
-                            u256(&self.quote_usd(&token.reference, quantity(added)).await?.0)?;
+                        let mut debt_value = u256(
+                            &self
+                                .quote_protocol_usd(&token.reference, quantity(added))
+                                .await?
+                                .0,
+                        )?;
+                        let configured_pool = &self.aave()?.pool;
                         for position in context
                             .projected
                             .positions
@@ -1119,7 +1120,7 @@ impl EthereumAdapter {
                                     a.resource == resource
                                         && a.authority
                                             == collateral(
-                                                &self.config.aave.pool,
+                                                configured_pool,
                                                 &position.asset.reference,
                                             )
                                         && a.value == "true"
@@ -1128,7 +1129,7 @@ impl EthereumAdapter {
                                 let info = self.reserve(&position.asset.reference, None).await?;
                                 let usd = u256(
                                     &self
-                                        .quote_usd(
+                                        .quote_protocol_usd(
                                             &position.asset.reference,
                                             position.amount.minimum.clone(),
                                         )
@@ -1149,7 +1150,7 @@ impl EthereumAdapter {
                                     debt_value,
                                     u256(
                                         &self
-                                            .quote_usd(
+                                            .quote_protocol_usd(
                                                 &position.asset.reference,
                                                 position.amount.maximum.clone(),
                                             )
@@ -1217,7 +1218,7 @@ impl EthereumAdapter {
                             context,
                             &resource,
                             &token.reference,
-                            &self.config.aave.pool,
+                            &self.aave()?.pool,
                             cap,
                         )?;
                         requires.push(ProjectedRequirement::CashAtLeast {

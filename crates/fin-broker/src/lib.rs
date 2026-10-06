@@ -6,7 +6,11 @@
 
 pub mod deposit;
 pub mod enrollment;
+mod evm_public_data;
+mod evm_router;
+mod pricing;
 pub use deposit::BinanceEthereumDepositAdapter;
+pub use pricing::SharedUsdValuator;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -72,6 +76,8 @@ pub struct NetworkConfig {
     pub chain_id: u64,
     pub rpc_urls: Vec<String>,
     pub confirmations: u64,
+    #[serde(default)]
+    pub snapshot_tokens: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -100,6 +106,7 @@ pub enum ConnectionConfig {
         physical_identity: String,
         physical_identity_verified: bool,
     },
+    /// Legacy chain-scoped connection, retained for journals and old installations.
     Ethereum {
         name: String,
         resource: ResourceId,
@@ -108,6 +115,21 @@ pub enum ConnectionConfig {
         address: String,
         signing_enabled: bool,
         assets: Vec<AssetId>,
+    },
+    /// One protected signer/address, reusable across the configured EVM networks.
+    Evm {
+        name: String,
+        resource: ResourceId,
+        credential_ref: Option<String>,
+        address: String,
+        signing_enabled: bool,
+    },
+    #[serde(rename = "coingecko")]
+    CoinGecko {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        api_plan: String,
     },
 }
 
@@ -130,7 +152,33 @@ impl NetworkConfig {
                 "https://eth.drpc.org".into(),
             ],
             confirmations: 2,
+            snapshot_tokens: vec![fin_ethereum::WETH.into(), fin_ethereum::USDC.into()],
         }
+    }
+    pub fn reviewed_evm_networks() -> Vec<Self> {
+        vec![
+            Self::ethereum_mainnet(),
+            Self {
+                id: "ethereum:42161".into(),
+                chain_id: 42161,
+                rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
+                confirmations: 2,
+                snapshot_tokens: vec![
+                    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1".into(),
+                    "0xaf88d065e77c8cc2239327c5edb3a432268e5831".into(),
+                ],
+            },
+            Self {
+                id: "ethereum:4663".into(),
+                chain_id: 4663,
+                rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
+                confirmations: 2,
+                snapshot_tokens: vec![
+                    "0x0bd7d308f8e1639fab988df18a8011f41eacad73".into(),
+                    "0x5fc5360d0400a0fd4f2af552add042d716f1d168".into(),
+                ],
+            },
+        ]
     }
 }
 
@@ -139,10 +187,10 @@ impl DeploymentConfig {
         let defaults = fin_ethereum::EthereumConfig::default();
         Self {
             network: "ethereum:1".into(),
-            weth: defaults.weth,
+            weth: defaults.weth.expect("mainnet WETH"),
             snapshot_tokens: defaults.snapshot_tokens,
-            uniswap: defaults.uniswap,
-            aave: defaults.aave,
+            uniswap: defaults.uniswap.expect("mainnet Uniswap"),
+            aave: defaults.aave.expect("mainnet Aave"),
         }
     }
 }
@@ -168,11 +216,11 @@ impl BrokerConfigV2 {
                 "Use the protected human enrollment flow to repair broker configuration.",
             ));
         }
-        if self.networks.is_empty() || self.deployments.is_empty() {
+        if self.networks.is_empty() {
             return Err(error(
                 "CONFIG_NETWORKS_REQUIRED",
                 "configuration",
-                "At least one network and one reviewed deployment are required.",
+                "At least one reviewed EVM network is required.",
                 "Configure a supported Ethereum network and reviewed deployments.",
             ));
         }
@@ -185,12 +233,21 @@ impl BrokerConfigV2 {
             ));
         }
         let mut networks = BTreeSet::new();
+        let mut chain_ids = BTreeSet::new();
         for network in &self.networks {
             if network.id.is_empty()
                 || network.chain_id == 0
                 || network.confirmations == 0
                 || network.rpc_urls.is_empty()
                 || !networks.insert(network.id.clone())
+                || network.id != format!("ethereum:{}", network.chain_id)
+                || !chain_ids.insert(network.chain_id)
+                || ![1, 42161, 4663].contains(&network.chain_id)
+                || network.snapshot_tokens.len() > 64
+                || network
+                    .snapshot_tokens
+                    .iter()
+                    .any(|token| !valid_eth_address(token))
                 || network.rpc_urls.iter().any(|url| !valid_public_rpc(url))
             {
                 return Err(error(
@@ -219,6 +276,25 @@ impl BrokerConfigV2 {
         let mut identities = BTreeSet::new();
         for connection in &self.connections {
             let (name, resource) = match connection {
+                ConnectionConfig::CoinGecko {
+                    name,
+                    resource,
+                    credential_ref,
+                    api_plan,
+                } => {
+                    if resource.0 != "market-data:coingecko"
+                        || !matches!(api_plan.as_str(), "demo" | "pro")
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_PRICING_CONNECTION_INVALID",
+                            "configuration",
+                            "CoinGecko API plan or protected credential mapping is invalid.",
+                            "Repair pricing through protected connection enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::Binance {
                     name,
                     resource,
@@ -276,6 +352,29 @@ impl BrokerConfigV2 {
                     }
                     (name, resource)
                 }
+                ConnectionConfig::Evm {
+                    name,
+                    resource,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                } => {
+                    if !valid_eth_address(address)
+                        || resource.0 != format!("evm:{}", address.to_ascii_lowercase())
+                        || (*signing_enabled != credential_ref.is_some())
+                        || credential_ref.as_ref().is_some_and(|value| {
+                            fin_credentials::CredentialRef::new(value).is_err()
+                        })
+                    {
+                        return Err(error(
+                            "CONFIG_EVM_CONNECTION_INVALID",
+                            "configuration",
+                            "EVM address or protected signer mapping is invalid.",
+                            "Repair the wallet through protected enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
             };
             if name.is_empty() || !names.insert(name.clone()) || !resources.insert(resource.clone())
             {
@@ -303,6 +402,41 @@ impl BrokerConfigV2 {
                     "A Binance physical account cannot be registered twice under distinct aliases.",
                     "Remove duplicate main-key mappings.",
                 ));
+            }
+        }
+        let mut physical_wallets = BTreeSet::new();
+        for connection in &self.connections {
+            let (address, chains) = match connection {
+                ConnectionConfig::Evm { address, .. } => (
+                    address,
+                    self.networks
+                        .iter()
+                        .map(|network| network.chain_id)
+                        .collect::<Vec<_>>(),
+                ),
+                ConnectionConfig::Ethereum {
+                    address, network, ..
+                } => (
+                    address,
+                    vec![
+                        self.networks
+                            .iter()
+                            .find(|profile| &profile.id == network)
+                            .expect("validated network")
+                            .chain_id,
+                    ],
+                ),
+                _ => continue,
+            };
+            for chain in chains {
+                if !physical_wallets.insert((chain, address.to_ascii_lowercase())) {
+                    return Err(error(
+                        "CONFIG_DUPLICATE_PHYSICAL_WALLET",
+                        "configuration",
+                        "The same EVM wallet is registered more than once on a network.",
+                        "Reuse the existing EVM connection instead of creating an alias.",
+                    ));
+                }
             }
         }
         for value in [
@@ -375,6 +509,18 @@ fn canonical_uid(value: &str) -> bool {
 }
 
 pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Send + Sync {
+    fn usd_price_source(
+        &self,
+        _credential: &fin_credentials::CredentialRef,
+        _plan: &str,
+    ) -> fin_domain::Result<Arc<dyn fin_pricing::UsdPriceSource>> {
+        Err(error(
+            "PRICING_CREDENTIAL_UNAVAILABLE",
+            "configuration",
+            "This credential provider has no protected pricing connection.",
+            "Enroll the CoinGecko key in your own Terminal.",
+        ))
+    }
     fn envelope_signer(
         &self,
         credential: &fin_credentials::CredentialRef,
@@ -438,13 +584,43 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn usd_price_source(
+        &self,
+        credential: &fin_credentials::CredentialRef,
+        plan: &str,
+    ) -> fin_domain::Result<Arc<dyn fin_pricing::UsdPriceSource>> {
+        self.store
+            .with_material(credential, |material| match material {
+                fin_credentials::SecretMaterial::CoinGeckoApiKey {
+                    api_key,
+                    plan: stored_plan,
+                } if stored_plan == plan => {
+                    let plan = match plan {
+                        "demo" => fin_pricing::ApiPlan::Demo,
+                        "pro" => fin_pricing::ApiPlan::Pro,
+                        _ => return Err(FinError::validation("The CoinGecko plan is invalid.")),
+                    };
+                    Ok(
+                        Arc::new(fin_pricing::CoinGeckoPrices::with_api_key(plan, api_key)?)
+                            as Arc<dyn fin_pricing::UsdPriceSource>,
+                    )
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not the configured CoinGecko API key.",
+                    "Repair pricing through protected enrollment.",
+                )),
+            })
+    }
+
     fn envelope_signer(
         &self,
         credential: &fin_credentials::CredentialRef,
     ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)> {
         self.store
             .with_material(credential, |material| match material {
-                fin_credentials::SecretMaterial::EthereumPrivateKey { private_key } => {
+                fin_credentials::SecretMaterial::EvmPrivateKey { private_key } => {
                     let signer =
                         Arc::new(fin_evm::LocalEnvelopeSigner::from_private_key(private_key)?);
                     let address = format!("{:#x}", signer.address());
@@ -452,7 +628,8 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 }
                 fin_credentials::SecretMaterial::BinanceHmac { .. }
                 | fin_credentials::SecretMaterial::BinanceRsa { .. }
-                | fin_credentials::SecretMaterial::BinanceEd25519 { .. } => Err(error(
+                | fin_credentials::SecretMaterial::BinanceEd25519 { .. }
+                | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
@@ -540,289 +717,6 @@ pub trait AssetValuator: Send + Sync {
     }
 }
 
-/// An independent USD quote for one USDT, the Binance ticker numeraire.
-#[async_trait]
-pub trait NumeraireUsdProvider: Send + Sync {
-    async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote>;
-}
-
-pub struct CoinbaseNumeraireUsd {
-    client: reqwest::Client,
-    #[cfg(test)]
-    test_base_url: Option<String>,
-}
-
-fn market_data_client() -> fin_domain::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(concat!("fin-cli/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(12))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| {
-            error(
-                "PRICE_UNAVAILABLE",
-                "configuration",
-                "Public market data transport could not be initialized.",
-                "Check broker networking.",
-            )
-        })
-}
-
-async fn public_market_json(client: &reqwest::Client, url: &str) -> fin_domain::Result<Value> {
-    let response = client.get(url).send().await.map_err(|_| {
-        error(
-            "PRICE_UNAVAILABLE",
-            "valuation",
-            "Public market data is unavailable.",
-            "Retry a read after the trusted market endpoint is reachable.",
-        )
-    })?;
-    if !response.status().is_success() {
-        return Err(error(
-            "PRICE_UNAVAILABLE",
-            "valuation",
-            &format!(
-                "Public market data request was rejected with HTTP status {}.",
-                response.status().as_u16()
-            ),
-            "Use a supported, available market product.",
-        ));
-    }
-    response.json().await.map_err(|_| {
-        error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Public market data response is malformed.",
-            "Retry later; no external response details or quantities were accepted.",
-        )
-    })
-}
-
-fn positive_price_atoms(value: &Value) -> fin_domain::Result<fin_domain::Quantity> {
-    let price = value
-        .as_str()
-        .filter(|text| !text.is_empty() && text.len() <= 64)
-        .and_then(|text| fin_domain::Quantity::from_decimal(text, 18).ok())
-        .filter(|price| !price.is_zero())
-        .ok_or_else(|| {
-            error(
-                "PRICE_DATA_INVALID",
-                "valuation",
-                "A positive exact decimal price with at most 18 fractional places is required.",
-                "Use a supported product with a complete exact quote.",
-            )
-        })?;
-    Ok(price)
-}
-
-fn checked_usd_quote(
-    quote: &fin_binance::PriceQuote,
-    instant: chrono::DateTime<Utc>,
-) -> fin_domain::Result<(fin_domain::Quantity, chrono::DateTime<Utc>)> {
-    let price = positive_price_atoms(&json!(quote.usd_per_unit))?;
-    let observed = chrono::DateTime::parse_from_rfc3339(&quote.observed_at)
-        .map(|time| time.with_timezone(&Utc))
-        .map_err(|_| {
-            error(
-                "PRICE_DATA_INVALID",
-                "valuation",
-                "USD quote observation time is malformed.",
-                "Obtain a fresh independent USD quote.",
-            )
-        })?;
-    if observed > instant || instant - observed > chrono::Duration::seconds(60) {
-        return Err(error(
-            "PRICE_STALE",
-            "valuation",
-            "Independent USD quote is future-dated or older than 60 seconds.",
-            "Obtain a fresh independent USD quote before a financial action.",
-        ));
-    }
-    if quote.source.trim().is_empty() || quote.source.len() > 1024 {
-        return Err(error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Independent USD quote has no bounded source description.",
-            "Use a reviewed independent USD provider.",
-        ));
-    }
-    Ok((price, observed))
-}
-
-fn coinbase_usdt_quote(
-    product: &Value,
-    ticker: &Value,
-    instant: chrono::DateTime<Utc>,
-) -> fin_domain::Result<fin_binance::PriceQuote> {
-    if product.get("id").and_then(Value::as_str) != Some("USDT-USD")
-        || product.get("base_currency").and_then(Value::as_str) != Some("USDT")
-        || product.get("quote_currency").and_then(Value::as_str) != Some("USD")
-        || product.get("status").and_then(Value::as_str) != Some("online")
-        || product.get("trading_disabled").and_then(Value::as_bool) != Some(false)
-    {
-        return Err(error(
-            "PRICE_PRODUCT_INVALID",
-            "valuation",
-            "The independent USDT-USD product identity or trading state is unavailable.",
-            "Use the reviewed online USDT-USD product; no parity fallback is allowed.",
-        ));
-    }
-    let price = positive_price_atoms(&ticker["price"])?;
-    let bid = positive_price_atoms(&ticker["bid"])?;
-    let ask = positive_price_atoms(&ticker["ask"])?;
-    if bid > ask {
-        return Err(error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Independent USD quote has an inverted bid/ask spread.",
-            "Obtain a complete consistent USDT-USD quote.",
-        ));
-    }
-    let quote = fin_binance::PriceQuote {
-        usd_per_unit: std::cmp::max(price, ask).to_decimal(18),
-        observed_at: ticker["time"].as_str().unwrap_or_default().into(),
-        source: "Coinbase Exchange USDT-USD public ticker max(price, ask)".into(),
-    };
-    checked_usd_quote(&quote, instant)?;
-    Ok(quote)
-}
-
-impl CoinbaseNumeraireUsd {
-    pub fn new() -> fin_domain::Result<Self> {
-        Ok(Self {
-            client: market_data_client()?,
-            #[cfg(test)]
-            test_base_url: None,
-        })
-    }
-    fn base_url(&self) -> &str {
-        #[cfg(test)]
-        if let Some(url) = &self.test_base_url {
-            return url;
-        }
-        "https://api.exchange.coinbase.com"
-    }
-}
-
-#[async_trait]
-impl NumeraireUsdProvider for CoinbaseNumeraireUsd {
-    async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
-        let product = public_market_json(
-            &self.client,
-            &format!("{}/products/USDT-USD", self.base_url()),
-        )
-        .await?;
-        let ticker = public_market_json(
-            &self.client,
-            &format!("{}/products/USDT-USD/ticker", self.base_url()),
-        )
-        .await?;
-        coinbase_usdt_quote(&product, &ticker, Utc::now())
-    }
-}
-
-pub struct PublicBinancePrices {
-    client: Arc<fin_exchange::ccxt::CcxtClient>,
-    numeraire: Arc<dyn NumeraireUsdProvider>,
-    #[cfg(test)]
-    test_base_url: Option<String>,
-}
-
-impl PublicBinancePrices {
-    pub fn new() -> fin_domain::Result<Self> {
-        Self::with_numeraire(Arc::new(CoinbaseNumeraireUsd::new()?))
-    }
-    pub fn with_numeraire(numeraire: Arc<dyn NumeraireUsdProvider>) -> fin_domain::Result<Self> {
-        Ok(Self {
-            client: Arc::new(fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
-                error(
-                    "PRICE_UNAVAILABLE",
-                    "valuation",
-                    "Exchange runtime could not start.",
-                    "Retry the read when available.",
-                )
-            })?),
-            numeraire,
-            #[cfg(test)]
-            test_base_url: None,
-        })
-    }
-}
-
-#[async_trait]
-impl fin_binance::BinancePriceProvider for PublicBinancePrices {
-    async fn quote_usd(&self, coin: &str) -> fin_domain::Result<fin_binance::PriceQuote> {
-        if coin.is_empty()
-            || coin.len() > 24
-            || !coin.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        {
-            return Err(error(
-                "PRICE_ASSET_UNSUPPORTED",
-                "valuation",
-                "Asset has no safe Binance market symbol.",
-                "Use an explicitly configured, supported asset symbol.",
-            ));
-        }
-        let numeraire = self.numeraire.quote_usd().await?;
-        let (numeraire_atoms, numeraire_time) = checked_usd_quote(&numeraire, Utc::now())?;
-        if coin == "USDT" {
-            return Ok(numeraire);
-        }
-        let symbol = format!("{coin}USDT");
-        let client = self.client.clone();
-        #[cfg(test)]
-        let client = if let Some(endpoint) = &self.test_base_url {
-            Arc::new(fin_exchange::ccxt::CcxtClient::for_test(endpoint).unwrap())
-        } else {
-            client
-        };
-        let value = client
-            .request(
-                fin_exchange::ccxt::ExchangeId::Binance,
-                fin_exchange::ccxt::Method::BinanceTickerPrice,
-                None,
-                vec![("symbol".into(), symbol.clone())],
-            )
-            .await
-            .map_err(|failure| {
-                error(
-                    if failure.kind == fin_exchange::ccxt::CcxtErrorKind::InvalidResponse {
-                        "PRICE_DATA_INVALID"
-                    } else {
-                        "PRICE_UNAVAILABLE"
-                    },
-                    "valuation",
-                    "The exchange quote could not be verified.",
-                    "Retry the read; no alternative price is inferred.",
-                )
-            })?;
-        if value.get("symbol").and_then(Value::as_str) != Some(symbol.as_str()) {
-            return Err(error(
-                "PRICE_PRODUCT_INVALID",
-                "valuation",
-                "Public Binance quote does not match the exact requested market pair.",
-                "Use the reviewed product identity; no alternative ticker is inferred.",
-            ));
-        }
-        let ticker_atoms = positive_price_atoms(&value["price"])?;
-        let ticker_time = Utc::now();
-        // Both components must still be fresh after the second HTTP read.
-        checked_usd_quote(&numeraire, ticker_time)?;
-        let usd_atoms = ticker_atoms.mul_div_ceil(
-            &numeraire_atoms,
-            &fin_domain::Quantity::from_decimal("1", 18)?,
-        )?;
-        Ok(fin_binance::PriceQuote {
-            usd_per_unit: usd_atoms.to_decimal(18),
-            observed_at: std::cmp::min(numeraire_time, ticker_time).to_rfc3339(),
-            source: format!(
-                "Binance {symbol} public ticker multiplied by {}",
-                numeraire.source
-            ),
-        })
-    }
-}
-
 pub struct EthereumPayoutVerifier {
     adapters: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
 }
@@ -847,28 +741,50 @@ pub fn build_protected_applications(
         eth_rpcs.insert(network.chain_id, rpc.clone());
         networks_by_id.insert(network.id.clone(), network);
     }
+    let source: Arc<dyn fin_pricing::UsdPriceSource> = if let Some(ConnectionConfig::CoinGecko {
+        credential_ref,
+        api_plan,
+        ..
+    }) = config
+        .connections
+        .iter()
+        .find(|connection| matches!(connection, ConnectionConfig::CoinGecko { .. }))
+    {
+        credentials.usd_price_source(
+            &fin_credentials::CredentialRef::new(credential_ref)?,
+            api_plan,
+        )?
+    } else {
+        Arc::new(fin_pricing::CoinGeckoPrices::new()?)
+    };
+    let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
+    let wallet_prices = binance_prices.clone();
+    let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<fin_ethereum::EthereumAdapter>>::new();
-    for deployment in &config.deployments {
-        let network = networks_by_id
-            .get(&deployment.network)
-            .expect("validated deployment network");
+    for network in &config.networks {
         let mut wallets = Vec::new();
         let mut signer_map = BTreeMap::new();
         for connection in &config.connections {
-            let ConnectionConfig::Ethereum {
-                name,
-                network: wallet_network,
-                address,
-                signing_enabled,
-                credential_ref,
-                ..
-            } = connection
-            else {
-                continue;
+            let (name, address, signing_enabled, credential_ref) = match connection {
+                ConnectionConfig::Evm {
+                    name,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                    ..
+                } => (name, address, signing_enabled, credential_ref),
+                ConnectionConfig::Ethereum {
+                    name,
+                    network: wallet_network,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                    ..
+                } if wallet_network == &network.id => {
+                    (name, address, signing_enabled, credential_ref)
+                }
+                _ => continue,
             };
-            if wallet_network != &network.id {
-                continue;
-            }
             wallets.push(fin_ethereum::WalletConnection {
                 name: name.clone(),
                 address: address.clone(),
@@ -901,30 +817,53 @@ pub fn build_protected_applications(
             Some(Arc::new(MappedEnvelopeSigner::new(signer_map)?))
         };
         let runtime = Arc::new(fin_evm::EvmRuntime::new(rpc, network.chain_id, signer));
-        let ethereum_config = fin_ethereum::EthereumConfig {
-            chain_id: network.chain_id,
-            confirmations: network.confirmations,
-            weth: deployment.weth.clone(),
-            snapshot_tokens: deployment.snapshot_tokens.clone(),
-            uniswap: deployment.uniswap.clone(),
-            aave: deployment.aave.clone(),
+        let ethereum_config = if let Some(deployment) = config
+            .deployments
+            .iter()
+            .find(|deployment| deployment.network == network.id)
+        {
+            fin_ethereum::EthereumConfig {
+                chain_id: network.chain_id,
+                confirmations: network.confirmations,
+                require_finalized: false,
+                weth: Some(deployment.weth.clone()),
+                snapshot_tokens: deployment.snapshot_tokens.clone(),
+                uniswap: Some(deployment.uniswap.clone()),
+                aave: Some(deployment.aave.clone()),
+            }
+        } else {
+            fin_ethereum::EthereumConfig::wallet_only(
+                network.chain_id,
+                network.confirmations,
+                network.snapshot_tokens.clone(),
+            )
         };
-        let adapter = Arc::new(fin_ethereum::EthereumAdapter::new(
-            ethereum_config,
-            wallets,
-            runtime,
-        )?);
+        let adapter = Arc::new(
+            fin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
+                .with_wallet_valuation(wallet_prices.clone())
+                .with_token_discovery(token_discovery.clone()),
+        );
         ethereum_adapters.insert(network.id.clone(), adapter);
     }
-
-    let mut adapters: Vec<Arc<dyn Adapter>> = ethereum_adapters
-        .values()
-        .cloned()
-        .map(|adapter| adapter as Arc<dyn Adapter>)
-        .collect();
-    let binance_prices = Arc::new(PublicBinancePrices::new()?);
+    let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
+    if !ethereum_adapters.is_empty() {
+        adapters.push(Arc::new(evm_router::EvmNetworkRouter::new(
+            ethereum_adapters
+                .values()
+                .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                .collect(),
+        )));
+    }
+    let exchange_client = Arc::new(fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
+        error(
+            "EXCHANGE_TRANSPORT_UNAVAILABLE",
+            "startup",
+            "Exchange transport could not be initialized.",
+            "Check the protected broker installation.",
+        )
+    })?);
     adapters.push(Arc::new(fin_exchange::ExchangeAdapter::new(
-        fin_exchange::DefaultExchangeProfile::new(binance_prices.client.clone()),
+        fin_exchange::DefaultExchangeProfile::new(exchange_client.clone()),
     )));
     if config
         .connections
@@ -966,34 +905,50 @@ pub fn build_protected_applications(
             .collect::<Vec<_>>();
         let mut destinations = Vec::new();
         for connection in &config.connections {
-            if let ConnectionConfig::Ethereum {
-                name,
-                resource,
-                network,
-                address,
-                assets,
-                ..
-            } = connection
-                && networks_by_id
+            let (name, address, resource, assets) = match connection {
+                ConnectionConfig::Ethereum {
+                    name,
+                    resource,
+                    network,
+                    address,
+                    assets,
+                    ..
+                } if networks_by_id
                     .get(network)
-                    .is_some_and(|network| network.chain_id == 1)
-            {
-                let assets = assets
-                    .iter()
-                    .filter(|asset| asset.network == "ethereum:1" && asset.reference == "native")
-                    .cloned()
-                    .map(|asset| ("ETH".to_owned(), asset))
-                    .collect::<BTreeMap<_, _>>();
-                if !assets.is_empty() {
-                    destinations.push(fin_binance::EthereumDestination {
-                        name: name.clone(),
-                        resource: resource.clone(),
-                        address: address.clone(),
-                        chain_id: 1,
-                        assets,
-                        confirmations: 2,
-                    });
+                    .is_some_and(|network| network.chain_id == 1) =>
+                {
+                    (name, address, resource.clone(), assets.clone())
                 }
+                ConnectionConfig::Evm { name, address, .. }
+                    if networks_by_id.values().any(|network| network.chain_id == 1) =>
+                {
+                    (
+                        name,
+                        address,
+                        ResourceId(format!("ethereum:1:{}", address.to_ascii_lowercase())),
+                        vec![AssetId {
+                            network: "ethereum:1".into(),
+                            reference: "native".into(),
+                            decimals: 18,
+                        }],
+                    )
+                }
+                _ => continue,
+            };
+            let assets = assets
+                .into_iter()
+                .filter(|asset| asset.network == "ethereum:1" && asset.reference == "native")
+                .map(|asset| ("ETH".to_owned(), asset))
+                .collect::<BTreeMap<_, _>>();
+            if !assets.is_empty() {
+                destinations.push(fin_binance::EthereumDestination {
+                    name: name.clone(),
+                    resource,
+                    address: address.clone(),
+                    chain_id: 1,
+                    assets,
+                    confirmations: 2,
+                });
             }
         }
         if accounts.is_empty() {
@@ -1007,7 +962,7 @@ pub fn build_protected_applications(
         let exchange_credentials: Arc<dyn fin_exchange::ccxt::CredentialProvider> =
             credentials.clone();
         let transport = Arc::new(fin_binance::BinanceCcxtTransport::new(
-            binance_prices.client.clone(),
+            exchange_client.clone(),
             exchange_credentials,
         ));
         // Binance-only enrollment has no Ethereum payout destinations. Keep
@@ -1044,109 +999,8 @@ pub fn build_protected_applications(
             )));
         }
     }
-    let valuator: Arc<dyn AssetValuator> = Arc::new(CompositeAssetValuator {
-        binance: binance_prices,
-        ethereum: ethereum_adapters,
-    });
+    let valuator: Arc<dyn AssetValuator> = binance_prices;
     Ok(ProtectedApplications { adapters, valuator })
-}
-
-pub struct CompositeAssetValuator {
-    binance: Arc<PublicBinancePrices>,
-    ethereum: BTreeMap<String, Arc<fin_ethereum::EthereumAdapter>>,
-}
-
-#[async_trait]
-impl AssetValuator for CompositeAssetValuator {
-    async fn usd_micros(&self, amount: &Amount) -> fin_domain::Result<(String, String, String)> {
-        if amount.asset.network == "binance" {
-            let quote = fin_binance::BinancePriceProvider::quote_usd(
-                &*self.binance,
-                &amount.asset.reference,
-            )
-            .await?;
-            let price = decimal_ratio(&quote.usd_per_unit)?;
-            let numerator = amount
-                .atoms
-                .to_string()
-                .parse::<num_bigint::BigUint>()
-                .map_err(|_| {
-                    error(
-                        "INVALID_AMOUNT",
-                        "valuation",
-                        "Asset amount is malformed.",
-                        "Use exact base-unit amount text.",
-                    )
-                })?
-                * price.0
-                * num_bigint::BigUint::from(1_000_000u64);
-            let denominator = pow10(amount.asset.decimals as u32) * pow10(price.1);
-            let micros =
-                (numerator + (&denominator - num_bigint::BigUint::from(1u8))) / denominator;
-            return Ok((micros.to_string(), quote.observed_at, quote.source));
-        }
-        let network = amount
-            .asset
-            .network
-            .strip_prefix("ethereum:")
-            .ok_or_else(|| {
-                error(
-                    "PRICE_ASSET_UNSUPPORTED",
-                    "valuation",
-                    "Asset network has no reviewed valuation source.",
-                    "Use a configured Binance or Ethereum asset.",
-                )
-            })?;
-        let adapter = self
-            .ethereum
-            .get(&format!("ethereum:{network}"))
-            .ok_or_else(|| {
-                error(
-                    "PRICE_ASSET_UNSUPPORTED",
-                    "valuation",
-                    "Asset network has no configured Ethereum oracle.",
-                    "Use an asset on a configured network.",
-                )
-            })?;
-        let (value, source) = adapter
-            .quote_usd(&amount.asset.reference, amount.atoms.clone())
-            .await?;
-        Ok((value.to_string(), now(), source))
-    }
-}
-
-fn decimal_ratio(value: &str) -> fin_domain::Result<(num_bigint::BigUint, u32)> {
-    if value.is_empty()
-        || value.starts_with('-')
-        || value.contains(['e', 'E', '+'])
-        || value.matches('.').count() > 1
-    {
-        return Err(error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Price is not a canonical exact decimal.",
-            "Use market data with exact decimal strings.",
-        ));
-    }
-    let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
-    let digits = format!("{whole}{fractional}");
-    let coefficient = digits.parse::<num_bigint::BigUint>().map_err(|_| {
-        error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Price is not an exact unsigned decimal.",
-            "Use market data with exact decimal strings.",
-        )
-    })?;
-    if fractional.len() > 18 {
-        return Err(error(
-            "PRICE_DATA_INVALID",
-            "valuation",
-            "Price precision exceeds the reviewed bound.",
-            "Use market data with at most 18 fractional places.",
-        ));
-    }
-    Ok((coefficient, fractional.len() as u32))
 }
 
 fn pow10(power: u32) -> num_bigint::BigUint {
@@ -1405,11 +1259,22 @@ impl BrokerRuntime {
                 json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES,"exchanges":fin_discovery::exchange_capabilities()}),
             ),
             R::Connections => {
-                let connections = self
+                let mut connections = self
                     .adapters
                     .iter()
                     .flat_map(|adapter| adapter.connections())
                     .collect::<Vec<_>>();
+                for connection in &self.config.connections {
+                    if let ConnectionConfig::CoinGecko {
+                        name,
+                        resource,
+                        api_plan,
+                        ..
+                    } = connection
+                    {
+                        connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"coingecko".into(), resource:resource.clone(), role:None, parent:None, network:None, address:None, credential_ref:None, signing_enabled:false, details:json!({"api_plan":api_plan,"purpose":"USD pricing reads","financial_access":false}) });
+                    }
+                }
                 serde_json::to_value(connections).map_err(|_| internal_error())
             }
             R::Doctor => Ok(
@@ -1714,6 +1579,36 @@ impl BrokerRuntime {
                 for asset in configured {
                     if !assets.contains(asset) {
                         assets.push(asset.clone());
+                    }
+                }
+            }
+            if let ConnectionConfig::Evm { address, .. } = connection {
+                // Preserve the reviewed protocol scope needed to value planned
+                // intermediate assets, even before their balances become positive.
+                // Read-only discovery candidates do not expand this trusted scope.
+                for deployment in &self.config.deployments {
+                    let network = self
+                        .config
+                        .networks
+                        .iter()
+                        .find(|network| network.id == deployment.network)
+                        .expect("validated deployment");
+                    let resource = ResourceId(format!(
+                        "ethereum:{}:{}",
+                        network.chain_id,
+                        address.to_ascii_lowercase()
+                    ));
+                    for holding in snapshot.state.holdings.iter().filter(|holding| {
+                        holding.resource == resource
+                            && holding.amount.asset.network == deployment.network
+                            && (holding.amount.asset.reference == "native"
+                                || deployment
+                                    .snapshot_tokens
+                                    .contains(&holding.amount.asset.reference))
+                    }) {
+                        if !assets.contains(&holding.amount.asset) {
+                            assets.push(holding.amount.asset.clone());
+                        }
                     }
                 }
             }
@@ -2579,400 +2474,6 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
 
-    struct FixedNumeraire {
-        price: String,
-    }
-    #[async_trait]
-    impl NumeraireUsdProvider for FixedNumeraire {
-        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
-            Ok(fin_binance::PriceQuote {
-                usd_per_unit: self.price.clone(),
-                observed_at: now(),
-                source: "synthetic independent USDT-USD quote".into(),
-            })
-        }
-    }
-    fn independent_prices(price: &str) -> PublicBinancePrices {
-        let mut provider = PublicBinancePrices::with_numeraire(Arc::new(FixedNumeraire {
-            price: price.into(),
-        }))
-        .unwrap();
-        // A regression must never cause these offline fixtures to use a public URL.
-        provider.test_base_url = Some("http://127.0.0.1:9".into());
-        provider
-    }
-
-    #[tokio::test]
-    async fn rejected_public_market_keeps_only_validated_http_status() {
-        let (endpoint, server) = market_fixture(vec![(
-            503,
-            json!({"message":"SYNTHETIC_SECRET_MARKER","data":{"token":"SYNTHETIC_RAW_TOKEN"}}),
-        )]);
-        let failure = public_market_json(&market_data_client().unwrap(), &endpoint)
-            .await
-            .unwrap_err();
-        assert_eq!(failure.code, "PRICE_UNAVAILABLE");
-        assert_eq!(
-            failure.message,
-            "Public market data request was rejected with HTTP status 503."
-        );
-        let serialized = serde_json::to_string(&failure).unwrap();
-        assert!(!serialized.contains("SYNTHETIC"));
-        assert!(!serialized.contains(&endpoint));
-        assert_eq!(server.join().unwrap(), vec!["/"]);
-    }
-
-    #[tokio::test]
-    async fn binance_usdt_numeraire_quote_is_a_fresh_independent_usd_observation() {
-        let provider = independent_prices("1.02");
-        let before = Utc::now();
-        let quote = fin_binance::BinancePriceProvider::quote_usd(&provider, "USDT")
-            .await
-            .unwrap();
-        let observed = chrono::DateTime::parse_from_rfc3339(&quote.observed_at).unwrap();
-        assert_eq!(quote.usd_per_unit, "1.02");
-        // now() records milliseconds, so permit only that truncation at entry.
-        assert!(observed >= before - chrono::Duration::milliseconds(1));
-        assert!(observed <= Utc::now());
-        assert_eq!(quote.source, "synthetic independent USDT-USD quote");
-        assert!(!quote.source.contains("public ticker"));
-    }
-
-    #[tokio::test]
-    async fn binance_usdt_numeraire_does_not_expand_accepted_symbol_shape() {
-        let provider = independent_prices("1.02");
-        for coin in [
-            "",
-            "USDT/USD",
-            "USDT?secret=SYNTHETIC",
-            "USDT\n",
-            "USDT ",
-            "USDT_____________________",
-        ] {
-            let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, coin)
-                .await
-                .unwrap_err();
-            assert_eq!(failure.code, "PRICE_ASSET_UNSUPPORTED");
-            assert!(
-                !serde_json::to_string(&failure)
-                    .unwrap()
-                    .contains("SYNTHETIC")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn binance_usdt_numeraire_valuation_preserves_exact_units_and_conservative_bounds() {
-        let valuator = CompositeAssetValuator {
-            binance: Arc::new(independent_prices("1.02")),
-            ethereum: BTreeMap::new(),
-        };
-        let asset = AssetId {
-            network: "binance".into(),
-            reference: "USDT".into(),
-            decimals: 36,
-        };
-        for (units, expected_micros) in [
-            ("0", "0"),
-            ("0.000000000000000000000000000000000001", "1"),
-            ("99", "100980000"),
-            ("99.999999", "101999999"),
-            ("100", "102000000"),
-            ("100.000000000000000000000000000000000001", "102000001"),
-        ] {
-            let amount = Amount {
-                asset: asset.clone(),
-                atoms: Quantity::from_decimal(units, asset.decimals).unwrap(),
-            };
-            let (micros, observed_at, source) = valuator.usd_micros(&amount).await.unwrap();
-            assert_eq!(micros, expected_micros);
-            assert!(chrono::DateTime::parse_from_rfc3339(&observed_at).is_ok());
-            assert_eq!(source, "synthetic independent USDT-USD quote");
-        }
-        let price = valuator.asset_price(&asset).await.unwrap();
-        assert_eq!(price.usd_micros_per_unit.as_str(), "1020000");
-        assert_eq!(price.unit_atoms, Quantity::from_decimal("1", 36).unwrap());
-        assert_eq!(price.asset, asset);
-    }
-
-    fn usdt_product() -> Value {
-        json!({"id":"USDT-USD","base_currency":"USDT","quote_currency":"USD","status":"online","trading_disabled":false})
-    }
-    fn usdt_ticker(instant: chrono::DateTime<Utc>) -> Value {
-        json!({"price":"1.02","bid":"1.01","ask":"1.03","time":instant.to_rfc3339()})
-    }
-
-    #[test]
-    fn independent_usd_product_and_ticker_are_strict_positive_and_fresh() {
-        let instant = chrono::DateTime::parse_from_rfc3339("2026-10-02T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let product = usdt_product();
-        let ticker = usdt_ticker(instant - chrono::Duration::seconds(3));
-        let quote = coinbase_usdt_quote(&product, &ticker, instant).unwrap();
-        assert_eq!(quote.usd_per_unit, "1.03");
-        assert_eq!(quote.observed_at, ticker["time"].as_str().unwrap());
-        assert!(quote.source.contains("max(price, ask)"));
-        let mut higher_trade = ticker.clone();
-        higher_trade["price"] = json!("1.04");
-        assert_eq!(
-            coinbase_usdt_quote(&product, &higher_trade, instant)
-                .unwrap()
-                .usd_per_unit,
-            "1.04"
-        );
-        for (field, value) in [
-            ("id", json!("SYNTHETIC_WRONG_PRODUCT")),
-            ("base_currency", json!("USDC")),
-            ("quote_currency", json!("USDT")),
-            ("status", json!("offline")),
-            ("trading_disabled", json!(true)),
-            ("trading_disabled", json!("false")),
-        ] {
-            let mut changed = product.clone();
-            changed[field] = value;
-            let failure = coinbase_usdt_quote(&changed, &ticker, instant).unwrap_err();
-            assert_eq!(failure.code, "PRICE_PRODUCT_INVALID");
-            assert!(
-                !serde_json::to_string(&failure)
-                    .unwrap()
-                    .contains("SYNTHETIC")
-            );
-        }
-        for field in [
-            "id",
-            "base_currency",
-            "quote_currency",
-            "status",
-            "trading_disabled",
-        ] {
-            let mut missing = product.clone();
-            missing.as_object_mut().unwrap().remove(field);
-            assert!(coinbase_usdt_quote(&missing, &ticker, instant).is_err());
-        }
-        for field in ["price", "bid", "ask"] {
-            for value in [
-                json!("0"),
-                json!("-1"),
-                json!("1e0"),
-                json!("NaN"),
-                json!(1.02),
-                Value::Null,
-            ] {
-                let mut changed = ticker.clone();
-                changed[field] = value;
-                assert_eq!(
-                    coinbase_usdt_quote(&product, &changed, instant)
-                        .unwrap_err()
-                        .code,
-                    "PRICE_DATA_INVALID"
-                );
-            }
-        }
-        let mut inverted = ticker.clone();
-        inverted["bid"] = json!("1.04");
-        assert!(coinbase_usdt_quote(&product, &inverted, instant).is_err());
-        for age in [-1, 61] {
-            let changed = usdt_ticker(instant - chrono::Duration::seconds(age));
-            assert_eq!(
-                coinbase_usdt_quote(&product, &changed, instant)
-                    .unwrap_err()
-                    .code,
-                "PRICE_STALE"
-            );
-        }
-        let mut missing_time = ticker;
-        missing_time.as_object_mut().unwrap().remove("time");
-        assert!(coinbase_usdt_quote(&product, &missing_time, instant).is_err());
-    }
-
-    fn market_fixture(
-        responses: Vec<(u16, Value)>,
-    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let worker = std::thread::spawn(move || {
-            let mut paths = vec![];
-            for (status, value) in responses {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(3)))
-                    .unwrap();
-                let mut request = vec![];
-                let mut buffer = [0u8; 1024];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = std::io::Read::read(&mut stream, &mut buffer).unwrap();
-                    assert_ne!(read, 0);
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                let headers = std::str::from_utf8(&request).unwrap();
-                assert!(
-                    headers
-                        .lines()
-                        .filter_map(|line| line.split_once(':'))
-                        .any(|(name, value)| name.eq_ignore_ascii_case("user-agent")
-                            && !value.trim().is_empty())
-                );
-                let first = std::str::from_utf8(&request)
-                    .unwrap()
-                    .lines()
-                    .next()
-                    .unwrap();
-                assert!(first.starts_with("GET "));
-                paths.push(first.split_whitespace().nth(1).unwrap().to_owned());
-                let body = value.to_string();
-                let response = format!(
-                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
-            }
-            paths
-        });
-        (endpoint, worker)
-    }
-
-    #[tokio::test]
-    async fn coinbase_numeraire_fetches_only_the_fixed_product_and_ticker_gets() {
-        let (endpoint, worker) = market_fixture(vec![
-            (200, usdt_product()),
-            (200, usdt_ticker(Utc::now() - chrono::Duration::seconds(2))),
-        ]);
-        let mut provider = CoinbaseNumeraireUsd::new().unwrap();
-        provider.test_base_url = Some(endpoint);
-        assert_eq!(provider.quote_usd().await.unwrap().usd_per_unit, "1.03");
-        assert_eq!(
-            worker.join().unwrap(),
-            vec!["/products/USDT-USD", "/products/USDT-USD/ticker"]
-        );
-    }
-
-    struct StaticNumeraire {
-        quote: fin_binance::PriceQuote,
-    }
-    #[async_trait]
-    impl NumeraireUsdProvider for StaticNumeraire {
-        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
-            Ok(self.quote.clone())
-        }
-    }
-
-    #[tokio::test]
-    async fn binance_quote_multiplies_independent_usd_exactly_and_preserves_oldest_observation() {
-        let time = (Utc::now() - chrono::Duration::seconds(20)).to_rfc3339();
-        let (endpoint, worker) =
-            market_fixture(vec![(200, json!({"symbol":"ETHUSDT","price":"2"}))]);
-        let mut provider = PublicBinancePrices::with_numeraire(Arc::new(StaticNumeraire {
-            quote: fin_binance::PriceQuote {
-                usd_per_unit: "1.02".into(),
-                observed_at: time.clone(),
-                source: "synthetic independent USDT-USD".into(),
-            },
-        }))
-        .unwrap();
-        provider.test_base_url = Some(endpoint);
-        let quote = fin_binance::BinancePriceProvider::quote_usd(&provider, "ETH")
-            .await
-            .unwrap();
-        assert_eq!(quote.usd_per_unit, "2.04");
-        assert_eq!(quote.observed_at, time);
-        assert!(quote.source.contains("ETHUSDT"));
-        assert!(quote.source.contains("synthetic independent USDT-USD"));
-        assert_eq!(
-            worker.join().unwrap(),
-            vec!["/api/v3/ticker/price?symbol=ETHUSDT"]
-        );
-        let (endpoint, worker) = market_fixture(vec![(
-            200,
-            json!({"symbol":"TINYUSDT","price":"0.000000000000000001"}),
-        )]);
-        let mut provider = independent_prices("0.999999999999999999");
-        provider.test_base_url = Some(endpoint);
-        assert_eq!(
-            fin_binance::BinancePriceProvider::quote_usd(&provider, "TINY")
-                .await
-                .unwrap()
-                .usd_per_unit,
-            "0.000000000000000001"
-        );
-        assert_eq!(worker.join().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn binance_quote_rejects_wrong_pair_or_invalid_price_without_alternative_requests() {
-        for value in [
-            json!({"symbol":"SYNTHETIC_WRONG_PAIR","price":"2"}),
-            json!({"price":"2"}),
-            json!({"symbol":"ETHUSDT","price":"0"}),
-            json!({"symbol":"ETHUSDT","price":"-1"}),
-            json!({"symbol":"ETHUSDT","price":2}),
-            json!({"symbol":"ETHUSDT","price":"SYNTHETIC_PRIVATE_PRICE"}),
-        ] {
-            let (endpoint, worker) = market_fixture(vec![(200, value)]);
-            let mut provider = independent_prices("0.99");
-            provider.test_base_url = Some(endpoint);
-            let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, "ETH")
-                .await
-                .unwrap_err();
-            assert!(matches!(
-                failure.code.as_str(),
-                "PRICE_PRODUCT_INVALID" | "PRICE_DATA_INVALID"
-            ));
-            assert!(
-                !serde_json::to_string(&failure)
-                    .unwrap()
-                    .contains("SYNTHETIC")
-            );
-            assert_eq!(worker.join().unwrap().len(), 1);
-        }
-    }
-
-    struct UnavailableNumeraire;
-    #[async_trait]
-    impl NumeraireUsdProvider for UnavailableNumeraire {
-        async fn quote_usd(&self) -> fin_domain::Result<fin_binance::PriceQuote> {
-            Err(error(
-                "SYNTHETIC_NUMERAIRE_UNAVAILABLE",
-                "test",
-                "Independent source unavailable.",
-                "No quote fallback.",
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_or_invalid_independent_numeraire_blocks_usdt_and_other_coins() {
-        for numeraire in [
-            Arc::new(UnavailableNumeraire) as Arc<dyn NumeraireUsdProvider>,
-            Arc::new(StaticNumeraire {
-                quote: fin_binance::PriceQuote {
-                    usd_per_unit: "0".into(),
-                    observed_at: now(),
-                    source: "synthetic".into(),
-                },
-            }),
-            Arc::new(StaticNumeraire {
-                quote: fin_binance::PriceQuote {
-                    usd_per_unit: "1".into(),
-                    observed_at: (Utc::now() - chrono::Duration::seconds(61)).to_rfc3339(),
-                    source: "synthetic".into(),
-                },
-            }),
-        ] {
-            let mut provider = PublicBinancePrices::with_numeraire(numeraire).unwrap();
-            provider.test_base_url = Some("http://127.0.0.1:9".into());
-            for coin in ["USDT", "ETH"] {
-                let failure = fin_binance::BinancePriceProvider::quote_usd(&provider, coin)
-                    .await
-                    .unwrap_err();
-                assert!(matches!(
-                    failure.code.as_str(),
-                    "SYNTHETIC_NUMERAIRE_UNAVAILABLE" | "PRICE_DATA_INVALID" | "PRICE_STALE"
-                ));
-            }
-        }
-    }
-
     struct ReadAdapter {
         captures: Arc<AtomicUsize>,
         pricing_snapshot: Option<Arc<Mutex<StateSnapshot>>>,
@@ -3245,6 +2746,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reusable_wallet_keeps_zero_protocol_assets_priced_without_expanding_to_indexer_noise()
+    {
+        let address = "0x1111111111111111111111111111111111111111";
+        let mut config = config();
+        config.networks = NetworkConfig::reviewed_evm_networks();
+        config.connections.push(ConnectionConfig::Evm {
+            name: "synthetic".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+        });
+        let asset = |network: &str, reference: &str, decimals| AssetId {
+            network: network.into(),
+            reference: reference.into(),
+            decimals,
+        };
+        let native = asset("ethereum:1", "native", 18);
+        let weth = asset("ethereum:1", fin_ethereum::WETH, 18);
+        let usdc = asset("ethereum:1", fin_ethereum::USDC, 6);
+        let noise = asset("ethereum:1", "synthetic-indexer-noise", 6);
+        let other_chain = asset(
+            "ethereum:4663",
+            "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            6,
+        );
+        let mut observed = price_snapshot(
+            [
+                native.clone(),
+                weth.clone(),
+                usdc.clone(),
+                noise,
+                other_chain,
+            ]
+            .into_iter()
+            .map(|asset| ResourceAmount {
+                resource: ResourceId(format!("{}:{address}", asset.network)),
+                amount: Amount {
+                    asset,
+                    atoms: Quantity::zero(),
+                },
+            })
+            .collect(),
+        );
+        // Financial scopes use RPC-verified AssetIds, not indexer symbols/prices.
+        observed.coverage.push(format!("ethereum:1:{address}"));
+        let fixture = pricing_fixture(config, observed.clone());
+        let prices = fixture
+            .runtime
+            .trusted_asset_prices(&observed, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            prices
+                .iter()
+                .map(|price| price.asset.clone())
+                .collect::<Vec<_>>(),
+            vec![native, weth, usdc]
+        );
+        assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+        assert_eq!(fixture.snapshot.lock().unwrap().state, observed.state);
+    }
+    #[tokio::test]
     async fn trusted_prices_skip_a_thousand_zero_holdings_without_changing_snapshot() {
         let observed = price_snapshot(
             (0..1000)
@@ -3384,10 +2948,7 @@ mod tests {
                     identity_probe: None,
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
-                valuator: Arc::new(CompositeAssetValuator {
-                    binance: Arc::new(independent_prices("1.02")),
-                    ethereum: BTreeMap::new(),
-                }),
+                valuator: Arc::new(pricing::tests::fixed_valuator("1.02")),
             },
         )
         .unwrap();
@@ -3826,6 +3387,8 @@ mod tests {
         });
         assert!(build_protected_applications(&config, Arc::new(UnusedCredentials)).is_ok());
         config.deployments.clear();
+        assert!(build_protected_applications(&config, Arc::new(UnusedCredentials)).is_ok());
+        config.networks.clear();
         let Err(failure) = build_protected_applications(&config, Arc::new(UnusedCredentials))
         else {
             panic!("configured payouts must fail closed without their receipt observer")
@@ -3835,6 +3398,147 @@ mod tests {
             panic!("an empty payout verifier must never be usable")
         };
         assert_eq!(failure.code, "PAYOUT_RPC_MISSING");
+    }
+
+    fn pricing_connection(plan: &str) -> ConnectionConfig {
+        ConnectionConfig::CoinGecko {
+            name: "synthetic-pricing".into(),
+            resource: ResourceId("market-data:coingecko".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+            api_plan: plan.into(),
+        }
+    }
+
+    #[test]
+    fn pricing_configuration_rejects_invalid_plan_identity_and_duplicate_source() {
+        let mut cfg = config();
+        cfg.connections.push(pricing_connection("demo"));
+        assert!(cfg.validate().is_ok());
+        for (plan, resource, credential) in [
+            (
+                "unknown",
+                "market-data:coingecko",
+                "550e8400-e29b-41d4-a716-446655440000",
+            ),
+            (
+                "demo",
+                "market-data:other",
+                "550e8400-e29b-41d4-a716-446655440000",
+            ),
+            ("pro", "market-data:coingecko", "invalid-reference"),
+        ] {
+            cfg.connections[0] = ConnectionConfig::CoinGecko {
+                name: "synthetic-pricing".into(),
+                resource: ResourceId(resource.into()),
+                credential_ref: credential.into(),
+                api_plan: plan.into(),
+            };
+            assert_eq!(
+                cfg.validate().unwrap_err().code,
+                "CONFIG_PRICING_CONNECTION_INVALID"
+            );
+        }
+        cfg.connections = vec![pricing_connection("demo"), pricing_connection("pro")];
+        if let ConnectionConfig::CoinGecko { name, .. } = &mut cfg.connections[1] {
+            *name = "synthetic-second".into();
+        }
+        assert!(cfg.validate().is_err());
+    }
+
+    struct PricingCredentials {
+        fail: bool,
+        calls: AtomicUsize,
+    }
+    impl fin_exchange::ccxt::CredentialProvider for PricingCredentials {
+        fn credentials(
+            &self,
+            _: &str,
+        ) -> Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError> {
+            panic!("market-data enrollment must not obtain exchange credentials")
+        }
+    }
+    impl BrokerCredentialProvider for PricingCredentials {
+        fn usd_price_source(
+            &self,
+            credential: &fin_credentials::CredentialRef,
+            plan: &str,
+        ) -> fin_domain::Result<Arc<dyn fin_pricing::UsdPriceSource>> {
+            assert_eq!(credential.as_str(), "550e8400-e29b-41d4-a716-446655440000");
+            assert_eq!(plan, "pro");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(FinError::validation(
+                    "synthetic unavailable pricing credential",
+                ));
+            }
+            Ok(Arc::new(pricing::tests::FixedUsdSource {
+                price: "1.02".into(),
+            }))
+        }
+        fn envelope_signer(
+            &self,
+            _: &fin_credentials::CredentialRef,
+        ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)> {
+            panic!("market-data enrollment must not obtain a wallet signer")
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_pricing_source_is_shared_and_failure_has_no_anonymous_fallback() {
+        let mut cfg = config();
+        cfg.connections.push(pricing_connection("pro"));
+        for fail in [false, true] {
+            let credentials = Arc::new(PricingCredentials {
+                fail,
+                calls: AtomicUsize::new(0),
+            });
+            let result = build_protected_applications(&cfg, credentials.clone());
+            assert_eq!(credentials.calls.load(Ordering::SeqCst), 1);
+            if fail {
+                assert!(result.is_err());
+                continue;
+            }
+            let applications = result.unwrap();
+            let amount = Amount {
+                asset: AssetId {
+                    network: "ethereum:1".into(),
+                    reference: "native".into(),
+                    decimals: 18,
+                },
+                atoms: fin_domain::Quantity::from_decimal("1", 18).unwrap(),
+            };
+            assert_eq!(
+                applications.valuator.usd_micros(&amount).await.unwrap().0,
+                "1020000"
+            );
+            let runtime = compose_runtime(
+                cfg.clone(),
+                RuntimeDependencies {
+                    store: Store::in_memory().unwrap(),
+                    adapters: applications.adapters,
+                    authorizer: Arc::new(ReadOnlyAuthorizer),
+                    valuator: applications.valuator,
+                },
+            )
+            .unwrap();
+            let response = runtime.handle(BrokerRequest::Connections).await;
+            assert!(response.ok);
+            let value = response.result.unwrap();
+            let row = value
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["provider"] == "coingecko")
+                .unwrap();
+            assert_eq!(row["signing_enabled"], false);
+            assert_eq!(row["details"]["financial_access"], false);
+            assert_eq!(row["details"]["api_plan"], "pro");
+            assert!(
+                !value
+                    .to_string()
+                    .contains("550e8400-e29b-41d4-a716-446655440000")
+            );
+        }
     }
 
     fn runtime() -> Arc<BrokerRuntime> {

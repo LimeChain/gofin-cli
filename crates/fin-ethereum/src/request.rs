@@ -134,12 +134,12 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
 pub fn parse(operation: &str, input: &Value) -> Result<Request> {
     if !OPERATIONS.contains(&operation) {
         return Err(FinError::validation(
-            "This Ethereum operation is not implemented.",
+            "This EVM operation is not implemented.",
         ));
     }
     let object = input
         .as_object()
-        .ok_or_else(|| FinError::validation("Ethereum input must be an object."))?;
+        .ok_or_else(|| FinError::validation("EVM input must be an object."))?;
     let (allowed, required) = extras(operation);
     for key in object.keys() {
         if !["wallet", "network", "chain_id"].contains(&key.as_str())
@@ -159,14 +159,14 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
         }
     }
     let request: Request = serde_json::from_value(input.clone())
-        .map_err(|_| FinError::validation("Ethereum input has invalid field types."))?;
+        .map_err(|_| FinError::validation("EVM input has invalid field types."))?;
     if request.wallet.is_empty()
         || request.wallet.len() > 80
-        || request.network != "ethereum"
+        || !matches!(request.network.as_str(), "evm" | "ethereum")
         || request.chain_id == 0
     {
         return Err(FinError::validation(
-            "Use a named wallet and explicit Ethereum chain identity.",
+            "Use a named wallet and explicit EVM chain identity.",
         ));
     }
     if request
@@ -222,7 +222,7 @@ pub fn definitions() -> Vec<Definition> {
         fields.extend_from_slice(required);
         if !read {fields.extend(["request_id","max_fee_eth"]);}
         schema["required"]=json!(fields);
-        schema["properties"]["network"]=json!({"type":"string","const":"ethereum"});
+        schema["properties"]["network"]=json!({"type":"string","enum":["evm","ethereum"]});
         let properties=schema["properties"].as_object_mut().expect("schema object");
         let decimal=json!({"type":"string","pattern":"^(0|[1-9][0-9]*)(\\.[0-9]+)?$","maxLength":100});
         let contract=json!({"type":"string","pattern":"^0x[0-9a-fA-F]{40}$"});
@@ -273,7 +273,7 @@ pub fn description(operation: &str) -> &'static str {
     }
 }
 fn example(operation: &str) -> Value {
-    let mut input = json!({"wallet":"main-wallet","network":"ethereum","chain_id":1});
+    let mut input = json!({"wallet":"main-wallet","network":"evm","chain_id":1});
     if !is_read(operation) {
         input["request_id"] = json!("unique-logical-request");
         input["max_fee_eth"] = json!("0.001");

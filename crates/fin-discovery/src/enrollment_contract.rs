@@ -7,6 +7,12 @@ use serde_json::Value;
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicConnection {
+    #[serde(rename = "coingecko")]
+    CoinGecko {
+        name: String,
+        resource: ResourceId,
+        api_plan: String,
+    },
     Binance {
         name: String,
         resource: ResourceId,
@@ -16,6 +22,13 @@ pub enum PublicConnection {
         wallet_type: String,
         physical_identity: String,
     },
+    Evm {
+        name: String,
+        resource: ResourceId,
+        address: String,
+        signing_enabled: bool,
+    },
+    /// Preserved for existing chain-scoped connection metadata.
     Ethereum {
         name: String,
         resource: ResourceId,
@@ -44,10 +57,37 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn coingecko_public_metadata_has_no_secret_or_signing_slot() {
+        let value = json!({"provider":"coingecko","name":"pricing","resource":"market-data:coingecko","api_plan":"demo"});
+        let parsed: PublicConnection = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        for field in [
+            "api_key",
+            "credential_ref",
+            "secret",
+            "network",
+            "address",
+            "signing_enabled",
+        ] {
+            let mut wrong = value.clone();
+            wrong[field] = json!("SYNTHETIC-NOT-A-REAL-KEY");
+            assert!(serde_json::from_value::<PublicConnection>(wrong).is_err());
+        }
+    }
+
+    #[test]
     fn protected_references_and_secret_fields_have_no_public_output_slot() {
         let connection = json!({"provider":"ethereum","name":"wallet","resource":"ethereum:1:synthetic","network":"ethereum:1","address":"0x1111111111111111111111111111111111111111","signing_enabled":true});
         assert!(serde_json::from_value::<PublicConnection>(connection.clone()).is_ok());
+        let evm = json!({"provider":"evm","name":"wallet","resource":"evm:0x1111111111111111111111111111111111111111","address":"0x1111111111111111111111111111111111111111","signing_enabled":true});
+        assert!(serde_json::from_value::<PublicConnection>(evm.clone()).is_ok());
+        let mut scoped_evm = evm.clone();
+        scoped_evm["network"] = json!("ethereum:42161");
+        assert!(serde_json::from_value::<PublicConnection>(scoped_evm).is_err());
         for forbidden in ["credential_ref", "private_key", "api_key", "signature"] {
+            let mut changed_evm = evm.clone();
+            changed_evm[forbidden] = json!("SYNTHETIC-SECRET");
+            assert!(serde_json::from_value::<PublicConnection>(changed_evm).is_err());
             let mut changed = connection.clone();
             changed[forbidden] = json!("SYNTHETIC-SECRET");
             assert!(serde_json::from_value::<PublicConnection>(changed).is_err());

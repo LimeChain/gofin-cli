@@ -197,30 +197,78 @@ pub struct AaveConfig {
 pub struct EthereumConfig {
     pub chain_id: u64,
     pub confirmations: u64,
-    pub weth: String,
+    /// Require RPC finalized inclusion before terminal settlement. Omission
+    /// preserves the confirmation-count policy of existing Ethereum configs.
+    #[serde(default)]
+    pub require_finalized: bool,
+    #[serde(default)]
+    pub weth: Option<String>,
     pub snapshot_tokens: Vec<String>,
-    pub uniswap: UniswapConfig,
-    pub aave: AaveConfig,
+    #[serde(default)]
+    pub uniswap: Option<UniswapConfig>,
+    #[serde(default)]
+    pub aave: Option<AaveConfig>,
 }
 impl Default for EthereumConfig {
     fn default() -> Self {
         Self {
             chain_id: 1,
             confirmations: 2,
-            weth: WETH.into(),
+            require_finalized: false,
+            weth: Some(WETH.into()),
             snapshot_tokens: vec![WETH.into(), USDC.into()],
-            uniswap: UniswapConfig {
+            uniswap: Some(UniswapConfig {
                 factory: "0x1f98431c8ad98523631ae4a59f267346ea31f984".into(),
                 quoter: "0x61ffe014ba17989e743c5f6cb21bf9697530b21e".into(),
                 router: "0xe592427a0aece92de3edee1f18e0157c05861564".into(),
-            },
-            aave: AaveConfig {
+            }),
+            aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
                 oracle: "0x54586be62e3c3580375ae3723c145253060ca0c2".into(),
-            },
+            }),
         }
     }
 }
+impl EthereumConfig {
+    pub fn wallet_only(chain_id: u64, confirmations: u64, snapshot_tokens: Vec<String>) -> Self {
+        Self {
+            chain_id,
+            confirmations,
+            require_finalized: true,
+            snapshot_tokens,
+            weth: None,
+            uniswap: None,
+            aave: None,
+        }
+    }
+}
+
+#[async_trait]
+pub trait WalletValuation: Send + Sync {
+    async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)>;
+    /// Providers with an external observation timestamp override this method.
+    /// The default supports isolated synthetic providers that observe on call.
+    async fn quote_observation(
+        &self,
+        asset: &AssetId,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
+        let (value, source) = self.quote_usd(asset, units).await?;
+        Ok((value, source, now()))
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TokenDiscoveryResult {
+    pub candidates: Vec<String>,
+    pub complete: bool,
+    pub source: String,
+    pub warnings: Vec<String>,
+}
+#[async_trait]
+pub trait TokenDiscovery: Send + Sync {
+    async fn tokens(&self, chain_id: u64, address: &str) -> Result<TokenDiscoveryResult>;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WalletConnection {
@@ -271,6 +319,8 @@ pub struct EthereumAdapter {
     pub wallets: Vec<WalletConnection>,
     pub runtime: Arc<EvmRuntime>,
     oracle_clock: Arc<dyn OracleObservationClock>,
+    wallet_valuation: Option<Arc<dyn WalletValuation>>,
+    token_discovery: Option<Arc<dyn TokenDiscovery>>,
 }
 impl EthereumAdapter {
     /// Internal dependency injection for a guarded isolated fork. Production
@@ -292,14 +342,21 @@ impl EthereumAdapter {
             "CHAIN_CONFIGURATION_INVALID",
             "Runtime chain and configured chain/finality must agree.",
         )?;
-        for value in [
-            &mut config.weth,
-            &mut config.uniswap.factory,
-            &mut config.uniswap.quoter,
-            &mut config.uniswap.router,
-            &mut config.aave.pool,
-            &mut config.aave.oracle,
-        ] {
+        let mut deployments = Vec::new();
+        if let Some(weth) = &mut config.weth {
+            deployments.push(weth);
+        }
+        if let Some(uniswap) = &mut config.uniswap {
+            deployments.extend([
+                &mut uniswap.factory,
+                &mut uniswap.quoter,
+                &mut uniswap.router,
+            ]);
+        }
+        if let Some(aave) = &mut config.aave {
+            deployments.extend([&mut aave.pool, &mut aave.oracle]);
+        }
+        for value in deployments {
             let a = address(value)?;
             require(
                 a != Address::ZERO,
@@ -309,7 +366,7 @@ impl EthereumAdapter {
             *value = lower_address(a);
         }
         require(
-            !config.snapshot_tokens.is_empty() && config.snapshot_tokens.len() <= 64,
+            config.snapshot_tokens.len() <= 64,
             "SNAPSHOT_SCOPE_INVALID",
             "Configure a bounded explicit token holding scope.",
         )?;
@@ -348,6 +405,61 @@ impl EthereumAdapter {
             wallets,
             runtime,
             oracle_clock: Arc::new(SystemOracleClock),
+            wallet_valuation: None,
+            token_discovery: None,
+        })
+    }
+    pub fn with_wallet_valuation(mut self, provider: Arc<dyn WalletValuation>) -> Self {
+        self.wallet_valuation = Some(provider);
+        self
+    }
+    pub fn with_token_discovery(mut self, provider: Arc<dyn TokenDiscovery>) -> Self {
+        self.token_discovery = Some(provider);
+        self
+    }
+    pub fn supports_operation(&self, operation: &str) -> bool {
+        match operation {
+            "wallet.balances" | "wallet.token" | "wallet.allowance" | "wallet.receipt"
+            | "wallet.transfer" => true,
+            "wallet.wrap" | "wallet.unwrap" => self.config.weth.is_some(),
+            "wallet.approve" => self.config.aave.is_some() || self.config.uniswap.is_some(),
+            name if name.starts_with("aave.") => self.config.aave.is_some(),
+            name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
+            _ => false,
+        }
+    }
+    fn require_operation(&self, operation: &str) -> Result<()> {
+        require(
+            self.supports_operation(operation),
+            "OPERATION_UNAVAILABLE",
+            "This operation has no configured deployment on the selected network.",
+        )
+    }
+    fn aave(&self) -> Result<&AaveConfig> {
+        self.config.aave.as_ref().ok_or_else(|| {
+            error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Aave is not configured on this network.",
+            )
+        })
+    }
+    fn uniswap(&self) -> Result<&UniswapConfig> {
+        self.config.uniswap.as_ref().ok_or_else(|| {
+            error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Uniswap is not configured on this network.",
+            )
+        })
+    }
+    fn weth(&self) -> Result<&str> {
+        self.config.weth.as_deref().ok_or_else(|| {
+            error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Wrapped native coin is not configured on this network.",
+            )
         })
     }
     fn wallet(&self, name: &str) -> Result<&WalletConnection> {
@@ -384,7 +496,7 @@ impl EthereumAdapter {
         self.asset("native", 18)
     }
     fn metadata(&self) -> Vec<ConnectionMetadata> {
-        self.wallets.iter().map(|w|ConnectionMetadata{name:w.name.clone(),provider:"ethereum".into(),resource:resource(self.config.chain_id,address(&w.address).expect("validated")),role:None,parent:None,network:Some(format!("ethereum:{}",self.config.chain_id)),address:Some(w.address.clone()),credential_ref:None,signing_enabled:w.signing_enabled,details:json!({"chain_id":self.config.chain_id,"confirmations":self.config.confirmations})}).collect()
+        self.wallets.iter().map(|w|ConnectionMetadata{name:w.name.clone(),provider:"evm".into(),resource:resource(self.config.chain_id,address(&w.address).expect("validated")),role:None,parent:None,network:Some(format!("ethereum:{}",self.config.chain_id)),address:Some(w.address.clone()),credential_ref:None,signing_enabled:w.signing_enabled,details:json!({"chain_id":self.config.chain_id,"confirmations":self.config.confirmations})}).collect()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -420,6 +532,16 @@ struct Binding {
 impl Adapter for EthereumAdapter {
     fn definitions(&self) -> Vec<Definition> {
         operation_definitions()
+            .into_iter()
+            .filter(|definition| self.supports_operation(&definition.name))
+            .map(|mut definition| {
+                for example in &mut definition.examples { example["chain_id"] = json!(self.config.chain_id); }
+                if self.config.require_finalized {
+                    definition.completion = "Writes require the original canonical envelope and receipt, bounded actual fees, verified transfer effects, and RPC finalized inclusion; sequencer confirmation alone remains pending.".into();
+                }
+                definition
+            })
+            .collect()
     }
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.metadata()

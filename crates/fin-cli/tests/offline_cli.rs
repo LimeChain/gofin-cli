@@ -9,6 +9,54 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn bare_discovery_commands_show_usage_and_keep_machine_output_structured() {
+    for command in ["explain", "schema"] {
+        let human = run(&[command]);
+        assert!(human.status.success());
+        assert!(human.stderr.is_empty());
+        let help = String::from_utf8(human.stdout).unwrap();
+        for expected in [
+            "Usage:",
+            "[NAME]",
+            &format!("fin {command} wallet.balances"),
+            "fin capabilities",
+        ] {
+            assert!(help.contains(expected), "missing {expected}");
+        }
+        assert!(!help.contains("INVALID_COMMAND") && !help.contains('\u{1b}'));
+        let explicit = run(&[command, "--help"]);
+        assert!(explicit.status.success());
+        assert_eq!(String::from_utf8(explicit.stdout).unwrap(), help);
+        for args in [
+            vec![command, "--json"],
+            vec![command, "--json", "--verbose"],
+        ] {
+            let machine = run(&args);
+            assert!(machine.status.success());
+            assert!(machine.stderr.is_empty());
+            let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+            assert_eq!(value["help"], help);
+            assert_eq!(value.as_object().unwrap().len(), 1);
+        }
+        let unknown = run(&[command, "synthetic.unknown", "--json"]);
+        assert!(!unknown.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&unknown.stdout).unwrap()["error"]["code"],
+            "UNKNOWN_DEFINITION"
+        );
+        let schema = run(&["schema", command, "--json"]);
+        assert!(schema.status.success());
+        let value: Value = serde_json::from_slice(&schema.stdout).unwrap();
+        assert_eq!(value["semantics"]["service_required"], false);
+        assert!(
+            !value["input"]["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == "name"))
+        );
+    }
+}
+
+#[test]
 fn offline_discovery_commands_work_without_service() {
     let help = run(&["--help"]);
     assert!(help.status.success());
@@ -20,6 +68,8 @@ fn offline_discovery_commands_work_without_service() {
     assert!(capabilities.status.success());
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
+    assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
+    assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
     assert_eq!(capabilities["operations"].as_array().unwrap().len(), 48);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
@@ -126,6 +176,97 @@ fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
     assert!(help.contains("--id <ID>"));
     assert!(help.contains("--run <RUN>"));
     assert!(!help.contains("--request-id"));
+}
+
+#[test]
+fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
+    let help = run(&["connections", "add", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("binance, evm, coingecko"));
+    assert!(help.contains("Optional enrollment read-check network"));
+    for provider in ["evm", "ethereum"] {
+        let output = run(&[
+            "connections",
+            "add",
+            "--provider",
+            provider,
+            "--name",
+            "wallet",
+            "--credential-type",
+            "private_key",
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+    }
+    let capabilities = run(&["explain", "connections.add", "--json"]);
+    assert!(capabilities.status.success());
+    let value: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    assert_eq!(
+        value["semantics"]["evm"]["networks"],
+        serde_json::json!(["ethereum:1", "ethereum:42161", "ethereum:4663"])
+    );
+}
+
+#[test]
+fn coingecko_metadata_is_discoverable_and_machine_enrollment_never_collects_key() {
+    let help = run(&["connections", "add", "--help", "--json"]);
+    assert!(help.status.success());
+    let help: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert!(help["help"].as_str().unwrap().contains("coingecko"));
+    assert!(help["help"].as_str().unwrap().contains("--api-plan"));
+    for plan in ["demo", "pro"] {
+        let output = run(&[
+            "connections",
+            "add",
+            "--provider",
+            "coingecko",
+            "--name",
+            "pricing",
+            "--credential-type",
+            "api_key",
+            "--api-plan",
+            plan,
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Mac login password"));
+    }
+    let output = run(&["capabilities", "--json"]);
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["pricing"]["provider"], "coingecko");
+    assert_eq!(
+        value["pricing"]["api_key_values_accepted_in_arguments"],
+        false
+    );
+    let secret = "SYNTHETIC-NOT-A-REAL-KEY";
+    let output = run(&[
+        "connections",
+        "add",
+        "--provider",
+        "coingecko",
+        "--name",
+        "pricing",
+        "--credential-type",
+        "api_key",
+        "--api-key",
+        secret,
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
+        "INVALID_COMMAND"
+    );
 }
 
 #[test]

@@ -21,15 +21,65 @@ fixtures exercise the real archive format against the downloader. The release
 builder normalizes archive headers; this is reproducible packaging, not a claim
 that compiler output is bit-for-bit reproducible. See [release maintenance](releases.md).
 
+## Reusable EVM wallets
+
+Public enrollment now uses `evm`, with `ethereum` retained as a legacy alias.
+A new connection is one address/protected signer reusable on reviewed networks;
+operation inputs select `network: evm` and `chain_id`. Optional enrollment
+`--network` performs a read-check only. Existing chain-scoped Ethereum connections
+remain scoped until protected human-approved update. Ledger assets and custody
+retain `ethereum:<chain_id>` identities to preserve pending records and histories.
+
+New setups include Ethereum mainnet, Arbitrum One (42161) and Robinhood Chain
+(4663). Wallet-only adapters do not require Uniswap/Aave deployments; these dapps
+remain mainnet-only. RPC URLs are protected network configuration; changing them
+through a public command is future work. Per-write approval, reservations,
+request identity, recovery and the $100 verification policy remain shared.
+
+Wallet balance reads combine configured/explicit tokens with bounded cached
+Blockscout candidate discovery, then verify metadata and balances on RPC.
+Discovery always reports partial coverage. Snapshot restoration scope is explicit
+native plus configured tokens, not a claim to enumerate every holding or dapp.
+Shared CoinGecko USD valuation serves Binance and all EVM networks. ERC-20
+lookups use verified chain/platform plus exact contract; exchange symbols use a
+reviewed coin-ID registry. Missing valuation blocks writes instead of bypassing
+limits; no stablecoin parity or exchange-price fallback is assumed. L2 settlement also requires the RPC finalized
+block to include the receipt; sequencer confirmation remains pending. That marker
+is not a proof of the complete rollup challenge period.
+
+Reproducible tests and the human checklist are in [EVM wallets](testing/evm-wallets.md).
+Synthetic, public no-secret probes, real onboarding/Touch ID and live restoration
+are separate evidence; unobserved categories remain pending.
+
 ## Rust implementation
 
 The selected implementation is a compiled Rust workspace. The [Rust architecture](rust-architecture.md) defines the protected client/service roles, domain/engine/storage/runtime/application boundaries, exact financial-effect ledger, versioned contracts, recovery/migration, and `fin-authorization` platform providers. The small compiled Swift helper is bundled behind the macOS authorization provider; the human does not install it separately.
 
 Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Official CCXT Rust `ccxt-base =4.5.85` supplies exchange connectivity and HMAC/RSA/Ed25519 signing behind `fin-exchange`; `fin-binance` retains venue-specific policy, mapping and evidence. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The macOS bundle contains all three, an inspectable terminal installer, and checksums. Commands and the current crate layout are in the [README](../README.md); [exchange verification](reports/ccxt-exchange.md) and [runtime lifecycle verification](reports/runtime-lifecycle.md) distinguish automated results from pending human acceptance.
 
-The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
+The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline for the declared observer scope and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
 
-Binance USD valuation uses an injected independent USDT/USD provider rather than a peg assumption. The initial provider validates Coinbase Exchange's fixed USDT-USD product and fresh positive ticker, conservatively uses the greater of the last price and ask, and combines it with the exact Binance asset/USDT quote. Missing, stale or invalid components refuse valuation; no parity fallback exists. The adapter and allocation valuator share the provider, and final submission rechecks the approved material valuation. Zero unselected holdings remain in the complete baseline/restoration scope but need no quote; replan still freshly prices immutable original allocation assets after custody moves. This provider boundary allows a future reviewed oracle without changing generic ledger accounting.
+`fin-pricing` owns provider-independent async `UsdPriceSource`; the default
+CoinGecko implementation supplies direct USD pricing for Binance and EVM mainnet/
+L2 wallets. Native ETH uses a verified coin ID, ERC-20s use verified platform and
+exact contract, and Binance coins use a reviewed ID registry rather than blind
+symbol search. Unknown mappings or absent listed-token quotes fail closed.
+Aave collateral/health oracles remain application-specific protocol checks.
+
+Raw JSON numeric lexemes become positive exact decimal text without floating
+point. Provider `last_updated_at` becomes RFC3339 source time, distinct from
+retrieval time. Maximum quote age is 120 seconds; a shared/coalesced 30-second
+cache rechecks freshness and never supplies stale data on outage. Missing, zero,
+malformed, future or stale quotes and rate limits block financial execution.
+The $100 verification policy and 90-second preview expiry are unchanged.
+No Binance/Coinbase/Kraken price fallback is implemented. Anonymous public access
+is best effort. Optional CoinGecko Demo/Pro enrollment uses a hidden protected
+key prompt, read-only authenticated ping plus a fresh ETH/USD quote, and
+configuration Touch ID. Safe
+metadata names the API plan; protected references stay private to the broker.
+A single `market-data:coingecko` resource prevents duplicate pricing credentials;
+keys grant market-data access only and calls may consume plan quota/billing.
+Saving the connection grants no financial approval; no environment key is loaded. See [pricing tests and public probes](testing/evm-wallets.md#reproducible-offline-tests).
 
 The TS SQLite database is not silently opened or replayed by Rust. The read-only `fin-store` legacy inspection example preserves original records and emits hashes and unresolved/reservation counts. Active legacy records block a separate Rust financial run; recovery or migration still needs compatible historical interpretation.
 
@@ -158,7 +208,7 @@ accounting and protected enrollment remain unchanged.
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | 1. Typed contracts and libraries  | Command/connection/operation registry, exact-money domain, reviewed Binance funding/authentication and Alloy payload preparation. | Safe discovery without a broker, schema/example contracts, exact request fixtures and frozen transaction tests.               |
 | 2. Protected engine               | SQLite persistence/migrations, policy/effect ledger, credential interfaces, native authorization provider, private IPC.           | Crash/response-loss/replay/conflict tests, atomic settlement, preserved old identities/reservations, native build/probe.      |
-| 3. Financial ports                | Binance funding and Ethereum wallet/Uniswap/Aave through the shared engine.                                                       | Financial/limit/receipt regressions and fixed mainnet-fork execution with complete synthetic restoration.                     |
+| 3. Financial ports                | Binance funding, reusable EVM wallets and mainnet Uniswap/Aave through the shared engine.                                                       | Financial/limit/receipt regressions and fixed mainnet-fork execution with complete synthetic restoration.                     |
 | 4. Installation and enrollment    | Bundled terminal setup, later add/update/remove, daemon lifecycle/diagnostics, agent discovery.                                   | Synthetic enrollment/failure tests, redaction, noninteractive refusal, and a recorded fresh-agent guidance rehearsal.         |
 | 5. Working implementation handoff | Reproducible builds/tests, updated companion instructions/docs, sanitized report, human commands and prerequisites.               | Actual results separated by environment; unrun real onboarding, isolation, biometric, and production cases explicitly listed. |
 
@@ -183,7 +233,7 @@ Live acceptance must use production exchange accounts and Ethereum mainnet with 
 
 ## Keep the implementation small
 
-Rust uses reviewed Binance REST mappings, Alloy for EVM envelopes, and the native macOS helper for per-write approval. Follow the [typed extension contracts](rust-architecture.md), separating shared runtime mechanics from application semantics.
+Rust uses reviewed Binance REST mappings through official CCXT, Alloy for EVM envelopes, and the native macOS helper for per-write approval. Follow the [typed extension contracts](rust-architecture.md), separating shared runtime mechanics from application semantics.
 
 Use a modular local application, not a hosted service or a distributed workflow engine. A durable local store should hold operation records. Shared operation definitions should drive help, schemas, and validation so that a later MCP interface can reuse them.
 
@@ -193,11 +243,11 @@ Use a modular local application, not a hosted service or a distributed workflow 
 | Connections and discovery | Named exchange accounts, main/subaccount relationships, wallets, networks, permissions, and adapter coverage. Secrets stay out of agent-visible metadata.        |
 | Operation layer           | Parse quantities and identities, preview effects, resolve exact request parameters, request approval, and coordinate one operation's execution.                  |
 | Protected execution       | Own credential access/signing and enforce approval of the actual request. The agent-facing client cannot authorize itself or obtain unrestricted signing access. |
-| Adapters                  | CCXT/Binance, Ethereum wallet, Uniswap, and Aave first; add other agreed integrations incrementally.                                                             |
+| Adapters                  | Binance REST, EVM wallets, mainnet Uniswap, and Aave first; add other agreed integrations incrementally.                                                             |
 | Operation store           | Durable identifiers, request fingerprints, authorization references, submissions, receipts, and reconciliation state.                                            |
 | Verification inventory    | Selected exact-unit funds, in-flight reservations, consumed costs, debt, custody/conversion origins, and exact restoration checks.                               |
 
-Configuration is versioned and strict. The current schema supports Binance and Ethereum mainnet; changing an RPC URL does not add another network. A new application or network should add its connection schema and reviewed operation definitions, adapter construction, exact asset/unit identities, valuation, submission identity, effect reconciliation, and scoped inventory/return behavior. Reuse the existing approval and durable execution path. Extend the receipt verifier for a new payout format instead of treating an unverified receipt as completion. These are ordinary implementation responsibilities, not a separate release-hardening gate.
+Configuration is versioned and strict. The current schema supports Binance and reusable EVM wallets on Ethereum mainnet, Arbitrum One and Robinhood Chain; changing an RPC URL does not add another network. A new application or network should add its connection schema and reviewed operation definitions, adapter construction, exact asset/unit identities, valuation, submission identity, effect reconciliation, and scoped inventory/return behavior. Reuse the existing approval and durable execution path. Extend the receipt verifier for a new payout format instead of treating an unverified receipt as completion. These are ordinary implementation responsibilities, not a separate release-hardening gate.
 
 The credential/approval boundary is implemented as a prototype but human protected installation, biometric confirmation, and bypass verification remain unrun. Document the actual agent capabilities against which it is tested. Do not assume an OS keychain, separate terminal, or background process automatically makes keys inaccessible. Automated fake authorization belongs only in isolated test construction and must not become a switch that permits live writes without the real approval path. The explicitly user-authorized temporary non-biometric production test phase supplies evidence only for its exact financial operations and restoration; it does not establish shipped Touch ID behavior or credential isolation.
 

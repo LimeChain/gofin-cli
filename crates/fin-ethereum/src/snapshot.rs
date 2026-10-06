@@ -129,12 +129,21 @@ impl EthereumAdapter {
                 None,
             )),
             oracle_clock: self.oracle_clock.clone(),
+            wallet_valuation: self.wallet_valuation.clone(),
+            token_discovery: self.token_discovery.clone(),
         });
-        let all = capture.all_tokens(None, Some(block)).await?;
+        let all = if self.config.aave.is_some() {
+            capture.all_tokens(None, Some(block)).await?
+        } else {
+            Vec::new()
+        };
         let mut units = Vec::new();
         for wallet in &self.wallets {
             units.push(CaptureUnit::Wallet(wallet.clone()));
-            for token in &self.config.snapshot_tokens {
+            // Financial baselines declare a finite configured holding scope.
+            // Indexer completeness is not evidence of exhaustive wallet state.
+            let scope = &self.config.snapshot_tokens;
+            for token in scope {
                 units.push(CaptureUnit::Holding(wallet.clone(), token.clone()));
             }
             for token in &all {
@@ -203,11 +212,24 @@ impl EthereumAdapter {
             "Snapshot block became noncanonical during capture.",
         )?;
         state.in_flight = pending.clone();
-        let coverage = self
+        let mut coverage = self
             .wallets
             .iter()
             .map(|w| Ok(resource(self.config.chain_id, address(&w.address)?).0))
             .collect::<Result<Vec<_>>>()?;
+        if self.config.aave.is_none() && self.config.uniswap.is_none() {
+            for wallet in &self.wallets {
+                coverage.push(format!(
+                    "explicit-token-scope:{}:native{}",
+                    resource(self.config.chain_id, address(&wallet.address)?).0,
+                    self.config
+                        .snapshot_tokens
+                        .iter()
+                        .map(|token| format!(",{token}"))
+                        .collect::<String>()
+                ));
+            }
+        }
         Ok(StateSnapshot {
             state,
             observed_at: now(),
@@ -256,7 +278,14 @@ impl EthereumAdapter {
                         self.balance_of(&token, owner, Some(block)).await?,
                     ),
                 });
-                for spender in [&self.config.aave.pool, &self.config.uniswap.router] {
+                let spenders = self
+                    .config
+                    .aave
+                    .as_ref()
+                    .map(|a| &a.pool)
+                    .into_iter()
+                    .chain(self.config.uniswap.as_ref().map(|u| &u.router));
+                for spender in spenders {
                     part.state.authorities.push(AuthorityState {
                         resource: r.clone(),
                         authority: authority(&token.reference, spender),
@@ -325,7 +354,7 @@ impl EthereumAdapter {
                     };
                     part.state.positions.push(PositionState {
                         resource: r.clone(),
-                        position: position(&self.config.aave.pool, &t, label),
+                        position: position(&self.aave()?.pool, &t, label),
                         kind,
                         amount: Amount {
                             asset: reserve.token.asset(self),
@@ -337,7 +366,7 @@ impl EthereumAdapter {
                 }
                 part.state.authorities.push(AuthorityState {
                     resource: r,
-                    authority: collateral(&self.config.aave.pool, &t),
+                    authority: collateral(&self.aave()?.pool, &t),
                     value: user.collateral_enabled.to_string(),
                 });
             }

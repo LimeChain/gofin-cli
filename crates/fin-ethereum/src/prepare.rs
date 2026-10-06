@@ -21,12 +21,13 @@ impl EthereumAdapter {
             "WRITE_OPERATION_REQUIRED",
             "Read operations have no financial execution preview.",
         )?;
+        self.require_operation(operation)?;
         let r = request::parse(operation, input)?;
         let w = self.resolve(&r, true)?;
         let owner = address(&w.address)?;
         self.runtime.assert_chain().await?;
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
-            self.config.weth.as_str()
+            self.weth()?
         } else if operation == "uniswap.swap" {
             r.token_in.as_deref().expect("schema")
         } else {
@@ -276,7 +277,7 @@ impl EthereumAdapter {
                     "DEADLINE_INVALID",
                     "Swap deadline must be in the next ten minutes.",
                 )?;
-                let router = address(&self.config.uniswap.router)?;
+                let router = address(&self.uniswap()?.router)?;
                 self.runtime.code(router).await?;
                 require(
                     {
@@ -287,7 +288,7 @@ impl EthereumAdapter {
                     "Exact input must be covered by a finite router allowance.",
                 )?;
                 to = router;
-                b.spender = Some(self.config.uniswap.router.clone());
+                b.spender = Some(self.uniswap()?.router.clone());
                 b.recipient = Some(lower_address(recipient));
                 b.output = Some(quote.token_out.asset(self));
                 b.minimum_output = Some(quantity(minimum));
@@ -328,10 +329,10 @@ impl EthereumAdapter {
                     "Aave reserve must be active and unpaused.",
                 )?;
                 let user = self.user_reserve(&token, owner, None).await?;
-                let pool = address(&self.config.aave.pool)?;
+                let pool = address(&self.aave()?.pool)?;
                 to = pool;
-                b.pool = Some(self.config.aave.pool.clone());
-                b.spender = Some(self.config.aave.pool.clone());
+                b.pool = Some(self.aave()?.pool.clone());
+                b.spender = Some(self.aave()?.pool.clone());
                 b.a_token = Some(reserve.a_token.clone());
                 b.debt_token = Some(reserve.variable_debt_token.clone());
                 b.supplied_before = Some(user.supplied.clone());
@@ -410,9 +411,8 @@ impl EthereumAdapter {
                     "POSITION_PRINCIPAL_CHANGED",
                     "Current scaled principal differs from broker-proved prior anchor.",
                 )?;
-                let supply_position = position(&self.config.aave.pool, &token.reference, "supply");
-                let debt_position =
-                    position(&self.config.aave.pool, &token.reference, "variable-debt");
+                let supply_position = position(&self.aave()?.pool, &token.reference, "supply");
+                let debt_position = position(&self.aave()?.pool, &token.reference, "variable-debt");
                 match operation {
                     "aave.supply" => {
                         require(
@@ -514,7 +514,10 @@ impl EthereumAdapter {
                         )?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
                         let (usd, _) = self
-                            .quote_usd(&token.reference, quantity(add(qty, rounding_limit)?))
+                            .quote_protocol_usd(
+                                &token.reference,
+                                quantity(add(qty, rounding_limit)?),
+                            )
                             .await?;
                         let added = mul(u256(&usd)?, U256::from(100))?;
                         let debt = add(account.totalDebtBase, added)?;
@@ -680,7 +683,7 @@ impl EthereumAdapter {
                         b.enabled = Some(enabled);
                         intent.expected.push(EffectConstraint::Authority {
                             resource: resource.clone(),
-                            authority: collateral(&self.config.aave.pool, &token.reference),
+                            authority: collateral(&self.aave()?.pool, &token.reference),
                             before: user.collateral_enabled.to_string(),
                             after: enabled.to_string(),
                         });
@@ -817,8 +820,8 @@ impl EthereumAdapter {
             )?;
         }
         if operation.starts_with("aave.") {
-            let supply_pos = position(&self.config.aave.pool, &token.reference, "supply");
-            let debt_pos = position(&self.config.aave.pool, &token.reference, "variable-debt");
+            let supply_pos = position(&self.aave()?.pool, &token.reference, "supply");
+            let debt_pos = position(&self.aave()?.pool, &token.reference, "variable-debt");
             let cash = AccountingLocation::Cash {
                 resource: resource.clone(),
             };
@@ -857,7 +860,7 @@ impl EthereumAdapter {
                 let before = b.collateral_before.expect("collateral").to_string();
                 intent.expected.push(EffectConstraint::AuthorityTransition {
                     resource: resource.clone(),
-                    authority: collateral(&self.config.aave.pool, &token.reference),
+                    authority: collateral(&self.aave()?.pool, &token.reference),
                     before: before.clone(),
                     allowed_after: if operation == "aave.supply" {
                         vec![before, "true".into()]
@@ -977,8 +980,11 @@ impl EthereumAdapter {
         } else {
             quantity(qty)
         };
-        let (movement_usd, source) = self.quote_usd(&principal_asset.reference, movement).await?;
-        let (fee_usd, _) = self.quote_usd("native", quantity(gas)).await?;
+        let (movement_usd, source, movement_observed) = self
+            .quote_usd_observed(&principal_asset.reference, movement)
+            .await?;
+        let (fee_usd, _, fee_observed) = self.quote_usd_observed("native", quantity(gas)).await?;
+        let mut price_observations = vec![movement_observed, fee_observed];
         let mut prices = Vec::new();
         for asset in [&principal_asset, &self.native_asset()]
             .into_iter()
@@ -988,29 +994,41 @@ impl EthereumAdapter {
                 continue;
             }
             let unit = quantity(pow10(asset.decimals)?);
-            let (usd, source) = self.quote_usd(&asset.reference, unit.clone()).await?;
+            let (usd, source, observed_at) = self
+                .quote_usd_observed(&asset.reference, unit.clone())
+                .await?;
+            price_observations.push(observed_at.clone());
             prices.push(AssetPrice {
                 asset: asset.clone(),
                 usd_micros_per_unit: usd,
                 unit_atoms: unit,
-                observed_at: now(),
+                observed_at,
                 source,
             });
         }
         let observed = now();
         let additional_allocation = if operation == "aave.borrow" {
-            self.quote_usd(
-                &principal_asset.reference,
-                quantity(add(
-                    qty,
-                    u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
-                )?),
-            )
-            .await?
-            .0
+            let (value, _, observed_at) = self
+                .quote_usd_observed(
+                    &principal_asset.reference,
+                    quantity(add(
+                        qty,
+                        u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
+                    )?),
+                )
+                .await?;
+            price_observations.push(observed_at);
+            value
         } else {
             Quantity::zero()
         };
+        let valuation_observed = price_observations
+            .into_iter()
+            .min_by_key(|timestamp| {
+                chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .expect("validated observation timestamp")
+            })
+            .expect("principal and fee observations");
         let expires = (chrono::Utc::now() + chrono::Duration::seconds(120))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         Ok(PreparedOperation {
@@ -1018,7 +1036,7 @@ impl EthereumAdapter {
             input: input.clone(),
             binding: serde_json::to_value(b).expect("binding serializable"),
             summary: format!(
-                "{} from {} on Ethereum chain {} with exact principal {} and maximum native gas {}",
+                "{} from {} on EVM chain {} with exact principal {} and maximum native gas {}",
                 request::description(operation),
                 w.name,
                 self.config.chain_id,
@@ -1039,7 +1057,7 @@ impl EthereumAdapter {
                 movement_usd_micros: movement_usd,
                 maximum_fee_usd_micros: fee_usd,
                 additional_allocation_usd_micros: additional_allocation,
-                observed_at: observed,
+                observed_at: valuation_observed,
                 source,
                 prices,
             }),

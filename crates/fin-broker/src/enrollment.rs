@@ -11,9 +11,7 @@ use fin_discovery::{
     AddConnectionArgs, BinanceRole, CredentialType, NamedConnectionArgs, Provider, validate_add,
     validate_name,
 };
-use fin_domain::{
-    AssetId, AuthorizationChallenge, FinError, ResourceId, Result, binding_hash, now,
-};
+use fin_domain::{AuthorizationChallenge, FinError, ResourceId, Result, binding_hash, now};
 use fin_human_terminal::{HumanTerminal, SecretInput};
 use fin_presentation::Ui;
 #[path = "enrollment_presentation.rs"]
@@ -100,7 +98,13 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         ));
     }
     for connection in &config.connections {
-        if resource_has_pending_operations(&journal, resource(connection))? {
+        if connection_resources(connection, &config)
+            .iter()
+            .map(|resource| resource_has_pending_operations(&journal, resource))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .any(|pending| pending)
+        {
             return Err(error(
                 "CONNECTION_HAS_PENDING_OPERATION",
                 "Reconcile unresolved financial operations before changing connections.",
@@ -113,6 +117,17 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         "add" | "update" => {
             let args: AddConnectionArgs = parse(request)?;
             validate_add(&args)?;
+            if args.provider == Provider::Evm {
+                for network in NetworkConfig::reviewed_evm_networks() {
+                    if !config
+                        .networks
+                        .iter()
+                        .any(|existing| existing.chain_id == network.chain_id)
+                    {
+                        config.networks.push(network);
+                    }
+                }
+            }
             let existing = config
                 .connections
                 .iter()
@@ -241,7 +256,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let config = BrokerConfigV2 {
         version: 2,
         approver_uid: args.approver_uid,
-        networks: vec![NetworkConfig::ethereum_mainnet()],
+        networks: NetworkConfig::reviewed_evm_networks(),
         deployments: vec![DeploymentConfig::ethereum_mainnet()],
         connections: vec![],
         policy: BrokerPolicy::beta(),
@@ -267,6 +282,12 @@ fn collect_material(
     args: &AddConnectionArgs,
 ) -> Result<Option<SecretMaterial>> {
     let material = match args.provider {
+        Provider::CoinGecko => SecretMaterial::CoinGeckoApiKey {
+            api_key: terminal
+                .read_secret("CoinGecko API key", SecretInput::Line)?
+                .to_string(),
+            plan: args.api_plan.as_deref().unwrap_or("demo").into(),
+        },
         Provider::Binance => {
             let api_key = terminal.read_secret("Binance API key", SecretInput::Line)?;
             if matches!(
@@ -301,12 +322,12 @@ fn collect_material(
                 }
             }
         }
-        Provider::Ethereum if args.credential_type == Some(CredentialType::ReadOnly) => {
+        Provider::Evm if args.credential_type == Some(CredentialType::ReadOnly) => {
             return Ok(None);
         }
-        Provider::Ethereum => SecretMaterial::EthereumPrivateKey {
+        Provider::Evm => SecretMaterial::EvmPrivateKey {
             private_key: terminal
-                .read_secret("Ethereum private key", SecretInput::Line)?
+                .read_secret("EVM private key", SecretInput::Line)?
                 .to_string(),
         },
     };
@@ -323,11 +344,66 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
-        Provider::Ethereum => {
+        Provider::CoinGecko => {
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "CREDENTIAL_REQUIRED",
+                    "CoinGecko needs a protected API key.",
+                )
+            })?;
+            let plan = args.api_plan.as_deref().unwrap_or("demo");
+            let source = store.with_material(reference, |material| match material {
+                SecretMaterial::CoinGeckoApiKey {
+                    api_key,
+                    plan: stored_plan,
+                } if stored_plan == plan => fin_pricing::CoinGeckoPrices::with_api_key(
+                    if plan == "demo" {
+                        fin_pricing::ApiPlan::Demo
+                    } else {
+                        fin_pricing::ApiPlan::Pro
+                    },
+                    api_key,
+                ),
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "The staged key is not the selected CoinGecko plan.",
+                )),
+            })?;
+            {
+                let _progress = ui.progress("Checking CoinGecko access");
+                source.validate_access().await?;
+            }
+            {
+                let _progress = ui.progress("Checking current USD pricing");
+                fin_pricing::UsdPriceSource::quote(
+                    &source,
+                    &fin_domain::AssetId {
+                        network: "ethereum:1".into(),
+                        reference: "native".into(),
+                        decimals: 18,
+                    },
+                )
+                .await?;
+            }
+            Ok((
+                ConnectionConfig::CoinGecko {
+                    name: args.name.clone(),
+                    resource: ResourceId("market-data:coingecko".into()),
+                    credential_ref: reference.as_str().into(),
+                    api_plan: plan.into(),
+                },
+                vec![
+                    json!({"name":"CoinGecko API access","status":"passed","api_plan":plan}),
+                    json!({"name":"fresh USD price read","status":"passed"}),
+                ],
+                vec![],
+            ))
+        }
+        Provider::Evm => {
             let network = config
                 .networks
                 .iter()
-                .find(|network| Some(network.id.as_str()) == args.network.as_deref())
+                .find(|network| network.id == args.network.as_deref().unwrap_or("ethereum:1"))
                 .ok_or_else(|| {
                     error(
                         "NETWORK_NOT_CONFIGURED",
@@ -335,7 +411,7 @@ async fn validate_connection(
                     )
                 })?;
             let derived = match material {
-                Some(SecretMaterial::EthereumPrivateKey { private_key }) => Some(format!(
+                Some(SecretMaterial::EvmPrivateKey { private_key }) => Some(format!(
                     "{:#x}",
                     fin_evm::LocalEnvelopeSigner::from_private_key(private_key)?.address()
                 )),
@@ -367,27 +443,19 @@ async fn validate_connection(
             )?);
             let runtime = fin_evm::EvmRuntime::new(rpc, network.chain_id, None);
             {
-                let _progress = ui.progress("Checking Ethereum network");
+                let _progress = ui.progress("Checking EVM network");
                 runtime.assert_chain().await?;
             }
             let balance = {
                 let _progress = ui.progress("Checking wallet balance");
                 runtime.balance(fin_evm::address(&address)?, None).await?
             };
-            let resource = ResourceId(format!("ethereum:{}:{address}", network.chain_id));
-            let assets = vec![
-                asset(&network.id, "native", 18),
-                asset(&network.id, fin_ethereum::WETH, 18),
-                asset(&network.id, fin_ethereum::USDC, 6),
-            ];
-            let connection = ConnectionConfig::Ethereum {
+            let connection = ConnectionConfig::Evm {
                 name: args.name.clone(),
-                resource,
+                resource: ResourceId(format!("evm:{address}")),
                 credential_ref: staged.map(|reference| reference.as_str().into()),
-                network: network.id.clone(),
                 address,
                 signing_enabled: derived.is_some(),
-                assets,
             };
             Ok((
                 connection,
@@ -677,13 +745,6 @@ async fn approve_and_audit(uid: u32, binding: &Value, summary: &str, ui: &Ui) ->
         })?;
     Ok(())
 }
-fn asset(network: &str, reference: &str, decimals: u8) -> AssetId {
-    AssetId {
-        network: network.into(),
-        reference: reference.into(),
-        decimals,
-    }
-}
 fn config_hash(config: &BrokerConfigV2) -> Result<String> {
     binding_hash(
         &serde_json::to_value(config)
@@ -692,19 +753,28 @@ fn config_hash(config: &BrokerConfigV2) -> Result<String> {
 }
 fn name(connection: &ConnectionConfig) -> &str {
     match connection {
-        ConnectionConfig::Binance { name, .. } | ConnectionConfig::Ethereum { name, .. } => name,
+        ConnectionConfig::Binance { name, .. }
+        | ConnectionConfig::Ethereum { name, .. }
+        | ConnectionConfig::Evm { name, .. }
+        | ConnectionConfig::CoinGecko { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
     match connection {
         ConnectionConfig::Binance { resource, .. }
-        | ConnectionConfig::Ethereum { resource, .. } => resource,
+        | ConnectionConfig::Ethereum { resource, .. }
+        | ConnectionConfig::Evm { resource, .. }
+        | ConnectionConfig::CoinGecko { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
-        ConnectionConfig::Binance { credential_ref, .. } => CredentialRef::new(credential_ref).ok(),
-        ConnectionConfig::Ethereum { credential_ref, .. } => credential_ref
+        ConnectionConfig::Binance { credential_ref, .. }
+        | ConnectionConfig::CoinGecko { credential_ref, .. } => {
+            CredentialRef::new(credential_ref).ok()
+        }
+        ConnectionConfig::Ethereum { credential_ref, .. }
+        | ConnectionConfig::Evm { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
     }
@@ -731,6 +801,12 @@ fn recover_inactive_credentials(
 }
 fn public_connection(connection: &ConnectionConfig) -> Value {
     match connection {
+        ConnectionConfig::CoinGecko {
+            name,
+            resource,
+            api_plan,
+            ..
+        } => json!({"provider":"coingecko","name":name,"resource":resource,"api_plan":api_plan}),
         ConnectionConfig::Binance {
             name,
             resource,
@@ -742,6 +818,15 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
             ..
         } => {
             json!({"name":name,"provider":"binance","resource":resource,"role":role,"parent":parent,"email":email,"wallet_type":wallet_type,"physical_identity":physical_identity})
+        }
+        ConnectionConfig::Evm {
+            name,
+            resource,
+            address,
+            signing_enabled,
+            ..
+        } => {
+            json!({"name":name,"provider":"evm","resource":resource,"address":address,"signing_enabled":signing_enabled})
         }
         ConnectionConfig::Ethereum {
             name,
@@ -756,12 +841,34 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
     }
 }
 fn immutable_identity(connection: &ConnectionConfig) -> Value {
-    let mut value = public_connection(connection);
-    value
-        .as_object_mut()
-        .expect("public connection object")
-        .remove("signing_enabled");
-    value
+    match connection {
+        ConnectionConfig::Evm { name, address, .. }
+        | ConnectionConfig::Ethereum { name, address, .. } => {
+            json!({"provider":"evm","name":name,"address":address.to_ascii_lowercase()})
+        }
+        ConnectionConfig::Binance { .. } => public_connection(connection),
+        ConnectionConfig::CoinGecko { name, resource, .. } => {
+            json!({"provider":"coingecko","name":name,"resource":resource})
+        }
+    }
+}
+fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {
+    match connection {
+        ConnectionConfig::Evm {
+            address, resource, ..
+        } => {
+            let mut resources = vec![resource.clone()];
+            resources.extend(config.networks.iter().map(|network| {
+                ResourceId(format!(
+                    "ethereum:{}:{}",
+                    network.chain_id,
+                    address.to_ascii_lowercase()
+                ))
+            }));
+            resources
+        }
+        _ => vec![resource(connection).clone()],
+    }
 }
 fn outcome(
     action: &str,
@@ -796,6 +903,132 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {
+        ConnectionConfig::CoinGecko {
+            name: "synthetic-pricing".into(),
+            resource: ResourceId("market-data:coingecko".into()),
+            credential_ref: reference.into(),
+            api_plan: plan.into(),
+        }
+    }
+
+    fn pricing_config(connection: ConnectionConfig) -> BrokerConfigV2 {
+        BrokerConfigV2 {
+            version: 2,
+            approver_uid: 501,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![connection],
+            policy: BrokerPolicy::beta(),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn coingecko_configuration_and_public_outcomes_use_one_safe_identity() {
+        let reference = "11111111-1111-4111-8111-111111111111";
+        let connection = pricing_connection("demo", reference);
+        let config = pricing_config(connection.clone());
+        config.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&connection).unwrap()["provider"],
+            "coingecko"
+        );
+        assert_eq!(name(&connection), "synthetic-pricing");
+        assert_eq!(resource(&connection).0, "market-data:coingecko");
+        assert_eq!(credential(&connection).unwrap().as_str(), reference);
+        assert!(referenced(&config).contains(reference));
+        assert_eq!(
+            connection_resources(&connection, &config),
+            vec![ResourceId("market-data:coingecko".into())]
+        );
+        let public = public_connection(&connection);
+        assert_eq!(
+            public,
+            json!({"provider":"coingecko","name":"synthetic-pricing","resource":"market-data:coingecko","api_plan":"demo"})
+        );
+        for action in ["add", "update", "remove"] {
+            let output = outcome(
+                action,
+                Some(&connection),
+                vec![json!({"name":"CoinGecko API access","status":"passed"})],
+                vec![],
+                None,
+            );
+            assert_eq!(output["connection"], public);
+            assert_eq!(output["configuration_authorized"], true);
+            assert_eq!(output["financial_movement"], false);
+            assert_eq!(output["future_financial_authority"], false);
+            assert!(!output.to_string().contains(reference));
+            assert!(output["connection"].get("credential_ref").is_none());
+            assert!(output["connection"].get("signing_enabled").is_none());
+            serde_json::from_value::<fin_discovery::enrollment_contract::EnrollmentOutcome>(output)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn coingecko_rotation_preserves_market_data_identity_and_rejects_duplicate_aliases() {
+        let original = pricing_connection("demo", "11111111-1111-4111-8111-111111111111");
+        let replacement = pricing_connection("pro", "22222222-2222-4222-8222-222222222222");
+        assert_eq!(
+            immutable_identity(&original),
+            immutable_identity(&replacement)
+        );
+        assert_ne!(credential(&original), credential(&replacement));
+        assert_ne!(
+            config_hash(&pricing_config(original.clone())).unwrap(),
+            config_hash(&pricing_config(replacement.clone())).unwrap()
+        );
+        let mut duplicate = replacement;
+        if let ConnectionConfig::CoinGecko { name, .. } = &mut duplicate {
+            *name = "synthetic-other-pricing".into();
+        }
+        let mut config = pricing_config(original.clone());
+        config.connections.push(duplicate);
+        assert_eq!(
+            config.validate().unwrap_err().code,
+            "CONFIG_CONNECTION_DUPLICATE"
+        );
+        for (field, value) in [
+            ("api_plan", "unsupported"),
+            ("resource", "market-data:other"),
+            ("credential_ref", "not-a-credential-reference"),
+        ] {
+            let mut wrong = serde_json::to_value(&original).unwrap();
+            wrong[field] = json!(value);
+            let wrong: ConnectionConfig = serde_json::from_value(wrong).unwrap();
+            assert_eq!(
+                pricing_config(wrong).validate().unwrap_err().code,
+                "CONFIG_PRICING_CONNECTION_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn coingecko_safe_requests_reject_key_and_approval_values_without_echo() {
+        let base = json!({"provider":"coingecko","name":"synthetic-pricing","credential_type":"api_key","api_plan":"demo"});
+        validate_add(&parse::<AddConnectionArgs>(base.clone()).unwrap()).unwrap();
+        for field in [
+            "api_key",
+            "secret",
+            "approval",
+            "credential_ref",
+            "signature",
+        ] {
+            let mut request = base.clone();
+            request[field] = json!("SYNTHETIC-NOT-A-REAL-KEY");
+            let failure = parse::<AddConnectionArgs>(request).unwrap_err();
+            assert!(!failure.to_string().contains("SYNTHETIC-NOT-A-REAL-KEY"));
+        }
+        let material = SecretMaterial::CoinGeckoApiKey {
+            api_key: "SYNTHETIC-NOT-A-REAL-KEY".into(),
+            plan: "demo".into(),
+        };
+        material.validate_present().unwrap();
+        assert!(!format!("{material:?}").contains("SYNTHETIC-NOT-A-REAL-KEY"));
+    }
+
     #[test]
     fn enrollment_binance_diagnostic_preserves_only_typed_http_codes() {
         use fin_binance::{HttpFailureKind, TransportError};
@@ -874,6 +1107,45 @@ mod tests {
             serde_json::from_value::<fin_discovery::enrollment_contract::EnrollmentOutcome>(output)
                 .is_ok()
         );
+    }
+    #[test]
+    fn legacy_wallet_upgrade_retains_identity_and_checks_each_chain_for_pending_writes() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let legacy = ConnectionConfig::Ethereum {
+            name: "wallet".into(),
+            resource: ResourceId(format!("ethereum:1:{address}")),
+            network: "ethereum:1".into(),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+            assets: vec![],
+        };
+        let shared = ConnectionConfig::Evm {
+            name: "wallet".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            signing_enabled: true,
+        };
+        assert_eq!(immutable_identity(&legacy), immutable_identity(&shared));
+        let config = BrokerConfigV2 {
+            version: 2,
+            approver_uid: 501,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![shared.clone()],
+            policy: BrokerPolicy::beta(),
+            extensions: BTreeMap::new(),
+        };
+        config.validate().unwrap();
+        let resources = connection_resources(&shared, &config);
+        for chain in [1, 42161, 4663] {
+            assert!(resources.contains(&ResourceId(format!("ethereum:{chain}:{address}"))));
+        }
+        let output = outcome("update", Some(&shared), vec![], vec![], None);
+        assert_eq!(output["connection"]["provider"], "evm");
+        assert!(output["connection"].get("network").is_none());
+        assert!(!output.to_string().contains("SYNTHETIC-KEY-REFERENCE"));
     }
     #[test]
     fn readonly_wallet_can_gain_same_address_signing_without_retargeting() {

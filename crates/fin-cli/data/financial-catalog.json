@@ -28,7 +28,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -899,7 +902,7 @@
         "chain_id": 1,
         "max_fee_eth": "0.001",
         "min_health_factor": "1.5",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -938,7 +941,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -1807,7 +1813,7 @@
         "chain_id": 1,
         "enabled": true,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -1838,7 +1844,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "tokens": {
@@ -1903,7 +1912,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "wallet": "main-wallet"
       }
     ],
@@ -1980,7 +1989,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -2849,7 +2861,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -2859,7 +2871,7 @@
         "chain_id": 1,
         "max_amount": "2",
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -2890,7 +2902,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "tokens": {
@@ -2955,7 +2970,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "wallet": "main-wallet"
       }
     ],
@@ -2994,7 +3009,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -3863,7 +3881,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -3942,7 +3960,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "recipient": {
@@ -4816,7 +4837,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -4827,7 +4848,7 @@
         "chain_id": 1,
         "max_amount": "2",
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -9053,7 +9074,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "token_in": {
@@ -9121,7 +9145,7 @@
       {
         "amount": "1",
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
         "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -9218,7 +9242,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "recipient": {
@@ -10100,7 +10127,7 @@
         "deadline": 2000000000,
         "max_fee_eth": "0.001",
         "min_output": "1",
-        "network": "ethereum",
+        "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "slippage_bps": 50,
@@ -10115,7 +10142,7 @@
         "max_amount": "2",
         "max_fee_eth": "0.001",
         "min_output": "1",
-        "network": "ethereum",
+        "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "slippage_bps": 50,
@@ -10149,7 +10176,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "spender": {
@@ -10222,7 +10252,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
@@ -10263,7 +10293,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -11137,7 +11170,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -11169,7 +11202,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "tokens": {
@@ -11234,7 +11270,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "wallet": "main-wallet"
       }
     ],
@@ -11263,7 +11299,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "transaction_hash": {
@@ -11324,7 +11363,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "transaction_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
         "wallet": "main-wallet"
       }
@@ -11354,7 +11393,10 @@
           "type": "integer"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "token": {
@@ -11422,7 +11464,7 @@
     "examples": [
       {
         "chain_id": 1,
-        "network": "ethereum",
+        "network": "evm",
         "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "wallet": "main-wallet"
       }
@@ -11462,7 +11504,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "recipient": {
@@ -12336,7 +12381,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "token": "native",
@@ -12416,7 +12461,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -13273,7 +13321,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "wallet": "main-wallet"
       },
@@ -13282,7 +13330,7 @@
         "chain_id": 1,
         "max_amount": "2",
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "wallet": "main-wallet"
       }
@@ -13322,7 +13370,10 @@
           "type": "string"
         },
         "network": {
-          "const": "ethereum",
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
           "type": "string"
         },
         "request_id": {
@@ -14179,7 +14230,7 @@
         "amount": "1",
         "chain_id": 1,
         "max_fee_eth": "0.001",
-        "network": "ethereum",
+        "network": "evm",
         "request_id": "unique-logical-request",
         "wallet": "main-wallet"
       }

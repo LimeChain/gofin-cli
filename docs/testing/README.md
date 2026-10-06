@@ -1,6 +1,6 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
+These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), and [EVM wallets](evm-wallets.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
 
 ```sh
 cargo fmt --all -- --check
@@ -43,6 +43,17 @@ state. The [trading report](../reports/binance-trading.md) records exact coverag
 Tests include full/partial/no-fill, price/permission/mode/fee limits, funding,
 order/cancellation races, response loss, restart, duplicate submission, run caps
 and restoration. Synthetic approval never establishes native authorization.
+
+## EVM wallet extension
+
+Ethereum mainnet, Arbitrum One and Robinhood Chain share a reusable EVM connection.
+The [wallet guide](evm-wallets.md) covers offline regressions, partial token
+discovery, explicit snapshot scope, L2 finalized-block checks and a proposed
+human test sequence. New network implementation is not a live acceptance pass.
+Public no-secret RPC/indexer probes, human enrollment/Touch ID and funded transfer
+round trips must each be reported separately when observed; this guide marks no
+unrun case passed. Existing $100 allocation, per-write approval and complete
+restoration requirements also apply to any separately authorized L2 live test.
 
 ## Local development loop
 
@@ -106,7 +117,7 @@ The agreed order is to finish the Rust implementation and reproducible verificat
 - Record Rust toolchain/dependency versions, commit, compiled artifact layout, build/install procedure, and actual test commands. Default tests use unmistakably synthetic credentials and never load production keys or submit mainnet transactions.
 - Port meaningful financial regression cases from TS: exact quantities and asset/account identities, permission/fee/price limits, receipt proof, debt/accrual/rounding, provenance, full restoration, response loss, concurrency, restart, and duplicate prevention. TS results are behavioral references, not Rust passes.
 - Verify the typed effect boundary and atomic ledger/terminal settlement, including confirmed failures with spent costs and mismatched evidence retaining reservations. Test migrations and adapter/evidence versions with persisted pending identities; no upgrade may invent a replacement request or replay a write.
-- Verify the implemented Binance HTTP funding mappings, HMAC/RSA/Ed25519 signatures, and exact decimal-string request/response paths. This beta uses typed fixed REST endpoints rather than a Rust CCXT dependency. Verify Alloy preparation and the actual signed envelope against the fixed approved payload. No policy/financial quantity may depend on a floating-point round trip.
+- Verify the implemented Binance HTTP funding mappings, HMAC/RSA/Ed25519 signatures, and exact decimal-string request/response paths. Typed fixed REST mappings run through the pinned official CCXT Rust wrapper. Verify Alloy preparation and the actual signed envelope against the fixed approved payload. No policy/financial quantity may depend on a floating-point round trip.
 - Complete offline CLI/schema/example/onboarding tests, synthetic terminal enrollment and configuration authorization tests, secret redaction, cancellation, permission failures, no-TTY/agent invocation refusal, service lifecycle, and unavailable OS-provider behavior.
 - Record a fresh-agent guidance rehearsal using installed help/schema only, with no inherited private configuration or chat context. Synthetic enrollment and a rehearsal do not establish actual human credential isolation.
 - Execute a recorded fixed mainnet fork with local synthetic signers, independent local/fork identity checks before signing, failure injection, duplicate/restart checks, and complete synthetic restoration. Do not silently change the fixed environment or use a real key because a fixture failed.

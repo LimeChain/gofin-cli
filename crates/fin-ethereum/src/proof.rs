@@ -423,6 +423,48 @@ impl EthereumAdapter {
                 });
             }
         };
+        if self.config.require_finalized {
+            let finalized = self
+                .runtime
+                .rpc
+                .request("eth_getBlockByNumber", json!(["finalized", false]))
+                .await;
+            let finalized_height = finalized
+                .as_ref()
+                .ok()
+                .filter(|header| !header.is_null())
+                .and_then(|header| {
+                    fin_evm::rpc_u64(&header["number"])
+                        .ok()
+                        .filter(|_| fin_evm::hash(header["hash"].as_str().unwrap_or("")).is_ok())
+                });
+            if finalized_height.is_none_or(|height| height < receipt.block_number) {
+                return Ok(Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"original_hash":submission.reference,"canonical_confirmed":true,"finality":"awaiting-rpc-finalized","finalized_height":finalized_height}),
+                    verified: None,
+                });
+            }
+            // Finalized height alone does not bind the original transaction's
+            // inclusion. Observe that block again after the finalized marker.
+            let canonical = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([format!("{:#x}", receipt.block_number), false]),
+                )
+                .await?;
+            if canonical["hash"] != json!(format!("{:#x}", receipt.block_hash))
+                || fin_evm::rpc_u64(&canonical["number"])? != receipt.block_number
+            {
+                return Ok(Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"original_hash":submission.reference,"canonical_confirmed":false,"finality":"inclusion-changed"}),
+                    verified: None,
+                });
+            }
+        }
         let mut effects = vec![FinancialEffect::Cost {
             location: AccountingLocation::Cash {
                 resource: b.resource.clone(),
@@ -431,7 +473,7 @@ impl EthereumAdapter {
             category: "ethereum_gas".into(),
             treatment: CostTreatment::AdditionalDebit,
         }];
-        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee)});
+        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
         if receipt.success {
             self.success_effects(&record.operation, &b, &receipt, &mut effects, &mut details)
                 .await?;
@@ -488,7 +530,7 @@ impl EthereumAdapter {
                 });
             }
             "wallet.wrap" | "wallet.unwrap" => {
-                let weth = address(&self.config.weth)?;
+                let weth = address(self.weth()?)?;
                 if operation == "wallet.wrap" {
                     let e = exact_one(
                         events::<Weth::Deposit>(receipt, weth)?

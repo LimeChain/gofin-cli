@@ -84,7 +84,7 @@ impl EthereumAdapter {
         let index = if kind == PositionKind::Supply {
             self.runtime
                 .call(
-                    address(&self.config.aave.pool)?,
+                    address(&self.aave()?.pool)?,
                     &Pool::getReserveNormalizedIncomeCall {
                         asset: address(&token.reference)?,
                     },
@@ -94,7 +94,7 @@ impl EthereumAdapter {
         } else {
             self.runtime
                 .call(
-                    address(&self.config.aave.pool)?,
+                    address(&self.aave()?.pool)?,
                     &Pool::getReserveNormalizedVariableDebtCall {
                         asset: address(&token.reference)?,
                     },
@@ -124,7 +124,7 @@ impl EthereumAdapter {
         Ok(PositionAnchor {
             resource: resource(self.config.chain_id, owner),
             position: position(
-                &self.config.aave.pool,
+                &self.aave()?.pool,
                 &token.reference,
                 if kind == PositionKind::Supply {
                     "supply"
@@ -136,7 +136,7 @@ impl EthereumAdapter {
             principal: amount(&token.asset(self), U256::ZERO),
             scaled_receipt: Some(Quantity::zero()),
             evidence_version: 1,
-            evidence: json!({"method":"aave-zero-observed-backing","chain_id":self.config.chain_id,"pool":self.config.aave.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":Quantity::zero(),"deferred_unpaid_rounding":Quantity::zero(),"deferred_unpaid_interest":Quantity::zero()}),
+            evidence: json!({"method":"aave-zero-observed-backing","chain_id":self.config.chain_id,"pool":self.aave()?.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":Quantity::zero(),"deferred_unpaid_rounding":Quantity::zero(),"deferred_unpaid_interest":Quantity::zero()}),
             observed_at: now(),
         })
     }
@@ -209,7 +209,7 @@ impl EthereumAdapter {
         let index = if kind == PositionKind::Supply {
             self.runtime
                 .call(
-                    address(&self.config.aave.pool)?,
+                    address(&self.aave()?.pool)?,
                     &Pool::getReserveNormalizedIncomeCall {
                         asset: address(&token.reference)?,
                     },
@@ -219,7 +219,7 @@ impl EthereumAdapter {
         } else {
             self.runtime
                 .call(
-                    address(&self.config.aave.pool)?,
+                    address(&self.aave()?.pool)?,
                     &Pool::getReserveNormalizedVariableDebtCall {
                         asset: address(&token.reference)?,
                     },
@@ -261,7 +261,7 @@ impl EthereumAdapter {
         Ok(PositionAnchor {
             resource: resource(self.config.chain_id, owner),
             position: position(
-                &self.config.aave.pool,
+                &self.aave()?.pool,
                 &token.reference,
                 if kind == PositionKind::Supply {
                     "supply"
@@ -273,7 +273,7 @@ impl EthereumAdapter {
             principal: amount(&token.asset(self), claim),
             scaled_receipt: Some(quantity(scaled)),
             evidence_version: 1,
-            evidence: json!({"method":"aave-v3-revision-5-exact-scaled-backing","chain_id":self.config.chain_id,"pool":self.config.aave.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":quantity(scaled),"deferred_unpaid_rounding":quantity(deferred_rounding),"deferred_unpaid_interest":quantity(deferred_interest)}),
+            evidence: json!({"method":"aave-v3-revision-5-exact-scaled-backing","chain_id":self.config.chain_id,"pool":self.aave()?.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":quantity(scaled),"deferred_unpaid_rounding":quantity(deferred_rounding),"deferred_unpaid_interest":quantity(deferred_interest)}),
             observed_at: now(),
         })
     }
@@ -287,7 +287,7 @@ impl EthereumAdapter {
     ) -> Result<PositionAnchor> {
         let resource = resource(self.config.chain_id, owner);
         let name = position(
-            &self.config.aave.pool,
+            &self.aave()?.pool,
             &token.reference,
             if kind == PositionKind::Supply {
                 "supply"
@@ -336,11 +336,11 @@ impl EthereumAdapter {
                 && (anchor.evidence["method"] == json!("aave-v3-revision-5-exact-scaled-backing")
                     || anchor.evidence["method"] == json!("aave-zero-observed-backing"))
                 && anchor.evidence["chain_id"] == json!(self.config.chain_id)
-                && anchor.evidence["pool"] == json!(self.config.aave.pool)
+                && anchor.evidence["pool"] == json!(self.aave()?.pool)
                 && anchor.evidence["receipt_token"] == json!(lower_address(receipt_token))
                 && anchor.position
                     == position(
-                        &self.config.aave.pool,
+                        &self.aave()?.pool,
                         &token.reference,
                         if *kind == PositionKind::Supply {
                             "supply"

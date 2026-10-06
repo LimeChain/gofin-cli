@@ -139,8 +139,8 @@ impl EthereumAdapter {
             .await
     }
     pub(crate) async fn data_provider(&self, block: Option<u64>) -> Result<Address> {
-        let pool = address(&self.config.aave.pool)?;
-        let oracle = address(&self.config.aave.oracle)?;
+        let pool = address(&self.aave()?.pool)?;
+        let oracle = address(&self.aave()?.oracle)?;
         self.runtime.code_at(pool, block).await?;
         self.runtime.code_at(oracle, block).await?;
         let provider = self
@@ -304,6 +304,76 @@ impl EthereumAdapter {
             collateral_enabled: u.usageAsCollateralEnabled,
         })
     }
+    pub(crate) async fn wallet_tokens(
+        &self,
+        owner: &str,
+        explicit: Option<&Vec<String>>,
+    ) -> Result<TokenDiscoveryResult> {
+        let mut result = if let Some(tokens) = explicit {
+            TokenDiscoveryResult {
+                candidates: tokens.clone(),
+                complete: false,
+                source: "explicit-token-scope".into(),
+                warnings: vec!["Only requested tokens are included.".into()],
+            }
+        } else if let Some(provider) = &self.token_discovery {
+            provider.tokens(self.config.chain_id, owner).await?
+        } else {
+            TokenDiscoveryResult { candidates: self.config.snapshot_tokens.clone(), complete: false, source: "configured-token-scope".into(), warnings: vec!["Automatic token discovery is unavailable; only configured tokens are included.".into()] }
+        };
+        require(
+            !result.source.trim().is_empty()
+                && result.candidates.len() <= 64
+                && result.warnings.len() <= 64,
+            "TOKEN_DISCOVERY_INVALID",
+            "Token discovery must report a bounded scope and source.",
+        )?;
+        let mut discovered = BTreeSet::new();
+        let mut normalized = Vec::new();
+        for candidate in result.candidates {
+            let token = address(&candidate)?;
+            require(
+                token != Address::ZERO,
+                "TOKEN_DISCOVERY_INVALID",
+                "Discovered ERC-20 addresses must be nonzero.",
+            )?;
+            let reference = lower_address(token);
+            let unique = discovered.insert(reference.clone());
+            require(
+                explicit.is_none() || unique,
+                "DUPLICATE_TOKEN",
+                "Requested holdings duplicate an immutable ERC-20 identity.",
+            )?;
+            if unique {
+                normalized.push(reference);
+            }
+        }
+        if explicit.is_some() {
+            result.candidates = normalized;
+        } else {
+            // Keep the user's configured scope first; bounded indexer noise
+            // must not crowd out explicitly tracked holdings or deny all reads.
+            let mut candidates = self.config.snapshot_tokens.clone();
+            let mut seen: BTreeSet<String> = candidates.iter().cloned().collect();
+            let mut truncated = false;
+            for token in discovered {
+                if !seen.insert(token.clone()) {
+                    continue;
+                }
+                if candidates.len() < 64 {
+                    candidates.push(token);
+                } else {
+                    truncated = true;
+                }
+            }
+            if truncated {
+                result.complete = false;
+                result.warnings.push("Token discovery exceeded the 64-token read scope; configured tokens were retained and additional candidates omitted.".into());
+            }
+            result.candidates = candidates;
+        }
+        Ok(result)
+    }
     pub(crate) async fn all_tokens(
         &self,
         explicit: Option<&Vec<String>>,
@@ -326,7 +396,7 @@ impl EthereumAdapter {
         let tokens = self
             .runtime
             .call(
-                address(&self.config.aave.pool)?,
+                address(&self.aave()?.pool)?,
                 &Pool::getReservesListCall {},
                 block,
             )
@@ -350,9 +420,59 @@ impl EthereumAdapter {
             .collect()
     }
     pub async fn quote_usd(&self, reference: &str, units: Quantity) -> Result<(Quantity, String)> {
+        let (value, source, _) = self.quote_usd_observed(reference, units).await?;
+        Ok((value, source))
+    }
+    pub async fn quote_usd_observed(
+        &self,
+        reference: &str,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
         self.runtime.assert_chain().await?;
         let token = self.token(reference, None).await?;
-        let oracle = address(&self.config.aave.oracle)?;
+        if let Some(provider) = &self.wallet_valuation {
+            let (value, source, observed_at) = provider
+                .quote_observation(&token.asset(self), units.clone())
+                .await?;
+            require(
+                !source.trim().is_empty() && (units.is_zero() || !value.is_zero()),
+                "VALUATION_UNAVAILABLE",
+                "Wallet valuation requires an explicit source and positive priced value.",
+            )?;
+            let observed = chrono::DateTime::parse_from_rfc3339(&observed_at).map_err(|_| {
+                error(
+                    "VALUATION_UNAVAILABLE",
+                    "valuation",
+                    "Price observation timestamp is malformed.",
+                )
+            })?;
+            let current = chrono::Utc::now();
+            require(
+                observed <= current + chrono::Duration::seconds(5)
+                    && current.signed_duration_since(observed) <= chrono::Duration::seconds(120),
+                "VALUATION_UNAVAILABLE",
+                "Price observation is stale or future-dated.",
+            )?;
+            return Ok((value, source, observed_at));
+        }
+        require(
+            self.config.aave.is_some(),
+            "VALUATION_UNAVAILABLE",
+            "No trusted wallet valuation provider is configured on this network.",
+        )?;
+        let (value, source) = self.quote_protocol_usd(reference, units).await?;
+        Ok((value, source, now()))
+    }
+    // Aave collateral/debt risk uses the protocol's own oracle. The same helper
+    // preserves isolated legacy policy fixtures when no provider is injected.
+    // Broker policy valuation always uses its injected provider, with no fallback.
+    pub(crate) async fn quote_protocol_usd(
+        &self,
+        reference: &str,
+        units: Quantity,
+    ) -> Result<(Quantity, String)> {
+        let token = self.token(reference, None).await?;
+        let oracle = address(&self.aave()?.oracle)?;
         self.runtime.code(oracle).await?;
         require(
             self.runtime
@@ -368,7 +488,7 @@ impl EthereumAdapter {
             "USD valuation requires the reviewed Aave USD base currency and unit.",
         )?;
         let reference = if token.reference == "native" {
-            address(&self.config.weth)?
+            address(self.weth()?)?
         } else {
             address(&token.reference)?
         };
@@ -415,7 +535,7 @@ impl EthereumAdapter {
             }
         };
         let current = U256::from(self.oracle_clock.unix_seconds().await?);
-        let heartbeat = if reference == address(&self.config.weth)? {
+        let heartbeat = if reference == address(self.weth()?)? {
             7200
         } else {
             86400
@@ -437,7 +557,7 @@ impl EthereumAdapter {
             usd,
             format!(
                 "aave-usd:{}:feed:{}:updated:{}",
-                self.config.aave.oracle,
+                self.aave()?.oracle,
                 lower_address(feed),
                 round.updatedAt
             ),
@@ -465,11 +585,9 @@ impl EthereumAdapter {
             "Swap input must be positive.",
         )?;
         self.runtime
-            .code(address(&self.config.uniswap.factory)?)
+            .code(address(&self.uniswap()?.factory)?)
             .await?;
-        self.runtime
-            .code(address(&self.config.uniswap.quoter)?)
-            .await?;
+        self.runtime.code(address(&self.uniswap()?.quoter)?).await?;
         let tiers = if let Some(t) = tier {
             vec![t]
         } else {
@@ -480,7 +598,7 @@ impl EthereumAdapter {
             let pool = self
                 .runtime
                 .call(
-                    address(&self.config.uniswap.factory)?,
+                    address(&self.uniswap()?.factory)?,
                     &Factory::getPoolCall {
                         tokenA: address(&ti.reference)?,
                         tokenB: address(&to.reference)?,
@@ -496,7 +614,7 @@ impl EthereumAdapter {
             let quoted = self
                 .runtime
                 .call(
-                    address(&self.config.uniswap.quoter)?,
+                    address(&self.uniswap()?.quoter)?,
                     &Quoter::quoteExactInputSingleCall {
                         params: Quoter::QuoteParams {
                             tokenIn: address(&ti.reference)?,
@@ -539,6 +657,7 @@ impl EthereumAdapter {
             "READ_OPERATION_REQUIRED",
             "Use prepare and the protected execution path for writes.",
         )?;
+        self.require_operation(operation)?;
         let r = request::parse(operation, input)?;
         let w = self.resolve(&r, false)?;
         self.runtime.assert_chain().await?;
@@ -550,6 +669,7 @@ impl EthereumAdapter {
                 .request("eth_blockNumber", json!([]))
                 .await?,
         )?;
+        let mut discovery = None;
         let data = match operation {
             "wallet.token" => json!(
                 self.token(r.token.as_deref().expect("schema"), Some(block))
@@ -563,10 +683,8 @@ impl EthereumAdapter {
                 json!({"token":token,"spender":lower_address(spender),"units":quantity(self.allowance(&token,owner,spender,Some(block)).await?)})
             }
             "wallet.balances" => {
-                let ts = r
-                    .tokens
-                    .unwrap_or_else(|| self.config.snapshot_tokens.clone());
-                let mut seen = BTreeSet::new();
+                let mut scope = self.wallet_tokens(&w.address, r.tokens.as_ref()).await?;
+                let ts = scope.candidates.clone();
                 let mut balances = vec![ResourceAmount {
                     resource: resource(self.config.chain_id, owner),
                     amount: amount(
@@ -574,26 +692,26 @@ impl EthereumAdapter {
                         self.runtime.balance(owner, Some(block)).await?,
                     ),
                 }];
-                for t in ts {
-                    let token = self.token(&t, Some(block)).await?;
-                    require(
-                        token.reference != "native",
-                        "DUPLICATE_TOKEN",
-                        "Native ETH is already included in holdings.",
-                    )?;
-                    require(
-                        seen.insert(token.reference.clone()),
-                        "DUPLICATE_TOKEN",
-                        "Requested holdings duplicate an immutable ERC-20 identity.",
-                    )?;
-                    balances.push(ResourceAmount {
-                        resource: resource(self.config.chain_id, owner),
-                        amount: amount(
-                            &token.asset(self),
-                            self.balance_of(&token, owner, Some(block)).await?,
-                        ),
-                    })
+                for reference in ts {
+                    let observed = async {
+                        let token = self.token(&reference, Some(block)).await?;
+                        let balance = self.balance_of(&token, owner, Some(block)).await?;
+                        Ok::<_, FinError>(ResourceAmount {
+                            resource: resource(self.config.chain_id, owner),
+                            amount: amount(&token.asset(self), balance),
+                        })
+                    }
+                    .await;
+                    match observed {
+                        Ok(holding) => balances.push(holding),
+                        Err(error) if r.tokens.is_some() => return Err(error),
+                        Err(error) => {
+                            scope.complete = false;
+                            scope.warnings.push(format!("Token {reference} could not be verified ({}); its holding is omitted.", error.code));
+                        }
+                    }
                 }
+                discovery = Some(scope);
                 json!(balances)
             }
             "wallet.receipt" => {
@@ -635,7 +753,7 @@ impl EthereumAdapter {
                 let account = self
                     .runtime
                     .call(
-                        address(&self.config.aave.pool)?,
+                        address(&self.aave()?.pool)?,
                         &Pool::getUserAccountDataCall { user: owner },
                         Some(block),
                     )
@@ -645,7 +763,7 @@ impl EthereumAdapter {
             _ => return Err(FinError::validation("Unsupported read.")),
         };
         Ok(
-            json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data}),
+            json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data,"discovery":discovery}),
         )
     }
 }

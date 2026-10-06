@@ -1,10 +1,10 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, and Ethereum wallet/Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, and Ethereum mainnet Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## Delivery objective and sequence
 
-Build a compiled Rust Fin with the existing Binance funding and Ethereum wallet/Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
+Build a compiled Rust Fin with the existing Binance funding, EVM wallet and Ethereum mainnet Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
 
 The implementation goal delivers working code, reproducible automated and fixed-fork verification, updated documentation, a sanitized results report, and a concrete [human test handoff](testing/rust-human-handoff.md). The human subsequently runs onboarding and the real Touch ID path. Human-only checks remain explicitly pending until performed; they must not prevent unrelated implementation and automated verification from finishing. Production/mainnet acceptance still requires the [live-test contract](testing/README.md#live-test-contract), including full restoration.
 
@@ -39,7 +39,7 @@ flowchart TD
 
 The CLI should remain lightweight and avoid linking execution-only venue SDKs or owning keys. A later MCP interface calls the same protected API and registry. The API accepts reviewed named operations, never arbitrary code, venue methods, raw signing requests, approval receipts from clients, or credential-export requests.
 
-Protect executable code, configuration, approval identities, credential storage, and state from the actual agent user's tools. A separate same-user process, masked terminal input, or a keychain entry alone is not an isolation proof. The TS prototype uses a root broker. Evaluate a dedicated service identity and narrow privileged helpers where practical; do not grant broad agent-accessible administrator privileges for startup. Record and test the chosen boundary, including native helper integrity and dynamic-library loading.
+Protect executable code, configuration, approval identities, credential storage, and state from the actual agent user's tools. A separate same-user process, masked terminal input, or a keychain entry alone is not an isolation proof. The macOS implementation uses a root-owned broker and protected code/state. A dedicated service identity may be evaluated later; startup grants no broad agent-accessible administrator privileges. Record and test the chosen boundary, including native helper integrity and dynamic-library loading.
 
 ## Workspace responsibilities
 
@@ -53,7 +53,8 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
 | `fin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
 | `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
-| `fin-ethereum`          | Wallet, Uniswap and Aave requests, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `fin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
+| `fin-ethereum`          | EVM wallets across reviewed networks, optional mainnet Uniswap/Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
 | `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
 | `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
@@ -62,7 +63,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
 | `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
 
-The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses official `ccxt-base =4.5.85` (the raw engine underlying `ccxt`) with Binance, Kraken, Hyperliquid, OKX, Coinbase and Bybit features. SQLite uses `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. The release downloader is implemented; publication remains pending. Publisher authentication and Linux/Windows write authorization are not established by these packages.
+The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses official `ccxt-base =4.5.85` (the raw engine underlying `ccxt`) with Binance, Kraken, Hyperliquid, OKX, Coinbase and Bybit features. SQLite uses `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. Published-release CI builds downloadable bundles; the curl bootstrap verifies their manifests and starts bundled setup. See [release delivery](releases.md). Publisher authentication and Linux/Windows write authorization are not established by these packages.
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
 
@@ -84,6 +85,45 @@ same root ownership, hardened signature and ACL validation as other runtime code
 | Policy/platform                  | Different limits or native authentication | Explicit versioned policy and a tested authorization/storage provider through the existing engine.                          |
 
 Wallet, Uniswap, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+
+### Reusable wallet and network profiles
+
+`ConnectionConfig::Evm` stores an address and protected signer once, independently
+of a chain. Reviewed profiles provide chain identity, public RPCs, confirmations,
+finality requirements and configured token scope. Operation requests use
+`network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
+compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
+Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
+Uniswap/Aave remain mainnet-only, and bridging is outside this increment.
+
+A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
+Protected human-approved `connections update --provider evm` broadens it
+explicitly. Custody and asset identities continue using `ethereum:<chain_id>`;
+renaming the public provider never rewrites persisted resource or submission
+identities. The same address on different chains has distinct balances and
+chain-specific nonce/fee state. Within a chain, aliases cannot duplicate custody.
+
+`wallet.balances` obtains bounded cached Blockscout candidates, combines them
+with explicit/configured token addresses, and verifies contract metadata and
+balances through RPC. It always reports partial discovery, including indexer
+failure/cache warnings. A financial baseline tracks native plus configured token
+scope; successful observation of that scope does not establish all wallet/dapp
+positions. A complete claim must name its scope.
+
+Shared `fin-pricing` valuation serves Binance and every EVM network through
+`UsdPriceSource`, with CoinGecko as the default. ERC-20 lookups use a verified
+chain/platform and exact contract, allowing listed tokens without a per-token
+allowlist. Native ETH uses its verified coin ID; Binance uses a reviewed symbol
+to coin-ID registry, without blind name/symbol search. Unknown or unquoted assets
+may be observed but cannot bypass write/allocation limits. Aave collateral and
+health-factor oracles remain protocol checks, separate from shared USD pricing. Fee preparation freezes the RPC-estimated envelope;
+L2 terminal reconciliation additionally checks finalized inclusion. A receipt
+before the RPC finalized block remains pending with its original identity.
+The finalized marker is not independent proof of the rollup challenge period.
+
+RPC customization belongs to protected network configuration and will need a
+human-authorized setting; no public RPC-changing command is implemented.
+See [wallet verification](testing/evm-wallets.md).
 
 Configuration separates networks, deployments, connections, credential references, and policy. Validate it strictly and version it. Reject aliases that count the same physical account or signer twice; query venue identity when supported and record any remaining human-verified mapping. Trusted policy, destinations, credential replacements, and approval identities require independent human authorization to change.
 
@@ -203,7 +243,34 @@ time has passed.
 
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
-Keep numeraire conversion behind an injectable valuation provider. A venue pair priced in USDT is not automatically USD: combine exact coin/USDT and independently observed USDT/USD values, preserve both sources and the oldest observation, and round cost/value bounds conservatively. The initial Binance provider uses a fixed reviewed Coinbase public product/ticker; unavailable or invalid data blocks writes instead of assuming parity. Price nonzero holdings/positions, selected assets and configured route assets, while retaining all observed holdings for restoration. Original allocation asset identities remain required at every replan even when their local balances reach zero.
+Shared USD valuation is injectable through `fin-pricing::UsdPriceSource`.
+CoinGecko supplies direct positive USD quotes for Binance and EVM assets; there
+is no Binance, Coinbase or Kraken price fallback or assumed stablecoin parity.
+Raw JSON numeric lexemes normalize to exact decimal text without floating-point
+conversion. `updated_at` is RFC3339 derived from provider `last_updated_at`,
+separate from retrieval `observed_at`. Quotes older than 120 seconds, future,
+missing, zero or malformed quotes, and rate limits/outages block writes.
+
+A shared/coalesced cache retains responses for at most 30 seconds and rechecks
+source freshness; it never serves stale quotes after an outage. The 120-second
+source-age bound accommodates the public provider's roughly 60-second update
+cycle without changing the 90-second preview/approval expiry or financial caps.
+Price nonzero holdings/positions, selected assets and configured route assets,
+while retaining all scoped holdings for restoration. Original allocation asset
+identities remain required at every replan even when balances reach zero.
+
+Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
+through protected `connections add --provider coingecko`; the broker retrieves
+them privately from `fin-credentials`, never from environment variables or public
+request metadata. API plan is safe configuration, the key is not. Authenticated
+read-only ping plus a fresh ETH/USD quote precede configuration Touch ID; it
+authorizes saving one
+`market-data:coingecko` connection, not future financial writes. Calls may consume
+plan quota/billing but grant no exchange/wallet access. Without enrollment, the
+provider remains anonymous and unavailable quotes fail closed. There is no
+credential-sharing workaround or alternate exchange-price path. Protocol-specific Aave price/health checks remain necessary
+for its collateral and lending behavior; they do not replace shared wallet USD
+valuation.
 
 Use exact decimal strings at boundaries, integer quantities with explicit asset/scale internally, checked `U256` conversion at EVM boundaries, and exact signed deltas and valuation arithmetic. Never pass financial quantities or policy valuations through `f64`. Use explicit conservative rounding for reserves; requested amounts must not be silently rounded. A fixed-width decimal type is not a universal container for 256-bit chain values.
 
@@ -260,6 +327,11 @@ Serde arbitrary-precision JSON preserves number tokens independently of CCXT's
 dynamic floating-point conversion. Existing Binance parsers still reject numeric financial
 amounts where the venue contract requires strings. No raw CCXT exception, signed
 URL, secret or upstream error body reaches public diagnostics.
+
+Alloy preparation completes nonce, gas and chain fields before approval and
+freezes the approved envelope. Signing/dispatch checks the exact serialized
+sender and payload/fee fields; changing a provider must not mutate the approved
+transaction. A new adapter can reuse runtime tooling only through this path.
 
 Compatibility shims are deliberately limited to demonstrated 4.5.85 gaps:
 
