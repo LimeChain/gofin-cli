@@ -131,7 +131,9 @@ class InstallerFixture(unittest.TestCase):
         if environment:
             env.update(environment)
         return subprocess.run(
-            arguments, capture_output=True, text=True, timeout=15,
+            # Intel CI runs many Python OS doubles more slowly; match the
+            # existing PTY fixture bound without changing product deadlines.
+            arguments, capture_output=True, text=True, timeout=30,
             env=env)
 
     def events(self):
