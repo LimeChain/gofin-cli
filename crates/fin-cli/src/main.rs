@@ -58,37 +58,56 @@ enum Command {
         #[arg(value_enum)]
         action: shell_integration::Action,
     },
+    /// List available commands and financial operations.
     Capabilities,
     /// Generate shell completion from the installed command definitions.
     Completions {
         #[arg(value_enum)]
         shell: CompletionShell,
     },
+    /// Explain a command or operation; omit NAME for usage and examples.
+    #[command(
+        after_help = "Examples:\n  fin explain wallet.balances\n  fin explain connections.add\n\nList available commands and operations: fin capabilities"
+    )]
     Explain {
-        name: String,
+        /// Exact command or financial operation name.
+        name: Option<String>,
     },
+    /// Show input, output and error schemas for a command or operation.
+    #[command(
+        after_help = "Examples:\n  fin schema wallet.balances\n  fin schema wallet.transfer\n\nList available commands and operations: fin capabilities"
+    )]
     Schema {
-        name: String,
+        /// Exact command or financial operation name.
+        name: Option<String>,
     },
+    /// Read balances, positions or other financial data.
     Read(OperationArgs),
+    /// Review a financial operation without moving funds.
     Preview(OperationArgs),
+    /// Execute an operation with fresh Touch ID approval.
     Execute(ExecuteArgs),
-    Status {
-        id: String,
-    },
+    /// Check and reconcile an existing operation.
+    Status { id: String },
+    /// List recorded operations and unresolved submissions.
     Operations,
+    /// Check configuration and protected service readiness.
     Doctor,
+    /// Read financial state within the configured tracking scope.
     Snapshot,
+    /// Plan and track a bounded financial test and its restoration.
     Run {
         #[command(subcommand)]
         command: RunCommand,
     },
     /// Install protected service/storage; macOS may request your Mac login password.
     Setup,
+    /// Start, stop or check the protected service.
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// List or securely manage exchange, wallet and pricing connections.
     Connections {
         #[command(subcommand)]
         command: Option<ConnectionsCommand>,
@@ -123,35 +142,42 @@ struct ExecuteArgs {
 
 #[derive(Subcommand, Debug)]
 enum RunCommand {
+    /// Capture the baseline and reserve a complete execution and return plan.
     Begin {
         #[arg(long)]
         input: String,
     },
-    Status {
-        id: String,
-    },
+    /// Check allocation, operations and restoration progress.
+    Status { id: String },
+    /// Replace the remaining return plan without moving funds.
     Replan {
         id: String,
         #[arg(long)]
         input: String,
     },
-    Finish {
-        id: String,
-    },
+    /// Verify restoration before completing the test.
+    Finish { id: String },
 }
 
 #[derive(Subcommand, Debug)]
 enum DaemonCommand {
+    /// Start the service and verify that it is running.
     Start,
+    /// Check running or stopped state without waking the service.
     Status,
+    /// Keep the service stopped until an explicit start.
     Stop,
 }
 
 #[derive(Subcommand, Debug)]
 enum ConnectionsCommand {
+    /// List enrolled connections without exposing credentials.
     List,
+    /// Enroll a connection privately in your own Terminal.
     Add(ConnectionCommandArgs),
+    /// Replace an existing connection's credentials with human approval.
     Update(fin_discovery::AddConnectionArgs),
+    /// Remove a connection and its stored credentials with human approval.
     Remove(fin_discovery::NamedConnectionArgs),
 }
 
@@ -409,6 +435,17 @@ fn schema(name: &str) -> Option<Value> {
     }))
 }
 
+fn discovery_help(name: &str) -> Value {
+    let mut command = Cli::command();
+    command.build();
+    let help = command
+        .find_subcommand_mut(name)
+        .expect("derived discovery command")
+        .render_help()
+        .to_string();
+    json!({"help": help})
+}
+
 #[async_trait]
 trait Client {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
@@ -445,7 +482,9 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                 json!({"shell":shell.to_string(),"script":String::from_utf8(bytes).map_err(|_| generic_input_error())?}),
             )
         }
-        Command::Explain { name } => find_definition(&name).ok_or_else(|| {
+        Command::Explain { name: None } => Ok(discovery_help("explain")),
+        Command::Schema { name: None } => Ok(discovery_help("schema")),
+        Command::Explain { name: Some(name) } => find_definition(&name).ok_or_else(|| {
             FinError::new(
                 "UNKNOWN_DEFINITION",
                 "discovery",
@@ -453,7 +492,7 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                 "Inspect fin capabilities --json.",
             )
         }),
-        Command::Schema { name } => schema(&name).ok_or_else(|| {
+        Command::Schema { name: Some(name) } => schema(&name).ok_or_else(|| {
             FinError::new(
                 "UNKNOWN_DEFINITION",
                 "discovery",
@@ -863,6 +902,14 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
                 std::io::stdout()
                     .lock()
                     .write_all(value["script"].as_str().unwrap_or_default().as_bytes())
+            } else if matches!(command, "explain" | "schema")
+                && value.get("help").is_some()
+                && !ui.is_machine()
+            {
+                use std::io::Write;
+                std::io::stdout()
+                    .lock()
+                    .write_all(value["help"].as_str().unwrap_or_default().as_bytes())
             } else if command == "internal-completions" && !ui.is_machine() {
                 let message = value["message"].as_str().unwrap_or_default();
                 if matches!(value["status"].as_str(), Some("installed" | "removed")) {
@@ -1010,6 +1057,28 @@ mod tests {
         ]);
         assert!(parse.is_err());
         assert!(Cli::try_parse_from(["fin", "connections", "remove", "--name", "main"]).is_ok());
+    }
+
+    #[test]
+    fn every_visible_command_and_subcommand_has_a_help_description() {
+        fn check(command: &clap::Command) {
+            for child in command
+                .get_subcommands()
+                .filter(|child| !child.is_hide_set())
+            {
+                assert!(
+                    child
+                        .get_about()
+                        .is_some_and(|about| !about.to_string().trim().is_empty()),
+                    "missing description: {}",
+                    child.get_name()
+                );
+                check(child);
+            }
+        }
+        let mut command = Cli::command();
+        command.build();
+        check(&command);
     }
 
     #[test]

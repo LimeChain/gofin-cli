@@ -89,6 +89,10 @@ reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signin
 and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
 
+Use `fin --help` for command descriptions, bare `fin explain` or `fin schema` for usage and examples,
+and `fin capabilities` to list all command and operation names. For a specific
+operation, run `fin explain wallet.balances`.
+
 One EVM connection shares an address and protected signer across reviewed chains:
 
 ```sh

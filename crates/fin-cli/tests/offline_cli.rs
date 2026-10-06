@@ -9,6 +9,54 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn bare_discovery_commands_show_usage_and_keep_machine_output_structured() {
+    for command in ["explain", "schema"] {
+        let human = run(&[command]);
+        assert!(human.status.success());
+        assert!(human.stderr.is_empty());
+        let help = String::from_utf8(human.stdout).unwrap();
+        for expected in [
+            "Usage:",
+            "[NAME]",
+            &format!("fin {command} wallet.balances"),
+            "fin capabilities",
+        ] {
+            assert!(help.contains(expected), "missing {expected}");
+        }
+        assert!(!help.contains("INVALID_COMMAND") && !help.contains('\u{1b}'));
+        let explicit = run(&[command, "--help"]);
+        assert!(explicit.status.success());
+        assert_eq!(String::from_utf8(explicit.stdout).unwrap(), help);
+        for args in [
+            vec![command, "--json"],
+            vec![command, "--json", "--verbose"],
+        ] {
+            let machine = run(&args);
+            assert!(machine.status.success());
+            assert!(machine.stderr.is_empty());
+            let value: Value = serde_json::from_slice(&machine.stdout).unwrap();
+            assert_eq!(value["help"], help);
+            assert_eq!(value.as_object().unwrap().len(), 1);
+        }
+        let unknown = run(&[command, "synthetic.unknown", "--json"]);
+        assert!(!unknown.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&unknown.stdout).unwrap()["error"]["code"],
+            "UNKNOWN_DEFINITION"
+        );
+        let schema = run(&["schema", command, "--json"]);
+        assert!(schema.status.success());
+        let value: Value = serde_json::from_slice(&schema.stdout).unwrap();
+        assert_eq!(value["semantics"]["service_required"], false);
+        assert!(
+            !value["input"]["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == "name"))
+        );
+    }
+}
+
+#[test]
 fn offline_discovery_commands_work_without_service() {
     let help = run(&["--help"]);
     assert!(help.status.success());

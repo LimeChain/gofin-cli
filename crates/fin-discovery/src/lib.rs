@@ -160,8 +160,9 @@ pub struct IdInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct NameInput {
-    pub name: String,
+pub struct DefinitionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 pub fn validate_name(value: &str) -> Result<()> {
@@ -365,21 +366,21 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"service_required":false,"secret_input":"none","financial_movement":false}),
         ),
-        definition::<NameInput>(
+        definition::<DefinitionInput>(
             "explain",
-            "Explain a bundled Fin command or financial operation by its exact name.",
+            "Explain a bundled command or financial operation; omit name for usage and examples.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({"name":"setup"}),
-            json!({"service_required":false,"secret_input":"none","financial_movement":false}),
+            json!({"service_required":false,"secret_input":"none","financial_movement":false,"without_name":"Help and examples; machine output is a help object, as with --help.","catalog_command":"fin capabilities"}),
         ),
-        definition::<NameInput>(
+        definition::<DefinitionInput>(
             "schema",
-            "Show the bundled input, output, error, example, and actor metadata for a command or operation.",
+            "Show bundled input, output, error and actor metadata; omit name for usage and examples.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({"name":"connections.add"}),
-            json!({"service_required":false,"secret_input":"none","financial_movement":false}),
+            json!({"service_required":false,"secret_input":"none","financial_movement":false,"without_name":"Help and examples; machine output is a help object, as with --help.","catalog_command":"fin capabilities"}),
         ),
         definition::<OperationInput>(
             "read",
