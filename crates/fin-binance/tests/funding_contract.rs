@@ -177,12 +177,12 @@ fn withdrawal_allowlist_endpoint_is_fixed_get_only_and_malformed_whitelist_is_un
         .is_err(),
         "invalid origin metadata isn't coerced into a supported value"
     );
-    // This plumbing doesn't publish a read operation that would expose full addresses.
-    assert!(
-        fin_binance::operation_definitions()
-            .iter()
-            .all(|definition| { definition.name != "binance.withdraw-address-list" })
-    );
+    let definition = fin_binance::operation_definitions()
+        .into_iter()
+        .find(|definition| definition.name == "binance.whitelist")
+        .unwrap();
+    assert_eq!(definition.kind, fin_domain::OperationKind::Read);
+    assert_eq!(definition.semantics["editing_supported"], false);
 }
 
 #[test]
@@ -687,7 +687,15 @@ fn operation_definitions_are_available_offline_and_writes_remain_agent_plannable
             .any(|definition| definition.name == "binance.deposit-history")
     );
     assert!(definitions.iter().all(|definition| {
-        definition.execution_actor == fin_domain::ExecutionActor::AgentInvocable
+        if definition.kind == fin_domain::OperationKind::Write {
+            definition.execution_actor == fin_domain::ExecutionActor::AgentInvocable
+        } else {
+            matches!(
+                definition.execution_actor,
+                fin_domain::ExecutionActor::AgentInvocable
+                    | fin_domain::ExecutionActor::AgentReadable
+            )
+        }
     }));
     assert!(
         !definitions

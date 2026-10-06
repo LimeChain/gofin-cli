@@ -985,3 +985,32 @@ async fn queued_trading_order_and_cancel_expiry_prevents_signing_and_network() {
         assert_eq!(server.finish(), 1);
     }
 }
+
+#[tokio::test]
+async fn deposit_address_list_uses_official_signed_get_without_mutation_or_retry() {
+    let server = Server::new(
+        200,
+        r#"[{"coin":"ETH","address":"synthetic-address","tag":"exact-memo","isDefault":1}]"#,
+        Duration::ZERO,
+    );
+    let result = CcxtClient::for_test(&server.url)
+        .unwrap()
+        .request(
+            ExchangeId::Binance,
+            Method::BinanceDepositAddressList,
+            credentials("SYNTHETIC-HMAC-SECRET".into()),
+            vec![
+                ("coin".into(), "ETH".into()),
+                ("network".into(), "ETH".into()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(result[0]["tag"], "exact-memo");
+    let request = server.request();
+    assert!(request.starts_with("GET /sapi/v1/capital/deposit/address/list?"));
+    assert!(request.contains("coin=ETH"));
+    assert!(request.contains("network=ETH"));
+    assert!(request.contains("signature="));
+    assert_eq!(server.finish(), 1);
+}

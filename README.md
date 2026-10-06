@@ -239,8 +239,22 @@ Loss, funding and commission bounds use exact decimals; no default fee estimate
 or USDT peg substitutes for observed evidence.
 
 Withdrawal support currently covers ETH to an enrolled Ethereum mainnet wallet.
-Deposit-address lookup is available; explicit address creation and withdrawal
-whitelist editing are not implemented.
+Deposit-address lookup/listing and withdrawal whitelist inspection are available.
+Binance's documented public API exposes no explicit address creation/rotation or
+whitelist add/remove endpoint; those changes require Binance's website/app.
+Fin supplies human-edit guidance and can recheck the reported address book:
+
+```sh
+fin read binance.deposit-addresses --input '{"account":"master","coin":"ETH","network":"ETH"}' --json
+fin read binance.whitelist --input '{"account":"master"}' --json
+fin read binance.whitelist --input '{"account":"master","coin":"ETH","network":"ETH","address":"0x1111111111111111111111111111111111111111","memo":""}' --json
+```
+
+The address in the last example is synthetic; replace it with your actual public
+destination. A whitelist check returns `enabled`, `disabled`, `absent` or
+`unknown` for that exact destination. It does not prove account-wide whitelist
+enforcement or expiry of Binance's activation cooldown. See the
+[address-book report](docs/reports/binance-address-book.md).
 
 [Trading verification and limitations](docs/reports/binance-trading.md) and the
 [human trading checklist](docs/testing/binance-trading.md) separate synthetic

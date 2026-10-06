@@ -1102,7 +1102,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 46);
+        assert_eq!(financial_catalog().len(), 48);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 

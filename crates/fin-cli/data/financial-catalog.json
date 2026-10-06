@@ -5106,6 +5106,156 @@
     }
   },
   {
+    "name": "binance.deposit-addresses",
+    "description": "List Binance deposit addresses for an explicit coin/network. Creating an additional address requires Binance's website/app.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "coin": {
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^[A-Z0-9_-]+$",
+          "type": "string"
+        },
+        "network": {
+          "maxLength": 40,
+          "minLength": 1,
+          "pattern": "^[A-Z0-9_-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "account",
+        "coin",
+        "network"
+      ],
+      "title": "DepositAddressInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "addresses": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "coin": {
+                "type": "string"
+              },
+              "isDefault": {
+                "enum": [
+                  0,
+                  1
+                ],
+                "type": "integer"
+              },
+              "tag": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "coin",
+              "address",
+              "tag",
+              "isDefault"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "coin": {
+          "type": "string"
+        },
+        "creationSupported": {
+          "const": false
+        },
+        "creditProof": {
+          "type": "string"
+        },
+        "humanAction": {
+          "type": "string"
+        },
+        "network": {
+          "type": "string"
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.deposit-addresses"
+        }
+      },
+      "required": [
+        "operation",
+        "account",
+        "coin",
+        "network",
+        "observedAt",
+        "addresses",
+        "creationSupported",
+        "humanAction",
+        "creditProof"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "master",
+        "coin": "ETH",
+        "network": "ETH"
+      }
+    ],
+    "coverage": "Documented Binance GET routes; synthetic tests. Authenticated live observations pending.",
+    "completion": "Bounded address-book observation only; no address creation, whitelist modification, account-wide enforcement or withdrawal eligibility proof.",
+    "semantics": {
+      "editing_supported": false,
+      "financial_movement": false,
+      "human_action": "Use Binance Deposit Crypto to claim a new address where available, then repeat this read.",
+      "limits": "Per-entry whitelist flags do not prove account-wide enforcement or that a security cooldown has elapsed.",
+      "maximum_rows": 1000,
+      "next_check": "fin read binance.deposit-addresses --input JSON --json"
+    }
+  },
+  {
     "name": "binance.deposit-history",
     "description": "Paginated Binance deposit history with pending, locked, and usable credit kept distinct.",
     "kind": "read",
@@ -8097,6 +8247,278 @@
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
       "walletType": "SPOT"
+    }
+  },
+  {
+    "name": "binance.whitelist",
+    "description": "Inspect withdrawal-address whitelist flags, optionally checking an exact coin/network/address/memo. Editing requires Binance's website/app.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "address"
+            ]
+          },
+          "then": {
+            "properties": {
+              "coin": {
+                "type": "string"
+              },
+              "network": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "coin",
+              "network"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "memo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "memo"
+            ]
+          },
+          "then": {
+            "properties": {
+              "address": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "address"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "address": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coin": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[A-Z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "memo": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[A-Z0-9_-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "title": "WhitelistInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "accountWhitelistEnforcement": {
+          "const": "unknown"
+        },
+        "activationStatus": {
+          "const": "unknown"
+        },
+        "editingSupported": {
+          "const": false
+        },
+        "entries": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "addressTag": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "coin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "network": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "origin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "originType": {
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ]
+              },
+              "whiteStatus": {
+                "enum": [
+                  "enabled",
+                  "disabled",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "address",
+              "whiteStatus"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "humanAction": {
+          "type": "string"
+        },
+        "matchStatus": {
+          "enum": [
+            "not_requested",
+            "absent",
+            "enabled",
+            "disabled",
+            "unknown"
+          ]
+        },
+        "observedAt": {
+          "type": "string"
+        },
+        "operation": {
+          "const": "binance.whitelist"
+        }
+      },
+      "required": [
+        "operation",
+        "account",
+        "observedAt",
+        "entries",
+        "matchStatus",
+        "accountWhitelistEnforcement",
+        "activationStatus",
+        "editingSupported",
+        "humanAction"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "account": "master",
+        "address": "0x1111111111111111111111111111111111111111",
+        "coin": "ETH",
+        "memo": "",
+        "network": "ETH"
+      }
+    ],
+    "coverage": "Documented Binance GET routes; synthetic tests. Authenticated live observations pending.",
+    "completion": "Bounded address-book observation only; no address creation, whitelist modification, account-wide enforcement or withdrawal eligibility proof.",
+    "semantics": {
+      "editing_supported": false,
+      "financial_movement": false,
+      "human_action": "Use Binance withdrawal Address Management to edit entries and complete its security checks, then repeat this read.",
+      "limits": "Per-entry whitelist flags do not prove account-wide enforcement or that a security cooldown has elapsed.",
+      "maximum_rows": 1000,
+      "next_check": "fin read binance.whitelist --input JSON --json"
     }
   },
   {

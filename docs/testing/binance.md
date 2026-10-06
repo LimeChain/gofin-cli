@@ -96,3 +96,22 @@ Automated tests should model the endpoint-level response shapes and validate acc
 Live acceptance requires accounts with the relevant capabilities. A lack of subaccount access, an account-specific withdrawal requirement, or a venue suspension should produce a blocked case with the reason. Continue other tests rather than inventing a passing result. Spot Testnet cannot complete this funding journey; see the [environment limitations](README.md).
 
 Use [the run report](report-template.md), including baseline/restored quantities, USD valuations, costs, venue IDs, chain evidence, actual commands, approval count, and any unresolved operations. Required cleanup movements use the preplanned return route and fresh approvals. Do not substitute a different asset, account, or larger budget to conceal an incomplete restoration.
+
+
+## Public address-book support
+
+Current named reads: `binance.deposit-address` (selected address),
+`binance.deposit-addresses` (address list for an explicit coin/network), and
+`binance.whitelist` (withdrawal address book and optional exact destination check).
+Inspect their schemas before invocation. An empty deposit list does not generate
+an address; use Binance Deposit Crypto to create one where available, then re-read.
+Whitelist edits belong in Binance withdrawal Address Management; Fin rechecks the
+result through the documented GET endpoint. Public API add/remove and explicit
+new-address creation/rotation are unsupported.
+
+Synthetic checks cover disabled deposits, missing tags, mismatched identities,
+duplicate deposit addresses, unknown/nonboolean whitelist flags, missing asset/
+network/memo metadata, conflicting entries, exact memo matching, Ethereum address
+case, oversized lists, secret/unknown input rejection and GET-only routing.
+A reported enabled entry is not proof of account-wide enforcement or cooldown
+expiry. Authenticated live observations remain pending for these new reads.

@@ -21,7 +21,7 @@ fn offline_discovery_commands_work_without_service() {
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 46);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 48);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
@@ -436,4 +436,39 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
         let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(schema["execution_actor"], "agent_invocable");
     }
+}
+
+#[test]
+fn address_book_discovery_exposes_reads_and_human_mutation_handoff_without_service() {
+    for name in ["binance.deposit-addresses", "binance.whitelist"] {
+        let result = run(&["schema", name, "--json", "--verbose"]);
+        assert!(result.status.success());
+        assert!(result.stderr.is_empty());
+        assert!(!result.stdout.contains(&0x1b));
+        let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(schema["execution_actor"], "agent_readable");
+        assert_eq!(schema["input"]["additionalProperties"], false);
+        assert_eq!(schema["output"]["additionalProperties"], false);
+        let explanation = run(&["explain", name, "--json"]);
+        let definition: Value = serde_json::from_slice(&explanation.stdout).unwrap();
+        assert_eq!(definition["kind"], "read");
+        assert_eq!(definition["semantics"]["editing_supported"], false);
+        assert!(
+            definition["semantics"]["human_action"]
+                .as_str()
+                .unwrap()
+                .contains("Binance")
+        );
+    }
+    let result = run(&["capabilities", "--json"]);
+    let capability: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let binance = &capability["exchanges"]["fin"]["binance"];
+    assert_eq!(binance["deposit_address_creation"], false);
+    assert_eq!(binance["withdrawal_whitelist_editing"], false);
+    assert!(
+        binance["address_management"]["whitelist_editing"]["recheck"]
+            .as_str()
+            .unwrap()
+            .contains("binance.whitelist")
+    );
 }

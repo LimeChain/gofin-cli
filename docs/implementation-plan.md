@@ -358,3 +358,21 @@ submission in the same run. A generic cancellation effect proves removal of the
 remainder; original fills, costs and reservation belong to the original order.
 Response loss/restart use the recorded client/numeric order IDs, never another POST.
 Reproduce synthetic results and pending cases in the [trading report](reports/binance-trading.md).
+
+
+## Public Binance address management — 6 October 2026
+
+Expose `binance.deposit-addresses` through the documented signed GET address-list
+route and `binance.whitelist` through the existing withdrawal-address-list route.
+Use explicit deposit coin/network selectors; preserve tag and default-address
+flags. Optional whitelist checks bind coin, network, address and exact memo, with
+missing or contradictory evidence reported as unknown. A per-entry flag cannot
+prove account-wide enforcement, withdrawal eligibility or cooldown expiry.
+
+Binance's public documentation and CCXT 4.5.85 do not expose explicit additional
+address creation/rotation or whitelist add/remove. The user confirmed public APIs
+only. Keep these mutations unsupported and discoverable with human website/app
+instructions and exact recheck commands; do not invent endpoints, reuse website
+sessions, or advertise a local alias as a Binance whitelist edit. Fresh approval
+and limits on existing financial writes remain unchanged. No live mutation is
+performed by these reads. [Verification](reports/binance-address-book.md).

@@ -1,4 +1,5 @@
 use super::*;
+mod address_book;
 mod trading;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -1724,6 +1725,7 @@ fn definitions() -> Vec<Definition> {
     }).collect();
     result.extend(crate::trading_reads::trading_read_definitions());
     result.extend(trading::definitions());
+    result.extend(address_book::definitions());
     result
 }
 
@@ -2327,6 +2329,9 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     async fn read(&self, operation: &str, raw: &Value) -> Result<Value, FinError> {
+        if matches!(operation, "binance.deposit-addresses" | "binance.whitelist") {
+            return self.read_address_book(operation, raw).await;
+        }
         if operation.starts_with("binance.spot.") || operation.starts_with("binance.futures.") {
             return crate::trading_reads::trading_read(
                 operation,

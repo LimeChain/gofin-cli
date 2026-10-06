@@ -16,6 +16,18 @@ configuration or broadcast to production. Node disposal after a failure does not
 establish financial restoration. Actual human checks are in the
 [Rust handoff checklist](rust-human-handoff.md).
 
+## Binance address-book regressions
+
+```sh
+cargo test --locked -p fin-binance --test address_book
+cargo test --locked -p fin-exchange --features binance,kraken --lib deposit_address_list_uses_official
+cargo test --locked -p fin-cli --test offline_cli address_book_discovery
+```
+
+These are offline/synthetic reads. The [address-book report](../reports/binance-address-book.md)
+records public API limitations and pending live observations; no whitelist edit or
+address creation is claimed by a successful lookup.
+
 ## Binance trading regressions
 
 ```sh

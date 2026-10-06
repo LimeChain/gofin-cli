@@ -186,6 +186,7 @@ pub enum BinanceEndpoint {
     SubAccountSpotAssets,
     CapitalConfig,
     DepositAddress,
+    DepositAddressList,
     WithdrawAddressList,
     DepositHistory,
     WithdrawalHistory,
@@ -256,6 +257,7 @@ impl BinanceEndpoint {
             Self::SubAccountSpotAssets => ("GET", "/sapi/v4/sub-account/assets"),
             Self::CapitalConfig => ("GET", "/sapi/v1/capital/config/getall"),
             Self::DepositAddress => ("GET", "/sapi/v1/capital/deposit/address"),
+            Self::DepositAddressList => ("GET", "/sapi/v1/capital/deposit/address/list"),
             Self::WithdrawAddressList => ("GET", "/sapi/v1/capital/withdraw/address/list"),
             Self::DepositHistory => ("GET", "/sapi/v1/capital/deposit/hisrec"),
             Self::WithdrawalHistory => ("GET", "/sapi/v1/capital/withdraw/history"),
@@ -424,7 +426,7 @@ impl BinanceRequest {
             ),
             BinanceEndpoint::SubAccountList => (&[], &["email", "page", "limit", "recvWindow"]),
             BinanceEndpoint::SubAccountSpotAssets => (&["email"], &["email", "recvWindow"]),
-            BinanceEndpoint::DepositAddress => {
+            BinanceEndpoint::DepositAddress | BinanceEndpoint::DepositAddressList => {
                 (&["coin", "network"], &["coin", "network", "recvWindow"])
             }
             BinanceEndpoint::DepositHistory | BinanceEndpoint::WithdrawalHistory => (
@@ -1438,6 +1440,7 @@ impl BinanceCcxtTransport {
             BinanceEndpoint::SubAccountSpotAssets => Method::BinanceSubAccountSpotAssets,
             BinanceEndpoint::CapitalConfig => Method::BinanceCapitalConfig,
             BinanceEndpoint::DepositAddress => Method::BinanceDepositAddress,
+            BinanceEndpoint::DepositAddressList => Method::BinanceDepositAddressList,
             BinanceEndpoint::WithdrawAddressList => Method::BinanceWithdrawAddressList,
             BinanceEndpoint::DepositHistory => Method::BinanceDepositHistory,
             BinanceEndpoint::WithdrawalHistory => Method::BinanceWithdrawalHistory,
