@@ -912,7 +912,9 @@ impl DefaultMasterReceiptTransport {
 
     fn outside_timestamp(&self, end: u64) -> u64 {
         let mut timestamp = self.invalid_timestamp.lock().unwrap();
-        *timestamp.get_or_insert_with(|| end.saturating_add(1))
+        // Master and child history reads capture different window end times.
+        // A 1 ms offset can become valid before the child read on a busy runner.
+        *timestamp.get_or_insert_with(|| end.saturating_add(86_400_000))
     }
 }
 
