@@ -36,7 +36,8 @@ pub enum SecretMaterial {
         api_key: String,
         private_key: String,
     },
-    EthereumPrivateKey {
+    #[serde(alias = "ethereum_private_key")]
+    EvmPrivateKey {
         private_key: String,
     },
 }
@@ -61,7 +62,7 @@ impl SecretMaterial {
                 !api_key.is_empty()
                     && ed25519_dalek::SigningKey::from_pkcs8_pem(private_key).is_ok()
             }
-            Self::EthereumPrivateKey { private_key } => {
+            Self::EvmPrivateKey { private_key } => {
                 let raw = private_key.strip_prefix("0x").unwrap_or(private_key);
                 raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
             }
@@ -408,9 +409,22 @@ mod tests {
         assert!(!error.to_string().contains("SYNTHETIC"));
     }
     #[test]
+    fn legacy_ethereum_key_records_are_reusable_evm_keys_without_secret_export() {
+        let synthetic = "01".repeat(32); // Isolated fixture only, never a live key.
+        let old = serde_json::json!({"type":"ethereum_private_key","private_key":synthetic});
+        let material: SecretMaterial = serde_json::from_value(old).unwrap();
+        material.validate_present().unwrap();
+        assert!(matches!(material, SecretMaterial::EvmPrivateKey { .. }));
+        assert_eq!(
+            serde_json::to_value(&material).unwrap()["type"],
+            "evm_private_key"
+        );
+        assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+    }
+    #[test]
     fn debug_and_bad_input_errors_never_echo_secret_values() {
         let sentinel = "SYNTHETIC-NEVER-A-REAL-SECRET";
-        let material = SecretMaterial::EthereumPrivateKey {
+        let material = SecretMaterial::EvmPrivateKey {
             private_key: sentinel.into(),
         };
         assert!(!format!("{material:?}").contains(sentinel));

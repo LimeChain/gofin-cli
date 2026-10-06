@@ -372,11 +372,24 @@ fn render_interaction(output: &mut String, semantics: &Value) {
         "binance prerequisites",
         semantics.pointer("/binance/prerequisites"),
     );
-    render_brief_field(
-        output,
-        "ethereum networks",
-        semantics.pointer("/ethereum/networks"),
-    );
+    render_brief_field(output, "EVM wallet", semantics.pointer("/evm/wallet_scope"));
+    if let Some(profiles) = semantics
+        .pointer("/evm/network_profiles")
+        .and_then(Value::as_array)
+    {
+        let names = profiles
+            .iter()
+            .filter_map(|profile| profile.get("name").and_then(Value::as_str))
+            .map(safe_text)
+            .collect::<Vec<_>>();
+        line(output, 0, &format!("Networks: {}.", names.join(", ")));
+    } else {
+        render_brief_field(
+            output,
+            "Ethereum networks",
+            semantics.pointer("/ethereum/networks"),
+        );
+    }
     if let Some(fields) = semantics.as_object() {
         for (key, field) in fields {
             if key == "maximum"
@@ -710,6 +723,7 @@ mod tests {
                 "configuration_authorization":"Separate Touch ID approval.",
                 "administrator_authentication":{"explanation":"Your Mac login password.","internal":"hidden authentication metadata"},
                 "binance":{"prerequisites":["Allow this machine IP."],"internal":"hidden provider metadata"},
+                "evm":{"wallet_scope":"One EVM wallet reusable across reviewed networks.","network_profiles":[{"name":"Ethereum Mainnet"},{"name":"Arbitrum One"},{"name":"Robinhood Chain"}]},
                 "command_line_examples":["fin connections add", "fin connections add --provider binance --name main --role main"],
                 "machine_contract":{"internal":"hidden semantic metadata"}
             },
@@ -722,6 +736,8 @@ mod tests {
             "Separate Touch ID approval.",
             "Your Mac login password.",
             "Allow this machine IP.",
+            "One EVM wallet reusable across reviewed networks.",
+            "Networks: Ethereum Mainnet, Arbitrum One, Robinhood Chain.",
             "fin connections add --provider binance --name main --role main",
             "Use --verbose",
         ] {

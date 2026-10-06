@@ -21,12 +21,13 @@ impl EthereumAdapter {
             "WRITE_OPERATION_REQUIRED",
             "Read operations have no financial execution preview.",
         )?;
+        self.require_operation(operation)?;
         let r = request::parse(operation, input)?;
         let w = self.resolve(&r, true)?;
         let owner = address(&w.address)?;
         self.runtime.assert_chain().await?;
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
-            self.config.weth.as_str()
+            self.weth()?
         } else if operation == "uniswap.swap" {
             r.token_in.as_deref().expect("schema")
         } else {
@@ -276,7 +277,7 @@ impl EthereumAdapter {
                     "DEADLINE_INVALID",
                     "Swap deadline must be in the next ten minutes.",
                 )?;
-                let router = address(&self.config.uniswap.router)?;
+                let router = address(&self.uniswap()?.router)?;
                 self.runtime.code(router).await?;
                 require(
                     {
@@ -287,7 +288,7 @@ impl EthereumAdapter {
                     "Exact input must be covered by a finite router allowance.",
                 )?;
                 to = router;
-                b.spender = Some(self.config.uniswap.router.clone());
+                b.spender = Some(self.uniswap()?.router.clone());
                 b.recipient = Some(lower_address(recipient));
                 b.output = Some(quote.token_out.asset(self));
                 b.minimum_output = Some(quantity(minimum));
@@ -328,10 +329,10 @@ impl EthereumAdapter {
                     "Aave reserve must be active and unpaused.",
                 )?;
                 let user = self.user_reserve(&token, owner, None).await?;
-                let pool = address(&self.config.aave.pool)?;
+                let pool = address(&self.aave()?.pool)?;
                 to = pool;
-                b.pool = Some(self.config.aave.pool.clone());
-                b.spender = Some(self.config.aave.pool.clone());
+                b.pool = Some(self.aave()?.pool.clone());
+                b.spender = Some(self.aave()?.pool.clone());
                 b.a_token = Some(reserve.a_token.clone());
                 b.debt_token = Some(reserve.variable_debt_token.clone());
                 b.supplied_before = Some(user.supplied.clone());
@@ -410,9 +411,8 @@ impl EthereumAdapter {
                     "POSITION_PRINCIPAL_CHANGED",
                     "Current scaled principal differs from broker-proved prior anchor.",
                 )?;
-                let supply_position = position(&self.config.aave.pool, &token.reference, "supply");
-                let debt_position =
-                    position(&self.config.aave.pool, &token.reference, "variable-debt");
+                let supply_position = position(&self.aave()?.pool, &token.reference, "supply");
+                let debt_position = position(&self.aave()?.pool, &token.reference, "variable-debt");
                 match operation {
                     "aave.supply" => {
                         require(
@@ -680,7 +680,7 @@ impl EthereumAdapter {
                         b.enabled = Some(enabled);
                         intent.expected.push(EffectConstraint::Authority {
                             resource: resource.clone(),
-                            authority: collateral(&self.config.aave.pool, &token.reference),
+                            authority: collateral(&self.aave()?.pool, &token.reference),
                             before: user.collateral_enabled.to_string(),
                             after: enabled.to_string(),
                         });
@@ -817,8 +817,8 @@ impl EthereumAdapter {
             )?;
         }
         if operation.starts_with("aave.") {
-            let supply_pos = position(&self.config.aave.pool, &token.reference, "supply");
-            let debt_pos = position(&self.config.aave.pool, &token.reference, "variable-debt");
+            let supply_pos = position(&self.aave()?.pool, &token.reference, "supply");
+            let debt_pos = position(&self.aave()?.pool, &token.reference, "variable-debt");
             let cash = AccountingLocation::Cash {
                 resource: resource.clone(),
             };
@@ -857,7 +857,7 @@ impl EthereumAdapter {
                 let before = b.collateral_before.expect("collateral").to_string();
                 intent.expected.push(EffectConstraint::AuthorityTransition {
                     resource: resource.clone(),
-                    authority: collateral(&self.config.aave.pool, &token.reference),
+                    authority: collateral(&self.aave()?.pool, &token.reference),
                     before: before.clone(),
                     allowed_after: if operation == "aave.supply" {
                         vec![before, "true".into()]
@@ -1018,7 +1018,7 @@ impl EthereumAdapter {
             input: input.clone(),
             binding: serde_json::to_value(b).expect("binding serializable"),
             summary: format!(
-                "{} from {} on Ethereum chain {} with exact principal {} and maximum native gas {}",
+                "{} from {} on EVM chain {} with exact principal {} and maximum native gas {}",
                 request::description(operation),
                 w.name,
                 self.config.chain_id,

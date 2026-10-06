@@ -5,8 +5,8 @@
 Fin is a compiled Rust CLI for local financial execution. An agent discovers
 operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
-The current adapters cover Binance funding and Ethereum wallets, Uniswap and
-Aave. The [product concept](docs/fin-product-concept.md) describes the broader
+The current adapters cover Binance funding, reusable EVM wallets on Ethereum,
+Arbitrum One and Robinhood Chain, plus Ethereum mainnet Uniswap and Aave. The [product concept](docs/fin-product-concept.md) describes the broader
 exchange, trading and DeFi scope. MCP and general chain-to-chain bridging follow
 later. Fin is open source; license selection is pending.
 
@@ -85,9 +85,26 @@ process collects credentials through hidden terminal input and performs
 read-only validation before configuration approval. Never put credentials in
 chat, flags, JSON, environment variables or an agent terminal. Later
 `connections add`, `update` and `remove` use the same protected path without
-reinstalling. Binance supports HMAC, RSA and Ed25519; Ethereum supports signing
-and read-only wallets. Inspect provider-specific prerequisites with
+reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signing
+and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
+
+One EVM connection shares an address and protected signer across reviewed chains:
+
+```sh
+fin connections add --provider evm --name wallet --credential-type private_key
+fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
+fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":4663}' --json
+```
+
+Enrollment requires no network. Each operation selects its explicit `chain_id`:
+Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
+ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
+native/ERC-20 transfers. Dapps and bridging on those networks are later work.
+Automatic token discovery is partial; candidates are verified against RPC and
+explicit token addresses remain available. Unknown USD valuations block writes.
+See the [EVM wallet guide](docs/testing/evm-wallets.md) for scope, compatibility,
+transfer previews and the human verification checklist.
 
 Discover current schemas before preparing an operation:
 

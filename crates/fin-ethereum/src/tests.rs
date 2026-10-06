@@ -103,7 +103,7 @@ impl Fixture {
     fn state(&self, tag: &Value) -> AtBlock {
         let block = tag
             .as_str()
-            .filter(|s| *s != "latest")
+            .filter(|s| *s != "latest" && *s != "finalized")
             .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
             .unwrap_or(self.latest.load(Ordering::SeqCst));
         self.states
@@ -811,7 +811,7 @@ impl EvmRpc for Fixture {
             "eth_getBlockByNumber" => {
                 let n = params[0]
                     .as_str()
-                    .filter(|s| *s != "latest")
+                    .filter(|s| *s != "latest" && *s != "finalized")
                     .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
                     .unwrap_or(latest);
                 json!({"hash":blockhash(n),"number":format!("{n:#x}"),"baseFeePerGas":"0x1"})
@@ -1082,17 +1082,17 @@ impl EvmRpc for Fixture {
 }
 fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
     let config = EthereumConfig {
-        weth: lower_address(addr(100)),
+        weth: Some(lower_address(addr(100))),
         snapshot_tokens: vec![lower_address(addr(101))],
-        uniswap: UniswapConfig {
+        uniswap: Some(UniswapConfig {
             factory: lower_address(addr(450)),
             quoter: lower_address(addr(460)),
             router: lower_address(addr(470)),
-        },
-        aave: AaveConfig {
+        }),
+        aave: Some(AaveConfig {
             pool: lower_address(addr(300)),
             oracle: lower_address(addr(400)),
-        },
+        }),
         ..Default::default()
     };
     EthereumAdapter::new(
@@ -2798,7 +2798,8 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .code,
         "PLAN_ALLOWANCE_UNFUNDED"
     );
-    let approve = mk(json!({"token":weth,"spender":a.config.uniswap.router,"amount":q}));
+    let approve =
+        mk(json!({"token":weth,"spender":a.config.uniswap.as_ref().unwrap().router,"amount":q}));
     let proof = a
         .preflight_return_route("wallet.approve", &approve, &context)
         .await
@@ -2816,7 +2817,8 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
     );
     apply_test_plan(&mut context, proof);
     let supply_q = "0.006666666666666667";
-    let approve = mk(json!({"token":weth,"spender":a.config.aave.pool,"amount":supply_q}));
+    let approve =
+        mk(json!({"token":weth,"spender":a.config.aave.as_ref().unwrap().pool,"amount":supply_q}));
     let proof = a
         .preflight_return_route("wallet.approve", &approve, &context)
         .await
@@ -2853,7 +2855,8 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .code,
         "PLAN_DEBT_UNCLOSED"
     );
-    let approve_repay = mk(json!({"token":usdc,"spender":a.config.aave.pool,"amount":"1.02"}));
+    let approve_repay =
+        mk(json!({"token":usdc,"spender":a.config.aave.as_ref().unwrap().pool,"amount":"1.02"}));
     let proof = a
         .preflight_return_route("wallet.approve", &approve_repay, &context)
         .await
@@ -3171,7 +3174,8 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .iter()
             .all(|p| p.amount.maximum.is_zero())
     );
-    let approve_reverse = mk(json!({"token":usdc,"spender":a.config.uniswap.router,"amount":"11"}));
+    let approve_reverse =
+        mk(json!({"token":usdc,"spender":a.config.uniswap.as_ref().unwrap().router,"amount":"11"}));
     let proof = a
         .preflight_return_route("wallet.approve", &approve_reverse, &context)
         .await
@@ -3919,4 +3923,764 @@ async fn broker_verified_native_deposit_is_exact_scoped_fresh_and_decimal_safe()
     let binding: Binding = serde_json::from_value(prepared.binding).unwrap();
     assert_eq!(binding.transaction.to, target.address);
     assert_eq!(binding.transaction.value, debit);
+}
+
+mod wallet_only_tests {
+    use super::*;
+    struct Prices(AtomicU64);
+    #[async_trait]
+    impl WalletValuation for Prices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            Ok((
+                quantity(
+                    mul(
+                        fin_evm::u256(&units)?,
+                        U256::from(self.0.load(Ordering::SeqCst)),
+                    )? / pow10(asset.decimals)?,
+                ),
+                "synthetic-wallet-usd".into(),
+            ))
+        }
+    }
+    struct Discovery {
+        complete: bool,
+        failure: bool,
+    }
+    #[async_trait]
+    impl TokenDiscovery for Discovery {
+        async fn tokens(&self, chain: u64, owner: &str) -> Result<TokenDiscoveryResult> {
+            assert!([42161, 4663].contains(&chain));
+            assert_eq!(owner, lower_address(addr(1)));
+            if self.failure {
+                return Err(error(
+                    "SYNTHETIC_DISCOVERY_FAILED",
+                    "read",
+                    "Isolated discovery failure.",
+                ));
+            }
+            Ok(TokenDiscoveryResult {
+                candidates: vec![lower_address(addr(101))],
+                complete: self.complete,
+                source: "synthetic-indexer".into(),
+                warnings: if self.complete {
+                    vec![]
+                } else {
+                    vec!["Synthetic incomplete index.".into()]
+                },
+            })
+        }
+    }
+    fn wallet_adapter(chain: u64, rpc: Arc<Fixture>) -> EthereumAdapter {
+        rpc.chain.store(chain, Ordering::SeqCst);
+        EthereumAdapter::new(
+            EthereumConfig::wallet_only(chain, 2, vec![]),
+            vec![WalletConnection {
+                name: "synthetic".into(),
+                address: lower_address(addr(1)),
+                signing_enabled: true,
+            }],
+            Arc::new(EvmRuntime::new(rpc, chain, None)),
+        )
+        .unwrap()
+    }
+    fn transfer(chain: u64, token: &str) -> Value {
+        json!({"wallet":"synthetic","network":"evm","chain_id":chain,"request_id":"synthetic-wallet-request","max_fee_eth":"0.001","token":token,"amount":if token=="native" {"0.001"}else{"1"},"recipient":lower_address(addr(2))})
+    }
+    #[test]
+    fn optional_deployments_serialize_without_dummy_addresses_and_capabilities_are_wallet_only() {
+        for chain in [42161, 4663] {
+            let a = wallet_adapter(chain, Arc::new(Fixture::new()));
+            let config = serde_json::to_value(&a.config).unwrap();
+            assert_eq!(config["weth"], Value::Null);
+            let parsed: EthereumConfig = serde_json::from_value(
+                json!({"chain_id":chain,"confirmations":2,"snapshot_tokens":[]}),
+            )
+            .unwrap();
+            assert!(parsed.aave.is_none() && parsed.uniswap.is_none());
+            assert_eq!(
+                a.definitions()
+                    .iter()
+                    .map(|d| d.name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                [
+                    "wallet.transfer",
+                    "wallet.balances",
+                    "wallet.token",
+                    "wallet.allowance",
+                    "wallet.receipt"
+                ]
+                .into_iter()
+                .collect()
+            );
+            assert_eq!(a.connections()[0].provider, "evm");
+            assert!(
+                a.connections()[0]
+                    .resource
+                    .0
+                    .starts_with(&format!("ethereum:{chain}:"))
+            );
+        }
+    }
+    #[tokio::test]
+    async fn discovered_balances_and_snapshots_are_verified_without_protocol_dependencies() {
+        for chain in [42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let a = wallet_adapter(chain, rpc.clone()).with_token_discovery(Arc::new(Discovery {
+                complete: true,
+                failure: false,
+            }));
+            let input = json!({"wallet":"synthetic","network":"evm","chain_id":chain});
+            let result = a.read("wallet.balances", &input).await.unwrap();
+            assert_eq!(result["data"].as_array().unwrap().len(), 2);
+            assert_eq!(result["discovery"]["complete"], json!(true));
+            assert_eq!(result["block"], json!(20));
+            let snapshot = a.snapshot().await.unwrap();
+            assert!(snapshot.complete && snapshot.pending.is_empty());
+            assert_eq!(snapshot.state.holdings.len(), 1);
+            assert!(snapshot.state.positions.is_empty() && snapshot.state.authorities.is_empty());
+            let explicit = json!({"wallet":"synthetic","network":"ethereum","chain_id":chain,"tokens":[lower_address(addr(101))]});
+            assert_eq!(
+                a.read("wallet.balances", &explicit).await.unwrap()["discovery"]["source"],
+                json!("explicit-token-scope")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn partial_missing_or_failed_discovery_keeps_balances_honest_and_baselines_scoped() {
+        for chain in [42161, 4663] {
+            let mut a = wallet_adapter(chain, Arc::new(Fixture::new()));
+            a.config.snapshot_tokens = vec![lower_address(addr(100))];
+            let snapshot = a.snapshot().await.unwrap();
+            assert!(snapshot.complete);
+            assert_eq!(snapshot.state.holdings.len(), 2);
+            assert!(
+                snapshot
+                    .coverage
+                    .iter()
+                    .any(|s| s.starts_with("explicit-token-scope:")
+                        && s.ends_with(&lower_address(addr(100))))
+            );
+            let input = json!({"wallet":"synthetic","network":"evm","chain_id":chain});
+            assert_eq!(
+                a.read("wallet.balances", &input).await.unwrap()["discovery"]["complete"],
+                json!(false)
+            );
+            let a = a.with_token_discovery(Arc::new(Discovery {
+                complete: false,
+                failure: false,
+            }));
+            let result = a.read("wallet.balances", &input).await.unwrap();
+            assert_eq!(result["discovery"]["complete"], json!(false));
+            assert_eq!(result["data"].as_array().unwrap().len(), 3);
+            assert_eq!(a.snapshot().await.unwrap().state.holdings.len(), 2);
+            let a = a.with_token_discovery(Arc::new(Discovery {
+                complete: true,
+                failure: true,
+            }));
+            assert_eq!(
+                a.read("wallet.balances", &input).await.unwrap_err().code,
+                "SYNTHETIC_DISCOVERY_FAILED"
+            );
+            assert!(a.snapshot().await.unwrap().complete);
+        }
+    }
+    struct CandidateDiscovery(Vec<String>);
+    #[async_trait]
+    impl TokenDiscovery for CandidateDiscovery {
+        async fn tokens(&self, _: u64, _: &str) -> Result<TokenDiscoveryResult> {
+            Ok(TokenDiscoveryResult {
+                candidates: self.0.clone(),
+                complete: true,
+                source: "synthetic-candidate-index".into(),
+                warnings: vec![],
+            })
+        }
+    }
+    #[tokio::test]
+    async fn full_indexer_page_retains_configured_holdings_and_bounds_additional_candidates() {
+        for chain in [42161, 4663] {
+            let mut a = wallet_adapter(chain, Arc::new(Fixture::new()));
+            let configured = vec![lower_address(addr(100)), lower_address(addr(101))];
+            a.config.snapshot_tokens = configured.clone();
+            let a = a.with_token_discovery(Arc::new(CandidateDiscovery(
+                (1000..1064).map(|n| lower_address(addr(n))).collect(),
+            )));
+            let result = a
+                .read(
+                    "wallet.balances",
+                    &json!({"wallet":"synthetic","network":"evm","chain_id":chain}),
+                )
+                .await
+                .unwrap();
+            let candidates = result["discovery"]["candidates"].as_array().unwrap();
+            assert_eq!(candidates.len(), 64);
+            assert_eq!(candidates[0], json!(configured[0]));
+            assert_eq!(candidates[1], json!(configured[1]));
+            assert_eq!(result["data"].as_array().unwrap().len(), 65);
+            assert_eq!(result["discovery"]["complete"], json!(false));
+            assert!(
+                result["discovery"]["warnings"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("additional candidates omitted")
+            );
+            let explicit = json!({"wallet":"synthetic","network":"evm","chain_id":chain,"tokens":[lower_address(addr(1000))]});
+            assert_eq!(
+                a.read("wallet.balances", &explicit).await.unwrap()["data"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            let duplicate = json!({"wallet":"synthetic","network":"evm","chain_id":chain,"tokens":[lower_address(addr(1000)),lower_address(addr(1000))]});
+            assert_eq!(
+                a.read("wallet.balances", &duplicate)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "DUPLICATE_TOKEN"
+            );
+        }
+    }
+    struct BadMetadataRpc(Arc<Fixture>);
+    #[async_trait]
+    impl EvmRpc for BadMetadataRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_call" && params[0]["to"] == json!(lower_address(addr(900))) {
+                return Ok(json!("0x")); // deployed non-ERC20 contract: no metadata ABI
+            }
+            self.0.request(method, params).await
+        }
+    }
+    #[tokio::test]
+    async fn invalid_discovered_contracts_report_partial_balances_but_explicit_reads_fail_strictly()
+    {
+        for chain in [42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let mut a = wallet_adapter(chain, rpc.clone());
+            a.runtime = Arc::new(EvmRuntime::new(Arc::new(BadMetadataRpc(rpc)), chain, None));
+            let a = a.with_token_discovery(Arc::new(CandidateDiscovery(vec![
+                lower_address(addr(1)),
+                lower_address(addr(900)),
+                lower_address(addr(101)),
+            ])));
+            let result = a
+                .read(
+                    "wallet.balances",
+                    &json!({"wallet":"synthetic","network":"evm","chain_id":chain}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["data"].as_array().unwrap().len(), 2);
+            assert_eq!(
+                result["data"][1]["amount"]["asset"]["reference"],
+                json!(lower_address(addr(101)))
+            );
+            assert_eq!(result["discovery"]["complete"], json!(false));
+            assert_eq!(result["discovery"]["warnings"].as_array().unwrap().len(), 2);
+            for bad in [addr(1), addr(900)] {
+                let explicit = json!({"wallet":"synthetic","network":"evm","chain_id":chain,"tokens":[lower_address(bad)]});
+                assert!(a.read("wallet.balances", &explicit).await.is_err());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn wallet_only_refuses_protocol_writes_and_missing_valuation() {
+        for chain in [42161, 4663] {
+            let a = wallet_adapter(chain, Arc::new(Fixture::new()));
+            for operation in [
+                "wallet.wrap",
+                "wallet.unwrap",
+                "wallet.approve",
+                "uniswap.swap",
+                "aave.supply",
+            ] {
+                assert_eq!(
+                    a.prepare(operation, &json!({})).await.unwrap_err().code,
+                    "OPERATION_UNAVAILABLE"
+                );
+            }
+            for operation in ["uniswap.quote", "aave.positions", "aave.reserves"] {
+                assert_eq!(
+                    a.read(operation, &json!({})).await.unwrap_err().code,
+                    "OPERATION_UNAVAILABLE"
+                );
+            }
+            assert_eq!(
+                a.prepare("wallet.transfer", &transfer(chain, "native"))
+                    .await
+                    .unwrap_err()
+                    .code,
+                "VALUATION_UNAVAILABLE"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn both_networks_freeze_transfers_fees_nonce_destination_and_price() {
+        for chain in [42161, 4663] {
+            for token in ["native".into(), lower_address(addr(101))] {
+                let rpc = Arc::new(Fixture::new());
+                let prices = Arc::new(Prices(AtomicU64::new(3_000_000_000)));
+                let a = wallet_adapter(chain, rpc.clone()).with_wallet_valuation(prices.clone());
+                let input = transfer(chain, &token);
+                let prepared = a.prepare("wallet.transfer", &input).await.unwrap();
+                let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+                assert_eq!(binding.transaction.chain_id, chain);
+                assert!(binding.transaction.maximum_cost().unwrap() <= exact("0.001", 18).unwrap());
+                assert_eq!(
+                    a.revalidate(&prepared).await.unwrap().binding,
+                    prepared.binding
+                );
+                rpc.nonce.store(1, Ordering::SeqCst);
+                assert!(a.revalidate(&prepared).await.is_err());
+                rpc.nonce.store(0, Ordering::SeqCst);
+                let mut changed = prepared.clone();
+                changed.input["recipient"] = json!(lower_address(addr(3)));
+                assert!(a.revalidate(&changed).await.is_err());
+                prices.0.store(3_100_000_000, Ordering::SeqCst);
+                let fresh = a.revalidate(&prepared).await.unwrap();
+                assert_eq!(
+                    require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())
+                        .unwrap_err()
+                        .code,
+                    "VALUATION_CHANGED"
+                );
+                let mut overfee = input.clone();
+                overfee["max_fee_eth"] = json!("0.00000000000001");
+                assert!(a.prepare("wallet.transfer", &overfee).await.is_err());
+            }
+        }
+    }
+    #[derive(Default)]
+    struct IsolatedSigningSeam(AtomicUsize);
+    #[async_trait]
+    impl fin_evm::EnvelopeSigner for IsolatedSigningSeam {
+        async fn sign_prepared(
+            &self,
+            _: &FrozenTransaction,
+        ) -> Result<fin_evm::alloy::primitives::Bytes> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(error(
+                "SYNTHETIC_WALLET_SIGNER_REACHED",
+                "signing",
+                "Isolated test ends before producing signed bytes.",
+            ))
+        }
+    }
+    struct IsolatedAuthorization {
+        calls: AtomicUsize,
+        decline: bool,
+    }
+    #[async_trait]
+    impl Authorizer for IsolatedAuthorization {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(challenge.purpose, "financial_write");
+            if self.decline {
+                return Err(error(
+                    "SYNTHETIC_APPROVAL_DECLINED",
+                    "approval",
+                    "Synthetic human declines.",
+                ));
+            }
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-wallet-engine-regression".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+    struct EnginePrices(AtomicU64);
+    impl Default for EnginePrices {
+        fn default() -> Self {
+            Self(AtomicU64::new(1))
+        }
+    }
+    #[async_trait]
+    impl WalletValuation for EnginePrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            let rate = if asset.reference == "native" {
+                3_000_000_000u64
+            } else {
+                1_000_000
+            };
+            Ok((
+                quantity(
+                    mul(
+                        fin_evm::u256(&units)?,
+                        U256::from(rate * self.0.load(Ordering::SeqCst)),
+                    )? / pow10(asset.decimals)?,
+                ),
+                "synthetic-engine-wallet-prices".into(),
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn durable_engine_on_both_chains_enforces_declines_and_one_signing_attempt_across_duplicates_and_restart()
+     {
+        use fin_engine::{Engine, EngineOptions};
+        use fin_store::Store;
+        for chain in [42161, 4663] {
+            for token in ["native".into(), lower_address(addr(101))] {
+                for decline in [true, false] {
+                    let rpc = Arc::new(Fixture::new());
+                    let signer = Arc::new(IsolatedSigningSeam::default());
+                    let mut adapter = wallet_adapter(chain, rpc.clone())
+                        .with_wallet_valuation(Arc::new(EnginePrices::default()));
+                    adapter.runtime =
+                        Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer.clone())));
+                    let adapter = Arc::new(adapter);
+                    let authorization = Arc::new(IsolatedAuthorization {
+                        calls: AtomicUsize::new(0),
+                        decline,
+                    });
+                    let directory = tempfile::tempdir().unwrap();
+                    let database = directory.path().join("synthetic-wallet-engine.sqlite");
+                    let engine = Engine::new(
+                        Store::open(&database).unwrap(),
+                        vec![adapter.clone()],
+                        authorization.clone(),
+                        EngineOptions::default(),
+                    )
+                    .unwrap();
+                    let request = OperationRequest {
+                        request_id: "synthetic-wallet-engine-identity".into(),
+                        operation: "wallet.transfer".into(),
+                        input: transfer(chain, &token),
+                        run_id: None,
+                    };
+                    let (first, concurrent) = tokio::join!(
+                        engine.execute(request.clone()),
+                        engine.execute(request.clone())
+                    );
+                    let first = first.unwrap();
+                    let concurrent = concurrent.unwrap();
+                    assert_eq!(first.id, concurrent.id);
+                    assert_eq!(
+                        first.status,
+                        if decline {
+                            Status::Rejected
+                        } else {
+                            Status::Failed
+                        }
+                    );
+                    assert_eq!(
+                        first.error.as_ref().unwrap().code,
+                        if decline {
+                            "SYNTHETIC_APPROVAL_DECLINED"
+                        } else {
+                            "SYNTHETIC_WALLET_SIGNER_REACHED"
+                        }
+                    );
+                    assert_eq!(authorization.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(signer.0.load(Ordering::SeqCst), usize::from(!decline));
+                    assert!(first.submission.is_none() && first.effects.is_none());
+                    let duplicate = engine.execute(request.clone()).await.unwrap();
+                    assert_eq!(duplicate.id, first.id);
+                    drop(engine);
+                    let restarted = Engine::new(
+                        Store::open(&database).unwrap(),
+                        vec![adapter],
+                        authorization.clone(),
+                        EngineOptions::default(),
+                    )
+                    .unwrap();
+                    let duplicate = restarted.execute(request.clone()).await.unwrap();
+                    assert_eq!(duplicate.id, first.id);
+                    assert_eq!(duplicate.error, first.error);
+                    let mut changed = request;
+                    changed.input["chain_id"] = json!(if chain == 42161 { 4663 } else { 42161 });
+                    assert_eq!(
+                        restarted.execute(changed).await.unwrap_err().code,
+                        "REQUEST_ID_CONFLICT"
+                    );
+                    assert_eq!(authorization.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(signer.0.load(Ordering::SeqCst), usize::from(!decline));
+                    assert!(
+                        !rpc.calls
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|method| method == "eth_sendRawTransaction")
+                    );
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn tracked_new_chain_runs_reject_over_allocation_and_price_growth_above_movement_limit_before_approval()
+     {
+        use fin_engine::{Engine, EngineOptions, RunAllocation, RunPlan};
+        use fin_store::Store;
+        for chain in [42161, 4663] {
+            for token in ["native".into(), lower_address(addr(101))] {
+                let rpc = Arc::new(Fixture::new());
+                rpc.cash_by_owner
+                    .lock()
+                    .unwrap()
+                    .insert(addr(2), U256::ZERO);
+                let signer = Arc::new(IsolatedSigningSeam::default());
+                let prices = Arc::new(EnginePrices::default());
+                let mut adapter =
+                    wallet_adapter(chain, rpc.clone()).with_wallet_valuation(prices.clone());
+                adapter.config.snapshot_tokens = vec![lower_address(addr(101))];
+                adapter.wallets.push(WalletConnection {
+                    name: "synthetic-return".into(),
+                    address: lower_address(addr(2)),
+                    signing_enabled: true,
+                });
+                adapter.runtime =
+                    Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer.clone())));
+                let adapter = Arc::new(adapter);
+                let authorization = Arc::new(IsolatedAuthorization {
+                    calls: AtomicUsize::new(0),
+                    decline: false,
+                });
+                let engine = Engine::new(
+                    Store::in_memory().unwrap(),
+                    vec![adapter.clone()],
+                    authorization.clone(),
+                    EngineOptions {
+                        require_run_for_writes: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let forward = transfer(chain, &token);
+                let mut unwind = forward.clone();
+                unwind["wallet"] = json!("synthetic-return");
+                unwind["recipient"] = json!(lower_address(addr(1)));
+                let mut allocations = vec![];
+                for (owner, reference, decimal_amount) in [
+                    (addr(1), "native", "0.01"),
+                    (addr(2), "native", "0.001"),
+                    (
+                        addr(1),
+                        token.as_str(),
+                        if token == "native" { "0" } else { "10" },
+                    ),
+                ] {
+                    if decimal_amount == "0" {
+                        continue;
+                    }
+                    let metadata = adapter.token(reference, None).await.unwrap();
+                    let units = Quantity::from_decimal(decimal_amount, metadata.decimals).unwrap();
+                    let (value, source) =
+                        adapter.quote_usd(reference, units.clone()).await.unwrap();
+                    allocations.push(RunAllocation {
+                        holding: ResourceAmount {
+                            resource: resource(chain, owner),
+                            amount: Amount {
+                                asset: metadata.asset(&adapter),
+                                atoms: units,
+                            },
+                        },
+                        value_usd_micros: value.to_string(),
+                        observed_at: now(),
+                        source,
+                    });
+                }
+                let mut asset_prices = vec![];
+                for reference in ["native", token.as_str()] {
+                    let metadata = adapter.token(reference, None).await.unwrap();
+                    if asset_prices
+                        .iter()
+                        .any(|p: &AssetPrice| p.asset == metadata.asset(&adapter))
+                    {
+                        continue;
+                    }
+                    let units = quantity(pow10(metadata.decimals).unwrap());
+                    let (value, source) =
+                        adapter.quote_usd(reference, units.clone()).await.unwrap();
+                    asset_prices.push(AssetPrice {
+                        asset: metadata.asset(&adapter),
+                        usd_micros_per_unit: value,
+                        unit_atoms: units,
+                        observed_at: now(),
+                        source,
+                    });
+                }
+                let plan = RunPlan {
+                    id: "synthetic-wallet-bounded-run".into(),
+                    baseline: adapter.snapshot().await.unwrap(),
+                    allocations,
+                    borrowed_proceeds_reserve_usd_micros: "0".into(),
+                    return_cost_reserve_usd_micros: "10000000".into(),
+                    planned_operations: vec![PlanStep {
+                        operation: "wallet.transfer".into(),
+                        input: forward.clone(),
+                        maximum_fee_usd_micros: "5000000".into(),
+                        description: "Synthetic forward transfer".into(),
+                    }],
+                    unwind: vec![PlanStep {
+                        operation: "wallet.transfer".into(),
+                        input: unwind,
+                        maximum_fee_usd_micros: "5000000".into(),
+                        description: "Synthetic complete return".into(),
+                    }],
+                    route_proofs: vec![],
+                    asset_prices: vec![],
+                };
+                let mut excessive = plan.clone();
+                excessive.id = "synthetic-rejected-allocation".into();
+                excessive.allocations[0].holding.amount.atoms =
+                    Quantity::from_decimal("0.04", 18).unwrap();
+                excessive.allocations[0].value_usd_micros = "120000000".into();
+                assert_eq!(
+                    engine
+                        .begin_run_from_observer_with_asset_prices(
+                            "wallet.transfer",
+                            excessive,
+                            asset_prices.clone(),
+                            chrono::Utc::now()
+                        )
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "ALLOCATION_LIMIT"
+                );
+                engine
+                    .begin_run_from_observer_with_asset_prices(
+                        "wallet.transfer",
+                        plan,
+                        asset_prices,
+                        chrono::Utc::now(),
+                    )
+                    .await
+                    .unwrap();
+                // The exact preflighted amount is unchanged, but fresh prices
+                // now put its movement above $100. Rejection precedes approval.
+                prices.0.store(110, Ordering::SeqCst);
+                let rejected = engine
+                    .execute(OperationRequest {
+                        request_id: "synthetic-over-movement".into(),
+                        operation: "wallet.transfer".into(),
+                        input: forward,
+                        run_id: Some("synthetic-wallet-bounded-run".into()),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(rejected.error.as_ref().unwrap().code, "MOVEMENT_LIMIT");
+                assert!(rejected.approval.is_none() && rejected.submission.is_none());
+                assert_eq!(authorization.calls.load(Ordering::SeqCst), 0);
+                assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+                assert!(
+                    !rpc.calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|method| method == "eth_sendRawTransaction")
+                );
+            }
+        }
+    }
+    struct FinalityRpc {
+        inner: Arc<Fixture>,
+        mode: AtomicU64,
+        finalized_seen: AtomicU64,
+    }
+    #[async_trait]
+    impl EvmRpc for FinalityRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_getBlockByNumber" && params[0] == json!("finalized") {
+                self.finalized_seen.store(1, Ordering::SeqCst);
+                return match self.mode.load(Ordering::SeqCst) {
+                    0 => Ok(Value::Null),
+                    1 => Err(error(
+                        "SYNTHETIC_FINALITY_UNSUPPORTED",
+                        "read",
+                        "No finalized tag.",
+                    )),
+                    2 => Ok(json!({"number":"0x14","hash":blockhash(20)})),
+                    3 => Ok(json!({"number":"0x16","hash":"invalid"})),
+                    _ => Ok(json!({"number":"0x16","hash":blockhash(22)})),
+                };
+            }
+            if self.mode.load(Ordering::SeqCst) == 5
+                && self.finalized_seen.load(Ordering::SeqCst) == 1
+                && method == "eth_getBlockByNumber"
+                && params[0] == json!("0x15")
+            {
+                return Ok(json!({"number":"0x15","hash":blockhash(99)}));
+            }
+            self.inner.request(method, params).await
+        }
+    }
+    #[tokio::test]
+    async fn finalized_evidence_is_required_and_never_settles_missing_lagging_or_changed_inclusion()
+    {
+        for chain in [42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let mut a = wallet_adapter(chain, rpc.clone())
+                .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+            let finality = Arc::new(FinalityRpc {
+                inner: rpc.clone(),
+                mode: AtomicU64::new(0),
+                finalized_seen: AtomicU64::new(0),
+            });
+            a.runtime = Arc::new(EvmRuntime::new(finality.clone(), chain, None));
+            let prepared = a
+                .prepare("wallet.transfer", &transfer(chain, "native"))
+                .await
+                .unwrap();
+            let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+            rpc.latest.store(22, Ordering::SeqCst);
+            rpc.set_receipt(&binding, 21, vec![]);
+            let record = record(prepared);
+            for mode in 0..4 {
+                finality.mode.store(mode, Ordering::SeqCst);
+                let result = a.reconcile(&record).await.unwrap();
+                assert_eq!(result.status, Status::Pending);
+                assert!(result.verified.is_none());
+            }
+            finality.mode.store(5, Ordering::SeqCst);
+            assert_eq!(a.reconcile(&record).await.unwrap().status, Status::Pending);
+            finality.mode.store(4, Ordering::SeqCst);
+            let result = a.reconcile(&record).await.unwrap();
+            assert_eq!(result.status, Status::Completed);
+            assert_eq!(result.evidence["finality"], json!("rpc-finalized"));
+        }
+    }
+    #[tokio::test]
+    async fn both_networks_reconcile_original_native_and_erc20_receipts_and_reject_reorg() {
+        for chain in [42161, 4663] {
+            for token in ["native".into(), lower_address(addr(101))] {
+                let rpc = Arc::new(Fixture::new());
+                let a = wallet_adapter(chain, rpc.clone())
+                    .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+                let prepared = a
+                    .prepare("wallet.transfer", &transfer(chain, &token))
+                    .await
+                    .unwrap();
+                let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+                let logs = if token == "native" {
+                    vec![]
+                } else {
+                    vec![event(
+                        addr(101),
+                        Erc20::Transfer {
+                            from: addr(1),
+                            to: addr(2),
+                            value: fin_evm::u256(&binding.units).unwrap(),
+                        },
+                        21,
+                    )]
+                };
+                rpc.latest.store(22, Ordering::SeqCst);
+                rpc.set_receipt(&binding, 21, logs);
+                let record = record(prepared);
+                assert_eq!(
+                    a.reconcile(&record).await.unwrap().status,
+                    Status::Completed
+                );
+                rpc.receipt.lock().unwrap()["blockHash"] = json!(blockhash(99));
+                assert_ne!(
+                    a.reconcile(&record).await.unwrap().status,
+                    Status::Completed
+                );
+            }
+        }
+    }
 }

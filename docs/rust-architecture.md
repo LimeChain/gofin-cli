@@ -1,10 +1,10 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, and Ethereum wallet/Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, and Ethereum mainnet Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## Delivery objective and sequence
 
-Build a compiled Rust Fin with the existing Binance funding and Ethereum wallet/Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
+Build a compiled Rust Fin with the existing Binance funding, EVM wallet and Ethereum mainnet Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
 
 The implementation goal delivers working code, reproducible automated and fixed-fork verification, updated documentation, a sanitized results report, and a concrete [human test handoff](testing/rust-human-handoff.md). The human subsequently runs onboarding and the real Touch ID path. Human-only checks remain explicitly pending until performed; they must not prevent unrelated implementation and automated verification from finishing. Production/mainnet acceptance still requires the [live-test contract](testing/README.md#live-test-contract), including full restoration.
 
@@ -39,7 +39,7 @@ flowchart TD
 
 The CLI should remain lightweight and avoid linking execution-only venue SDKs or owning keys. A later MCP interface calls the same protected API and registry. The API accepts reviewed named operations, never arbitrary code, venue methods, raw signing requests, approval receipts from clients, or credential-export requests.
 
-Protect executable code, configuration, approval identities, credential storage, and state from the actual agent user's tools. A separate same-user process, masked terminal input, or a keychain entry alone is not an isolation proof. The TS prototype uses a root broker. Evaluate a dedicated service identity and narrow privileged helpers where practical; do not grant broad agent-accessible administrator privileges for startup. Record and test the chosen boundary, including native helper integrity and dynamic-library loading.
+Protect executable code, configuration, approval identities, credential storage, and state from the actual agent user's tools. A separate same-user process, masked terminal input, or a keychain entry alone is not an isolation proof. The macOS implementation uses a root-owned broker and protected code/state. A dedicated service identity may be evaluated later; startup grants no broad agent-accessible administrator privileges. Record and test the chosen boundary, including native helper integrity and dynamic-library loading.
 
 ## Workspace responsibilities
 
@@ -52,7 +52,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-store`             | SQLite journal, schema migrations, unique request identities, atomic financial settlement and terminal status.                                         |
 | `fin-evm`               | Alloy EVM encoding, fee/nonce preparation, frozen signing envelopes and canonical receipt mechanics.                                                   |
 | `fin-binance`           | Reviewed Binance HTTP transport, authentication contracts, exact venue quantities and funding evidence.                                                |
-| `fin-ethereum`          | Wallet, Uniswap and Aave requests, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `fin-ethereum`          | EVM wallet operations independent of optional mainnet Uniswap/Aave deployments, conditional return planning, receipt interpretation and position anchors.                         |
 | `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
 | `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
@@ -61,7 +61,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-protocol`          | Versioned bounded local requests and typed run planning contracts.                                                                                     |
 | `fin-cli`, `fin-broker` | Public command handling and local client; protected composition, configuration, enrollment and service lifecycle.                                      |
 
-The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses explicit Binance REST methods rather than claiming a Rust CCXT equivalent. SQLite is handled through `rusqlite`; Ethereum uses Alloy. macOS packages are built locally with hardened ad hoc signatures and checksums. Publisher authentication, Linux/Windows write authorization, and an unattended curl installer are not implemented by that packaging script.
+The beta ships one public `fin` binary and two internal protected executables, `fin-broker` and the compiled `fin-touch-id` helper. It uses explicit Binance REST methods rather than claiming a Rust CCXT equivalent. SQLite is handled through `rusqlite`; Ethereum uses Alloy. macOS packages use hardened ad hoc signatures and checksums. Published-release CI builds downloadable bundles; the curl bootstrap verifies their manifests and starts bundled setup. Linux/Windows write authorization and publisher signing/notarization remain unavailable. See [release delivery](releases.md).
 
 The shared domain and engine must not import application implementations. Application modules depend on shared contracts and runtimes. Wire reviewed implementations into an explicit registry at the broker composition boundary. Use static compiled integrations and Cargo features initially; do not dynamically load agent-writable plugins into the credential-owning process.
 
@@ -83,6 +83,42 @@ same root ownership, hardened signature and ACL validation as other runtime code
 | Policy/platform                  | Different limits or native authentication | Explicit versioned policy and a tested authorization/storage provider through the existing engine.                          |
 
 Wallet, Uniswap, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+
+### Reusable wallet and network profiles
+
+`ConnectionConfig::Evm` stores an address and protected signer once, independently
+of a chain. Reviewed profiles provide chain identity, public RPCs, confirmations,
+finality requirements and configured token scope. Operation requests use
+`network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
+compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
+Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
+Uniswap/Aave remain mainnet-only, and bridging is outside this increment.
+
+A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
+Protected human-approved `connections update --provider evm` broadens it
+explicitly. Custody and asset identities continue using `ethereum:<chain_id>`;
+renaming the public provider never rewrites persisted resource or submission
+identities. The same address on different chains has distinct balances and
+chain-specific nonce/fee state. Within a chain, aliases cannot duplicate custody.
+
+`wallet.balances` obtains bounded cached Blockscout candidates, combines them
+with explicit/configured token addresses, and verifies contract metadata and
+balances through RPC. It always reports partial discovery, including indexer
+failure/cache warnings. A financial baseline tracks native plus configured token
+scope; successful observation of that scope does not establish all wallet/dapp
+positions. A complete claim must name its scope.
+
+Wallet-only valuation is injectable and maps exact reviewed token identities to
+independent USD observations: native ETH, Arbitrum WETH/USDC, Robinhood WETH/USDG.
+Unknown assets may be observed but cannot receive invented USD value or bypass
+write/allocation limits. Fee preparation freezes the RPC-estimated envelope;
+L2 terminal reconciliation additionally checks finalized inclusion. A receipt
+before the RPC finalized block remains pending with its original identity.
+The finalized marker is not independent proof of the rollup challenge period.
+
+RPC customization belongs to protected network configuration and will need a
+human-authorized setting; no public RPC-changing command is implemented.
+See [wallet verification](testing/evm-wallets.md).
 
 Configuration separates networks, deployments, connections, credential references, and policy. Validate it strictly and version it. Reject aliases that count the same physical account or signer twice; query venue identity when supported and record any remaining human-verified mapping. Trusted policy, destinations, credential replacements, and approval identities require independent human authorization to change.
 
@@ -218,14 +254,16 @@ The $100 acceptance profile is configurable verification policy, not a permanent
 
 ## Library choices and implementation spikes
 
-Use Tokio, Alloy for EVM types/providers/contract bindings/signing, CCXT Rust behind an exchange interface, Serde/Schemars for contracts, clap for the public CLI, and SQLite/rusqlite for storage. Pin the actual Rust toolchain and dependencies during implementation in repository build files and `Cargo.lock`; document reproducible build and release commands.
+The implementation uses Tokio, Alloy for EVM encoding/providers/signing,
+Serde/Schemars for contracts, Clap for the public CLI, and SQLite/rusqlite for
+storage. Toolchain and dependencies are pinned in repository build files and
+`Cargo.lock`. Binance uses reviewed decimal-string REST endpoints and fixed
+HMAC/RSA/Ed25519 signing contracts; it does not depend on a Rust CCXT port.
 
-Before committing the financial ports, verify two concrete library boundaries:
-
-1. **CCXT Rust funding and exact quantities.** Verify the required Binance authentication schemes, endpoint mappings, client identifiers/history, and raw response precision against the pinned crate. The inspected upstream typed Binance withdrawal wrapper accepts `f64`. Use a reviewed decimal-string endpoint path or a small native implementation behind the same exchange interface where necessary. Discovery, quantities, and execution must not silently inherit floating-point normalization. Compile only the intended exchanges initially.
-2. **Alloy transaction preparation.** Recommended fillers can populate nonce, gas, and chain fields. Complete preparation before approval, freeze the approved fields, and control or disable filling at dispatch. Verify the serialized sender and every bound payload/fee field before broadcasting. Changing a filler/provider must not change an approved transaction.
-
-Sources: [CCXT Rust workspace](https://github.com/ccxt/ccxt/blob/master/rust/README.md), [inspected Binance typed wrapper](https://github.com/ccxt/ccxt/blob/master/rust/ccxt/src/exchanges/binance_typed.rs), [Alloy](https://alloy.rs/), [Alloy fillers](https://alloy.rs/rpc-providers/understanding-fillers/), [Serde](https://serde.rs/), [Schemars](https://docs.rs/schemars/latest/schemars/), [rusqlite](https://docs.rs/rusqlite/latest/rusqlite/).
+Alloy preparation completes nonce, gas and chain fields before approval and
+freezes the approved envelope. Signing/dispatch checks the exact serialized
+sender and payload/fee fields; changing a provider must not mutate the approved
+transaction. A new adapter can reuse runtime tooling only through this path.
 
 Public RPCs must be from trusted public providers without credential-bearing URLs or borrowed wallet-provider keys. Verify chain identity and record provider/finality assumptions. Cache static metadata only where safe; refresh write prerequisites and keep bounded read concurrency and venue rate limiting.
 

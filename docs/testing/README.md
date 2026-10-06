@@ -1,6 +1,6 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
+These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), and [EVM wallets](evm-wallets.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
 
 ```sh
 cargo fmt --all -- --check
@@ -15,6 +15,17 @@ synthetic local keys behind loopback/chain/block guards. It does not load privat
 configuration or broadcast to production. Node disposal after a failure does not
 establish financial restoration. Actual human checks are in the
 [Rust handoff checklist](rust-human-handoff.md).
+
+## EVM wallet extension
+
+Ethereum mainnet, Arbitrum One and Robinhood Chain share a reusable EVM connection.
+The [wallet guide](evm-wallets.md) covers offline regressions, partial token
+discovery, explicit snapshot scope, L2 finalized-block checks and a proposed
+human test sequence. New network implementation is not a live acceptance pass.
+Public no-secret RPC/indexer probes, human enrollment/Touch ID and funded transfer
+round trips must each be reported separately when observed; this guide marks no
+unrun case passed. Existing $100 allocation, per-write approval and complete
+restoration requirements also apply to any separately authorized L2 live test.
 
 ## Local development loop
 

@@ -72,8 +72,7 @@ fn guided_add_with(
                 &CredentialType::Hmac,
             )?);
         }
-        Provider::Ethereum => {
-            args.network = Some(prompt(input, output, "Network", Some("ethereum:1"))?);
+        Provider::Evm => {
             let kind = choice(
                 input,
                 output,
@@ -229,23 +228,26 @@ mod tests {
     }
 
     #[test]
-    fn ethereum_signing_and_read_only_use_exact_supported_network() {
-        let (result, _) = run("ethereum\nwallet\n\n\n\n");
+    fn evm_signing_and_read_only_reuse_wallet_without_network_prompt() {
+        let (result, output) = run("evm\nwallet\n\n\n");
         let args = result.unwrap();
-        assert_eq!(args.network.as_deref(), Some("ethereum:1"));
+        assert!(args.network.is_none());
+        assert!(output.contains("Provider (binance/evm)"));
+        assert!(!output.contains("Network"));
+        assert!(!output.contains("Private key:"));
         assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));
         assert!(args.address.is_none());
         let address = "0x1111111111111111111111111111111111111111";
-        let (result, _) = run(&format!("ethereum\nwatch\n\nread_only\n{address}\n"));
+        let (result, _) = run(&format!("ethereum\nwatch\nread_only\n{address}\n"));
         assert_eq!(result.unwrap().address.as_deref(), Some(address));
     }
 
     #[test]
     fn shared_validation_rejects_bad_address_network_relationship_and_name() {
         for input in [
-            "ethereum\nwatch\n\nread_only\n\n",
-            "ethereum\nwatch\n\nread_only\n0x0000000000000000000000000000000000000000\n",
-            "ethereum\nwatch\nethereum-mainnet\nprivate_key\n\n",
+            "evm\nwatch\nread_only\n\n",
+            "evm\nwatch\nread_only\n0x0000000000000000000000000000000000000000\n",
+            "evm\nwatch\nhmac\n\n",
             "binance\nchild\nsub\nmain\ninvalid-email\nhmac\n",
             "binance\nINVALID NAME\n",
         ] {
@@ -266,7 +268,7 @@ mod tests {
 
     #[test]
     fn eof_at_every_prompt_cancels_without_retries() {
-        for input in ["", "\n", "\nmain\n", "\nmain\n\n", "ethereum\nwallet\n\n\n"] {
+        for input in ["", "\n", "\nmain\n", "\nmain\n\n", "evm\nwallet\n\n"] {
             let (result, output) = run(input);
             assert_eq!(result.unwrap_err().code, "ONBOARDING_CANCELLED");
             assert!(output.lines().count() <= 2);

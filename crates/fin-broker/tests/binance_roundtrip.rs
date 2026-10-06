@@ -1113,7 +1113,10 @@ impl EvmRpc for DepositExecutionRpc {
         let deposit = "0x1111111111111111111111111111111111111111";
         let wallet = self.wallet_address.as_str();
         let payout_hash = format!("0x{}", "ee".repeat(32));
-        let oracle = fin_ethereum::EthereumConfig::default().aave.oracle;
+        let oracle = fin_ethereum::EthereumConfig::default()
+            .aave
+            .expect("mainnet Aave")
+            .oracle;
         match method {
             "eth_sendRawTransaction" => {
                 let persisted = self.journal.lock().unwrap().clone().or_else(|| {
@@ -1278,7 +1281,10 @@ impl EvmRpc for DepositExecutionRpc {
 impl EvmRpc for DepositPreviewRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let deposit = "0x1111111111111111111111111111111111111111";
-        let oracle = fin_ethereum::EthereumConfig::default().aave.oracle;
+        let oracle = fin_ethereum::EthereumConfig::default()
+            .aave
+            .expect("mainnet Aave")
+            .oracle;
         Ok(match method {
             "eth_chainId" => json!("0x1"),
             "eth_getCode" => json!(

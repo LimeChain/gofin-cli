@@ -386,6 +386,7 @@ fn capabilities() -> Value {
         "operations": financial_catalog(),
         "service_required": false,
         "machine_contract": fin_discovery::machine_contract(),
+        "evm_networks": fin_discovery::evm_network_profiles(),
         "platforms": {
             "macos": {"protected_broker": true, "human_enrollment": true},
             "linux": {"offline_discovery": true, "protected_broker": false, "human_enrollment": false},

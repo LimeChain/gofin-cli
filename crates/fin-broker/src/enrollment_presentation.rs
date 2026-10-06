@@ -30,7 +30,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         let expected = BrokerConfigV2 {
             version: 2,
             approver_uid: config.approver_uid,
-            networks: vec![NetworkConfig::ethereum_mainnet()],
+            networks: NetworkConfig::reviewed_evm_networks(),
             deployments: vec![DeploymentConfig::ethereum_mainnet()],
             connections: vec![],
             policy: BrokerPolicy::beta(),
@@ -63,6 +63,9 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         let subject = if matches!(
             &connection,
             ConnectionConfig::Ethereum {
+                signing_enabled: false,
+                ..
+            } | ConnectionConfig::Evm {
                 signing_enabled: false,
                 ..
             }
@@ -153,6 +156,22 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                         }
                     }
                 }
+            }
+            ConnectionConfig::Evm {
+                address,
+                signing_enabled,
+                ..
+            } => {
+                lines.push(format!(
+                    "EVM wallet: {} | Signing: {}",
+                    safe(address),
+                    if *signing_enabled {
+                        "enabled"
+                    } else {
+                        "disabled (read-only)"
+                    }
+                ));
+                lines.push("Reusable on Ethereum, Arbitrum One and Robinhood Chain.".into());
             }
             ConnectionConfig::Ethereum {
                 address,
@@ -272,7 +291,7 @@ mod tests {
         let config = BrokerConfigV2 {
             version: 2,
             approver_uid: 501,
-            networks: vec![NetworkConfig::ethereum_mainnet()],
+            networks: NetworkConfig::reviewed_evm_networks(),
             deployments: vec![DeploymentConfig::ethereum_mainnet()],
             connections: vec![],
             policy: BrokerPolicy::beta(),

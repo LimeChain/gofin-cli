@@ -6,6 +6,8 @@
 
 pub mod deposit;
 pub mod enrollment;
+mod evm_public_data;
+mod evm_router;
 pub use deposit::BinanceEthereumDepositAdapter;
 
 use async_trait::async_trait;
@@ -87,6 +89,8 @@ pub struct NetworkConfig {
     pub chain_id: u64,
     pub rpc_urls: Vec<String>,
     pub confirmations: u64,
+    #[serde(default)]
+    pub snapshot_tokens: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -115,6 +119,7 @@ pub enum ConnectionConfig {
         physical_identity: String,
         physical_identity_verified: bool,
     },
+    /// Legacy chain-scoped connection, retained for journals and old installations.
     Ethereum {
         name: String,
         resource: ResourceId,
@@ -123,6 +128,14 @@ pub enum ConnectionConfig {
         address: String,
         signing_enabled: bool,
         assets: Vec<AssetId>,
+    },
+    /// One protected signer/address, reusable across the configured EVM networks.
+    Evm {
+        name: String,
+        resource: ResourceId,
+        credential_ref: Option<String>,
+        address: String,
+        signing_enabled: bool,
     },
 }
 
@@ -145,7 +158,33 @@ impl NetworkConfig {
                 "https://eth.drpc.org".into(),
             ],
             confirmations: 2,
+            snapshot_tokens: vec![fin_ethereum::WETH.into(), fin_ethereum::USDC.into()],
         }
+    }
+    pub fn reviewed_evm_networks() -> Vec<Self> {
+        vec![
+            Self::ethereum_mainnet(),
+            Self {
+                id: "ethereum:42161".into(),
+                chain_id: 42161,
+                rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
+                confirmations: 2,
+                snapshot_tokens: vec![
+                    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1".into(),
+                    "0xaf88d065e77c8cc2239327c5edb3a432268e5831".into(),
+                ],
+            },
+            Self {
+                id: "ethereum:4663".into(),
+                chain_id: 4663,
+                rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
+                confirmations: 2,
+                snapshot_tokens: vec![
+                    "0x0bd7d308f8e1639fab988df18a8011f41eacad73".into(),
+                    "0x5fc5360d0400a0fd4f2af552add042d716f1d168".into(),
+                ],
+            },
+        ]
     }
 }
 
@@ -154,10 +193,10 @@ impl DeploymentConfig {
         let defaults = fin_ethereum::EthereumConfig::default();
         Self {
             network: "ethereum:1".into(),
-            weth: defaults.weth,
+            weth: defaults.weth.expect("mainnet WETH"),
             snapshot_tokens: defaults.snapshot_tokens,
-            uniswap: defaults.uniswap,
-            aave: defaults.aave,
+            uniswap: defaults.uniswap.expect("mainnet Uniswap"),
+            aave: defaults.aave.expect("mainnet Aave"),
         }
     }
 }
@@ -183,11 +222,11 @@ impl BrokerConfigV2 {
                 "Use the protected human enrollment flow to repair broker configuration.",
             ));
         }
-        if self.networks.is_empty() || self.deployments.is_empty() {
+        if self.networks.is_empty() {
             return Err(error(
                 "CONFIG_NETWORKS_REQUIRED",
                 "configuration",
-                "At least one network and one reviewed deployment are required.",
+                "At least one reviewed EVM network is required.",
                 "Configure a supported Ethereum network and reviewed deployments.",
             ));
         }
@@ -200,12 +239,21 @@ impl BrokerConfigV2 {
             ));
         }
         let mut networks = BTreeSet::new();
+        let mut chain_ids = BTreeSet::new();
         for network in &self.networks {
             if network.id.is_empty()
                 || network.chain_id == 0
                 || network.confirmations == 0
                 || network.rpc_urls.is_empty()
                 || !networks.insert(network.id.clone())
+                || network.id != format!("ethereum:{}", network.chain_id)
+                || !chain_ids.insert(network.chain_id)
+                || ![1, 42161, 4663].contains(&network.chain_id)
+                || network.snapshot_tokens.len() > 64
+                || network
+                    .snapshot_tokens
+                    .iter()
+                    .any(|token| !valid_eth_address(token))
                 || network.rpc_urls.iter().any(|url| !valid_public_rpc(url))
             {
                 return Err(error(
@@ -291,6 +339,29 @@ impl BrokerConfigV2 {
                     }
                     (name, resource)
                 }
+                ConnectionConfig::Evm {
+                    name,
+                    resource,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                } => {
+                    if !valid_eth_address(address)
+                        || resource.0 != format!("evm:{}", address.to_ascii_lowercase())
+                        || (*signing_enabled != credential_ref.is_some())
+                        || credential_ref.as_ref().is_some_and(|value| {
+                            fin_credentials::CredentialRef::new(value).is_err()
+                        })
+                    {
+                        return Err(error(
+                            "CONFIG_EVM_CONNECTION_INVALID",
+                            "configuration",
+                            "EVM address or protected signer mapping is invalid.",
+                            "Repair the wallet through protected enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
             };
             if name.is_empty() || !names.insert(name.clone()) || !resources.insert(resource.clone())
             {
@@ -318,6 +389,41 @@ impl BrokerConfigV2 {
                     "A Binance physical account cannot be registered twice under distinct aliases.",
                     "Remove duplicate main-key mappings.",
                 ));
+            }
+        }
+        let mut physical_wallets = BTreeSet::new();
+        for connection in &self.connections {
+            let (address, chains) = match connection {
+                ConnectionConfig::Evm { address, .. } => (
+                    address,
+                    self.networks
+                        .iter()
+                        .map(|network| network.chain_id)
+                        .collect::<Vec<_>>(),
+                ),
+                ConnectionConfig::Ethereum {
+                    address, network, ..
+                } => (
+                    address,
+                    vec![
+                        self.networks
+                            .iter()
+                            .find(|profile| &profile.id == network)
+                            .expect("validated network")
+                            .chain_id,
+                    ],
+                ),
+                _ => continue,
+            };
+            for chain in chains {
+                if !physical_wallets.insert((chain, address.to_ascii_lowercase())) {
+                    return Err(error(
+                        "CONFIG_DUPLICATE_PHYSICAL_WALLET",
+                        "configuration",
+                        "The same EVM wallet is registered more than once on a network.",
+                        "Reuse the existing EVM connection instead of creating an alias.",
+                    ));
+                }
             }
         }
         for value in [
@@ -435,7 +541,7 @@ impl fin_binance::BinanceSigner for ProtectedCredentialProvider {
                 | fin_credentials::SecretMaterial::BinanceEd25519 { api_key, .. } => {
                     Ok(api_key.clone())
                 }
-                fin_credentials::SecretMaterial::EthereumPrivateKey { .. } => Err(error(
+                fin_credentials::SecretMaterial::EvmPrivateKey { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not a Binance API key.",
@@ -494,7 +600,7 @@ impl fin_binance::BinanceSigner for ProtectedCredentialProvider {
                     fin_credentials::SecretMaterial::BinanceEd25519 { private_key, .. } => {
                         binance_ed25519_signature(private_key, encoded_parameters)
                     }
-                    fin_credentials::SecretMaterial::EthereumPrivateKey { .. } => Err(error(
+                    fin_credentials::SecretMaterial::EvmPrivateKey { .. } => Err(error(
                         "CREDENTIAL_TYPE_MISMATCH",
                         "credentials",
                         "Credential is not a Binance signing key.",
@@ -514,7 +620,7 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
     ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)> {
         self.store
             .with_material(credential, |material| match material {
-                fin_credentials::SecretMaterial::EthereumPrivateKey { private_key } => {
+                fin_credentials::SecretMaterial::EvmPrivateKey { private_key } => {
                     let signer =
                         Arc::new(fin_evm::LocalEnvelopeSigner::from_private_key(private_key)?);
                     let address = format!("{:#x}", signer.address());
@@ -892,28 +998,36 @@ pub fn build_protected_applications(
         eth_rpcs.insert(network.chain_id, rpc.clone());
         networks_by_id.insert(network.id.clone(), network);
     }
+    let binance_prices = Arc::new(PublicBinancePrices::new()?);
+    let wallet_prices = Arc::new(evm_public_data::PublicEvmWalletPrices::new(
+        binance_prices.clone(),
+    ));
+    let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<fin_ethereum::EthereumAdapter>>::new();
-    for deployment in &config.deployments {
-        let network = networks_by_id
-            .get(&deployment.network)
-            .expect("validated deployment network");
+    for network in &config.networks {
         let mut wallets = Vec::new();
         let mut signer_map = BTreeMap::new();
         for connection in &config.connections {
-            let ConnectionConfig::Ethereum {
-                name,
-                network: wallet_network,
-                address,
-                signing_enabled,
-                credential_ref,
-                ..
-            } = connection
-            else {
-                continue;
+            let (name, address, signing_enabled, credential_ref) = match connection {
+                ConnectionConfig::Evm {
+                    name,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                    ..
+                } => (name, address, signing_enabled, credential_ref),
+                ConnectionConfig::Ethereum {
+                    name,
+                    network: wallet_network,
+                    address,
+                    signing_enabled,
+                    credential_ref,
+                    ..
+                } if wallet_network == &network.id => {
+                    (name, address, signing_enabled, credential_ref)
+                }
+                _ => continue,
             };
-            if wallet_network != &network.id {
-                continue;
-            }
             wallets.push(fin_ethereum::WalletConnection {
                 name: name.clone(),
                 address: address.clone(),
@@ -946,28 +1060,43 @@ pub fn build_protected_applications(
             Some(Arc::new(MappedEnvelopeSigner::new(signer_map)?))
         };
         let runtime = Arc::new(fin_evm::EvmRuntime::new(rpc, network.chain_id, signer));
-        let ethereum_config = fin_ethereum::EthereumConfig {
-            chain_id: network.chain_id,
-            confirmations: network.confirmations,
-            weth: deployment.weth.clone(),
-            snapshot_tokens: deployment.snapshot_tokens.clone(),
-            uniswap: deployment.uniswap.clone(),
-            aave: deployment.aave.clone(),
+        let ethereum_config = if let Some(deployment) = config
+            .deployments
+            .iter()
+            .find(|deployment| deployment.network == network.id)
+        {
+            fin_ethereum::EthereumConfig {
+                chain_id: network.chain_id,
+                confirmations: network.confirmations,
+                require_finalized: false,
+                weth: Some(deployment.weth.clone()),
+                snapshot_tokens: deployment.snapshot_tokens.clone(),
+                uniswap: Some(deployment.uniswap.clone()),
+                aave: Some(deployment.aave.clone()),
+            }
+        } else {
+            fin_ethereum::EthereumConfig::wallet_only(
+                network.chain_id,
+                network.confirmations,
+                network.snapshot_tokens.clone(),
+            )
         };
-        let adapter = Arc::new(fin_ethereum::EthereumAdapter::new(
-            ethereum_config,
-            wallets,
-            runtime,
-        )?);
+        let adapter = Arc::new(
+            fin_ethereum::EthereumAdapter::new(ethereum_config, wallets, runtime)?
+                .with_wallet_valuation(wallet_prices.clone())
+                .with_token_discovery(token_discovery.clone()),
+        );
         ethereum_adapters.insert(network.id.clone(), adapter);
     }
-
-    let mut adapters: Vec<Arc<dyn Adapter>> = ethereum_adapters
-        .values()
-        .cloned()
-        .map(|adapter| adapter as Arc<dyn Adapter>)
-        .collect();
-    let binance_prices = Arc::new(PublicBinancePrices::new()?);
+    let mut adapters: Vec<Arc<dyn Adapter>> = Vec::new();
+    if !ethereum_adapters.is_empty() {
+        adapters.push(Arc::new(evm_router::EvmNetworkRouter::new(
+            ethereum_adapters
+                .values()
+                .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                .collect(),
+        )));
+    }
     if config
         .connections
         .iter()
@@ -1008,34 +1137,50 @@ pub fn build_protected_applications(
             .collect::<Vec<_>>();
         let mut destinations = Vec::new();
         for connection in &config.connections {
-            if let ConnectionConfig::Ethereum {
-                name,
-                resource,
-                network,
-                address,
-                assets,
-                ..
-            } = connection
-                && networks_by_id
+            let (name, address, resource, assets) = match connection {
+                ConnectionConfig::Ethereum {
+                    name,
+                    resource,
+                    network,
+                    address,
+                    assets,
+                    ..
+                } if networks_by_id
                     .get(network)
-                    .is_some_and(|network| network.chain_id == 1)
-            {
-                let assets = assets
-                    .iter()
-                    .filter(|asset| asset.network == "ethereum:1" && asset.reference == "native")
-                    .cloned()
-                    .map(|asset| ("ETH".to_owned(), asset))
-                    .collect::<BTreeMap<_, _>>();
-                if !assets.is_empty() {
-                    destinations.push(fin_binance::EthereumDestination {
-                        name: name.clone(),
-                        resource: resource.clone(),
-                        address: address.clone(),
-                        chain_id: 1,
-                        assets,
-                        confirmations: 2,
-                    });
+                    .is_some_and(|network| network.chain_id == 1) =>
+                {
+                    (name, address, resource.clone(), assets.clone())
                 }
+                ConnectionConfig::Evm { name, address, .. }
+                    if networks_by_id.values().any(|network| network.chain_id == 1) =>
+                {
+                    (
+                        name,
+                        address,
+                        ResourceId(format!("ethereum:1:{}", address.to_ascii_lowercase())),
+                        vec![AssetId {
+                            network: "ethereum:1".into(),
+                            reference: "native".into(),
+                            decimals: 18,
+                        }],
+                    )
+                }
+                _ => continue,
+            };
+            let assets = assets
+                .into_iter()
+                .filter(|asset| asset.network == "ethereum:1" && asset.reference == "native")
+                .map(|asset| ("ETH".to_owned(), asset))
+                .collect::<BTreeMap<_, _>>();
+            if !assets.is_empty() {
+                destinations.push(fin_binance::EthereumDestination {
+                    name: name.clone(),
+                    resource,
+                    address: address.clone(),
+                    chain_id: 1,
+                    assets,
+                    confirmations: 2,
+                });
             }
         }
         if accounts.is_empty() {
@@ -1720,6 +1865,36 @@ impl BrokerRuntime {
                 for asset in configured {
                     if !assets.contains(asset) {
                         assets.push(asset.clone());
+                    }
+                }
+            }
+            if let ConnectionConfig::Evm { address, .. } = connection {
+                // Preserve the reviewed protocol scope needed to value planned
+                // intermediate assets, even before their balances become positive.
+                // Read-only discovery candidates do not expand this trusted scope.
+                for deployment in &self.config.deployments {
+                    let network = self
+                        .config
+                        .networks
+                        .iter()
+                        .find(|network| network.id == deployment.network)
+                        .expect("validated deployment");
+                    let resource = ResourceId(format!(
+                        "ethereum:{}:{}",
+                        network.chain_id,
+                        address.to_ascii_lowercase()
+                    ));
+                    for holding in snapshot.state.holdings.iter().filter(|holding| {
+                        holding.resource == resource
+                            && holding.amount.asset.network == deployment.network
+                            && (holding.amount.asset.reference == "native"
+                                || deployment
+                                    .snapshot_tokens
+                                    .contains(&holding.amount.asset.reference))
+                    }) {
+                        if !assets.contains(&holding.amount.asset) {
+                            assets.push(holding.amount.asset.clone());
+                        }
                     }
                 }
             }
@@ -3221,6 +3396,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reusable_wallet_keeps_zero_protocol_assets_priced_without_expanding_to_indexer_noise()
+    {
+        let address = "0x1111111111111111111111111111111111111111";
+        let mut config = config();
+        config.networks = NetworkConfig::reviewed_evm_networks();
+        config.connections.push(ConnectionConfig::Evm {
+            name: "synthetic".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+        });
+        let asset = |network: &str, reference: &str, decimals| AssetId {
+            network: network.into(),
+            reference: reference.into(),
+            decimals,
+        };
+        let native = asset("ethereum:1", "native", 18);
+        let weth = asset("ethereum:1", fin_ethereum::WETH, 18);
+        let usdc = asset("ethereum:1", fin_ethereum::USDC, 6);
+        let noise = asset("ethereum:1", "synthetic-indexer-noise", 6);
+        let other_chain = asset(
+            "ethereum:4663",
+            "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            6,
+        );
+        let mut observed = price_snapshot(
+            [
+                native.clone(),
+                weth.clone(),
+                usdc.clone(),
+                noise,
+                other_chain,
+            ]
+            .into_iter()
+            .map(|asset| ResourceAmount {
+                resource: ResourceId(format!("{}:{address}", asset.network)),
+                amount: Amount {
+                    asset,
+                    atoms: Quantity::zero(),
+                },
+            })
+            .collect(),
+        );
+        // Financial scopes use RPC-verified AssetIds, not indexer symbols/prices.
+        observed.coverage.push(format!("ethereum:1:{address}"));
+        let fixture = pricing_fixture(config, observed.clone());
+        let prices = fixture
+            .runtime
+            .trusted_asset_prices(&observed, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            prices
+                .iter()
+                .map(|price| price.asset.clone())
+                .collect::<Vec<_>>(),
+            vec![native, weth, usdc]
+        );
+        assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+        assert_eq!(fixture.snapshot.lock().unwrap().state, observed.state);
+    }
     #[tokio::test]
     async fn trusted_prices_skip_a_thousand_zero_holdings_without_changing_snapshot() {
         let observed = price_snapshot(

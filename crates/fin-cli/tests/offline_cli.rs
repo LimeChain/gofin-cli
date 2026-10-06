@@ -20,6 +20,8 @@ fn offline_discovery_commands_work_without_service() {
     assert!(capabilities.status.success());
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
+    assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
+    assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
     assert_eq!(capabilities["operations"].as_array().unwrap().len(), 29);
 
@@ -95,6 +97,39 @@ fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
     assert!(help.contains("--id <ID>"));
     assert!(help.contains("--run <RUN>"));
     assert!(!help.contains("--request-id"));
+}
+
+#[test]
+fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
+    let help = run(&["connections", "add", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("binance, evm"));
+    assert!(help.contains("Optional enrollment read-check network"));
+    for provider in ["evm", "ethereum"] {
+        let output = run(&[
+            "connections",
+            "add",
+            "--provider",
+            provider,
+            "--name",
+            "wallet",
+            "--credential-type",
+            "private_key",
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+    }
+    let capabilities = run(&["explain", "connections.add", "--json"]);
+    assert!(capabilities.status.success());
+    let value: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    assert_eq!(
+        value["semantics"]["evm"]["networks"],
+        serde_json::json!(["ethereum:1", "ethereum:42161", "ethereum:4663"])
+    );
 }
 
 #[test]

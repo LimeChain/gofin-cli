@@ -649,7 +649,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
     let supply_index = adapter
         .runtime
         .call(
-            address(&config.aave.pool)?,
+            address(&config.aave.as_ref().expect("mainnet Aave").pool)?,
             &PlanningPool::getReserveNormalizedIncomeCall {
                 asset: address(WETH)?,
             },
@@ -900,7 +900,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-02-router-weth",
-                json!({"token":WETH,"spender":config.uniswap.router,"amount":decimal(swap_units,18)}),
+                json!({"token":WETH,"spender":config.uniswap.as_ref().expect("mainnet Uniswap").router,"amount":decimal(swap_units,18)}),
             ),
             "Approve finite forward input.",
         ),
@@ -913,7 +913,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-04-pool-weth",
-                json!({"token":WETH,"spender":config.aave.pool,"amount":decimal(supply_units,18)}),
+                json!({"token":WETH,"spender":config.aave.as_ref().expect("mainnet Aave").pool,"amount":decimal(supply_units,18)}),
             ),
             "Approve finite collateral supply.",
         ),
@@ -953,7 +953,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-09-pool-usdc",
-                json!({"token":USDC,"spender":config.aave.pool,"amount":"1.02"}),
+                json!({"token":USDC,"spender":config.aave.as_ref().expect("mainnet Aave").pool,"amount":"1.02"}),
             ),
             "Approve finite full debt/interest repayment cap.",
         ),
@@ -977,7 +977,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-12-clear-pool-weth",
-                json!({"token":WETH,"spender":config.aave.pool,"amount":"0"}),
+                json!({"token":WETH,"spender":config.aave.as_ref().expect("mainnet Aave").pool,"amount":"0"}),
             ),
             "Restore original zero Pool WETH allowance.",
         ),
@@ -985,7 +985,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-13-clear-pool-usdc",
-                json!({"token":USDC,"spender":config.aave.pool,"amount":"0"}),
+                json!({"token":USDC,"spender":config.aave.as_ref().expect("mainnet Aave").pool,"amount":"0"}),
             ),
             "Restore original zero Pool USDC allowance.",
         ),
@@ -993,7 +993,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-14-router-usdc",
-                json!({"token":USDC,"spender":config.uniswap.router,"amount":"12"}),
+                json!({"token":USDC,"spender":config.uniswap.as_ref().expect("mainnet Uniswap").router,"amount":"12"}),
             ),
             "Approve explicit finite conditional cleanup cap, then restore it.",
         ),
@@ -1006,7 +1006,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-16-clear-router-usdc",
-                json!({"token":USDC,"spender":config.uniswap.router,"amount":"0"}),
+                json!({"token":USDC,"spender":config.uniswap.as_ref().expect("mainnet Uniswap").router,"amount":"0"}),
             ),
             "Restore original zero reverse router allowance.",
         ),
@@ -1014,7 +1014,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             "wallet.approve",
             write_input(
                 "fork-17-clear-router-weth",
-                json!({"token":WETH,"spender":config.uniswap.router,"amount":"0"}),
+                json!({"token":WETH,"spender":config.uniswap.as_ref().expect("mainnet Uniswap").router,"amount":"0"}),
             ),
             "Restore original zero forward router allowance.",
         ),

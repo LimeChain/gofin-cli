@@ -11,9 +11,7 @@ use fin_discovery::{
     AddConnectionArgs, BinanceRole, CredentialType, NamedConnectionArgs, Provider, validate_add,
     validate_name,
 };
-use fin_domain::{
-    AssetId, AuthorizationChallenge, FinError, ResourceId, Result, binding_hash, now,
-};
+use fin_domain::{AuthorizationChallenge, FinError, ResourceId, Result, binding_hash, now};
 use fin_human_terminal::{HumanTerminal, SecretInput};
 use fin_presentation::Ui;
 #[path = "enrollment_presentation.rs"]
@@ -100,7 +98,13 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         ));
     }
     for connection in &config.connections {
-        if resource_has_pending_operations(&journal, resource(connection))? {
+        if connection_resources(connection, &config)
+            .iter()
+            .map(|resource| resource_has_pending_operations(&journal, resource))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .any(|pending| pending)
+        {
             return Err(error(
                 "CONNECTION_HAS_PENDING_OPERATION",
                 "Reconcile unresolved financial operations before changing connections.",
@@ -113,6 +117,17 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         "add" | "update" => {
             let args: AddConnectionArgs = parse(request)?;
             validate_add(&args)?;
+            if args.provider == Provider::Evm {
+                for network in NetworkConfig::reviewed_evm_networks() {
+                    if !config
+                        .networks
+                        .iter()
+                        .any(|existing| existing.chain_id == network.chain_id)
+                    {
+                        config.networks.push(network);
+                    }
+                }
+            }
             let existing = config
                 .connections
                 .iter()
@@ -241,7 +256,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let config = BrokerConfigV2 {
         version: 2,
         approver_uid: args.approver_uid,
-        networks: vec![NetworkConfig::ethereum_mainnet()],
+        networks: NetworkConfig::reviewed_evm_networks(),
         deployments: vec![DeploymentConfig::ethereum_mainnet()],
         connections: vec![],
         policy: BrokerPolicy::beta(),
@@ -301,12 +316,12 @@ fn collect_material(
                 }
             }
         }
-        Provider::Ethereum if args.credential_type == Some(CredentialType::ReadOnly) => {
+        Provider::Evm if args.credential_type == Some(CredentialType::ReadOnly) => {
             return Ok(None);
         }
-        Provider::Ethereum => SecretMaterial::EthereumPrivateKey {
+        Provider::Evm => SecretMaterial::EvmPrivateKey {
             private_key: terminal
-                .read_secret("Ethereum private key", SecretInput::Line)?
+                .read_secret("EVM private key", SecretInput::Line)?
                 .to_string(),
         },
     };
@@ -323,11 +338,11 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
-        Provider::Ethereum => {
+        Provider::Evm => {
             let network = config
                 .networks
                 .iter()
-                .find(|network| Some(network.id.as_str()) == args.network.as_deref())
+                .find(|network| network.id == args.network.as_deref().unwrap_or("ethereum:1"))
                 .ok_or_else(|| {
                     error(
                         "NETWORK_NOT_CONFIGURED",
@@ -335,7 +350,7 @@ async fn validate_connection(
                     )
                 })?;
             let derived = match material {
-                Some(SecretMaterial::EthereumPrivateKey { private_key }) => Some(format!(
+                Some(SecretMaterial::EvmPrivateKey { private_key }) => Some(format!(
                     "{:#x}",
                     fin_evm::LocalEnvelopeSigner::from_private_key(private_key)?.address()
                 )),
@@ -367,27 +382,19 @@ async fn validate_connection(
             )?);
             let runtime = fin_evm::EvmRuntime::new(rpc, network.chain_id, None);
             {
-                let _progress = ui.progress("Checking Ethereum network");
+                let _progress = ui.progress("Checking EVM network");
                 runtime.assert_chain().await?;
             }
             let balance = {
                 let _progress = ui.progress("Checking wallet balance");
                 runtime.balance(fin_evm::address(&address)?, None).await?
             };
-            let resource = ResourceId(format!("ethereum:{}:{address}", network.chain_id));
-            let assets = vec![
-                asset(&network.id, "native", 18),
-                asset(&network.id, fin_ethereum::WETH, 18),
-                asset(&network.id, fin_ethereum::USDC, 6),
-            ];
-            let connection = ConnectionConfig::Ethereum {
+            let connection = ConnectionConfig::Evm {
                 name: args.name.clone(),
-                resource,
+                resource: ResourceId(format!("evm:{address}")),
                 credential_ref: staged.map(|reference| reference.as_str().into()),
-                network: network.id.clone(),
                 address,
                 signing_enabled: derived.is_some(),
-                assets,
             };
             Ok((
                 connection,
@@ -679,13 +686,6 @@ async fn approve_and_audit(uid: u32, binding: &Value, summary: &str, ui: &Ui) ->
         })?;
     Ok(())
 }
-fn asset(network: &str, reference: &str, decimals: u8) -> AssetId {
-    AssetId {
-        network: network.into(),
-        reference: reference.into(),
-        decimals,
-    }
-}
 fn config_hash(config: &BrokerConfigV2) -> Result<String> {
     binding_hash(
         &serde_json::to_value(config)
@@ -694,19 +694,23 @@ fn config_hash(config: &BrokerConfigV2) -> Result<String> {
 }
 fn name(connection: &ConnectionConfig) -> &str {
     match connection {
-        ConnectionConfig::Binance { name, .. } | ConnectionConfig::Ethereum { name, .. } => name,
+        ConnectionConfig::Binance { name, .. }
+        | ConnectionConfig::Ethereum { name, .. }
+        | ConnectionConfig::Evm { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
     match connection {
         ConnectionConfig::Binance { resource, .. }
-        | ConnectionConfig::Ethereum { resource, .. } => resource,
+        | ConnectionConfig::Ethereum { resource, .. }
+        | ConnectionConfig::Evm { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
         ConnectionConfig::Binance { credential_ref, .. } => CredentialRef::new(credential_ref).ok(),
-        ConnectionConfig::Ethereum { credential_ref, .. } => credential_ref
+        ConnectionConfig::Ethereum { credential_ref, .. }
+        | ConnectionConfig::Evm { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
     }
@@ -745,6 +749,15 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
         } => {
             json!({"name":name,"provider":"binance","resource":resource,"role":role,"parent":parent,"email":email,"wallet_type":wallet_type,"physical_identity":physical_identity})
         }
+        ConnectionConfig::Evm {
+            name,
+            resource,
+            address,
+            signing_enabled,
+            ..
+        } => {
+            json!({"name":name,"provider":"evm","resource":resource,"address":address,"signing_enabled":signing_enabled})
+        }
         ConnectionConfig::Ethereum {
             name,
             resource,
@@ -758,12 +771,31 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
     }
 }
 fn immutable_identity(connection: &ConnectionConfig) -> Value {
-    let mut value = public_connection(connection);
-    value
-        .as_object_mut()
-        .expect("public connection object")
-        .remove("signing_enabled");
-    value
+    match connection {
+        ConnectionConfig::Evm { name, address, .. }
+        | ConnectionConfig::Ethereum { name, address, .. } => {
+            json!({"provider":"evm","name":name,"address":address.to_ascii_lowercase()})
+        }
+        ConnectionConfig::Binance { .. } => public_connection(connection),
+    }
+}
+fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) -> Vec<ResourceId> {
+    match connection {
+        ConnectionConfig::Evm {
+            address, resource, ..
+        } => {
+            let mut resources = vec![resource.clone()];
+            resources.extend(config.networks.iter().map(|network| {
+                ResourceId(format!(
+                    "ethereum:{}:{}",
+                    network.chain_id,
+                    address.to_ascii_lowercase()
+                ))
+            }));
+            resources
+        }
+        _ => vec![resource(connection).clone()],
+    }
 }
 fn outcome(
     action: &str,
@@ -876,6 +908,45 @@ mod tests {
             serde_json::from_value::<fin_discovery::enrollment_contract::EnrollmentOutcome>(output)
                 .is_ok()
         );
+    }
+    #[test]
+    fn legacy_wallet_upgrade_retains_identity_and_checks_each_chain_for_pending_writes() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let legacy = ConnectionConfig::Ethereum {
+            name: "wallet".into(),
+            resource: ResourceId(format!("ethereum:1:{address}")),
+            network: "ethereum:1".into(),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+            assets: vec![],
+        };
+        let shared = ConnectionConfig::Evm {
+            name: "wallet".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            signing_enabled: true,
+        };
+        assert_eq!(immutable_identity(&legacy), immutable_identity(&shared));
+        let config = BrokerConfigV2 {
+            version: 2,
+            approver_uid: 501,
+            networks: NetworkConfig::reviewed_evm_networks(),
+            deployments: vec![],
+            connections: vec![shared.clone()],
+            policy: BrokerPolicy::beta(),
+            extensions: BTreeMap::new(),
+        };
+        config.validate().unwrap();
+        let resources = connection_resources(&shared, &config);
+        for chain in [1, 42161, 4663] {
+            assert!(resources.contains(&ResourceId(format!("ethereum:{chain}:{address}"))));
+        }
+        let output = outcome("update", Some(&shared), vec![], vec![], None);
+        assert_eq!(output["connection"]["provider"], "evm");
+        assert!(output["connection"].get("network").is_none());
+        assert!(!output.to_string().contains("SYNTHETIC-KEY-REFERENCE"));
     }
     #[test]
     fn readonly_wallet_can_gain_same_address_signing_without_retargeting() {
