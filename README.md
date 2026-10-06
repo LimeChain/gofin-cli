@@ -27,11 +27,11 @@ later. Fin is open source; license selection is pending.
 
 The [installer](scripts/install.sh) downloads published GitHub release bundles,
 verifies their checksum manifest and starts protected setup on supported macOS
-hardware. The release workflow creates a draft; a maintainer publishes it to
-make the installer and bundles downloadable.
+hardware. Publishing a GitHub release starts CI; the installer and bundles
+become downloadable when its builds and asset uploads finish.
 
-**The first beta is pending publication.** After `v0.2.0-beta.1` is published,
-run this version-pinned command in your own macOS Terminal:
+**The first beta is pending publication.** After `v0.2.0-beta.1` is published
+and CI finishes, run this version-pinned command in your own macOS Terminal:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 \

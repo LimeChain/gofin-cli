@@ -6,8 +6,10 @@
 
 Compiled delivery uses a native CI matrix for Apple Silicon/Intel macOS 13+ and
 Linux x86_64 discovery. The workspace version is `0.2.0-beta.1`; release tags must
-match it exactly. Branch previews carry a source suffix and cannot publish.
-Version tags create verified draft releases, with explicit maintainer publication.
+match it exactly. Publishing a GitHub release starts the native builds and asset
+uploads; tag pushes and branch pushes do not package releases. The existing
+preview builder remains available for manual local inspection. Upload retries
+skip matching files and refuse to replace differing published assets.
 No Apple Developer credentials or production secrets enter CI.
 
 A standalone POSIX downloader selects a published version, verifies outer and

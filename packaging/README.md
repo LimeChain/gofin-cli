@@ -20,7 +20,7 @@ The bundle contains `fin`, the internal `fin-broker`, the internal native
 whether that checkout had modifications, and the target architecture; its checksum
 is included in `SHA256SUMS`. Node.js, npm, Rust, and Swift are not needed
 on the target machine. Local beta binaries use ad-hoc hardened signatures. The downloadable bootstrap is implemented; published bundles require a
-maintainer to promote a CI-created draft. Apple Developer signing and notarized
+maintainer to publish a GitHub release and wait for CI to attach its assets. Apple Developer signing and notarized
 distribution are not provided.
 
 Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS

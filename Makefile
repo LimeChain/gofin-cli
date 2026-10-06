@@ -37,6 +37,7 @@ test-integration:
 test-delivery:
 	@python3 scripts/test-curl-installer.py
 	@python3 scripts/test-release-build.py
+	@python3 scripts/test-release-upload.py
 
 test:
 	@cargo test --locked --workspace

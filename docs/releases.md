@@ -17,42 +17,44 @@ has an inner manifest and a fixed `bundle/` layout. Apple signatures are ad-hoc
 hardened signatures. Checksums verify bytes against GitHub's release manifest;
 they do not establish independent publisher provenance or notarization.
 
-## Preview builds
-
-Pushes to `codex/release-*` run `.github/workflows/release.yml` and upload native
-bundles as workflow artifacts. Download an artifact from the workflow run's
-Artifacts section. Preview versions include the source commit and
-`BUILDINFO` records `preview=true`. Preview builds never create a GitHub release.
-Artifact archives and their checksum fragments can be inspected locally. The curl
-installer accepts published GitHub release assets; it does not install directly
-from workflow-artifact ZIPs.
-
 ## Cutting a release
 
 1. Merge and review the release source. Set `[workspace.package].version` in
    `Cargo.toml`, refresh the workspace package versions in `Cargo.lock`, and run
    `make check`, `make test`, and `make test-delivery`.
-2. Create and push an annotated `v<workspace-version>` tag at that exact commit.
-   For the first beta, this is `v0.2.0-beta.1`. Never move an existing release tag.
-3. Tag CI builds on native Apple Silicon/Intel macOS runners and Ubuntu 22.04.
-   Formatting, strict Clippy, workspace tests, synthetic delivery tests and macOS
-   installer/native checks must pass before release assembly.
-4. CI validates the complete asset set and creates a **draft** GitHub release.
-   Tags with a SemVer prerelease suffix are marked prerelease. Review the assets,
-   checksums and notes, then publish the draft from GitHub Releases. Drafts are
-   not public download endpoints.
+2. In GitHub Releases, draft a release using `v<workspace-version>` at that exact
+   commit. For the first beta, use `v0.2.0-beta.1` and mark it as a prerelease.
+   An existing annotated tag is also supported. Never move a release tag.
+3. Click **Publish release**. The `release: published` event starts CI for both
+   stable releases and prereleases. Creating a draft or pushing a tag alone does
+   not start release packaging. Ordinary branch pushes still run regression CI.
+4. CI validates the tag/version, builds on native Apple Silicon/Intel macOS
+   runners and Ubuntu 22.04, then attaches the archives, installer and checksums
+   to the same published release. Download links are usable after CI finishes.
 
-A manual run of **Release bundles** accepts an existing matching tag. It resolves
-that tag to its exact commit and runs the same pipeline. Existing drafts or
-published releases are never overwritten; failures before draft creation can be
-rerun, while an existing partial draft requires maintainer inspection. There is
-no automatic promotion or installation.
+Formatting, strict Clippy, workspace tests, synthetic delivery tests and macOS
+installer/native checks must pass before upload. A published release may appear
+without binaries while CI is running or after a failed build; check the
+**Release bundles** workflow before sharing installation instructions.
 
-The workflow builds with read-only repository permission; only the draft-release
-job has `contents: write`. It needs no signing secrets, production accounts,
-wallet keys or human approvals. The release pipeline follows GitHub's
-[hosted-runner architecture labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-and [draft-release CLI](https://cli.github.com/manual/gh_release_create).
+## Recovery and artifacts
+
+Each platform also uploads a workflow artifact for inspection. Normal branch
+pushes do not produce these release bundles. The manual local `--preview` builder
+remains available for developers; preview assets cannot be uploaded as releases.
+
+Rerun failed jobs in GitHub Actions to retry an interrupted upload using the
+original build artifacts. Matching published assets are skipped, never replaced.
+Differing or incomplete same-name assets stop upload for maintainer inspection;
+there is no automatic deletion, overwrite, tag movement or release-note editing.
+The checksum manifest uploads last so the installer refuses incomplete delivery.
+
+Build jobs have read-only repository permission; only the asset-upload job has
+`contents: write`. CI needs no signing secrets, production accounts, wallet keys
+or human approvals. The workflow follows GitHub's
+[published release event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release),
+[hosted-runner labels](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+and [release asset uploads](https://cli.github.com/manual/gh_release_upload).
 
 ## Installer behavior
 
@@ -62,8 +64,8 @@ sh scripts/install.sh --version v0.2.0-beta.1
 sh scripts/install.sh --version v0.2.0-beta.1 --download-only /absolute/new-directory
 ```
 
-The selected version must already be published. Without `--version`, the
-installer resolves GitHub's latest **stable** release once, then downloads all
+The selected version must already be published with its CI assets attached.
+Without `--version`, the installer resolves GitHub's latest **stable** release once, then downloads all
 files from that exact tag. A beta-only repository needs an explicit version.
 Unsupported OS/architecture, root invocation, an existing protected installation,
 or an existing download destination fail before artifact downloads. Linux allows
@@ -93,7 +95,7 @@ public user-facing upgrade command is separate work.
 PTYs. It verifies version/platform selection, HTTPS options, outer/inner checksums,
 fixed archive paths/types, tampering, duplicate entries, preserved existing paths,
 curl-pipe terminal handoff, cancellation, machine/no-color behavior, provenance,
-and draft/preview separation. It uses no network, real credentials, sudo or installed
-service. CI provides the actual native builds; an installed human Touch ID flow
+published-release identity, upload retries and preview separation. It uses no
+network, real credentials, sudo or installed service. CI provides the actual native builds; an installed human Touch ID flow
 requires its own [checklist](testing/rust-human-handoff.md). Artifact success alone
 does not establish financial settlement or cleanup.
