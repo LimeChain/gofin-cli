@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-**Agreed direction: 2 October 2026. Status: Rust foundation implemented; verification in progress.** The workspace now contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, and Ethereum wallet/Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface. Human installation, credential isolation, and real Touch ID checks remain pending; implementation alone is not acceptance evidence. The [product concept](fin-product-concept.md) defines scope. The [TypeScript foundation report](reports/foundation.md) records historical evidence and does not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, and Ethereum wallet/Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## Delivery objective and sequence
 
@@ -167,8 +167,7 @@ Version fingerprint encoding explicitly; do not hash incidental JSON ordering or
 Application adapters verify their own venue/protocol receipts and emit typed effects: custody movements, asset conversions, positions, debt, spending/collateral authority, usable deposit credit, and attributable costs. The shared ledger checks those effects against approved expectations, identities, reservations, and conservation/provenance rules. It must not branch on `binance.*`, `aave.*`, or other operation-name prefixes to interpret finances.
 
 Conditional return planning needs the same origin discipline before submission.
-The current verification work replaces conversion-cycle graph exemptions with
-finite, tagged quantity replay. Every projected principal credit must match its
+Use finite, tagged quantity replay. Every projected principal credit must match its
 own source leg; a transfer preserves origin identity and a conversion carries the
 origins of the input it consumes. Sweeps consume observed projected inventory,
 not their user ceiling. Gas and other additional costs consume selected holdings
@@ -176,8 +175,8 @@ once, including when a principal output credits the same asset. Yield needs an
 existing selected position and a bounded typed accrual claim. The final route
 must return every origin to its original custody and asset, with individually
 valued shortfalls inside the funded reserve. Ambiguous pooled intervals may fail
-closed rather than inventing an origin attribution. These changes are under
-verification; the [Rust report](reports/rust-foundation.md) records their status.
+closed rather than inventing an origin attribution. Verify these properties
+through the [testing guide](testing/README.md) and [fork harness](testing/fork.md).
 
 Execution reserves principal and additional fees into separate pools. Fee caps
 earmark selected allocation-origin lots whose original home matches the fee's

@@ -9,6 +9,7 @@ mkdir -p .build
 cp FinTouchID.swift .build/main.swift
 /usr/bin/plutil -lint Info.plist >/dev/null
 /usr/bin/xcrun swiftc -O -framework AppKit -framework LocalAuthentication -framework CryptoKit \
+  -target "$(/usr/bin/uname -m)-apple-macosx13.0" \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
   .build/main.swift ApprovalPresentation.swift -o .build/fin-touch-id
 # Ad-hoc hardened signing supports a local beta; developer release signing is separate.

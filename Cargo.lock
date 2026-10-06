@@ -1687,7 +1687,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fin-authorization"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "fin-binance"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "fin-broker"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "fin-cli"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "clap",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "fin-credentials"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "ed25519-dalek",
  "fin-authorization",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "fin-discovery"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "clap",
  "fin-domain",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "fin-domain"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "fin-engine"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "fin-ethereum"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "fin-evm"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "alloy",
  "async-trait",
@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "fin-human-terminal"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "chrono",
  "fin-domain",
@@ -1890,7 +1890,7 @@ dependencies = [
 
 [[package]]
 name = "fin-presentation"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "fin-domain",
  "serde_json",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "fin-protocol"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "fin-domain",
  "schemars 1.2.2",
@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "fin-store"
-version = "0.2.0"
+version = "0.2.0-beta.1"
 dependencies = [
  "hex",
  "rusqlite",

@@ -1,12 +1,29 @@
-# Implementation handoff
+# Implementation plan
 
-**Updated:** 6 October 2026. [Product concept](fin-product-concept.md) defines the product. The compiled Rust workspace is the sole implementation; [verification evidence](reports/rust-foundation.md) separates implemented behavior from acceptance results.
+[Product concept](fin-product-concept.md) defines the product. The compiled Rust workspace is the sole implementation. Follow the [testing guide](testing/README.md) to distinguish implemented behavior from observed acceptance results.
 
-## Rust foundation in progress
+## Release delivery
+
+Compiled delivery uses a native CI matrix for Apple Silicon/Intel macOS 13+ and
+Linux x86_64 discovery. The workspace version is `0.2.0-beta.1`; release tags must
+match it exactly. Branch previews carry a source suffix and cannot publish.
+Version tags create verified draft releases, with explicit maintainer publication.
+No Apple Developer credentials or production secrets enter CI.
+
+A standalone POSIX downloader selects a published version, verifies outer and
+inner manifests and fixed archive paths/types before executing the existing
+compiled setup. Curl pipes reopen only bootstrap stdin; protected terminal,
+credential and Touch ID checks remain in the CLI/broker. Initial installation
+refuses existing state; upgrades remain a separate contract. Shared synthetic
+fixtures exercise the real archive format against the downloader. The release
+builder normalizes archive headers; this is reproducible packaging, not a claim
+that compiler output is bit-for-bit reproducible. See [release maintenance](releases.md).
+
+## Rust implementation
 
 The selected implementation is a compiled Rust workspace. The [Rust architecture](rust-architecture.md) defines the protected client/service roles, domain/engine/storage/runtime/application boundaries, exact financial-effect ledger, versioned contracts, recovery/migration, and `fin-authorization` platform providers. The small compiled Swift helper is bundled behind the macOS authorization provider; the human does not install it separately.
 
-Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Reviewed Binance REST operations and HMAC/RSA/Ed25519 authentication are implemented directly; this build does not depend on or claim a maintained Rust CCXT port. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The local macOS bundle contains all three, an inspectable terminal installer, and checksums. Commands and the actual current crate layout are in the [README](../README.md); current evidence and unfinished gates are in the [Rust verification report](reports/rust-foundation.md).
+Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Reviewed Binance REST operations and HMAC/RSA/Ed25519 authentication are implemented directly; this build does not depend on or claim a maintained Rust CCXT port. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The macOS bundle contains all three, an inspectable terminal installer, and checksums. Build and discovery commands are in the [README](../README.md); the [Rust architecture](rust-architecture.md) describes component responsibilities.
 
 The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
 
@@ -40,7 +57,7 @@ and explicit approval expiry with actionable recovery. The existing configuratio
 approval window remains 90 seconds across terminal review and Touch ID; technical
 configuration is available through details rather than the default setup summary.
 
-### Local development commands — 6 October 2026
+### Local development and lifecycle
 
 Daemon lifecycle is separate from broker readiness: a client-only launchd observer
 implements nonactivating status; start/stop use fixed peer-authenticated lifecycle
@@ -72,7 +89,7 @@ The existing synthetic broker/store/engine tests are the current isolated loop;
 a standalone interactive synthetic broker is not yet implemented. No dependency,
 financial policy, credential backend, or live authorization mode was added.
 
-### Shared CLI UX — implemented locally 6 October 2026
+### Shared CLI presentation
 
 `fin-presentation` centralizes human rendering, safe terminal text, restrained
 semantic color, stderr progress guards, diagnostics and machine serialization.
@@ -116,7 +133,7 @@ returns device ownership, modes and input settings on normal completion or paren
 exit. Fin verifies restoration before saving or approving enrollment. This does
 not disable sudo's PTY policy or allow arbitrary root-owned terminals.
 
-Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, evidence report, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The subsequent implementation goal explicitly authorizes a temporary private lead-owned non-biometric verification harness; the shipped entrypoint still requires real per-write Touch ID and exposes no authorization-disable switch.
+Implementation and automated/fork verification precede the user's real onboarding and Touch ID session. Deliver the compiled build/install procedure, observed results, and [exact human checklist](testing/rust-human-handoff.md) with the code. Preserve production/mainnet acceptance and complete unwind requirements; do not turn pending human checks into passes or inherit TS live results. The shipped entrypoint requires real per-write Touch ID and exposes no authorization-disable switch.
 
 During human onboarding and Touch ID iteration, keep fixes and verification
 local. Run focused regression checks and rebuild the retry bundle as needed;
@@ -145,13 +162,13 @@ accounting and protected enrollment remain unchanged.
 
 Use [testing stages](testing/README.md#rust-implementation-and-later-human-verification). Broader product coverage remains inventoried separately; packaging polish, other OS authorization providers, and formal audits are not additional beta gates.
 
-## TypeScript retirement — 6 October 2026
+## Legacy compatibility
 
 Removed the prototype source/tests, npm dependencies and formatting/build tools,
 example configuration, TypeScript live/fork scripts, old installer, and Node CI
 job. Rust development, packaging and verification use Cargo, Swift and the
-existing shell/Python fixtures. Historical reports remain, with the earlier
-source available in [Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5).
+existing shell/Python fixtures. Earlier source and reports remain available in
+[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5).
 The read-only legacy journal inspector and refusal to replay unresolved records
 remain unchanged. This removal does not migrate or delete installed financial
 state or credentials.

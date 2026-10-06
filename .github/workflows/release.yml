@@ -1,0 +1,160 @@
+name: Release bundles
+
+on:
+  push:
+    tags: ['v*']
+    branches: ['codex/release-*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag matching the Cargo workspace version (for example v0.2.0-beta.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fin-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
+      preview: ${{ steps.source.outputs.preview }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Resolve and validate source
+        id: source
+        env:
+          FIN_REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+          FIN_PREVIEW: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          args = ['python3', 'scripts/build-release.py', '--resolve']
+          if os.environ['FIN_PREVIEW'] == 'true':
+              args.append('--preview')
+          else:
+              args += ['--tag', os.environ['FIN_REQUESTED_TAG']]
+          source = json.loads(subprocess.check_output(args, text=True))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key in ('tag', 'commit', 'prerelease', 'preview'):
+                  value = source[key]
+                  output.write(key + '=' + (str(value).lower() if isinstance(value, bool) else value) + '\n')
+          PY
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      FIN_TAG: ${{ needs.resolve.outputs.tag }}
+      FIN_TARGET: ${{ matrix.target }}
+      FIN_PREVIEW: ${{ needs.resolve.outputs.preview }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97.1'
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - name: Synthetic delivery tests
+        run: |
+          python3 scripts/test-curl-installer.py
+          python3 scripts/test-release-build.py
+      - name: macOS installer and native presentation tests
+        if: runner.os == 'macOS'
+        run: |
+          python3 scripts/test-rust-macos-installer.py
+          python3 scripts/test-rust-macos-runtime-update.py
+          python3 scripts/test-rust-macos-uninstall.py
+          python3 scripts/test-dev-workflow.py
+          mkdir -p native/.build
+          xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests
+          native/.build/approval-presentation-tests
+      - name: Build inspectable release archives
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          args = ['python3', 'scripts/build-release.py', '--tag', os.environ['FIN_TAG'],
+                  '--target', os.environ['FIN_TARGET'], '--output-dir', os.environ['RUNNER_TEMP'] + '/fin-assets']
+          if os.environ['FIN_PREVIEW'] == 'true':
+              args.append('--preview')
+          subprocess.run(args, check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fin-${{ needs.resolve.outputs.tag }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/fin-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.preview == 'false'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      FIN_TAG: ${{ needs.resolve.outputs.tag }}
+      FIN_PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fin-${{ needs.resolve.outputs.tag }}-*
+          path: ${{ runner.temp }}/fin-assets
+          merge-multiple: true
+      - name: Validate assets and create draft release
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          tag = os.environ['FIN_TAG']
+          assets = pathlib.Path(os.environ['RUNNER_TEMP']) / 'fin-assets'
+          subprocess.run(['python3', 'scripts/build-release.py', '--tag', tag, '--assemble',
+                          '--output-dir', str(assets), '--installer', 'scripts/install.sh'], check=True)
+          # Fail on API errors; an existing draft or published release is never overwritten.
+          query = '''query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){id isDraft}}}'''
+          owner, name = os.environ['GH_REPO'].split('/', 1)
+          existing = json.loads(subprocess.check_output(['gh', 'api', 'graphql', '-f', 'query=' + query,
+                                '-f', 'owner=' + owner, '-f', 'name=' + name, '-f', 'tag=' + tag], text=True))
+          if existing.get('errors'):
+              raise SystemExit('Release lookup failed; no release or assets were changed.')
+          if existing['data']['repository']['release'] is not None:
+              raise SystemExit('A release already exists for this tag; inspect it manually. No assets were changed.')
+          archives = sorted(str(path) for path in assets.glob('*.tar.gz'))
+          args = ['gh', 'release', 'create', tag, '--verify-tag', '--draft', '--title', 'Fin ' + tag,
+                  '--notes', 'Compiled macOS bundles and Linux offline discovery bundle. Human installation and real Touch ID verification remain separate.']
+          if os.environ['FIN_PRERELEASE'] == 'true':
+              args.append('--prerelease')
+          subprocess.run(args + archives + [str(assets / 'install.sh'), str(assets / 'SHA256SUMS')], check=True)
+          PY

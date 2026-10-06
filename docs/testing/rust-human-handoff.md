@@ -1,71 +1,27 @@
-# Rust human onboarding and per-write acceptance
+# Human onboarding and per-write acceptance
 
-The human confirmed successful end-to-end installation on 6 October 2026.
-The remaining individual checks below require their own observations; installation
-success does not establish financial-write acceptance or credential isolation.
-Run them together with the human after the reviewed bundle and automated/fork results are ready.
-The ordinary installed broker always uses native authorization. Temporary private
-non-biometric verification does not establish this boundary.
+Use this checklist after the reviewed bundle and automated/fork verification are
+ready. Record installation, credential isolation, configuration approval, financial
+Touch ID and production settlement separately. A case is pending until observed;
+synthetic and historical non-biometric results do not establish the human boundary.
 
-## Requested local clean uninstall (6 October)
+## Maintenance and terminal presentation
 
-The human explicitly requested deleting the installed credentials and starting
-onboarding again. `scripts/uninstall-rust-macos.py` is a local development reset,
-not a shipped upgrade/uninstall command. Run it with `/usr/bin/python3 -I` under
-fresh human sudo. It checks fixed root-owned paths and service/PATH identity,
-takes the existing exclusive maintenance lock, refuses active clients, unloads
-launchd and verifies the broker stopped, then checks a private temporary copy of
-the database and WAL. Any financial rows block deletion and restore the service.
-An empty journal allows removal of `/Library/Fin`, its service plist and PATH registration. It opens no key
-files and creates no credential/configuration backup. Nonempty or unreadable
-financial history stops deletion for a recovery decision. Separate development
-files under `.context/` are outside the installed application and are unchanged.
+Initial setup preserves and refuses an existing installation or journal. Use the
+reviewed runtime updater for an existing installation; do not delete financial
+state to bypass setup. `make uninstall` is a destructive local development reset
+that deletes installed credentials/configuration only when its journal checks
+establish no financial history. Run it in your own macOS Terminal, and follow the
+[bundle instructions](../../packaging/README.md).
 
-The agent's read-only installed operations check first returned
-`CONFIG_CHANGED_RESTART_REQUIRED`, then `BROKER_TIMEOUT`; neither establishes an
-empty journal. The privileged reset checks SQLite itself before removing anything.
-The human retry stopped at journal verification, before deletion. The follow-up reported SQLite could not open the database during its first
-query. The same error was reproduced with a read-only WAL reader unable to create
-its shared-memory support file. The reset now verifies a disposable database+WAL
-snapshot after broker shutdown, without opening the original in SQLite or copying
-credentials. Thirteen isolated fixtures pass on macOS system Python, including
-that reproduction, committed WAL-only history, original-byte preservation,
-service restoration and temporary-snapshot cleanup. The precise installed
-filesystem cause remains unobserved; the revised human retry is pending.
-Actual deletion and fresh setup await the human's Terminal. Test with `python3 scripts/test-rust-macos-uninstall.py`.
-After successful reset, run `./fin setup` from `work/release-ux-20261006/bundle`.
-
-## UX update retest (6 October)
-
-For an existing installation, use the reviewed runtime updater with the exact
-installed prior bundle and the new UX bundle, including `--presentation-update`.
-Do not rerun initial setup over existing state. The updater verifies both bundles,
-requires an idle client/enrollment, retains a runtime backup and never opens
-private state or restarts the daemon. The next enrollment uses the updated binary.
-
-1. `fin --help`, `fin capabilities`, and `fin connections add --help`: readable,
-   no JSON dump. `--verbose` reveals details; `--json --verbose` stays JSON only.
-2. `fin connections add --json`: immediate structured human-terminal handoff,
-   with no sudo password, input or Touch ID. No settings change.
-3. In your Terminal, use the applicable full `fin connections update ...` command
-   to review the already-enrolled connection without creating a duplicate, or
-   `fin connections add` for a genuinely new connection. Enter secrets privately.
-4. Verify hidden secret receipts and one updating progress line, then a concise
-   terminal action/account/permissions/storage summary. Y/N and D respond
-   immediately without Enter, in either case. Enter means No; D shows details.
-   Cancel once; the active connection must remain intact.
-5. Repeat when ready: `y` then native Touch ID, without an extra Fin confirmation
-   window. A fallback Fin window means protected channel recognition needs checking;
-   it does not imply approval was skipped. Success is one readable line, with
-   warnings retained on stderr. Inspect `fin connections list --json` afterward.
-   The native prompt must name **Fin**, describe the named connection action (or
-   finishing setup for the Mac account), and use **Cancel**. Configuration stays
-   in the terminal; no opaque "this configuration" wording or internal filename.
-6. `NO_COLOR=1 fin ...` has no color; redirected/machine output has no animation.
-   Clear cached sudo with `sudo -K` after enrollment.
-
-These cases require observation; synthetic tests do not establish the installed
-biometric or credential boundary. No financial write is needed for this UX retest.
+Verify readable help, concise enrollment results, hidden secret receipts,
+truthful progress, and separate Mac login password/configuration Touch ID
+explanations. `--verbose` adds details; `--json --verbose` remains JSON only.
+`fin connections add --json` must return a structured human-terminal handoff
+before sudo, secret input or Touch ID. During review, Y/N and D respond without
+Enter; Enter means No and D shows exact details. Cancellation preserves the
+active connection. `NO_COLOR=1` disables color, and redirected/machine output has
+no animation. These checks require their own observed results.
 
 ## Installation and discovery
 
@@ -131,7 +87,7 @@ separate from the fresh Touch ID required by Fin for each write.
 Sudo is needed for setup and connection add/update/remove. Ordinary Fin commands
 use the background service without sudo; financial writes request Touch ID.
 
-For the local enrollment-input hotfix on an existing installation, finish or
+For a reviewed compatible runtime update on an existing installation, finish or
 cancel enrollment and stop issuing Fin commands. Review
 `scripts/update-rust-macos-runtime.sh` and the exact old/new bundles, then run
 the script in your own Terminal with fresh sudo and absolute `--from`/`--to`
@@ -147,8 +103,7 @@ installation or establish root/signature enforcement on the host.
 
 ## Private connection enrollment
 
-The connection-output/approval presentation update has isolated regression
-checks; it does not require credentials or invoke authentication:
+Presentation regression checks do not require credentials or invoke authentication:
 
 ```sh
 cargo test --locked -p fin-cli -p fin-broker --bin fin --bin fin-broker
@@ -157,12 +112,14 @@ xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.
 native/.build/approval-presentation-tests
 ```
 
-After the next reviewed bundle is installed, check that enrollment returns a
-short confirmation by default and `--json` returns the structured result. In
-the native connection approval, verify the account/action/permissions summary
-and visible warnings, open and close Details, then approve or cancel. The full
+After installing the reviewed bundle, check that enrollment returns a short
+confirmation by default and `--json` returns a human-terminal handoff. In the
+protected terminal review, verify the account/action/permissions summary and
+visible warnings, open and close Details, then approve or cancel. The full
 binding, hash and expiry must remain available; toggling Details grants no
-approval and must not extend the deadline. This human UI check is still pending.
+approval and must not extend the deadline. The native prompt must name **Fin**,
+describe the named connection action or finishing setup for the Mac account,
+and offer **Cancel**. Record these human UI results separately from synthetic tests.
 
 Use actual help for the final version. Illustrative safe metadata commands are:
 
@@ -244,19 +201,11 @@ the journal and does not perform financial cleanup.
 ## Production/mainnet round trips
 
 Reconcile all earlier test records before starting new financial acceptance.
-The original temporary Rust Binance request remains unresolved. The owner accepted
-its five USDC as a possible loss and explicitly authorized a distinct 4.9-USDC
-attempt, which received HTTP 400 / `-1022` and retains its own unknown record and
-reservation. Unchanged balances and absent history are not terminal proof. Both
-identities and allocations remain charged; do not replay either request, discard
-the journals, or use installation/enrollment to forget them. A separate 0.05-USDC
-probe was subsequently authorized and completed both writes with an exact
-zero-fee return, full restoration and no additional POSTs during duplicate checks.
-Its authorization is consumed. Carry the two older unknown outcomes and
-outstanding campaign cleanup into the human-session report. Query-form signing
-and default-master receipt proof passed that exact private non-biometric route;
-Touch ID and protected credential acceptance remain pending. See the
-[current report](../reports/rust-foundation.md).
+Uncertain outcomes retain their original identities, reservations and charged
+allocations. Unchanged balances or absent history alone are not terminal proof.
+Do not replay an uncertain request, discard its journal, or use installation or
+enrollment to forget it. Carry unresolved records and outstanding cleanup into
+the private human-session report; a previous approval never authorizes a new run.
 
 Follow the [live-test contract](README.md#live-test-contract), carrying forward the
 historical selected allocation and actual consumed costs. Snapshot current

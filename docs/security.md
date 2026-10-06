@@ -87,12 +87,10 @@ reset, migrated or replayed.
 
 ## Verification limits
 
-The human confirmed end-to-end installation on 6 October 2026. Individual isolation,
-biometric financial-write and production/mainnet cases retain their own evidence
-status in the [Rust report](reports/rust-foundation.md). Synthetic tests and native
-availability probes do not establish those cases. Live tests retain the
+Installation, credential isolation, biometric financial writes and production/mainnet
+settlement require separate observed results in the [human checklist](testing/rust-human-handoff.md).
+Synthetic tests and native availability probes do not establish those cases. Live tests retain the
 [$100 allocation/movement and complete restoration contract](testing/README.md#live-test-contract).
 
 The TypeScript runtime and installer have been removed. Its source remains in
-[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5) and its results in the
-[historical report](reports/foundation.md).
+[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5), together with historical reports. Those results do not establish Rust verification.

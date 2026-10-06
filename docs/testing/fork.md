@@ -22,8 +22,8 @@ and unwrapping. It checks duplicate identities without extra authorization,
 signature or dispatch, recovery through the durable broker journal, and an
 independent final snapshot. The shared run ledger must finish `restored` with
 zero differences. Failed preflight or incomplete cleanup is a failed attempt;
-stopping its node provides no restoration evidence. Current Rust results are in
-the [Rust report](../reports/rust-foundation.md).
+stopping its node provides no restoration evidence. Record the observed result,
+source commit, tool versions and artifact path using the [report template](report-template.md).
 
 The fixture is pinned to block **26099326**, hash
 `0xe24db6a0bd48918550f6a7c35c0e129172816d1f6641ac16a37459627551f7bf`.
@@ -31,5 +31,4 @@ The script uses Foundry Anvil and a public archive RPC; unavailable archived sta
 blocks reproduction. Never silently substitute current mainnet state.
 
 The TypeScript harness has been retired. Its earlier source is available in
-[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5); historical results remain in the
-[foundation report](../reports/foundation.md) and do not establish Rust passes.
+[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5). Historical results do not establish Rust passes.

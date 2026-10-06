@@ -19,9 +19,9 @@ The bundle contains `fin`, the internal `fin-broker`, the internal native
 `fin-touch-id` helper, and `install.sh`. `BUILDINFO` records the source commit,
 whether that checkout had modifications, and the target architecture; its checksum
 is included in `SHA256SUMS`. Node.js, npm, Rust, and Swift are not needed
-on the target machine. Local beta binaries use ad-hoc hardened signatures. A
-published download script, Apple Developer signing, and notarized distribution
-have not been released or verified.
+on the target machine. Local beta binaries use ad-hoc hardened signatures. The downloadable bootstrap is implemented; published bundles require a
+maintainer to promote a CI-created draft. Apple Developer signing and notarized
+distribution are not provided.
 
 Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
 Terminal can run `fin` directly. It leaves Homebrew directories untouched and
@@ -77,3 +77,19 @@ Fin requests elevation when needed and the wrapper clears it on exit.
 and configuration, refusing financial history. Neither target runs implicitly.
 Use Apple's Make supplied with macOS/Xcode/Command Line Tools; other executable
 paths remain outside the protected terminal ancestry allowlist.
+
+## Published bundles
+
+The release workflow produces native Apple Silicon and Intel bundles for macOS
+13 or later. Binaries use ad-hoc hardened signing; Developer ID signing and Apple
+notarization are not provided. The Linux x86_64 archive supports offline discovery
+only and is built on Ubuntu 22.04 (glibc 2.35). It has no protected execution provider.
+
+After a maintainer publishes a versioned release, its `install.sh` downloads the
+matching archive and checksum manifest over HTTPS, verifies the archive and fixed
+bundle contents, then invokes the existing compiled `fin setup`. It never reads
+credentials. Setup retains its administrator and fresh configuration Touch ID path.
+Use `--version TAG` for beta releases; the default selects GitHub's latest stable
+release. `--download-only NEW_DIR` saves a verified bundle without setup. Existing
+installations and user files are preserved; this bootstrap is not an updater.
+See [release maintenance](../docs/releases.md) for CI artifacts and publication.

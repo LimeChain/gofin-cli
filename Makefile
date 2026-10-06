@@ -2,7 +2,7 @@
 SHELL := /bin/sh
 ARGS ?= --help
 
-.PHONY: help dev build test-ui test-integration test check bundle release setup uninstall
+.PHONY: help dev build test-ui test-integration test-delivery test check bundle release setup uninstall
 
 help:
 	@printf '%s\n' \
@@ -10,6 +10,7 @@ help:
 	  'make build             Incrementally build the debug CLI and broker' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
+	  'make test-delivery     Synthetic release and curl-installer tests' \
 	  'make test              Full offline Rust test suite' \
 	  'make check             Rust formatting and strict Clippy' \
 	  'make bundle            Build an inspectable debug macOS bundle; do not install' \
@@ -32,6 +33,10 @@ test-integration:
 	@python3 scripts/test-rust-macos-runtime-update.py
 	@python3 scripts/test-rust-macos-uninstall.py
 	@python3 scripts/test-dev-workflow.py
+
+test-delivery:
+	@python3 scripts/test-curl-installer.py
+	@python3 scripts/test-release-build.py
 
 test:
 	@cargo test --locked --workspace

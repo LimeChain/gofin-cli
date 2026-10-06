@@ -2,7 +2,7 @@
 
 Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the implementation plan](docs/implementation-plan.md), and [the testing guide](docs/testing/README.md) before implementation. The linked Binance and Ethereum guides contain the first acceptance cases.
 
-Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). The retired TypeScript source is available in Git history; its [foundation report](docs/reports/foundation.md) is historical evidence, not Rust verification.
+Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). Retired TypeScript source and verification reports are available in Git history; historical evidence does not establish Rust verification.
 
 ## Product decisions
 

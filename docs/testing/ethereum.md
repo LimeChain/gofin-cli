@@ -1,6 +1,6 @@
 # Ethereum wallet and DeFi acceptance
 
-Read the [shared testing rules](README.md) first. This guide specifies required Ethereum behavior. Existing TS choices/results are recorded in the [handoff](../implementation-plan.md) and [foundation report](../reports/foundation.md); Rust must record its own commands, versions, deployments, test snapshots, and results.
+Read the [shared testing rules](README.md) first. This guide specifies required Ethereum behavior. Follow the [implementation plan](../implementation-plan.md) and record Rust commands, versions, deployments, test snapshots, and results independently of historical TypeScript evidence in Git history.
 
 ## Scope and representative route
 

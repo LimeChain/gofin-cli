@@ -1,6 +1,6 @@
 # Binance funding acceptance
 
-Read the [shared testing rules](README.md) first. These cases specify required behavior, not a live pass. The current Rust implementation is recorded in the [handoff](../implementation-plan.md); historical TypeScript evidence remains separate in the [foundation report](../reports/foundation.md).
+Read the [shared testing rules](README.md) first. These cases specify required behavior, not a live pass. The [implementation plan](../implementation-plan.md) describes the Rust implementation. Historical TypeScript evidence in Git history does not establish Rust acceptance.
 
 ## Goal and setup
 

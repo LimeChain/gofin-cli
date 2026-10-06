@@ -1,6 +1,6 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Existing TS results are in the [foundation report](../reports/foundation.md). Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. The Rust CLI and workspace tests are implemented; use its installed discovery for current schemas instead of the historical TS syntax.
+These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md) and [Ethereum](ethereum.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
 
 ```sh
 cargo fmt --all -- --check
