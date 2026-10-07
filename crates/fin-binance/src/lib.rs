@@ -179,6 +179,11 @@ impl ClientIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinanceEndpoint {
+    ExchangeInfo,
+    SpotCommission,
+    SpotOrder,
+    SpotOrderStatus,
+    SpotTrades,
     ApiRestrictions,
     Account,
     SubAccountList,
@@ -198,6 +203,11 @@ pub enum BinanceEndpoint {
 impl BinanceEndpoint {
     pub fn method_path(self) -> (&'static str, &'static str) {
         match self {
+            Self::ExchangeInfo => ("GET", "/api/v3/exchangeInfo"),
+            Self::SpotCommission => ("GET", "/api/v3/account/commission"),
+            Self::SpotOrder => ("POST", "/api/v3/order"),
+            Self::SpotOrderStatus => ("GET", "/api/v3/order"),
+            Self::SpotTrades => ("GET", "/api/v3/myTrades"),
             Self::ApiRestrictions => ("GET", "/sapi/v1/account/apiRestrictions"),
             Self::Account => ("GET", "/api/v3/account"),
             Self::SubAccountList => ("GET", "/sapi/v1/sub-account/list"),
@@ -258,6 +268,38 @@ impl BinanceRequest {
             return Err(BinanceError::DuplicateParameter);
         }
         let (required, allowed): (&[&str], &[&str]) = match self.endpoint {
+            BinanceEndpoint::ExchangeInfo | BinanceEndpoint::SpotCommission => {
+                (&["symbol"], &["symbol", "recvWindow"])
+            }
+            BinanceEndpoint::SpotOrder => (
+                &[
+                    "symbol",
+                    "side",
+                    "type",
+                    "timeInForce",
+                    "quantity",
+                    "price",
+                    "newClientOrderId",
+                ],
+                &[
+                    "symbol",
+                    "side",
+                    "type",
+                    "timeInForce",
+                    "quantity",
+                    "price",
+                    "newClientOrderId",
+                    "recvWindow",
+                ],
+            ),
+            BinanceEndpoint::SpotOrderStatus => (
+                &["symbol", "origClientOrderId"],
+                &["symbol", "origClientOrderId", "recvWindow"],
+            ),
+            BinanceEndpoint::SpotTrades => (
+                &["symbol", "orderId", "limit"],
+                &["symbol", "orderId", "limit", "recvWindow"],
+            ),
             BinanceEndpoint::ApiRestrictions
             | BinanceEndpoint::Account
             | BinanceEndpoint::CapitalConfig
@@ -355,6 +397,15 @@ impl BinanceRequest {
         {
             return Err(BinanceError::UnsupportedParameter);
         }
+        if matches!(self.endpoint, BinanceEndpoint::SpotOrder)
+            && (self.get("type") != Some("LIMIT")
+                || self.get("timeInForce") != Some("FOK")
+                || !matches!(self.get("side"), Some("BUY" | "SELL"))
+                || ExactDecimal::parse(self.get("quantity").unwrap())?.is_zero()
+                || ExactDecimal::parse(self.get("price").unwrap())?.is_zero())
+        {
+            return Err(BinanceError::InvalidRequest);
+        }
         if matches!(self.endpoint, BinanceEndpoint::UniversalTransfer) {
             let amount = ExactDecimal::parse(self.get("amount").unwrap())?;
             if amount.is_zero()
@@ -369,7 +420,7 @@ impl BinanceRequest {
         }
         if matches!(self.endpoint, BinanceEndpoint::StandardWithdrawal)
             && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
-                || self.get("network") != Some("ETH")
+                || !matches!(self.get("network"), Some("ETH" | "ARBITRUM"))
                 || self.get("walletType") != Some("0"))
         {
             return Err(BinanceError::InvalidRequest);
@@ -1194,45 +1245,48 @@ impl BinanceTransport for BinanceHttpTransport {
             .validate()
             .map_err(|_| TransportError::InvalidResponse)?;
         let (method, path) = request.endpoint.method_path();
-        let params = self.signed_params(&request);
-        let preimage = signed_preimage(&params);
-        let signature = self.signer.sign(credential, &preimage).await?;
-        let api_key = self.signer.api_key(credential).await?;
-        if api_key.is_empty() || api_key.contains(['\r', '\n']) {
-            return Err(TransportError::PermissionDenied);
-        }
-        let signature_param = format!("signature={}", percent_encode(signature.as_str()));
-        let mut url = format!("{}{}", self.base_url, path);
-        let builder = if method == "GET" || method == "POST" {
-            url.push('?');
-            url.push_str(
-                std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
-            );
-            url.push('&');
-            url.push_str(&signature_param);
-            if method == "GET" {
-                self.client.get(url)
-            } else {
-                // Binance permits signed POST parameters in the query string;
-                // its Ed25519 example uses this placement. Keeping the exact
-                // signing preimage and signature together avoids depending on
-                // venue form-body parsing for characters such as '+' and '@'.
-                self.client.post(url)
-            }
+        let builder = if request.endpoint == BinanceEndpoint::ExchangeInfo {
+            let query = signed_preimage(&request.params);
+            let query = std::str::from_utf8(&query).map_err(|_| TransportError::InvalidResponse)?;
+            self.client.get(format!("{}{path}?{query}", self.base_url))
         } else {
-            return Err(TransportError::InvalidResponse);
-        };
-        let response = builder
-            .header("X-MBX-APIKEY", api_key)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    TransportError::Timeout
+            let params = self.signed_params(&request);
+            let preimage = signed_preimage(&params);
+            let signature = self.signer.sign(credential, &preimage).await?;
+            let api_key = self.signer.api_key(credential).await?;
+            if api_key.is_empty() || api_key.contains(['\r', '\n']) {
+                return Err(TransportError::PermissionDenied);
+            }
+            let signature_param = format!("signature={}", percent_encode(signature.as_str()));
+            let mut url = format!("{}{}", self.base_url, path);
+            let builder = if method == "GET" || method == "POST" {
+                url.push('?');
+                url.push_str(
+                    std::str::from_utf8(&preimage).map_err(|_| TransportError::InvalidResponse)?,
+                );
+                url.push('&');
+                url.push_str(&signature_param);
+                if method == "GET" {
+                    self.client.get(url)
                 } else {
-                    TransportError::Unavailable
+                    // Binance permits signed POST parameters in the query string;
+                    // its Ed25519 example uses this placement. Keeping the exact
+                    // signing preimage and signature together avoids depending on
+                    // venue form-body parsing for characters such as '+' and '@'.
+                    self.client.post(url)
                 }
-            })?;
+            } else {
+                return Err(TransportError::InvalidResponse);
+            };
+            builder.header("X-MBX-APIKEY", api_key)
+        };
+        let response = builder.send().await.map_err(|error| {
+            if error.is_timeout() {
+                TransportError::Timeout
+            } else {
+                TransportError::Unavailable
+            }
+        })?;
         let status = response.status();
         let status_code = status.as_u16();
         // Retain only Binance's numeric `code` in failure diagnostics; never

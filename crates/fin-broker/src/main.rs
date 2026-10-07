@@ -35,6 +35,10 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum EnrollmentAction {
+    PolicySet {
+        #[arg(long)]
+        request: String,
+    },
     Initialize {
         #[arg(long)]
         request: String,
@@ -122,11 +126,12 @@ async fn run(args: Args) -> fin_domain::Result<()> {
                 "HUMAN_TERMINAL_REQUIRED",
                 "enrollment",
                 "Enrollment requires your own interactive Terminal.",
-                "Run fin connections add or fin setup yourself without --json.",
+                "Run fin policy set, fin connections add or fin setup yourself without --json.",
             ));
         }
         let ui = Ui::new(false, args.verbose);
         let (action_name, request) = match action {
+            EnrollmentAction::PolicySet { request } => ("policy_set", request),
             EnrollmentAction::Initialize { request } => ("initialize", request),
             EnrollmentAction::Add { request } => ("add", request),
             EnrollmentAction::Update { request } => ("update", request),
@@ -134,6 +139,15 @@ async fn run(args: Args) -> fin_domain::Result<()> {
         };
         let request = validate_public_enrollment_request(&request)?;
         let result = fin_broker::enrollment::handle_with_ui(action_name, request, &ui).await?;
+        if action_name == "policy_set" {
+            ui.success("Financial limits updated.").map_err(|_| {
+                FinError::validation("Limits may be saved; run fin policy show to inspect them.")
+            })?;
+            ui.write_result(&result, "policy").map_err(|_| {
+                FinError::validation("Limits were saved; run fin policy show to inspect them.")
+            })?;
+            return Ok(());
+        }
         let output = render_enrollment_result(result.clone(), false)?;
         let summary = output.lines().next().unwrap_or_default();
         ui.success(summary).map_err(|_| {

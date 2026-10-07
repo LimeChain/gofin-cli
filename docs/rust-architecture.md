@@ -77,7 +77,7 @@ same root ownership, hardened signature and ACL validation as other runtime code
 
 | Dimension                        | Example extension                         | Required work                                                                                                               |
 | -------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Application                      | Kraken, another lending protocol          | Typed operations, capabilities, preparation, receipt verification, financial effects, restoration semantics, tests.         |
+| Application                      | Kraken, another lending protocol          | Typed operations, capabilities, preparation, receipt verification, financial effects, recovery semantics, tests.         |
 | Network runtime                  | Solana                                    | Its own transaction/signing/lifetime/finality model and typed identities; do not impose EVM nonce or address shapes.        |
 | Network/deployment configuration | Another reviewed EVM chain or Aave market | Chain identity, trusted public RPCs, fee/finality rules, valuation, exact assets, reviewed protocol deployment and version. |
 | Connection                       | Another main account, child, or wallet    | Human enrollment, credential reference, physical identity, authority/permissions, resource locking.                         |
@@ -206,39 +206,23 @@ Version fingerprint encoding explicitly; do not hash incidental JSON ordering or
 
 Application adapters verify their own venue/protocol receipts and emit typed effects: custody movements, asset conversions, positions, debt, spending/collateral authority, usable deposit credit, and attributable costs. The shared ledger checks those effects against approved expectations, identities, reservations, and conservation/provenance rules. It must not branch on `binance.*`, `aave.*`, or other operation-name prefixes to interpret finances.
 
-Conditional return planning needs the same origin discipline before submission.
-Use finite, tagged quantity replay. Every projected principal credit must match its
-own source leg; a transfer preserves origin identity and a conversion carries the
-origins of the input it consumes. Sweeps consume observed projected inventory,
-not their user ceiling. Gas and other additional costs consume selected holdings
-once, including when a principal output credits the same asset. Yield needs an
-existing selected position and a bounded typed accrual claim. The final route
-must return every origin to its original custody and asset, with individually
-valued shortfalls inside the funded reserve. Ambiguous pooled intervals may fail
-closed rather than inventing an origin attribution. Verify these properties
-through the [testing guide](testing/README.md) and [fork harness](testing/fork.md).
+Ordinary execution prepares and reserves one exact operation, independently of
+historical restoration runs. Resource reservations cover approved principal and
+maximum additional fees before approval and submission. Competing work cannot
+spend resources reserved for an unresolved submission. Denied or expired
+unsubmitted work releases only its own reservation; uncertain submitted work
+retains its original identity, evidence and reservation until reconciliation.
+Approved amount, destination, price/slippage and fee bounds cannot be widened by
+a later policy change. Reconciliation uses the frozen evidence and approved
+bounds, without replaying a write or requiring return to starting holdings.
 
-Execution reserves principal and additional fees into separate pools. Fee caps
-earmark selected allocation-origin lots whose original home matches the fee's
-current resource and asset first, then other selected allocation-origin lots
-recorded at that same source. An unselected, borrowed, or accrual lot cannot fund an additional fee.
-Transfer principal prefers origins whose selected home is the recipient,
-including accrual descendants of that origin; next it uses foreign
-nonborrowed origins, then source-local origins, and borrowed origins last.
-Debt repayment reverses that final preference and consumes borrowed cash first.
-
-Each durable reservation stores the exact pre-selection lot vector and separate
-source-index lists for principal and fees. Those immutable source slices keep
-the original ordering through rejection, partial debit, or fee-only failure.
-Settlement consumes verified principal only from the principal pool and
-verified additional costs only from the fee pool; unspent amounts return to
-their original indexed lots, without appending or reordering refunds. A
-confirmed failure invalidates the remaining route until a fresh complete suffix
-proves it is funded from the unspent reserve. Cross-asset cost attribution
-obtains exact original-asset prices before approval and rechecks them before
-submission. Settlement uses those frozen approved observations so delayed
-reconciliation does not fetch new prices or strand a receipt solely because
-time has passed.
+Historical run records retain their original baseline, origin lots, cost
+reserves and proofs for inspection and compatible settlement. They are not
+required for new operations, and unresolved restoration alone is not a gate on
+normal execution. Existing uncertain operations still retain their actual
+operation reservations. `fin run status` provides historical inspection;
+`fin status` reconciles original operations. Creating, replanning and finishing
+verification runs are retired from product discovery and execution.
 
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
@@ -255,8 +239,8 @@ source freshness; it never serves stale quotes after an outage. The 120-second
 source-age bound accommodates the public provider's roughly 60-second update
 cycle without changing the 90-second preview/approval expiry or financial caps.
 Price nonzero holdings/positions, selected assets and configured route assets,
-while retaining all scoped holdings for restoration. Original allocation asset
-identities remain required at every replan even when balances reach zero.
+without requiring a restoration baseline. Historical allocation identities remain
+part of retained evidence for compatible recovery.
 
 Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
@@ -275,13 +259,35 @@ Use exact decimal strings at boundaries, integer quantities with explicit asset/
 
 Carry forward these demonstrated TS requirements:
 
-- Preserve finer Binance observed precision separately from spendable chain units. Unallocated residuals cannot disappear during restoration.
+- Preserve finer Binance observed precision separately from spendable chain units. Observed residuals must not disappear through numeric conversion.
 - Aave supplied underlying, scaled receipt units, accrual indices, and debt are different quantities. Reviewed protocol math and historical evidence establish backing; do not hide rounding with a tolerance.
 - Receipt tokens and their underlying position are not separate wealth. Borrowed proceeds and debt remain distinct; test allocation counts proceeds without netting debt.
 - Chain inclusion, canonical finality, intended effects, and spendable exchange credit have separate completion criteria.
-- Restoration returns principal to its original account and asset representation, reconciles proved costs, and rejects remaining debt, positions/dust, modified allowances, displaced assets, and in-flight work.
+- Live acceptance tests separately restore principal, positions and allowances and reconcile costs under the testing contract; ordinary operations may retain intentional portfolio changes.
 
-The $100 acceptance profile is configurable verification policy, not a permanent product ceiling. Persist its scoped cumulative allocation and consumed costs through retries/restarts. Selected physical holdings include the actual cash that finances gas and unwind costs; the cost reserve earmarks those holdings and is not a second funding source. Gross borrowed proceeds add to the physical allocation without netting debt. Prove every forward/return prefix, including maximum additional cash costs, is funded solely from selected holdings and bounded prior credits. Snapshot all affected resources, reserve the complete unwind, and price exposures independently. Each unwind action is a newly prepared and authorized operation; the engine does not choose financial compensation autonomously.
+Human-owned policy has two exact USD ceilings. The movement ceiling includes
+gross movement plus maximum execution costs. The legacy-named
+`max-run-allocation-usd` ceiling covers installation-wide rolling 24-hour gross
+allocation across all commands and accounts: movement, maximum costs and
+additional borrowed allocation. It is cumulative turnover, not net holdings.
+Unresolved submitted operations continue consuming their reserved budget beyond
+the window. Durable accounting and resource reservations survive restart;
+retries do not create new charges or submissions. Zero removes that personal
+ceiling only. `fin policy show` reports limits, scope and usage.
+
+Setup collects both limits in the protected human Terminal. Later changes use
+`fin policy set`, fresh configuration approval, atomic protected storage and the
+existing broker reload mechanism. Nonterminal operations block policy mutation;
+historical unrestored runs do not. Existing installations retain stored $100
+limits until an explicit human change. Legacy run-required configuration no
+longer gates ordinary execution. No migration removes pending identities,
+financial evidence or reservations, or broadens approved operation authority.
+
+The $100 development budget, baseline snapshots, complete return plans and
+cleanup completion are LLM live-testing instructions in
+[the testing guide](testing/README.md#live-test-contract), not runtime policy.
+There is no normal/verification execution classification. Personal policy never
+authorizes exceeding the independent live-test instructions.
 
 ## Library choices and implementation spikes
 

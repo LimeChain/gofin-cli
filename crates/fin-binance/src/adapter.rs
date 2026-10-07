@@ -1,4 +1,5 @@
 use super::*;
+mod spot;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use fin_domain::{
@@ -160,15 +161,15 @@ impl BinanceAdapter {
         }
         let mut destination_names = BTreeSet::new();
         for dest in &config.destinations {
-            if dest.chain_id != 1
+            if !matches!(dest.chain_id, 1 | 42161)
                 || !valid_eth_address(&dest.address)
                 || dest.confirmations == 0
-                || !destination_names.insert(dest.name.clone())
+                || !destination_names.insert((dest.name.clone(), dest.chain_id))
             {
                 return Err(error(
                     "INVALID_DESTINATION",
                     "setup",
-                    "Ethereum destinations require a unique name, valid address, mainnet chain, and positive confirmation count.",
+                    "Ethereum destinations require a unique name/network, valid address, reviewed EVM chain, and positive confirmation count.",
                 ));
             }
         }
@@ -245,6 +246,35 @@ impl BinanceAdapter {
             }),
         )
         .await
+    }
+
+    fn withdrawal_destination(
+        &self,
+        name: &str,
+        network: &str,
+    ) -> Result<&EthereumDestination, FinError> {
+        let chain = match network {
+            "ETH" => 1,
+            "ARBITRUM" => 42161,
+            _ => {
+                return Err(error(
+                    "WRONG_NETWORK",
+                    "preview",
+                    "Select an enrolled ETH or ARBITRUM withdrawal route.",
+                ));
+            }
+        };
+        self.config
+            .destinations
+            .iter()
+            .find(|d| d.name == name && d.chain_id == chain)
+            .ok_or_else(|| {
+                error(
+                    "UNKNOWN_DESTINATION",
+                    "preview",
+                    "No enrolled wallet matches this withdrawal name and network.",
+                )
+            })
     }
 
     fn account(&self, name: &str) -> Result<&BinanceAccount, FinError> {
@@ -1144,19 +1174,12 @@ impl BinanceAdapter {
         funding: Option<ConditionalFunding>,
     ) -> Result<PreparedOperation, FinError> {
         let account = self.require_main(&input.account)?;
-        let destination = self.destination(&input.destination)?;
-        if destination.chain_id != 1 {
+        let destination = self.withdrawal_destination(&input.destination, &input.network)?;
+        if input.wallet_type != "SPOT" {
             return Err(error(
                 "WRONG_NETWORK",
                 "preview",
-                "Binance withdrawal target must be Ethereum mainnet.",
-            ));
-        }
-        if input.network != "ETH" || input.wallet_type != "SPOT" {
-            return Err(error(
-                "WRONG_NETWORK",
-                "preview",
-                "Only Binance ETH network withdrawals from SPOT are implemented.",
+                "Only SPOT withdrawals on the enrolled ETH or ARBITRUM route are implemented.",
             ));
         }
         let permissions = self.permissions(account).await?;
@@ -1176,7 +1199,7 @@ impl BinanceAdapter {
             ));
         }
         let currency = self.currency(account, &input.coin).await?;
-        let network = self.network(&currency, "ETH")?;
+        let network = self.network(&currency, &input.network)?;
         if currency.withdraw_all_enable != Some(true)
             || network.withdraw_enable != Some(true)
             || network.busy == Some(true)
@@ -1250,7 +1273,7 @@ impl BinanceAdapter {
             error(
                 "UNSUPPORTED_ASSET_IDENTITY",
                 "preview",
-                "No reviewed Ethereum mainnet identity is configured for the Binance coin.",
+                "No reviewed identity is configured for this Binance coin and selected network.",
             )
         })?;
         if asset.decimals > 36
@@ -1267,7 +1290,7 @@ impl BinanceAdapter {
             return Err(error(
                 "ASSET_IDENTITY_MISMATCH",
                 "preview",
-                "Binance ETH route contract does not match the configured Ethereum asset identity.",
+                "Binance selected-network contract does not match the configured EVM asset identity.",
             ));
         }
         let min_receive_atoms = decimal_to_atoms(&min_receive, asset.decimals)?;
@@ -1317,7 +1340,7 @@ impl BinanceAdapter {
             )
         })?;
         let client_id = ClientIdentity::withdrawal(&input.request_id).map_err(domain_error)?;
-        let prepared_request = StandardWithdrawalIntent {
+        let mut prepared_request = StandardWithdrawalIntent {
             coin: input.coin.clone(),
             amount: quantity.clone(),
             address: destination.address.clone(),
@@ -1325,6 +1348,13 @@ impl BinanceAdapter {
         }
         .request()
         .map_err(domain_error)?;
+        prepared_request
+            .params
+            .iter_mut()
+            .find(|param| param.key == "network")
+            .unwrap()
+            .value = input.network.clone();
+        prepared_request.validate().map_err(domain_error)?;
         let mut valuation = self
             .valuation(&input.coin, &quantity.canonical(), &max_fee.canonical())
             .await?;
@@ -1341,7 +1371,7 @@ impl BinanceAdapter {
             });
         }
         let mut binding = json!({
-            "account": account.name, "destination": destination.name, "chainId": 1,
+            "account": account.name, "destination": destination.name, "chainId": destination.chain_id,
             "asset": asset, "debitAsset": debit_asset, "params": prepared_request, "maximumFee": max_fee.canonical(),
             "maximumGrossDebit": gross.canonical(), "minimumReceive": min_receive.canonical(),
             "maximumReceive": quantity.canonical(), "confirmations": destination.confirmations,
@@ -1363,7 +1393,7 @@ impl BinanceAdapter {
             Self::check(
                 "network_asset",
                 CheckStatus::Passed,
-                "ETH network and reviewed Ethereum mainnet asset identity match.",
+                "Selected Binance network and enrolled EVM asset identity match.",
             ),
             Self::check(
                 "precision_balance_limits",
@@ -1419,12 +1449,14 @@ impl BinanceAdapter {
             serde_json::to_value(&input).unwrap_or(Value::Null),
             binding,
             format!(
-                "Withdraw API quantity {} {} from {} SPOT to {} ({}) on Ethereum mainnet; published fee {}, approved maximum fee {}, maximum gross debit {}, minimum net receipt {}.",
+                "Withdraw API quantity {} {} from {} SPOT to {} ({}) on {} (chain {}); published fee {}, approved maximum fee {}, maximum gross debit {}, minimum net receipt {}.",
                 quantity.canonical(),
                 input.coin,
                 account.name,
                 destination.name,
                 destination.address,
+                input.network,
+                destination.chain_id,
                 fee.canonical(),
                 max_fee.canonical(),
                 gross.canonical(),
@@ -1588,6 +1620,13 @@ fn definitions() -> Vec<Definition> {
             "Venue withdrawal history observed.",
         ),
         (
+            "binance.spot-order",
+            "Bounded LIMIT FOK spot BUY or SELL using existing holdings; purchased assets may be retained. Exact quantity, limit price, maximum receipt-asset fee and minimum net receipt are approved.",
+            OperationKind::Write,
+            schema_for!(spot::SpotInput),
+            "Matching terminal order plus complete authenticated fills and commissions establish the conversion; submission alone does not.",
+        ),
+        (
             "binance.transfer",
             "Main-authorized SPOT transfer between a configured main account and one configured subaccount, with persistent clientTranId.",
             OperationKind::Write,
@@ -1596,10 +1635,10 @@ fn definitions() -> Vec<Definition> {
         ),
         (
             "binance.withdraw",
-            "Standard Binance SPOT withdrawal to a named Ethereum mainnet wallet with current fee, network, precision, Travel Rule, and receipt checks.",
+            "Standard Binance SPOT withdrawal to a named enrolled Ethereum or Arbitrum wallet with current fee, network, precision, Travel Rule, and receipt checks.",
             OperationKind::Write,
             schema_for!(WithdrawInput),
-            "Matching completed withdrawal, bounded source debit/fee, and verified Ethereum mainnet recipient receipt.",
+            "Matching completed withdrawal, bounded source debit/fee, and verified selected-chain recipient receipt.",
         ),
     ];
     defs.into_iter().map(|(name, description, kind, input, completion)| Definition {
@@ -1608,7 +1647,7 @@ fn definitions() -> Vec<Definition> {
         input_schema: serde_json::to_value(input).unwrap_or(Value::Null),
         output_schema: json!({"type":"object"}),
         error_schema: schema_for!(FinError).into(),
-        examples: vec![], coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
+        examples: if name == "binance.spot-order" { vec![json!({"operation":"binance.spot-order","input":{"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"}})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
         completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
     }).collect()
 }
@@ -1764,7 +1803,7 @@ impl Adapter for BinanceAdapter {
                 network: None,
                 address: None,
                 credential_ref: None,
-                signing_enabled: matches!(account.role, AccountRole::Main),
+                signing_enabled: true,
                 details: json!({"walletType":"SPOT", "credentialEnrolled":true}),
             })
             .collect()
@@ -2362,6 +2401,7 @@ impl Adapter for BinanceAdapter {
 
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation, FinError> {
         match operation {
+            "binance.spot-order" => self.prepare_spot(self.parse_input(input).await?).await,
             "binance.transfer" => self.prepare_transfer(self.parse_input(input).await?).await,
             "binance.withdraw" => {
                 self.prepare_withdrawal(self.parse_input(input).await?, None)
@@ -2425,6 +2465,9 @@ impl Adapter for BinanceAdapter {
                 "Conditional funding preparation cannot be submitted.",
             ));
         }
+        if prepared.operation == "binance.spot-order" {
+            return self.submit_spot(prepared, journal).await;
+        }
         let current = self.revalidate(prepared).await?;
         journal.assert_authorized()?;
         let input: Value = current.input.clone();
@@ -2480,7 +2523,8 @@ impl Adapter for BinanceAdapter {
             "binance.withdraw" => {
                 let input: WithdrawInput = self.parse_input(&input).await?;
                 let main = self.require_main(&input.account)?;
-                let destination = self.destination(&input.destination)?;
+                let destination =
+                    self.withdrawal_destination(&input.destination, &input.network)?;
                 let params: BinanceRequest =
                     serde_json::from_value(current.binding["params"].clone()).map_err(|_| {
                         error(
@@ -2570,6 +2614,7 @@ impl Adapter for BinanceAdapter {
             });
         }
         match record.operation.as_str() {
+            "binance.spot-order" => self.reconcile_spot(record, submission).await,
             "binance.transfer" => self.reconcile_transfer(record, submission).await,
             "binance.withdraw" => self.reconcile_withdrawal(record, submission).await,
             _ => Ok(Reconciliation {
@@ -3234,14 +3279,20 @@ impl BinanceAdapter {
                 "Persisted Binance account is invalid.",
             )
         })?)?;
-        let destination =
-            self.destination(binding["destination"].as_str().ok_or_else(|| {
+        let destination = self.withdrawal_destination(
+            binding["destination"].as_str().ok_or_else(|| {
                 error(
                     "RECONCILIATION_INVALID",
                     "reconciliation",
                     "Persisted Ethereum destination is invalid.",
                 )
-            })?)?;
+            })?,
+            binding["params"]["params"]
+                .as_array()
+                .and_then(|params| params.iter().find(|p| p["key"] == "network"))
+                .and_then(|p| p["value"].as_str())
+                .unwrap_or("ETH"),
+        )?;
         let coin = data["coin"].as_str().ok_or_else(|| {
             error(
                 "RECONCILIATION_INVALID",
@@ -3338,7 +3389,12 @@ impl BinanceAdapter {
         }
         let row = matches.remove(0);
         let correct = row.coin == coin
-            && row.network.as_deref() == Some("ETH")
+            && row.network.as_deref()
+                == Some(if destination.chain_id == 42161 {
+                    "ARBITRUM"
+                } else {
+                    "ETH"
+                })
             && row
                 .address
                 .as_deref()
@@ -3472,7 +3528,7 @@ impl BinanceAdapter {
             };
             return Ok(Reconciliation {
                 status,
-                evidence: json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Mainnet receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
+                evidence: json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Selected-chain receipt is unverified or reverted; retain the original Binance withdrawal identity."}),
                 verified: None,
             });
         }
@@ -3592,6 +3648,17 @@ fn approved_native_valuation_matches(
         for constraint in &approved.intent.expected {
             if let EffectConstraint::Transfer { credit_asset, .. } = constraint {
                 adapter_assets.insert(credit_asset.clone());
+            }
+        }
+    }
+    if approved.operation == "binance.spot-order" {
+        for name in ["spentAsset", "receivedAsset"] {
+            if let Some(coin) = approved.binding[name].as_str() {
+                adapter_assets.insert(AssetId {
+                    network: "binance".into(),
+                    reference: coin.into(),
+                    decimals: 36,
+                });
             }
         }
     }

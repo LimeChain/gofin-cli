@@ -96,3 +96,27 @@ Automated tests should model the endpoint-level response shapes and validate acc
 Live acceptance requires accounts with the relevant capabilities. A lack of subaccount access, an account-specific withdrawal requirement, or a venue suspension should produce a blocked case with the reason. Continue other tests rather than inventing a passing result. Spot Testnet cannot complete this funding journey; see the [environment limitations](README.md).
 
 Use [the run report](report-template.md), including baseline/restored quantities, USD valuations, costs, venue IDs, chain evidence, actual commands, approval count, and any unresolved operations. Required cleanup movements use the preplanned return route and fresh approvals. Do not substitute a different asset, account, or larger budget to conceal an incomplete restoration.
+
+
+## Synthetic permanent portfolio regression
+
+The ordinary product scenario sells an enrolled subaccount's available APT and
+SEI for USDC, buys ETH with at most 20 USDC, transfers purchased ETH to its
+enrolled main account, then withdraws to an enrolled Arbitrum EVM wallet. Verify
+complete fills and fees, internal destination credit, and chain destination
+receipt. Its intentional final portfolio is retained: no run, classification,
+return plan or restoration is an execution prerequisite. This scenario is
+synthetic and authorizes no production execution. Any separately authorized live
+acceptance still follows the independent $100 and restoration contract above.
+
+`binance.spot-order` accepts `requestId`, `account`, `symbol`, `side` (BUY/SELL),
+`quantity`, `limitPrice`, `maxFee` and `minReceiveAmount`. Quantities/prices are
+exact decimal strings. Orders are LIMIT FOK, with base-asset quantity and an
+absolute fee cap in the received asset. BUY quote spending is bounded by
+quantity × limitPrice; SELL spends existing base holdings. Received holdings may
+remain permanently. Current standard, special and tax commissions are included;
+active BNB discounts are unsupported. SELL fee bounds conservatively use the
+symbol's finite maximum price, not an assumed favorable-fill price. Symbols whose
+worst-case fees cannot fit explicit/personal bounds fail before approval.
+Unexpected partial fills, missing trade evidence and unknown withdrawals remain
+unresolved with reservations; venue success alone is not destination receipt.

@@ -28,28 +28,29 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 mod cash_reservation_sources;
+mod ordinary_policy;
 mod projected_provenance;
 mod projected_shares;
 
-const TEST_LIMIT_MICROS: u64 = 100_000_000;
+const DEFAULT_LIMIT_MICROS: u64 = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
+fn legacy_movement_limit() -> String {
+    fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
+}
 const MAX_OBSERVATION_AGE_SECONDS: i64 = 120;
 
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
-    /// When true, all writes must belong to a captured, bounded run.
-    pub require_run_for_writes: bool,
-    /// Maximum single gross movement plus maximum costs for a test-profile write.
+    /// Maximum single gross movement plus maximum costs under personal policy.
     pub max_movement_and_cost_usd_micros: String,
-    /// Maximum run allocation, including borrowed proceeds and return costs.
+    /// Installation-wide rolling 24-hour gross allocation, including maximum costs and additional borrowing.
     pub max_run_allocation_usd_micros: String,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
-            require_run_for_writes: false,
-            max_movement_and_cost_usd_micros: TEST_LIMIT_MICROS.to_string(),
-            max_run_allocation_usd_micros: TEST_LIMIT_MICROS.to_string(),
+            max_movement_and_cost_usd_micros: DEFAULT_LIMIT_MICROS.to_string(),
+            max_run_allocation_usd_micros: DEFAULT_LIMIT_MICROS.to_string(),
         }
     }
 }
@@ -112,6 +113,10 @@ struct RunReservation {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RunLedger {
+    #[serde(default)]
+    purpose: Option<Value>,
+    #[serde(default = "legacy_movement_limit")]
+    max_movement_usd_micros: String,
     id: String,
     status: RunStatus,
     baseline: StateSnapshot,
@@ -522,7 +527,7 @@ impl Engine {
         })
     }
 
-    /// Begin a test run using only a snapshot obtained by the registered adapter.
+    /// Begin a bounded run using only a snapshot obtained by the registered adapter.
     /// The caller-provided `RunPlan.baseline` is replaced by the observer result.
     pub async fn begin_run_from_observer(
         &self,
@@ -964,14 +969,6 @@ impl Engine {
                 "Use the read command.",
             ));
         }
-        if self.options.require_run_for_writes && request.run_id.is_none() {
-            return Err(FinError::new(
-                "RUN_REQUIRED",
-                "budget",
-                "A captured baseline and complete return plan are required.",
-                "Begin a bounded run before writing.",
-            ));
-        }
         let fingerprint = request_fingerprint(&request)?;
         let timestamp = now();
         let id = Uuid::new_v4().to_string();
@@ -1022,6 +1019,18 @@ impl Engine {
         }
 
         let mut record = initial;
+        #[cfg(not(test))]
+        if request.run_id.is_some() {
+            record.status = Status::Rejected;
+            record.error = Some(FinError::new(
+                "RUN_RETIRED",
+                "validation",
+                "Historical runs no longer authorize new operations.",
+                "Execute without --run; inspect or reconcile existing operations by their original identity.",
+            ));
+            self.update_record(&record)?;
+            return Ok(record);
+        }
         let result = self.execute_new(adapter, &request, &mut record).await;
         match result {
             Ok(record) => Ok(record),
@@ -1085,7 +1094,7 @@ impl Engine {
                 )
                 .map_err(map_store)?;
         } else {
-            self.update_record(record)?;
+            self.reserve_ordinary_operation(record, &prepared)?;
         }
 
         let approved_binding = authorization_binding(&prepared);
@@ -1139,6 +1148,9 @@ impl Engine {
                     &now(),
                 )
                 .map_err(map_store)?;
+        }
+        if request.run_id.is_none() {
+            self.reserve_ordinary_operation(record, &refreshed)?;
         }
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
@@ -1329,6 +1341,16 @@ impl Engine {
         }
     }
 
+    /// Read the original historical document without rewriting its reservations or proofs.
+    pub fn historical_run(&self, id: &str) -> Result<Value> {
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .get_run(id)
+            .map_err(map_store)?
+            .ok_or_else(|| FinError::validation("Historical run not found."))
+    }
+
     pub fn operations(&self) -> Result<Vec<OperationRecord>> {
         self.store
             .lock()
@@ -1374,7 +1396,7 @@ impl Engine {
                 "INCOMPLETE_BASELINE",
                 "budget",
                 "A complete initial snapshot with no unresolved financial operations is required.",
-                "Capture every affected resource and reconcile existing work before starting a test run.",
+                "Capture every affected resource and reconcile existing work before starting a run.",
             ));
         }
         let mut seen = BTreeSet::new();
@@ -1435,13 +1457,13 @@ impl Engine {
                 "Fund return costs from the same selected allocation that is capped for this run.",
             ));
         }
-        if &allocation_total + &borrow_reserve
-            > parse_uint(&self.options.max_run_allocation_usd_micros)?
+        if fin_domain::policy::limit(&self.options.max_run_allocation_usd_micros)?
+            .is_some_and(|limit| &allocation_total + &borrow_reserve > BigUint::from(limit))
         {
             return Err(FinError::new(
                 "ALLOCATION_LIMIT",
                 "budget",
-                "Selected physical holdings and separately authorized borrowed proceeds exceed the configured test allocation.",
+                "Selected physical holdings and separately authorized borrowed proceeds exceed the effective run allocation limit.",
                 "Reduce the selected holdings or borrowed-proceeds reserve.",
             ));
         }
@@ -1468,6 +1490,12 @@ impl Engine {
             .filter_map(|position| position.anchor.clone())
             .collect();
         let ledger = RunLedger {
+            purpose: None,
+            max_movement_usd_micros: fin_domain::policy::limit(
+                &self.options.max_movement_and_cost_usd_micros,
+            )?
+            .unwrap_or(0)
+            .to_string(),
             id: plan.id.clone(),
             status: RunStatus::Active,
             baseline: plan.baseline,
@@ -1852,7 +1880,14 @@ impl Engine {
         let borrowed = parse_uint(valuation.additional_allocation_usd_micros.as_str())?;
         let cost_assets = prepared_cost_assets(&prepared.intent);
         validate_cost_prices(prepared, &cost_assets, Utc::now())?;
-        if &movement + &fee_usd > parse_uint(&self.options.max_movement_and_cost_usd_micros)? {
+        if [
+            fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?,
+            fin_domain::policy::limit(&run.max_movement_usd_micros)?,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|limit| &movement + &fee_usd > BigUint::from(limit))
+        {
             return Err(FinError::new(
                 "MOVEMENT_LIMIT",
                 "budget",
@@ -1868,7 +1903,7 @@ impl Engine {
                 "UNALLOCATED_FUNDS",
                 "budget",
                 "The operation exceeds selected holdings and the separate borrowed-proceeds allocation.",
-                "Use only the selected test allocation.",
+                "Use only the selected run allocation.",
             ));
         }
         let total_borrow_reserved = run.reservations.values().fold(BigUint::zero(), |sum, row| {
@@ -6998,15 +7033,15 @@ fn map_store(error: StoreError) -> FinError {
             "Inspect the existing outcome instead of resubmitting.",
         ),
         StoreError::ConcurrentReservation => FinError::new(
-            "RUN_PENDING",
+            "RESOURCE_RESERVED",
             "budget",
-            "Another write already holds this run's unresolved reservation.",
+            "Operation state changed or another write holds a required resource reservation.",
             "Reconcile the original submission before starting another write.",
         ),
         StoreError::ActiveRunExists => FinError::new(
             "ACTIVE_RUN_EXISTS",
             "budget",
-            "A non-restored run already owns the test allocation.",
+            "A non-restored run already owns the run allocation.",
             "Finish or restore the existing run before beginning another.",
         ),
         other => FinError::new(
@@ -7296,7 +7331,7 @@ mod tests {
 
     impl SyntheticAdapter {
         fn new() -> Self {
-            Self::new_with_valuation(false)
+            Self::new_with_valuation(true)
         }
 
         fn new_with_valuation(include_valuation: bool) -> Self {
@@ -7371,9 +7406,13 @@ mod tests {
                 observed_at: at.to_rfc3339(),
                 expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
                 valuation: self.include_valuation.then(|| fin_domain::Valuation {
-                    movement_usd_micros: quantity("1000000"),
-                    maximum_fee_usd_micros: quantity("0"),
-                    additional_allocation_usd_micros: quantity("0"),
+                    movement_usd_micros: quantity(
+                        input["movementMicros"].as_str().unwrap_or("1000000"),
+                    ),
+                    maximum_fee_usd_micros: quantity(input["feeMicros"].as_str().unwrap_or("0")),
+                    additional_allocation_usd_micros: quantity(
+                        input["borrowMicros"].as_str().unwrap_or("0"),
+                    ),
                     observed_at: at.to_rfc3339(),
                     source: "synthetic fixed-price fixture".into(),
                     prices: vec![],
@@ -7795,6 +7834,8 @@ mod tests {
 
     fn empty_run_for_provenance(baseline: StateSnapshot) -> RunLedger {
         RunLedger {
+            purpose: None,
+            max_movement_usd_micros: legacy_movement_limit(),
             id: "synthetic-provenance".into(),
             status: RunStatus::Active,
             baseline,
@@ -10979,5 +11020,212 @@ mod tests {
                 .code,
             "RUN_NOT_FOUND"
         );
+    }
+    fn ordinary_request(identity: &str) -> OperationRequest {
+        OperationRequest {
+            request_id: identity.into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({"amount":"1"}),
+            run_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_completed_holdings_need_no_run_or_restoration_and_keep_gross_allocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ordinary.sqlite3");
+        let adapter = Arc::new(SyntheticAdapter::new());
+        adapter.completed_response();
+        let mut engine = synthetic_engine(&path, adapter.clone());
+        engine.options.max_run_allocation_usd_micros = "1500000".into();
+        // An old unrestored verification document is archival, never an execution gate.
+        let history = json!({"id":"legacy","status":"cleanup_outstanding","purpose":"verification","reservations":{},"baseline":{"fixture":"preserve"}});
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_run("legacy", &history, &now())
+            .unwrap();
+        let completed = engine
+            .execute(ordinary_request("ordinary-first"))
+            .await
+            .unwrap();
+        assert_eq!(completed.status, Status::Completed);
+        assert!(completed.run_id.is_none());
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+        assert_eq!(engine.historical_run("legacy").unwrap(), history);
+        drop(engine);
+        let mut restarted = synthetic_engine(&path, adapter.clone());
+        restarted.options.max_run_allocation_usd_micros = "1500000".into();
+        let denied = restarted
+            .execute(ordinary_request("ordinary-second"))
+            .await
+            .unwrap();
+        assert_eq!(denied.error.unwrap().code, "ALLOCATION_LIMIT");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        let replay = restarted
+            .execute(ordinary_request("ordinary-first"))
+            .await
+            .unwrap();
+        assert_eq!(replay.id, completed.id);
+        assert_eq!(replay.submission, completed.submission);
+        assert_eq!(replay.effects, completed.effects);
+        // Only terminal submitted allocation ages out, at least24h after settlement.
+        let mut aged = completed;
+        aged.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        restarted.update_record(&aged).unwrap();
+        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "0");
+    }
+
+    #[tokio::test]
+    async fn ordinary_pending_reservation_outlives_window_and_zero_does_not_unlock_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = Arc::new(SyntheticAdapter::new());
+        let mut engine =
+            synthetic_engine(&directory.path().join("pending.sqlite3"), adapter.clone());
+        engine.options.max_movement_and_cost_usd_micros = "0".into();
+        engine.options.max_run_allocation_usd_micros = "0".into();
+        let mut pending = engine
+            .execute(ordinary_request("pending-first"))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, Status::Pending);
+        pending.created_at = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        pending.updated_at = pending.created_at.clone();
+        engine.update_record(&pending).unwrap();
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+        engine.recover_interrupted().unwrap();
+        let blocked = engine
+            .execute(ordinary_request("pending-second"))
+            .await
+            .unwrap();
+        assert_eq!(blocked.error.unwrap().code, "RESOURCE_RESERVED");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            engine
+                .operations()
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == pending.id)
+                .unwrap()
+                .submission,
+            pending.submission
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_finite_movement_and_zero_policy_are_enforced_before_approval() {
+        for (limit, expected) in [
+            ("999999", Some("MOVEMENT_LIMIT")),
+            ("1000000", None),
+            ("0", None),
+        ] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                auth.clone(),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: limit.into(),
+                    max_run_allocation_usd_micros: "0".into(),
+                },
+            )
+            .unwrap();
+            let result = engine
+                .execute(ordinary_request("finite-zero"))
+                .await
+                .unwrap();
+            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
+            assert_eq!(
+                auth.challenges.lock().unwrap().len(),
+                usize::from(expected.is_none())
+            );
+            assert_eq!(
+                adapter.submissions.load(Ordering::SeqCst),
+                usize::from(expected.is_none())
+            );
+        }
+    }
+
+    struct RefusingApproval(bool);
+    #[async_trait]
+    impl Authorizer for RefusingApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            if self.0 {
+                return Err(FinError::new(
+                    "APPROVAL_DENIED",
+                    "approval",
+                    "Synthetic denied approval",
+                    "Retry manually",
+                ));
+            }
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-expired".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
+                expires_at: (Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn ordinary_denied_or_expired_approval_releases_only_unsubmitted_allocation() {
+        for denied in [true, false] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                Arc::new(RefusingApproval(denied)),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let first = engine
+                .execute(ordinary_request("refused-first"))
+                .await
+                .unwrap();
+            assert!(first.status.terminal());
+            assert!(first.submission.is_none());
+            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+            let second = engine
+                .execute(ordinary_request("refused-second"))
+                .await
+                .unwrap();
+            assert_ne!(second.error.as_ref().unwrap().code, "RESOURCE_RESERVED");
+            assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+        }
+    }
+    #[tokio::test]
+    async fn ordinary_policy_counts_costs_and_borrowing_with_no_hidden_verification_ceiling() {
+        for (movement, allocation, expected) in [
+            ("154999999", "0", Some("MOVEMENT_LIMIT")),
+            ("155000000", "164999999", Some("ALLOCATION_LIMIT")),
+            ("155000000", "165000000", None),
+            ("0", "0", None),
+        ] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                Arc::new(SyntheticAuthorizer),
+                EngineOptions {
+                    max_movement_and_cost_usd_micros: movement.into(),
+                    max_run_allocation_usd_micros: allocation.into(),
+                },
+            )
+            .unwrap();
+            let mut request = ordinary_request("above-former-test-budget");
+            request.input = json!({"movementMicros":"150000000","feeMicros":"5000000","borrowMicros":"10000000"});
+            let result = engine.execute(request).await.unwrap();
+            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
+            assert_eq!(
+                adapter.submissions.load(Ordering::SeqCst),
+                usize::from(expected.is_none())
+            );
+            assert_eq!(
+                engine.allocation_used_usd_micros().unwrap(),
+                if expected.is_none() { "165000000" } else { "0" }
+            );
+        }
     }
 }

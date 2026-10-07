@@ -12,10 +12,10 @@ use fin_broker::{
 };
 use fin_domain::{
     Adapter, Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer, FinError,
-    OperationRequest, PlanStep, Quantity, ResourceAmount, ResourceId, Result, now,
+    OperationRequest, Quantity, ResourceAmount, ResourceId, Result, now,
 };
 use fin_evm::EvmRpc;
-use fin_protocol::{BrokerRequest, RunBeginRequest};
+use fin_protocol::BrokerRequest;
 use fin_store::Store;
 use serde_json::{Value, json};
 use std::{
@@ -42,25 +42,9 @@ const STEP_A_OUT: &str = "main-to-a";
 fn resource(uid: u64) -> ResourceId {
     ResourceId(format!("binance:uid:{uid}:SPOT"))
 }
-fn asset() -> AssetId {
-    AssetId {
-        network: "binance".into(),
-        reference: ASSET.into(),
-        decimals: 36,
-    }
-}
 fn transfer(id: &str, from: &str, to: &str, amount: &str) -> Value {
     json!({"requestId":id,"authority":MAIN,"from":from,"to":to,"coin":ASSET,"amount":amount,"fromWallet":"SPOT","toWallet":"SPOT"})
 }
-fn step(id: &str, from: &str, to: &str, amount: &str) -> PlanStep {
-    PlanStep {
-        operation: "binance.transfer".into(),
-        input: transfer(id, from, to, amount),
-        maximum_fee_usd_micros: "0".into(),
-        description: format!("Synthetic bounded transfer {id}"),
-    }
-}
-
 #[derive(Default)]
 struct VenueState {
     balances: BTreeMap<String, String>,
@@ -159,6 +143,11 @@ impl BinanceTransport for SyntheticVenue {
         ));
         let owner = Self::owner(credential);
         match request.endpoint {
+            E::ExchangeInfo
+            | E::SpotCommission
+            | E::SpotOrder
+            | E::SpotOrderStatus
+            | E::SpotTrades => Err(TransportError::InvalidResponse),
             E::Account => {
                 let uid = match owner {
                     "main" => 1001,
@@ -423,7 +412,11 @@ fn runtime_config() -> BrokerConfigV2 {
         networks: vec![fin_broker::NetworkConfig::ethereum_mainnet()],
         deployments: vec![fin_broker::DeploymentConfig::ethereum_mainnet()],
         connections: vec![],
-        policy: BrokerPolicy::beta(),
+        policy: BrokerPolicy {
+            require_run_for_writes: true, // Legacy config is migrated semantically; ordinary execution remains available.
+            max_run_allocation_usd_micros: "1000000000".into(),
+            ..BrokerPolicy::beta()
+        },
         approver_uid: 501,
         extensions: BTreeMap::new(),
     };
@@ -608,19 +601,14 @@ fn runtime(
     .unwrap()
 }
 
-async fn execute(
-    broker: &fin_broker::BrokerRuntime,
-    run_id: &str,
-    id: &str,
-    input: Value,
-) -> Value {
+async fn execute(broker: &fin_broker::BrokerRuntime, id: &str, input: Value) -> Value {
     let response = broker
         .handle(BrokerRequest::Execute {
             request: OperationRequest {
                 request_id: id.into(),
                 operation: "binance.transfer".into(),
                 input,
-                run_id: Some(run_id.into()),
+                run_id: None,
             },
         })
         .await;
@@ -660,43 +648,8 @@ async fn two_child_spot_roundtrip_restores_allocations_and_reconciles_history() 
         },
     )
     .unwrap();
-    let plan = RunBeginRequest {
-        allocations: vec![
-            ResourceAmount {
-                resource: resource(1002),
-                amount: Amount {
-                    asset: asset(),
-                    atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-                },
-            },
-            ResourceAmount {
-                resource: resource(1003),
-                amount: Amount {
-                    asset: asset(),
-                    atoms: Quantity::from_decimal("0.010", 36).unwrap(),
-                },
-            },
-        ],
-        planned_operations: vec![
-            step(STEP_A_IN, CHILD_A, MAIN, "0.005"),
-            step(STEP_B_IN, CHILD_B, MAIN, "0.010"),
-        ],
-        borrowed_proceeds_reserve_usd_micros: "0".into(),
-        return_cost_reserve_usd_micros: "0".into(),
-        unwind: vec![
-            step(STEP_A_OUT, MAIN, CHILD_A, "0.005"),
-            step(STEP_B_OUT, MAIN, CHILD_B, "0.010"),
-        ],
-    };
-    let started = broker
-        .handle(BrokerRequest::RunBegin { request: plan })
-        .await;
-    assert!(started.ok, "{:?}", started.error);
-    let run = started.result.unwrap();
-    let run_id = run["id"].as_str().unwrap();
     let one = execute(
         &broker,
-        run_id,
         STEP_A_IN,
         transfer(STEP_A_IN, CHILD_A, MAIN, "0.005"),
     )
@@ -704,7 +657,6 @@ async fn two_child_spot_roundtrip_restores_allocations_and_reconciles_history() 
     assert_eq!(one["status"], "completed", "{one}");
     let duplicate = execute(
         &broker,
-        run_id,
         STEP_A_IN,
         transfer(STEP_A_IN, CHILD_A, MAIN, "0.005"),
     )
@@ -712,31 +664,22 @@ async fn two_child_spot_roundtrip_restores_allocations_and_reconciles_history() 
     assert_eq!(duplicate["id"], one["id"]);
     execute(
         &broker,
-        run_id,
         STEP_B_IN,
         transfer(STEP_B_IN, CHILD_B, MAIN, "0.010"),
     )
     .await;
     execute(
         &broker,
-        run_id,
         STEP_A_OUT,
         transfer(STEP_A_OUT, MAIN, CHILD_A, "0.005"),
     )
     .await;
     execute(
         &broker,
-        run_id,
         STEP_B_OUT,
         transfer(STEP_B_OUT, MAIN, CHILD_B, "0.010"),
     )
     .await;
-    let finished = broker
-        .handle(BrokerRequest::RunFinish { id: run_id.into() })
-        .await;
-    assert!(finished.ok, "{:?}", finished.error);
-    let finished_value = finished.result.unwrap();
-    assert_eq!(finished_value["status"], "restored", "{finished_value}");
     let s = venue.state.lock().unwrap();
     assert_eq!(s.balances[EMAIL_A], "0.005");
     assert_eq!(s.balances[EMAIL_B], "0.010");
@@ -758,28 +701,8 @@ async fn concurrent_duplicate_transfer_uses_one_approval_and_one_venue_submissio
     let db = temp.path().join("concurrent-duplicate.sqlite");
     let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
     let broker = runtime(&db, venue.clone(), approval.clone());
-    let start = broker
-        .handle(BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                allocations: vec![ResourceAmount {
-                    resource: resource(1002),
-                    amount: Amount {
-                        asset: asset(),
-                        atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-                    },
-                }],
-                planned_operations: vec![step("concurrent-in", CHILD_A, MAIN, "0.005")],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "0".into(),
-                unwind: vec![step("concurrent-out", MAIN, CHILD_A, "0.005")],
-            },
-        })
-        .await;
-    assert!(start.ok, "{:?}", start.error);
-    let run_id = start.result.unwrap()["id"].as_str().unwrap().to_owned();
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let call = |broker: Arc<fin_broker::BrokerRuntime>, barrier: Arc<tokio::sync::Barrier>| {
-        let run_id = run_id.clone();
         tokio::spawn(async move {
             barrier.wait().await;
             broker
@@ -788,7 +711,7 @@ async fn concurrent_duplicate_transfer_uses_one_approval_and_one_venue_submissio
                         request_id: "concurrent-in".into(),
                         operation: "binance.transfer".into(),
                         input: transfer("concurrent-in", CHILD_A, MAIN, "0.005"),
-                        run_id: Some(run_id),
+                        run_id: None,
                     },
                 })
                 .await
@@ -823,32 +746,13 @@ async fn rate_limited_transfer_retry_returns_original_record_without_reposting()
         venue.clone(),
         Arc::new(SyntheticApproval(AtomicUsize::new(0))),
     );
-    let started = broker
-        .handle(BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                allocations: vec![ResourceAmount {
-                    resource: resource(1002),
-                    amount: Amount {
-                        asset: asset(),
-                        atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-                    },
-                }],
-                planned_operations: vec![step("rate-limited-in", CHILD_A, MAIN, "0.005")],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "0".into(),
-                unwind: vec![step("rate-limited-out", MAIN, CHILD_A, "0.005")],
-            },
-        })
-        .await;
-    assert!(started.ok, "{:?}", started.error);
-    let run_id = started.result.unwrap()["id"].as_str().unwrap().to_owned();
     let first = broker
         .handle(BrokerRequest::Execute {
             request: OperationRequest {
                 request_id: "rate-limited-in".into(),
                 operation: "binance.transfer".into(),
                 input: transfer("rate-limited-in", CHILD_A, MAIN, "0.005"),
-                run_id: Some(run_id.clone()),
+                run_id: None,
             },
         })
         .await;
@@ -858,7 +762,7 @@ async fn rate_limited_transfer_retry_returns_original_record_without_reposting()
                 request_id: "rate-limited-in".into(),
                 operation: "binance.transfer".into(),
                 input: transfer("rate-limited-in", CHILD_A, MAIN, "0.005"),
-                run_id: Some(run_id),
+                run_id: None,
             },
         })
         .await;
@@ -880,31 +784,13 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     let db = temp.path().join("restart.sqlite");
     let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
     let broker = runtime(&db, venue.clone(), approval.clone());
-    let plan = RunBeginRequest {
-        allocations: vec![ResourceAmount {
-            resource: resource(1002),
-            amount: Amount {
-                asset: asset(),
-                atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-            },
-        }],
-        planned_operations: vec![step("lost-a-to-main", CHILD_A, MAIN, "0.005")],
-        borrowed_proceeds_reserve_usd_micros: "0".into(),
-        return_cost_reserve_usd_micros: "0".into(),
-        unwind: vec![step("restore-a", MAIN, CHILD_A, "0.005")],
-    };
-    let started = broker
-        .handle(BrokerRequest::RunBegin { request: plan })
-        .await;
-    assert!(started.ok, "{:?}", started.error);
-    let run_id = started.result.unwrap()["id"].as_str().unwrap().to_owned();
     let unknown_response = broker
         .handle(BrokerRequest::Execute {
             request: OperationRequest {
                 request_id: "lost-a-to-main".into(),
                 operation: "binance.transfer".into(),
                 input: transfer("lost-a-to-main", CHILD_A, MAIN, "0.005"),
-                run_id: Some(run_id.clone()),
+                run_id: None,
             },
         })
         .await;
@@ -926,7 +812,6 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     assert_eq!(settled["submission"]["reference"], client_id.as_str());
     let duplicate = execute(
         &recovered,
-        &run_id,
         "lost-a-to-main",
         transfer("lost-a-to-main", CHILD_A, MAIN, "0.005"),
     )
@@ -939,17 +824,10 @@ async fn accepted_but_lost_transfer_response_recovers_original_client_id_after_r
     );
     execute(
         &recovered,
-        &run_id,
         "restore-a",
         transfer("restore-a", MAIN, CHILD_A, "0.005"),
     )
     .await;
-    let finished = recovered
-        .handle(BrokerRequest::RunFinish { id: run_id })
-        .await;
-    assert!(finished.ok, "{:?}", finished.error);
-    let finished_value = finished.result.unwrap();
-    assert_eq!(finished_value["status"], "restored", "{finished_value}");
     assert_eq!(venue.state.lock().unwrap().balances[EMAIL_A], "0.005");
 }
 
@@ -1016,6 +894,26 @@ async fn permission_precision_and_stale_price_guards_block_before_any_post() {
 struct CanonicalNativeCreditRpc {
     value: Mutex<String>,
     latest: Mutex<String>,
+    rpc_chain: AtomicU64,
+    transaction_chain: AtomicU64,
+    recipient: Mutex<String>,
+    finalized: Mutex<Option<String>>,
+    finalized_seen: AtomicUsize,
+    change_inclusion_after_finality: AtomicUsize,
+}
+impl CanonicalNativeCreditRpc {
+    fn new(chain_id: u64) -> Self {
+        Self {
+            value: Mutex::new("0x2386f26fc10000".into()), // 0.01 ETH exactly.
+            latest: Mutex::new("0x65".into()),
+            rpc_chain: AtomicU64::new(chain_id),
+            transaction_chain: AtomicU64::new(chain_id),
+            recipient: Mutex::new("0x1111111111111111111111111111111111111111".into()),
+            finalized: Mutex::new(Some("0x65".into())),
+            finalized_seen: AtomicUsize::new(0),
+            change_inclusion_after_finality: AtomicUsize::new(0),
+        }
+    }
 }
 
 fn synthetic_oracle_updated_at() -> u128 {
@@ -1357,9 +1255,8 @@ impl EvmRpc for CanonicalNativeCreditRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let tx_hash = format!("0x{}", "ab".repeat(32));
         let block_hash = format!("0x{}", "cd".repeat(32));
-        let recipient = "0x1111111111111111111111111111111111111111";
         Ok(match method {
-            "eth_chainId" => json!("0x1"),
+            "eth_chainId" => json!(format!("{:#x}", self.rpc_chain.load(Ordering::SeqCst))),
             "eth_blockNumber" => json!(*self.latest.lock().unwrap()),
             "eth_getTransactionReceipt" => json!({
                 "transactionHash":tx_hash,
@@ -1373,15 +1270,30 @@ impl EvmRpc for CanonicalNativeCreditRpc {
             "eth_getTransactionByHash" => json!({
                 "hash":tx_hash,
                 "from":"0x2222222222222222222222222222222222222222",
-                "to":recipient,
+                "to":*self.recipient.lock().unwrap(),
                 "value":*self.value.lock().unwrap(),
-                "chainId":"0x1",
+                "chainId":format!("{:#x}", self.transaction_chain.load(Ordering::SeqCst)),
                 "blockHash":block_hash,
                 "blockNumber":"0x64"
             }),
             "eth_getBlockByNumber" => {
-                assert_eq!(params[0], "0x64");
-                json!({"hash":block_hash,"number":"0x64"})
+                if params[0] == "finalized" {
+                    self.finalized_seen.store(1, Ordering::SeqCst);
+                    match self.finalized.lock().unwrap().as_ref() {
+                        Some(number) => json!({"hash":block_hash,"number":number}),
+                        None => Value::Null,
+                    }
+                } else {
+                    assert_eq!(params[0], "0x64");
+                    let hash = if self.finalized_seen.load(Ordering::SeqCst) == 1
+                        && self.change_inclusion_after_finality.load(Ordering::SeqCst) == 1
+                    {
+                        format!("0x{}", "ef".repeat(32))
+                    } else {
+                        block_hash
+                    };
+                    json!({"hash":hash,"number":"0x64"})
+                }
             }
             "eth_getCode" => json!("0x"),
             "eth_getBalance" => json!("0x16345785d8a0000"),
@@ -1392,10 +1304,7 @@ impl EvmRpc for CanonicalNativeCreditRpc {
 
 #[tokio::test]
 async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_exact_amount() {
-    let rpc = Arc::new(CanonicalNativeCreditRpc {
-        value: Mutex::new("0x2386f26fc10000".into()), // 0.01 ETH exactly.
-        latest: Mutex::new("0x65".into()),
-    });
+    let rpc = Arc::new(CanonicalNativeCreditRpc::new(1));
     let wallet = "0x1111111111111111111111111111111111111111";
     let ethereum = fin_ethereum::EthereumAdapter::new(
         fin_ethereum::EthereumConfig::default(),
@@ -1427,10 +1336,8 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
         "canonical-direct-native-value"
     );
 
-    let unconfirmed = CanonicalNativeCreditRpc {
-        value: Mutex::new("0x2386f26fc10000".into()),
-        latest: Mutex::new("0x64".into()),
-    };
+    let unconfirmed = CanonicalNativeCreditRpc::new(1);
+    *unconfirmed.latest.lock().unwrap() = "0x64".into();
     let pending = fin_ethereum::EthereumAdapter::new(
         fin_ethereum::EthereumConfig::default(),
         vec![fin_ethereum::WalletConnection {
@@ -1454,6 +1361,110 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
             .unwrap_err()
             .code,
         "FUNDING_AMOUNT_MISMATCH"
+    );
+}
+
+#[tokio::test]
+async fn arbitrum_payout_verifier_requires_canonical_finalized_exact_destination_receipt() {
+    use fin_binance::{BinanceRecipientVerifier, PayoutRequest};
+    let rpc = Arc::new(CanonicalNativeCreditRpc::new(42161));
+    let recipient = "0x1111111111111111111111111111111111111111";
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-arbitrum-payout".into(),
+                address: recipient.into(),
+                signing_enabled: false,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(rpc.clone(), 42161, None)),
+        )
+        .unwrap(),
+    );
+    let verifier =
+        fin_broker::EthereumPayoutVerifier::new(BTreeMap::from([(42161, ethereum)])).unwrap();
+    let request = PayoutRequest {
+        tx_hash: format!("0x{}", "ab".repeat(32)),
+        chain_id: 42161,
+        recipient: recipient.into(),
+        asset: AssetId {
+            network: "ethereum:42161".into(),
+            reference: "native".into(),
+            decimals: 18,
+        },
+        minimum_amount: "0.01".into(),
+        maximum_amount: "0.01".into(),
+        confirmations: 2,
+    };
+    // Sequencer confirmations do not establish final destination receipt.
+    for finalized in [None, Some("0x63".to_owned()), Some("invalid".to_owned())] {
+        *rpc.finalized.lock().unwrap() = finalized;
+        let result = verifier.verify(request.clone()).await;
+        assert_eq!(result.status, fin_domain::Status::Pending);
+        assert!(result.amount_atoms.is_none());
+    }
+    *rpc.finalized.lock().unwrap() = Some("0x65".into());
+    rpc.finalized_seen.store(0, Ordering::SeqCst);
+    rpc.change_inclusion_after_finality
+        .store(1, Ordering::SeqCst);
+    let changed = verifier.verify(request.clone()).await;
+    assert_eq!(changed.status, fin_domain::Status::Pending);
+    assert!(changed.amount_atoms.is_none());
+    rpc.change_inclusion_after_finality
+        .store(0, Ordering::SeqCst);
+    let completed = verifier.verify(request.clone()).await;
+    assert_eq!(completed.status, fin_domain::Status::Completed);
+    assert_eq!(
+        completed.amount_atoms,
+        Some(Quantity::from_decimal("0.01", 18).unwrap())
+    );
+    assert_eq!(
+        completed.evidence["proof_method"],
+        "canonical-direct-native-value"
+    );
+    assert_eq!(completed.evidence["chain_id"], 42161);
+    assert_eq!(completed.evidence["finality"], "rpc-finalized");
+
+    *rpc.latest.lock().unwrap() = "0x64".into();
+    assert_eq!(
+        verifier.verify(request.clone()).await.status,
+        fin_domain::Status::Pending
+    );
+    *rpc.latest.lock().unwrap() = "0x65".into();
+    *rpc.recipient.lock().unwrap() = "0x3333333333333333333333333333333333333333".into();
+    let wrong_recipient = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_recipient.status, fin_domain::Status::Unknown);
+    assert_eq!(
+        wrong_recipient.evidence["code"],
+        "FUNDING_RECIPIENT_MISMATCH"
+    );
+    *rpc.recipient.lock().unwrap() = recipient.into();
+    *rpc.value.lock().unwrap() = "0x1".into();
+    let partial = verifier.verify(request.clone()).await;
+    assert_eq!(partial.status, fin_domain::Status::Unknown);
+    assert_eq!(partial.evidence["code"], "FUNDING_AMOUNT_MISMATCH");
+    *rpc.value.lock().unwrap() = "0x2386f26fc10000".into();
+    rpc.transaction_chain.store(1, Ordering::SeqCst);
+    let wrong_transaction_chain = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_transaction_chain.status, fin_domain::Status::Unknown);
+    assert_eq!(
+        wrong_transaction_chain.evidence["code"],
+        "FUNDING_IDENTITY_MISMATCH"
+    );
+    rpc.transaction_chain.store(42161, Ordering::SeqCst);
+    rpc.rpc_chain.store(1, Ordering::SeqCst);
+    let wrong_rpc_chain = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_rpc_chain.status, fin_domain::Status::Unknown);
+    assert!(wrong_rpc_chain.amount_atoms.is_none());
+    rpc.rpc_chain.store(42161, Ordering::SeqCst);
+    let mut wrong_asset = request.clone();
+    wrong_asset.asset.network = "ethereum:1".into();
+    let wrong_asset = verifier.verify(wrong_asset).await;
+    assert_eq!(wrong_asset.status, fin_domain::Status::Unknown);
+    assert_eq!(wrong_asset.evidence["code"], "WRONG_CHAIN");
+    assert_eq!(
+        verifier.verify(request).await.status,
+        fin_domain::Status::Completed
     );
 }
 
@@ -1914,51 +1925,6 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     )
     .unwrap();
 
-    let deposit = PlanStep {
-        operation: "binance.deposit".into(),
-        input: json!({"requestId":"scoped-deposit-forward","account":"main","wallet":"synthetic-wallet","amount":"0.009","maxFeeEth":"0.001"}),
-        maximum_fee_usd_micros: "2000000".into(),
-        description: "Fund the enrolled Binance account with exact native ETH".into(),
-    };
-    let withdrawal = PlanStep {
-        operation: "binance.withdraw".into(),
-        input: json!({"requestId":"scoped-withdraw-return","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.009","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"}),
-        maximum_fee_usd_micros: "2000000".into(),
-        description: "Return the credited Binance ETH to its source wallet".into(),
-    };
-    let start = broker
-        .handle(BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                allocations: vec![
-                    ResourceAmount {
-                        resource: wallet.clone(),
-                        amount: Amount {
-                            asset: native_asset(),
-                            atoms: Quantity::from_decimal("0.02", 18).unwrap(),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: resource(1001),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.001", 36).unwrap(),
-                        },
-                    },
-                ],
-                planned_operations: vec![deposit],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "5000000".into(),
-                unwind: vec![withdrawal],
-            },
-        })
-        .await;
-    assert!(
-        start.ok,
-        "run.begin failed before a write: {:?}",
-        start.error
-    );
-    let run_id = start.result.unwrap()["id"].as_str().unwrap().to_owned();
-
     for (request_id, operation, input) in [
         (
             "scoped-deposit-forward",
@@ -1977,7 +1943,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
                     request_id: request_id.into(),
                     operation: operation.into(),
                     input,
-                    run_id: Some(run_id.clone()),
+                    run_id: None,
                 },
             })
             .await;
@@ -1995,12 +1961,6 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     );
     assert_eq!(venue.state.lock().unwrap().balances["main"], "0.000");
     assert_eq!(*wallet_balance.lock().unwrap(), "0.099958");
-    let finish = broker.handle(BrokerRequest::RunFinish { id: run_id }).await;
-    assert!(
-        finish.ok,
-        "run.finish failed despite net venue and chain costs: {:?}",
-        finish.error
-    );
     assert_eq!(
         approval.0.load(Ordering::SeqCst),
         2,
@@ -2110,65 +2070,6 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
     )
     .unwrap();
 
-    let collect_a = step("journey-a-to-main", CHILD_A, MAIN, "0.005");
-    let collect_b = step("journey-b-to-main", CHILD_B, MAIN, "0.010");
-    let withdrawal = PlanStep {
-        operation: "binance.withdraw".into(),
-        input: json!({"requestId":"journey-withdraw","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.015","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.015"}),
-        maximum_fee_usd_micros: "2000000".into(),
-        description: "Withdraw the consolidated native ETH to the enrolled wallet".into(),
-    };
-    let deposit = PlanStep {
-        operation: "binance.deposit".into(),
-        input: json!({"requestId":"scoped-deposit-forward","account":"main","wallet":"synthetic-wallet","amount":"0.015","maxFeeEth":"0.001"}),
-        maximum_fee_usd_micros: "2000000".into(),
-        description: "Return native ETH to the same Binance main account".into(),
-    };
-    let restore_a = step("journey-main-to-a", MAIN, CHILD_A, "0.005");
-    let restore_b = step("journey-main-to-b", MAIN, CHILD_B, "0.010");
-    let start = broker
-        .handle(BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                allocations: vec![
-                    ResourceAmount {
-                        resource: resource(1002),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: resource(1003),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.010", 36).unwrap(),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: resource(1001),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.001", 36).unwrap(),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: wallet.clone(),
-                        amount: Amount {
-                            asset: native_asset(),
-                            atoms: Quantity::from_decimal("0.02", 18).unwrap(),
-                        },
-                    },
-                ],
-                planned_operations: vec![collect_a, collect_b, withdrawal],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "5000000".into(),
-                unwind: vec![deposit, restore_a, restore_b],
-            },
-        })
-        .await;
-    assert!(start.ok, "run.begin failed before write: {:?}", start.error);
-    let run_id = start.result.unwrap()["id"].as_str().unwrap().to_owned();
-
     for (id, operation, input) in [
         (
             "journey-a-to-main",
@@ -2207,7 +2108,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
                     request_id: id.into(),
                     operation: operation.into(),
                     input,
-                    run_id: Some(run_id.clone()),
+                    run_id: None,
                 },
             })
             .await;
@@ -2215,9 +2116,6 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
         assert_eq!(response.result.unwrap()["status"], "completed", "{id}");
     }
     assert_eq!(rpc.accepted.load(Ordering::SeqCst), 1);
-    let finish = broker.handle(BrokerRequest::RunFinish { id: run_id }).await;
-    assert!(finish.ok, "run.finish failed: {:?}", finish.error);
-    assert_eq!(finish.result.unwrap()["status"], "restored");
     let venue_state = venue.state.lock().unwrap();
     assert_eq!(venue_state.balances[EMAIL_A], "0.005");
     assert_eq!(venue_state.balances[EMAIL_B], "0.010");
@@ -2228,7 +2126,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
 }
 
 #[tokio::test]
-async fn partial_second_consolidation_failure_replans_and_restores_first_child() {
+async fn partial_second_consolidation_failure_preserves_success_and_allows_explicit_followup() {
     let venue = Arc::new(SyntheticVenue::new());
     let failed_id = fin_binance::ClientIdentity::transfer("consolidate-b").unwrap();
     venue.state.lock().unwrap().reject_request_id = Some(failed_id.as_str().into());
@@ -2236,43 +2134,8 @@ async fn partial_second_consolidation_failure_replans_and_restores_first_child()
     let db = temp.path().join("partial.sqlite");
     let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
     let broker = runtime(&db, venue.clone(), approval.clone());
-    let start = broker
-        .handle(BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                allocations: vec![
-                    ResourceAmount {
-                        resource: resource(1002),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.005", 36).unwrap(),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: resource(1003),
-                        amount: Amount {
-                            asset: asset(),
-                            atoms: Quantity::from_decimal("0.010", 36).unwrap(),
-                        },
-                    },
-                ],
-                planned_operations: vec![
-                    step("consolidate-a", CHILD_A, MAIN, "0.005"),
-                    step("consolidate-b", CHILD_B, MAIN, "0.010"),
-                ],
-                borrowed_proceeds_reserve_usd_micros: "0".into(),
-                return_cost_reserve_usd_micros: "0".into(),
-                unwind: vec![
-                    step("return-a", MAIN, CHILD_A, "0.005"),
-                    step("return-b", MAIN, CHILD_B, "0.010"),
-                ],
-            },
-        })
-        .await;
-    assert!(start.ok, "{:?}", start.error);
-    let run_id = start.result.unwrap()["id"].as_str().unwrap().to_owned();
     execute(
         &broker,
-        &run_id,
         "consolidate-a",
         transfer("consolidate-a", CHILD_A, MAIN, "0.005"),
     )
@@ -2283,7 +2146,7 @@ async fn partial_second_consolidation_failure_replans_and_restores_first_child()
                 request_id: "consolidate-b".into(),
                 operation: "binance.transfer".into(),
                 input: transfer("consolidate-b", CHILD_B, MAIN, "0.010"),
-                run_id: Some(run_id.clone()),
+                run_id: None,
             },
         })
         .await;
@@ -2298,24 +2161,12 @@ async fn partial_second_consolidation_failure_replans_and_restores_first_child()
     assert!(reconciled.ok, "{:?}", reconciled.error);
     assert_eq!(reconciled.result.unwrap()["status"], "failed");
 
-    let revision = broker
-        .handle(BrokerRequest::RunReplan {
-            id: run_id.clone(),
-            remaining: vec![step("return-a", MAIN, CHILD_A, "0.005")],
-        })
-        .await;
-    assert!(revision.ok, "{:?}", revision.error);
     execute(
         &broker,
-        &run_id,
         "return-a",
         transfer("return-a", MAIN, CHILD_A, "0.005"),
     )
     .await;
-    let finished = broker.handle(BrokerRequest::RunFinish { id: run_id }).await;
-    assert!(finished.ok, "{:?}", finished.error);
-    let finished_value = finished.result.unwrap();
-    assert_eq!(finished_value["status"], "restored", "{finished_value}");
     let state = venue.state.lock().unwrap();
     assert_eq!(state.balances[EMAIL_A], "0.005");
     assert_eq!(state.balances[EMAIL_B], "0.010");

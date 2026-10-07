@@ -153,7 +153,6 @@ async fn authoritative_result(second: Result<StateSnapshot>) -> (FinError, Arc<O
         vec![observer.clone()],
         authorizer.clone(),
         EngineOptions {
-            require_run_for_writes: true,
             ..Default::default()
         },
     )
@@ -195,7 +194,6 @@ async fn broker_handoff_consumes_one_engine_bound_authoritative_capture() {
         vec![observer.clone()],
         Arc::new(NoApproval::default()),
         EngineOptions {
-            require_run_for_writes: true,
             ..Default::default()
         },
     )
@@ -242,7 +240,6 @@ async fn observed_baseline_cannot_be_consumed_by_another_engine_instance() {
             vec![observer.clone()],
             Arc::new(NoApproval::default()),
             EngineOptions {
-                require_run_for_writes: true,
                 ..Default::default()
             },
         )
@@ -285,7 +282,6 @@ async fn stale_observed_baseline_is_rejected_before_route_preflight() {
         vec![observer.clone()],
         Arc::new(NoApproval::default()),
         EngineOptions {
-            require_run_for_writes: true,
             ..Default::default()
         },
     )

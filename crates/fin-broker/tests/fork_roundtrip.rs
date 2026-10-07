@@ -14,7 +14,7 @@ use fin_broker::{
 use fin_domain::{
     AccountingLocation, Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer,
     CostTreatment, FinError, FinancialEffect, OperationRecord, OperationRequest, Quantity,
-    ResourceAmount, ResourceId, Result, StateSnapshot, Status, now,
+    ResourceId, Result, StateSnapshot, Status, now,
 };
 use fin_ethereum::{
     EthereumAdapter, EthereumConfig, OracleObservationClock, USDC, WETH, WalletConnection,
@@ -25,7 +25,7 @@ use fin_evm::{
     alloy::primitives::{Bytes, U256},
     hex_quantity, lower_address, quantity, rpc_u64, rpc_u256, u256,
 };
-use fin_protocol::{BrokerRequest, RunBeginRequest, UnwindStep};
+use fin_protocol::{BrokerRequest, UnwindStep};
 use fin_store::Store;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -374,7 +374,6 @@ struct Journey {
     rpc: Arc<ForkRpc>,
     signer: Arc<ForkSigner>,
     approval: Arc<IsolatedApproval>,
-    run: String,
     records: Vec<OperationRecord>,
 }
 impl Journey {
@@ -402,7 +401,7 @@ impl Journey {
             request_id: input["request_id"].as_str().unwrap().into(),
             operation: operation.into(),
             input,
-            run_id: Some(self.run.clone()),
+            run_id: None,
         };
         let previous = (
             self.approval.count.load(Ordering::SeqCst),
@@ -802,7 +801,12 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
                 assets: vec![native.clone(), weth, usdc],
             },
         ],
-        policy: BrokerPolicy::beta(),
+        policy: BrokerPolicy {
+            // The personal gross-turnover budget is independent of this test's
+            // separately checked $100 physical funding and restoration plan.
+            max_run_allocation_usd_micros: "5000000000".into(),
+            ..BrokerPolicy::beta()
+        },
         approver_uid: 501,
         extensions: BTreeMap::new(),
     };
@@ -1061,7 +1065,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
         rows.iter().map(|row| row.0).collect::<Vec<_>>(),
         ORDERED_OPERATIONS
     );
-    let mut steps = rows
+    let executable_plan = rows
         .into_iter()
         .map(|(operation, mut input, description)| {
             input["max_fee_eth"] = json!(decimal(fee_caps[operation], 18));
@@ -1073,47 +1077,11 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             }
         })
         .collect::<Vec<_>>();
-    let unwind = steps.split_off(13);
-    let planned_operations = steps;
-    let executable_plan = planned_operations
-        .iter()
-        .chain(&unwind)
-        .cloned()
-        .collect::<Vec<_>>();
-    let run: fin_engine::RunResult = call(
-        &broker,
-        BrokerRequest::RunBegin {
-            request: RunBeginRequest {
-                planned_operations,
-                allocations: vec![
-                    ResourceAmount {
-                        resource: resource.clone(),
-                        amount: Amount {
-                            asset: native.clone(),
-                            atoms: quantity(funding),
-                        },
-                    },
-                    ResourceAmount {
-                        resource: return_resource,
-                        amount: Amount {
-                            asset: native,
-                            atoms: quantity(return_funding),
-                        },
-                    },
-                ],
-                borrowed_proceeds_reserve_usd_micros: "4000000".into(),
-                return_cost_reserve_usd_micros: return_cost_reserve.to_string(),
-                unwind,
-            },
-        },
-    )
-    .await?;
     let mut j = Journey {
         broker: broker.clone(),
         rpc: rpc.clone(),
         signer: signer.clone(),
         approval: approval.clone(),
-        run: run.id,
         records: vec![],
     };
     let mut advanced_debt = None;
@@ -1174,10 +1142,8 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
     );
     assert_eq!(rpc.sent.load(Ordering::SeqCst), j.records.len() as u64);
     assert!(j.records.len() as u64 <= MAX_WRITES);
-    let restored: fin_engine::RunResult =
-        call(&broker, BrokerRequest::RunFinish { id: j.run.clone() }).await?;
-    assert_eq!(restored.status, fin_engine::RunStatus::Restored);
-    assert!(restored.differences.is_empty());
+    // Restoration is asserted by this verification harness, never a runtime
+    // execution gate. All writes above execute without a run or classification.
     let (debt_before, debt_after) = advanced_debt
         .ok_or_else(|| blocked("The required isolated interest advance was not exercised."))?;
     println!(
@@ -1193,7 +1159,8 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
         "selected_native_usd_micros":selected_native_usd,"full_cost_reserve_usd_micros":return_cost_reserve,"borrow_reserve_usd_micros":borrowing_reserve,"total_allocation_usd_micros":total_allocation,"wrap_principal_usd":wrap_usd,"swap_principal_usd":swap_usd,
             "settled_writes":j.records.len(),"duplicates_without_new_actions":j.records.len(),
             "restored_resources":baseline.state.holdings.iter().map(|h|h.resource.0.clone()).collect::<std::collections::BTreeSet<_>>(),
-            "final_differences":restored.differences,
+            "restoration_checked_by":"test harness cash, positions and allowance assertions",
+            "execution_requires_run":false,
             "evidence_classes":{"synthetic_authorization":true,"deployed_protocols_on_fork":true,"live_write":false,"touch_id":false}
         })
     );

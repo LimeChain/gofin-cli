@@ -32,6 +32,8 @@ pub fn configuration_approval_expired(action: &str) -> FinError {
         "Approval expired. No configuration was saved.",
         if action == "initialize" {
             "Run setup again to request a fresh approval."
+        } else if action == "policy_set" {
+            "Run fin policy set again to request a fresh approval."
         } else {
             "Run the connection command again to request a fresh approval."
         },
@@ -63,7 +65,7 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
         || !challenge.operation_id.starts_with("configuration:")
         || !matches!(
             challenge.binding["action"].as_str(),
-            Some("initialize" | "add" | "update" | "remove")
+            Some("initialize" | "add" | "update" | "remove" | "policy_set")
         )
         || challenge.binding["financial_movement"] != false
         || challenge.binding["future_financial_authority"] != false
@@ -1359,6 +1361,48 @@ mod platform {
             Ok(proof)
         }
 
+        /// Public configuration metadata, read only inside the verified human terminal.
+        /// Unlike credential entry, decimal limits are visible while typed.
+        pub fn read_public_line(&mut self, label: &str) -> Result<String> {
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            self.recheck_lineage()?;
+            let fd = self.inner.file.as_raw_fd();
+            let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+            if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+                return Err(terminal_inspection_failed());
+            }
+            let cancellation = Arc::new(AtomicBool::new(false));
+            let mut guard = InputGuard {
+                fd,
+                original,
+                registrations: Vec::new(),
+                active: true,
+            };
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                guard.registrations.push(
+                    signal_hook::flag::register(signal, cancellation.clone())
+                        .map_err(|_| terminal_inspection_failed())?,
+                );
+            }
+            let settings = public_input_settings(original);
+            if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &settings) } != 0 {
+                return Err(terminal_inspection_failed());
+            }
+            let result = read_public_input(
+                &mut self.inner.file,
+                label,
+                &cancellation,
+                InputTiming::HUMAN.deadline,
+            )?;
+            guard.restore()?;
+            drop(guard);
+            self.recheck_lineage()?;
+            self.inspect_descriptors()?;
+            self.recheck_lineage()?;
+            Ok(result)
+        }
+
         pub fn read_secret(&mut self, label: &str, mode: SecretInput) -> Result<Zeroizing<String>> {
             self.recheck_lineage()?;
             self.inspect_descriptors()?;
@@ -1431,6 +1475,73 @@ mod platform {
             Ok(value)
         }
     }
+    fn public_input_settings(mut settings: libc::termios) -> libc::termios {
+        settings.c_lflag |= libc::ICANON | libc::ECHO | libc::ISIG;
+        settings.c_iflag |= libc::ICRNL;
+        settings.c_iflag &= !(libc::IGNCR | libc::INLCR);
+        settings
+    }
+
+    fn read_public_input(
+        terminal: &mut File,
+        label: &str,
+        cancellation: &AtomicBool,
+        deadline: Duration,
+    ) -> Result<String> {
+        // Labels originate in protected code. No secret material is accepted here.
+        write!(terminal, "{label}: ")
+            .and_then(|_| terminal.flush())
+            .map_err(|_| terminal_inspection_failed())?;
+        let start = Instant::now();
+        let cancelled = || {
+            denied(
+                "ENROLLMENT_CANCELLED",
+                "Setup input ended or timed out. No configuration was saved; run fin setup again.",
+            )
+        };
+        let mut bytes = Vec::new();
+        loop {
+            if cancellation.load(Ordering::SeqCst) || start.elapsed() >= deadline {
+                return Err(cancelled());
+            }
+            let mut poll = libc::pollfd {
+                fd: terminal.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, 100) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(terminal_inspection_failed());
+            }
+            if ready == 0 {
+                continue;
+            }
+            if poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                return Err(cancelled());
+            }
+            let mut byte = [0u8];
+            match terminal.read(&mut byte) {
+                Ok(0) => return Err(cancelled()),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(cancelled()),
+            }
+            if byte[0] == b'\n' {
+                return String::from_utf8(bytes)
+                    .map_err(|_| FinError::validation("Enter an exact decimal USD limit."));
+            }
+            if bytes.len() >= 64 || !(byte[0].is_ascii_digit() || byte[0] == b'.') {
+                return Err(FinError::validation(
+                    "Enter decimal dollars, or 0 for no personal limit.",
+                ));
+            }
+            bytes.push(byte[0]);
+        }
+    }
+
     fn read_review_response(
         terminal: &mut File,
         challenge: &AuthorizationChallenge,
@@ -1949,6 +2060,79 @@ mod platform {
         }
 
         #[test]
+        fn public_policy_input_echo_defaults_cancellation_expiry_and_restore() {
+            for (input, cancel, expected) in [
+                (b"1000.25\n".as_slice(), false, Some("1000.25")),
+                (b"0\n", false, Some("0")),
+                (b"\n", false, Some("")),
+                (b"", true, None),
+                (b"", false, None),
+                (b"-1\n", false, None),
+                (b"\x04", false, None),
+            ] {
+                let (mut master, terminal) = synthetic_terminal();
+                let mut file = terminal.file.try_clone().unwrap();
+                let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
+                assert_eq!(
+                    unsafe { libc::tcgetattr(file.as_raw_fd(), &mut original) },
+                    0
+                );
+                let settings = public_input_settings(original);
+                assert_ne!(settings.c_lflag & libc::ECHO, 0);
+                assert_eq!(
+                    unsafe { libc::tcsetattr(file.as_raw_fd(), libc::TCSAFLUSH, &settings) },
+                    0
+                );
+                let cancellation = Arc::new(AtomicBool::new(false));
+                let reader_cancel = cancellation.clone();
+                let reader = std::thread::spawn(move || {
+                    let _guard = InputGuard {
+                        fd: file.as_raw_fd(),
+                        original,
+                        registrations: Vec::new(),
+                        active: true,
+                    };
+                    read_public_input(
+                        &mut file,
+                        "Synthetic policy",
+                        &reader_cancel,
+                        Duration::from_millis(500),
+                    )
+                });
+                let mut output = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !output.ends_with(b": ") {
+                    assert!(Instant::now() < deadline);
+                    read_test_output(&mut master, &mut output, 20);
+                }
+                master.write_all(input).unwrap();
+                if cancel {
+                    cancellation.store(true, Ordering::SeqCst);
+                }
+                while !reader.is_finished() {
+                    assert!(Instant::now() < deadline);
+                    read_test_output(&mut master, &mut output, 20);
+                }
+                let result = reader.join().unwrap();
+                if let Some(expected) = expected {
+                    assert_eq!(result.unwrap(), expected);
+                    if !expected.is_empty() {
+                        assert!(String::from_utf8_lossy(&output).contains(expected));
+                    }
+                } else {
+                    assert!(result.is_err());
+                }
+                let mut restored = unsafe { std::mem::zeroed::<libc::termios>() };
+                assert_eq!(
+                    unsafe { libc::tcgetattr(terminal.file.as_raw_fd(), &mut restored) },
+                    0
+                );
+                assert_eq!(restored.c_lflag, original.c_lflag);
+                assert_eq!(restored.c_iflag, original.c_iflag);
+            }
+        }
+
+        #[test]
         fn native_public_confirmation_defaults_no_cancels_and_obeys_deadline() {
             for (input, expected) in [
                 (b"\n".as_slice(), ReviewResponse::Cancel),
@@ -2267,6 +2451,12 @@ impl HumanTerminal {
             "Protected human enrollment is not implemented on this platform.",
         ))
     }
+    pub fn read_public_line(&mut self, _: &str) -> Result<String> {
+        Err(denied(
+            "PLATFORM_ENROLLMENT_UNAVAILABLE",
+            "Protected public input is unavailable.",
+        ))
+    }
     pub fn read_secret(&mut self, _: &str, _: SecretInput) -> Result<Zeroizing<String>> {
         Err(denied(
             "PLATFORM_ENROLLMENT_UNAVAILABLE",
@@ -2327,6 +2517,31 @@ mod tests {
             configuration_challenge(&challenge).unwrap_err().code,
             "INVALID_CHALLENGE"
         );
+    }
+
+    #[test]
+    fn policy_configuration_review_is_exact_expiring_and_human_bound() {
+        let mut challenge = configuration();
+        challenge.binding["action"] = "policy_set".into();
+        challenge.binding["policy"] = serde_json::json!({"max_movement_usd_micros":"1000000000","max_run_allocation_usd_micros":"5000000000"});
+        challenge.binding_hash = binding_hash(&challenge.binding).unwrap();
+        let proof = ConfigurationReview {
+            uid: 501,
+            hash: challenge.binding_hash.clone(),
+            nonce: challenge.nonce.clone(),
+            operation: challenge.operation_id.clone(),
+            expiry: challenge.expires_at.clone(),
+        };
+        assert!(proof.validate_for(&challenge, 501).is_ok());
+        assert!(proof.validate_for(&challenge, 502).is_err());
+        let mut tampered = challenge.clone();
+        tampered.binding["policy"]["max_movement_usd_micros"] = "2000000000".into();
+        tampered.binding_hash = binding_hash(&tampered.binding).unwrap();
+        assert!(proof.validate_for(&tampered, 501).is_err());
+        challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        let expired = configuration_challenge(&challenge).unwrap_err();
+        assert_eq!(expired.code, "AUTHORIZATION_EXPIRED");
+        assert!(expired.next_action.contains("fin policy set again"));
     }
 
     #[test]

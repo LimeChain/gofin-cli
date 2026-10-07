@@ -299,13 +299,56 @@ impl EthereumAdapter {
         if observed_confirmations < u64::from(confirmations) {
             return Ok(pending());
         }
+        if self.config.require_finalized {
+            let finalized = self
+                .runtime
+                .rpc
+                .request("eth_getBlockByNumber", json!(["finalized", false]))
+                .await;
+            let finalized_height = finalized
+                .as_ref()
+                .ok()
+                .filter(|header| !header.is_null())
+                .and_then(|header| {
+                    fin_evm::rpc_u64(&header["number"])
+                        .ok()
+                        .filter(|_| fin_evm::hash(header["hash"].as_str().unwrap_or("")).is_ok())
+                });
+            if finalized_height.is_none_or(|height| height < block) {
+                return Ok(ExternalCredit {
+                    status: Status::Pending,
+                    amount_atoms: None,
+                    evidence: json!({"original_hash":tx_hash,"canonical_confirmed":true,"finality":"awaiting-rpc-finalized","finalized_height":finalized_height}),
+                });
+            }
+            // The finalized height alone cannot bind this payout's inclusion.
+            // Recheck the original block after reading the finality marker, as
+            // for Fin-originated transactions, before any terminal outcome.
+            let canonical = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([fin_evm::block_tag(Some(block)), false]),
+                )
+                .await?;
+            if canonical["hash"] != json!(format!("{block_hash:#x}"))
+                || fin_evm::rpc_u64(&canonical["number"])? != block
+            {
+                return Ok(ExternalCredit {
+                    status: Status::Pending,
+                    amount_atoms: None,
+                    evidence: json!({"original_hash":tx_hash,"canonical_confirmed":false,"finality":"inclusion-changed"}),
+                });
+            }
+        }
         let status = fin_evm::rpc_u64(&receipt["status"])?;
         require(
             status <= 1,
             "FUNDING_STATUS_INVALID",
             "Funding receipt status is not success or revert.",
         )?;
-        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true});
+        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true,"finality":if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
         if status == 0 {
             return Ok(ExternalCredit {
                 status: Status::Failed,

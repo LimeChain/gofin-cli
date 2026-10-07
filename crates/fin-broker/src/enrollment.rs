@@ -86,17 +86,22 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     let mut config = load_protected_config()?;
     let mut terminal = HumanTerminal::open(config.approver_uid)?;
     let journal = open_protected_store()?;
-    if journal.has_active_run().map_err(|_| {
-        error(
-            "STORE_UNAVAILABLE",
-            "The durable run state could not be inspected.",
+    if action == "policy_set" {
+        terminal.finish()?;
+        let args: fin_discovery::PolicySetArgs = parse(request)?;
+        return crate::policy::update(
+            &config,
+            &journal,
+            &args,
+            |binding| async move {
+                approve_and_audit(config.approver_uid, &binding, "Change financial limits", ui)
+                    .await
+            },
+            save_protected_config,
         )
-    })? {
-        return Err(error(
-            "CONNECTION_HAS_ACTIVE_RUN",
-            "Restore the active run before changing connections.",
-        ));
+        .await;
     }
+
     for connection in &config.connections {
         if connection_resources(connection, &config)
             .iter()
@@ -238,10 +243,35 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     }
 }
 
+fn collect_setup_policy(mut read: impl FnMut(&str) -> Result<String>) -> Result<BrokerPolicy> {
+    let movement = read(
+        "Movement limit in USD, including maximum execution costs (0 = no limit; Enter = 100)",
+    )?;
+    let allocation = read(
+        "Rolling 24-hour gross allocation in USD: movement + maximum costs + additional borrowing across all commands (0 = no limit; Enter = 100)",
+    )?;
+    let args = fin_discovery::PolicySetArgs {
+        max_movement_usd: if movement.is_empty() {
+            "100".into()
+        } else {
+            movement
+        },
+        max_run_allocation_usd: if allocation.is_empty() {
+            "100".into()
+        } else {
+            allocation
+        },
+    };
+    let (movement, allocation) = args.micros()?;
+    let mut policy = BrokerPolicy::beta();
+    policy.max_movement_usd_micros = movement;
+    policy.max_run_allocation_usd_micros = allocation;
+    Ok(policy)
+}
+
 async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
-    let terminal = HumanTerminal::open(args.approver_uid)?;
-    terminal.finish()?;
+    let mut terminal = HumanTerminal::open(args.approver_uid)?;
     if Path::new(CONFIG_PATH).try_exists().map_err(|_| {
         error(
             "CONFIG_UNAVAILABLE",
@@ -253,13 +283,15 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
             "Setup cannot replace an existing journal or configuration. Use connection management or a reviewed upgrade.",
         ));
     }
+    let policy = collect_setup_policy(|label| terminal.read_public_line(label))?;
+    terminal.finish()?;
     let config = BrokerConfigV2 {
         version: 2,
         approver_uid: args.approver_uid,
         networks: NetworkConfig::reviewed_evm_networks(),
         deployments: vec![DeploymentConfig::ethereum_mainnet()],
         connections: vec![],
-        policy: BrokerPolicy::beta(),
+        policy,
         extensions: BTreeMap::new(),
     };
     config.validate()?;
@@ -673,7 +705,12 @@ fn account_uid(identity: &Value) -> Result<String> {
     }
     Ok(uid)
 }
-async fn approve_and_audit(uid: u32, binding: &Value, summary: &str, ui: &Ui) -> Result<()> {
+async fn approve_and_audit(
+    uid: u32,
+    binding: &Value,
+    summary: &str,
+    ui: &Ui,
+) -> Result<AuthorizationChallenge> {
     let challenge = AuthorizationChallenge {
         purpose: "configuration".into(),
         operation_id: format!("configuration:{}", uuid::Uuid::new_v4()),
@@ -745,7 +782,16 @@ async fn approve_and_audit(uid: u32, binding: &Value, summary: &str, ui: &Ui) ->
                 "Configuration audit directory could not be synchronized.",
             )
         })?;
-    Ok(())
+    fin_authorization::validate_challenge(&challenge, &now()).map_err(|failure| {
+        if failure.code == "AUTHORIZATION_EXPIRED" {
+            fin_human_terminal::configuration_approval_expired(
+                binding["action"].as_str().unwrap_or(""),
+            )
+        } else {
+            failure
+        }
+    })?;
+    Ok(challenge)
 }
 fn config_hash(config: &BrokerConfigV2) -> Result<String> {
     binding_hash(
@@ -924,6 +970,38 @@ mod tests {
             policy: BrokerPolicy::beta(),
             extensions: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn setup_collects_defaults_exact_limits_or_zero_before_approval() {
+        for (inputs, expected) in [
+            (["", ""], ["100000000", "100000000"]),
+            (["1000.000001", "5000"], ["1000000001", "5000000000"]),
+            (["0", "0"], ["0", "0"]),
+            (["0", "5000"], ["0", "5000000000"]),
+        ] {
+            let mut index = 0;
+            let policy = collect_setup_policy(|label| {
+                assert!(label.contains("0 = no limit; Enter = 100"));
+                let value = inputs[index].into();
+                index += 1;
+                Ok(value)
+            })
+            .unwrap();
+            assert_eq!(policy.max_movement_usd_micros, expected[0]);
+            assert_eq!(policy.max_run_allocation_usd_micros, expected[1]);
+            assert!(!policy.require_run_for_writes);
+            assert_eq!(policy.preview_ttl_seconds, 90);
+        }
+        for invalid in ["-1", "1e3", "0.0000001", "18446744073709.551616"] {
+            assert!(collect_setup_policy(|_| Ok(invalid.into())).is_err());
+        }
+        assert_eq!(
+            collect_setup_policy(|_| Err(error("ENROLLMENT_CANCELLED", "Synthetic cancellation")))
+                .unwrap_err()
+                .code,
+            "ENROLLMENT_CANCELLED"
+        );
     }
 
     #[test]

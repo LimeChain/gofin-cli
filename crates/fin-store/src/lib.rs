@@ -21,7 +21,7 @@ pub enum StoreError {
     SubmissionConflict,
     #[error("resource reservation cannot be changed")]
     ReservationConflict,
-    #[error("another operation already holds the run's in-flight reservation")]
+    #[error("operation state changed or another operation already holds a resource reservation")]
     ConcurrentReservation,
     #[error("another non-restored run already exists")]
     ActiveRunExists,
@@ -401,6 +401,107 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically reserve resources for an ordinary operation and persist its
+    /// prepared record. `expected_records` must be the complete, unmodified
+    /// result of `list_records` used by the engine to validate policy usage.
+    /// Comparing that snapshot under an immediate transaction prevents two
+    /// writers from both reserving against the same remaining allocation.
+    /// The store does not interpret amounts or perform financial arithmetic.
+    pub fn persist_operation_reservation(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if list_records_conn(&tx)? != expected_records {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let durable: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT request_id, fingerprint, status FROM operations WHERE id=?1",
+                [operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((request_id, fingerprint, status)) = durable else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if status != "awaiting_approval" {
+            return Err(StoreError::AlreadySettled);
+        }
+        if json_string(record, "request_id") != Some(request_id.as_str())
+            || json_string(record, "fingerprint") != Some(fingerprint.as_str())
+            || json_string(record, "status") != Some("awaiting_approval")
+            || record
+                .get("submission")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(StoreError::RequestConflict);
+        }
+        let submitted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            [operation_id],
+            |r| r.get(0),
+        )?;
+        if submitted {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let mut requested = reservations.to_vec();
+        requested.sort_by(|a, b| a.resource.cmp(&b.resource));
+        if requested
+            .windows(2)
+            .any(|rows| rows[0].resource == rows[1].resource)
+        {
+            return Err(StoreError::ReservationConflict);
+        }
+        let current = {
+            let mut statement = tx.prepare(
+                "SELECT resource, units, fee_units FROM reservations WHERE operation_id=?1 ORDER BY resource",
+            )?;
+            statement
+                .query_map([operation_id], |r| {
+                    Ok(ReservationRow {
+                        resource: r.get(0)?,
+                        units: r.get(1)?,
+                        fee_units: r.get(2)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if !current.is_empty() && current != requested {
+            return Err(StoreError::ReservationConflict);
+        }
+        for reservation in &requested {
+            let held: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM reservations WHERE resource=?1 AND operation_id!=?2)",
+                params![reservation.resource, operation_id],
+                |r| r.get(0),
+            )?;
+            if held {
+                return Err(StoreError::ConcurrentReservation);
+            }
+        }
+        if current.is_empty() {
+            for reservation in &requested {
+                tx.execute(
+                    "INSERT INTO reservations(operation_id, resource, units, fee_units) VALUES (?1, ?2, ?3, ?4)",
+                    params![operation_id, reservation.resource, reservation.units, reservation.fee_units],
+                )?;
+            }
+        }
+        tx.execute(
+            "UPDATE operations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![record.to_string(), timestamp, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Atomic pre-authorization commit of the prepared request, exact resource
     /// reservations and updated run ledger. A crash cannot persist only one side.
     pub fn persist_reservation(
@@ -710,21 +811,7 @@ impl Store {
     }
 
     pub fn list_records(&self) -> Result<Vec<Value>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT record_json FROM operations ORDER BY created_at DESC, id DESC")?;
-        let rows = statement.query_map([], |r| {
-            let text: String = r.get(0)?;
-            serde_json::from_str(&text).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(e),
-                )
-            })
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        list_records_conn(&self.conn)
     }
 
     /// Persist a lifecycle update without changing its durable request identity
@@ -893,6 +980,19 @@ impl Store {
     }
 }
 
+fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
+    let mut statement =
+        conn.prepare("SELECT record_json FROM operations ORDER BY created_at DESC, id DESC")?;
+    let rows = statement.query_map([], |r| {
+        let text: String = r.get(0)?;
+        serde_json::from_str(&text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+    })?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
+}
+
 fn is_terminal(status: &str) -> bool {
     matches!(
         status,
@@ -961,6 +1061,172 @@ mod tests {
 
     fn record(status: &str) -> Value {
         json!({"status": status, "input": {"amount": "1000000000000000001"}})
+    }
+
+    fn ordinary_request(store: &mut Store, id: &str) -> Value {
+        let value = json!({"id":id,"request_id":format!("request-{id}"),"fingerprint":format!("fingerprint-{id}"),"status":"awaiting_approval"});
+        store
+            .create_request(
+                id,
+                value["request_id"].as_str().unwrap(),
+                value["fingerprint"].as_str().unwrap(),
+                "synthetic.transfer",
+                None,
+                "awaiting_approval",
+                &value,
+                "t0",
+            )
+            .unwrap();
+        value
+    }
+
+    fn ordinary_reservation(resource: &str) -> ReservationRow {
+        ReservationRow {
+            resource: resource.into(),
+            units: "1000000000000000001".into(),
+            fee_units: "123".into(),
+        }
+    }
+
+    #[test]
+    fn ordinary_reservation_is_durable_idempotent_and_immutable_without_a_run() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("ordinary.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let mut prepared = ordinary_request(&mut store, "ordinary");
+        prepared["preview"] = json!({"allocation_usd_micros":"1000000"});
+        let reservations = [ordinary_reservation("synthetic:wallet/ETH")];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation("ordinary", &reservations, &prepared, &snapshot, "t1")
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation("ordinary", &reservations, &prepared, &snapshot, "t2")
+            .unwrap();
+        let mut changed = reservations.clone();
+        changed[0].units = "2".into();
+        assert!(matches!(
+            store.persist_operation_reservation("ordinary", &changed, &prepared, &snapshot, "t3"),
+            Err(StoreError::ReservationConflict)
+        ));
+        store.close().unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.get_record("ordinary").unwrap(), Some(prepared));
+        assert_eq!(store.reservation_count("ordinary").unwrap(), 1);
+        assert!(!store.has_active_run().unwrap());
+    }
+
+    #[test]
+    fn ordinary_reservation_rejects_stale_policy_snapshot_and_resource_conflicts() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("concurrent.sqlite");
+        let mut first = Store::open(&path).unwrap();
+        let one = ordinary_request(&mut first, "one");
+        let two = ordinary_request(&mut first, "two");
+        let snapshot = first.list_records().unwrap();
+        let mut second = Store::open(&path).unwrap();
+        let mut updated = one.clone();
+        updated["preview"] = json!({"allocation_usd_micros":"5000000"});
+        let reservations = [ordinary_reservation("synthetic:shared/ETH")];
+        first
+            .persist_operation_reservation("one", &reservations, &updated, &snapshot, "t1")
+            .unwrap();
+        // Even disjoint resources cannot reserve against stale remaining budget.
+        assert!(matches!(
+            second.persist_operation_reservation(
+                "two",
+                &[ordinary_reservation("synthetic:other/ETH")],
+                &two,
+                &snapshot,
+                "t2"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        let fresh = second.list_records().unwrap();
+        assert!(matches!(
+            second.persist_operation_reservation("two", &reservations, &two, &fresh, "t2"),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(second.reservation_count("two").unwrap(), 0);
+        assert_eq!(second.get_record("two").unwrap(), Some(two));
+        assert_eq!(second.reservation_count("one").unwrap(), 1);
+    }
+
+    #[test]
+    fn ordinary_reservation_rejects_identity_status_and_submission_changes() {
+        let mut store = Store::in_memory().unwrap();
+        let original = ordinary_request(&mut store, "ordinary");
+        let reservations = [ordinary_reservation("synthetic:wallet/ETH")];
+        for (field, value) in [
+            ("request_id", json!("different")),
+            ("fingerprint", json!("different")),
+            ("status", json!("submitted")),
+            ("submission", json!({"reference":"unrecorded"})),
+        ] {
+            let mut changed = original.clone();
+            changed[field] = value;
+            let snapshot = store.list_records().unwrap();
+            assert!(matches!(
+                store.persist_operation_reservation(
+                    "ordinary",
+                    &reservations,
+                    &changed,
+                    &snapshot,
+                    "t1"
+                ),
+                Err(StoreError::RequestConflict)
+            ));
+            assert_eq!(store.reservation_count("ordinary").unwrap(), 0);
+            assert_eq!(
+                store.get_record("ordinary").unwrap(),
+                Some(original.clone())
+            );
+        }
+        store
+            .persist_submission(
+                "ordinary",
+                &SubmissionRow {
+                    kind: "synthetic".into(),
+                    reference: "stable-reference".into(),
+                    data: json!({}),
+                },
+                "t1",
+            )
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation(
+                "ordinary",
+                &reservations,
+                &original,
+                &snapshot,
+                "t2"
+            ),
+            Err(StoreError::AlreadySettled)
+        ));
+    }
+
+    #[test]
+    fn ordinary_reservation_record_failure_rolls_back_all_rows() {
+        let mut store = Store::in_memory().unwrap();
+        let original = ordinary_request(&mut store, "ordinary");
+        let snapshot = store.list_records().unwrap();
+        let mut prepared = original.clone();
+        prepared["preview"] = json!({"allocation_usd_micros":"5000000"});
+        store.conn.execute_batch("CREATE TRIGGER reject_prepared_record BEFORE UPDATE ON operations BEGIN SELECT RAISE(ABORT, 'synthetic persistence failure'); END;").unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation(
+                "ordinary",
+                &[ordinary_reservation("synthetic:wallet/ETH")],
+                &prepared,
+                &snapshot,
+                "t1"
+            ),
+            Err(StoreError::Sqlite(_))
+        ));
+        assert_eq!(store.reservation_count("ordinary").unwrap(), 0);
+        assert_eq!(store.get_record("ordinary").unwrap(), Some(original));
     }
 
     #[test]

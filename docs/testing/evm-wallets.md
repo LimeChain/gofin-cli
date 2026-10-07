@@ -56,9 +56,11 @@ fin preview wallet.transfer --input '{"wallet":"wallet","network":"evm","chain_i
 ERC-20 transfers use the exact token contract instead of `"native"`; the amount
 is a decimal token quantity and `max_fee_eth` is the native ETH fee cap. A preview
 moves no funds. Execution uses the same public input with a persistent logical
-`--id` and required tracked `--run`; every write requires fresh Touch ID. Inspect
-`fin schema run.begin --json` to prepare explicit allocations and funded forward/
-return operations; this document does not authorize a live write.
+`--id`; no run or restoration is required for ordinary operations. Every write
+requires fresh Touch ID and personal movement/rolling allocation limits. For an
+explicitly authorized live test, the LLM separately records the baseline, $100
+budget and funded return plan under the live-test contract. This document does
+not authorize a live write.
 
 ## Optional authenticated pricing
 
@@ -205,7 +207,7 @@ verification remains pending until protected human enrollment is observed.
    operation after interrupted output; duplicate/restart attempts must not create
    a second transfer. Authorize every cleanup write separately.
 6. Restore starting custody and asset holdings net proved costs, reconcile fees
-   and dust, and require `fin run finish RUN_ID --json` to report restoration.
+   and dust, and record independent final snapshots establishing restoration.
    Unresolved finality or incomplete cleanup cannot pass.
 
 Follow the [live-test contract](README.md#live-test-contract). Record automated,

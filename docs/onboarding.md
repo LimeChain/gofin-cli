@@ -291,3 +291,26 @@ A fresh-agent rehearsal must start from CLI discovery alone and produce correct 
 The later human session uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
 
 Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).
+
+
+## Financial policy management
+
+`fin policy show` is agent-readable and reports personal limits, included costs,
+and installation-wide rolling 24-hour allocation usage; `--json` returns exact decimal strings.
+`fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000` is
+human-interactive, using the same fixed privileged broker and verified human
+Terminal as connection enrollment, without loading credentials. Both amounts
+are required; `0` means no personal limit for that field and is displayed as
+“No limit” in human output/approval. New `fin setup` prompts for both amounts in
+the protected human Terminal (Enter defaults each to $100), before the setup
+Touch ID challenge. Credential input remains hidden; policy input is visible. Discover safe fields through `fin explain policy.set --json` and
+`fin schema policy.set --json` before onboarding or service setup.
+
+The Mac login password permits protected configuration access; the subsequent
+90-second terminal-review/Touch ID challenge approves only the displayed limits.
+Cancellation, decline or expiry saves nothing and requires an explicit retry.
+Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
+even with a TTY. Policy changes refuse nonterminal operations, preserving
+reservations and exact approved authority. Historical unrestored run records do
+not block policy changes or ordinary execution. Approved changes retain per-write
+Touch ID. Live-test $100 and restoration instructions remain in the testing guide. See [limit and reload behavior](../README.md#financial-limits).

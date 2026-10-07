@@ -261,7 +261,62 @@ pub fn safe_text(text: &str) -> String {
 /// fields. Discovery has a shorter overview with its full metadata in verbose mode.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
-    if command == "daemon" {
+    if command == "policy" && !verbose {
+        for (key, label) in [
+            ("max_movement_usd", "Per movement"),
+            ("max_run_allocation_usd", "Rolling 24-hour allocation"),
+        ] {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "{label}: {}",
+                    match value[key].as_str() {
+                        Some("0") => "No limit".to_owned(),
+                        Some(amount) => format!("${} USD", safe_text(amount)),
+                        None => "unavailable".to_owned(),
+                    }
+                ),
+            );
+        }
+        if let Some(used) = value["allocation_used_usd"].as_str() {
+            line(
+                &mut output,
+                0,
+                &format!("Allocation used: ${} USD", safe_text(used)),
+            );
+        }
+        if let Some(error) = value["allocation_usage_error"]["message"].as_str() {
+            line(
+                &mut output,
+                0,
+                &format!("Allocation usage unavailable: {}", safe_text(error)),
+            );
+        }
+        for key in [
+            "movement_includes",
+            "allocation_includes",
+            "authorization",
+            "next_action",
+        ] {
+            if let Some(text) = value[key].as_str() {
+                line(&mut output, 0, &safe_text(text));
+            }
+        }
+    } else if command == "run" && !verbose {
+        let id = value["id"].as_str().unwrap_or("unknown");
+        let status = value["status"].as_str().unwrap_or("unknown");
+        line(
+            &mut output,
+            0,
+            &format!("Historical run {}: {}", safe_text(id), safe_text(status)),
+        );
+        line(
+            &mut output,
+            0,
+            "Use --json for the preserved record; use fin status OPERATION_ID to reconcile pending operations.",
+        );
+    } else if command == "daemon" {
         line(
             &mut output,
             0,
@@ -492,6 +547,49 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+
+    #[test]
+    fn policy_output_is_exact_in_human_and_machine_terminal_modes() {
+        let value = json!({"max_movement_usd":"1000.000001","max_run_allocation_usd":"5000","allocation_used_usd":"20.000001","movement_includes":"Gross movement plus maximum costs.","allocation_includes":"Gross movement, maximum costs and additional borrowed allocation.","allocation_scope":"Installation-wide rolling 24-hour budget.","authorization":"Fresh Touch ID required.","next_action":"Run fin policy show --json."});
+        for (tty, dumb, no_color) in [
+            (true, false, false),
+            (true, false, true),
+            (false, false, false),
+            (true, true, false),
+        ] {
+            for machine in [true, false] {
+                let mut output = Vec::new();
+                ui(machine, false, tty, tty, dumb, no_color)
+                    .write_result_to(&value, "policy", &mut output)
+                    .unwrap();
+                assert!(!output.contains(&0x1b));
+                if machine {
+                    assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
+                } else {
+                    let text = String::from_utf8(output).unwrap();
+                    assert!(text.contains("Per movement: $1000.000001 USD"));
+                    assert!(text.contains("Rolling 24-hour allocation: $5000 USD"));
+                    assert!(text.contains("Allocation used: $20.000001 USD"));
+                    assert!(!text.contains("max_movement_usd"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn policy_zero_is_no_limit_in_human_output_and_exact_zero_in_json() {
+        let value = json!({"max_movement_usd":"0","max_run_allocation_usd":"0"});
+        let text = render_human("policy", &value, false);
+        assert_eq!(
+            text,
+            "Per movement: No limit\nRolling 24-hour allocation: No limit\n"
+        );
+        let mut output = Vec::new();
+        ui(true, false, false, false, false, false)
+            .write_result_to(&value, "policy", &mut output)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
+    }
 
     #[test]
     fn daemon_output_is_one_observed_state_line_with_json_fields_preserved() {
@@ -808,5 +906,14 @@ mod tests {
             assert!(!text.contains('\x1b'));
             assert_eq!(text.contains("detail"), verbose);
         }
+    }
+    #[test]
+    fn historical_run_summary_keeps_full_evidence_behind_explicit_details() {
+        let value = json!({"id":"old-run","status":"cleanup_outstanding","baseline":{"private_detail":"historical-evidence"},"reservations":{"original-operation":{}}});
+        let brief = render_human("run", &value, false);
+        assert!(brief.contains("Historical run old-run: cleanup_outstanding"));
+        assert!(brief.contains("fin status OPERATION_ID"));
+        assert!(!brief.contains("historical-evidence"));
+        assert!(render_human("run", &value, true).contains("historical-evidence"));
     }
 }

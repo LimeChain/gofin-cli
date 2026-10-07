@@ -220,10 +220,46 @@ restore all modified allowances and original asset representation. Exercise
 Binance child/main funding, withdrawal/verified wallet receipt, usable exchange
 return credit and redistribution only when the complete route is available.
 Present and approve every cleanup step. Independently verify all affected
-accounts, assets, debt, positions, allowances and pending activity. `run finish`
-must report restored, with receipt-backed gas, interest, rounding, yield and
+accounts, assets, debt, positions, allowances and pending activity. The independently recorded final test snapshot
+must establish restoration, with receipt-backed gas, interest, rounding, yield and
 conversion economics explained. Any incomplete cleanup fails the round trip.
 
 Record automated, fork, read-only production, private non-biometric mainnet,
 installed credential denial, actual Touch ID and protected financial acceptance
 as separate evidence in the [report format](report-template.md).
+
+
+## Financial policy checks
+
+**Pending / not run:** actual policy Terminal isolation, Touch ID acceptance,
+decline, cancellation, expiry and installed launchd reload. Synthetic evidence
+cannot establish these cases. This change did not install or perform live reads
+or writes. Use the reviewed human build/update workflow separately; these checks
+need no financial movement.
+
+1. During a separately authorized fresh setup, verify both limit prompts, Enter
+   preserving $100, and zero shown explicitly as “No limit” in the trusted review.
+   Cancel before approval to check that no configuration is saved.
+   Run `fin policy show` and `fin policy show --json`; on an unchanged installation,
+   verify both personal limits remain $100 and included costs are explained.
+2. In your own macOS Terminal run
+   `fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000`.
+   Verify the password explanation and trusted old/new USD values. Decline,
+   cancel, and separately let the 90-second approval expire. Each must leave
+   both limits unchanged, with a fresh explicit retry required.
+3. Repeat and accept fresh Touch ID. Run `fin policy show --json`; if the old
+   broker reports `CONFIG_CHANGED_RESTART_REQUIRED`, allow launchd to restart
+   and repeat the read. Verify 1000/5000 personal limits and the rolling allocation scope/usage. Restore the original policy through another fresh approved
+   `fin policy set --max-movement-usd 100 --max-run-allocation-usd 100`.
+4. Separately test `fin policy set --max-movement-usd 0 --max-run-allocation-usd 0`:
+   review “No limit” for both fields, decline first and verify no change, then
+   accept fresh Touch ID and confirm JSON `"0"` values and unchanged operation approval requirements. Restore both original limits through fresh approval.
+   Verify agent invocation, redirected input, direct unprivileged broker invocation
+   and `--json` cannot change policy or bypass terminal review/Touch ID.
+   The synthetic suite tests pending-operation refusal and historical-run compatibility; do not create a
+   live financial operation solely for this configuration check.
+5. Any later authorized live acceptance follows the LLM testing instructions: the
+   $100 total allocation and per-movement contract, a baseline, a complete funded
+   return plan, observed restoration, and fresh Touch ID for every write.
+   Ordinary permanent portfolio changes do not require these test artifacts.
+   No runtime verification classification exists. No live acceptance is claimed here.

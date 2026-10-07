@@ -4612,169 +4612,70 @@ mod wallet_only_tests {
         }
     }
     #[tokio::test]
-    async fn tracked_new_chain_runs_reject_over_allocation_and_price_growth_above_movement_limit_before_approval()
-     {
-        use fin_engine::{Engine, EngineOptions, RunAllocation, RunPlan};
+    async fn ordinary_new_chain_transfers_enforce_personal_allocation_and_movement_before_approval()
+    {
+        use fin_engine::{Engine, EngineOptions};
         use fin_store::Store;
         for chain in [42161, 4663] {
             for token in ["native".into(), lower_address(addr(101))] {
-                let rpc = Arc::new(Fixture::new());
-                rpc.cash_by_owner
-                    .lock()
-                    .unwrap()
-                    .insert(addr(2), U256::ZERO);
-                let signer = Arc::new(IsolatedSigningSeam::default());
-                let prices = Arc::new(EnginePrices::default());
-                let mut adapter =
-                    wallet_adapter(chain, rpc.clone()).with_wallet_valuation(prices.clone());
-                adapter.config.snapshot_tokens = vec![lower_address(addr(101))];
-                adapter.wallets.push(WalletConnection {
-                    name: "synthetic-return".into(),
-                    address: lower_address(addr(2)),
-                    signing_enabled: true,
-                });
-                adapter.runtime =
-                    Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer.clone())));
-                let adapter = Arc::new(adapter);
-                let authorization = Arc::new(IsolatedAuthorization {
-                    calls: AtomicUsize::new(0),
-                    decline: false,
-                });
-                let engine = Engine::new(
-                    Store::in_memory().unwrap(),
-                    vec![adapter.clone()],
-                    authorization.clone(),
-                    EngineOptions {
-                        require_run_for_writes: true,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                let forward = transfer(chain, &token);
-                let mut unwind = forward.clone();
-                unwind["wallet"] = json!("synthetic-return");
-                unwind["recipient"] = json!(lower_address(addr(1)));
-                let mut allocations = vec![];
-                for (owner, reference, decimal_amount) in [
-                    (addr(1), "native", "0.01"),
-                    (addr(2), "native", "0.001"),
-                    (
-                        addr(1),
-                        token.as_str(),
-                        if token == "native" { "0" } else { "10" },
-                    ),
-                ] {
-                    if decimal_amount == "0" {
-                        continue;
-                    }
-                    let metadata = adapter.token(reference, None).await.unwrap();
-                    let units = Quantity::from_decimal(decimal_amount, metadata.decimals).unwrap();
-                    let (value, source) =
-                        adapter.quote_usd(reference, units.clone()).await.unwrap();
-                    allocations.push(RunAllocation {
-                        holding: ResourceAmount {
-                            resource: resource(chain, owner),
-                            amount: Amount {
-                                asset: metadata.asset(&adapter),
-                                atoms: units,
-                            },
+                for excessive_movement in [false, true] {
+                    let rpc = Arc::new(Fixture::new());
+                    let signer = Arc::new(IsolatedSigningSeam::default());
+                    let prices = Arc::new(EnginePrices::default());
+                    let mut adapter =
+                        wallet_adapter(chain, rpc.clone()).with_wallet_valuation(prices.clone());
+                    adapter.runtime =
+                        Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer.clone())));
+                    let authorization = Arc::new(IsolatedAuthorization {
+                        calls: AtomicUsize::new(0),
+                        decline: false,
+                    });
+                    let engine = Engine::new(
+                        Store::in_memory().unwrap(),
+                        vec![Arc::new(adapter)],
+                        authorization.clone(),
+                        EngineOptions {
+                            max_movement_and_cost_usd_micros: "100000000".into(),
+                            max_run_allocation_usd_micros: if excessive_movement {
+                                "5000000000"
+                            } else {
+                                "1000000"
+                            }
+                            .into(),
                         },
-                        value_usd_micros: value.to_string(),
-                        observed_at: now(),
-                        source,
-                    });
-                }
-                let mut asset_prices = vec![];
-                for reference in ["native", token.as_str()] {
-                    let metadata = adapter.token(reference, None).await.unwrap();
-                    if asset_prices
-                        .iter()
-                        .any(|p: &AssetPrice| p.asset == metadata.asset(&adapter))
-                    {
-                        continue;
-                    }
-                    let units = quantity(pow10(metadata.decimals).unwrap());
-                    let (value, source) =
-                        adapter.quote_usd(reference, units.clone()).await.unwrap();
-                    asset_prices.push(AssetPrice {
-                        asset: metadata.asset(&adapter),
-                        usd_micros_per_unit: value,
-                        unit_atoms: units,
-                        observed_at: now(),
-                        source,
-                    });
-                }
-                let plan = RunPlan {
-                    id: "synthetic-wallet-bounded-run".into(),
-                    baseline: adapter.snapshot().await.unwrap(),
-                    allocations,
-                    borrowed_proceeds_reserve_usd_micros: "0".into(),
-                    return_cost_reserve_usd_micros: "10000000".into(),
-                    planned_operations: vec![PlanStep {
-                        operation: "wallet.transfer".into(),
-                        input: forward.clone(),
-                        maximum_fee_usd_micros: "5000000".into(),
-                        description: "Synthetic forward transfer".into(),
-                    }],
-                    unwind: vec![PlanStep {
-                        operation: "wallet.transfer".into(),
-                        input: unwind,
-                        maximum_fee_usd_micros: "5000000".into(),
-                        description: "Synthetic complete return".into(),
-                    }],
-                    route_proofs: vec![],
-                    asset_prices: vec![],
-                };
-                let mut excessive = plan.clone();
-                excessive.id = "synthetic-rejected-allocation".into();
-                excessive.allocations[0].holding.amount.atoms =
-                    Quantity::from_decimal("0.04", 18).unwrap();
-                excessive.allocations[0].value_usd_micros = "120000000".into();
-                assert_eq!(
-                    engine
-                        .begin_run_from_observer_with_asset_prices(
-                            "wallet.transfer",
-                            excessive,
-                            asset_prices.clone(),
-                            chrono::Utc::now()
-                        )
-                        .await
-                        .unwrap_err()
-                        .code,
-                    "ALLOCATION_LIMIT"
-                );
-                engine
-                    .begin_run_from_observer_with_asset_prices(
-                        "wallet.transfer",
-                        plan,
-                        asset_prices,
-                        chrono::Utc::now(),
                     )
-                    .await
                     .unwrap();
-                // The exact preflighted amount is unchanged, but fresh prices
-                // now put its movement above $100. Rejection precedes approval.
-                prices.0.store(110, Ordering::SeqCst);
-                let rejected = engine
-                    .execute(OperationRequest {
-                        request_id: "synthetic-over-movement".into(),
-                        operation: "wallet.transfer".into(),
-                        input: forward,
-                        run_id: Some("synthetic-wallet-bounded-run".into()),
-                    })
-                    .await
-                    .unwrap();
-                assert_eq!(rejected.error.as_ref().unwrap().code, "MOVEMENT_LIMIT");
-                assert!(rejected.approval.is_none() && rejected.submission.is_none());
-                assert_eq!(authorization.calls.load(Ordering::SeqCst), 0);
-                assert_eq!(signer.0.load(Ordering::SeqCst), 0);
-                assert!(
-                    !rpc.calls
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|method| method == "eth_sendRawTransaction")
-                );
+                    if excessive_movement {
+                        prices.0.store(110, Ordering::SeqCst);
+                    }
+                    let rejected = engine
+                        .execute(OperationRequest {
+                            request_id: "synthetic-personal-budget".into(),
+                            operation: "wallet.transfer".into(),
+                            input: transfer(chain, &token),
+                            run_id: None,
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        rejected.error.as_ref().unwrap().code,
+                        if excessive_movement {
+                            "MOVEMENT_LIMIT"
+                        } else {
+                            "ALLOCATION_LIMIT"
+                        }
+                    );
+                    assert!(rejected.approval.is_none() && rejected.submission.is_none());
+                    assert_eq!(authorization.calls.load(Ordering::SeqCst), 0);
+                    assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+                    assert!(
+                        !rpc.calls
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|method| method == "eth_sendRawTransaction")
+                    );
+                }
             }
         }
     }
