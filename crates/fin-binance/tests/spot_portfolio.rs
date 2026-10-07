@@ -454,6 +454,30 @@ async fn missing_or_wrong_fee_evidence_keeps_spot_unresolved_without_replay() {
     assert_eq!(v.posts.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
+async fn equivalent_padded_spot_inputs_keep_the_exact_approved_order_bounds() {
+    let venue = Arc::new(Venue::new());
+    let adapter = adapter(venue.clone(), Arc::new(Receipt(AtomicBool::new(false))));
+    let mut request = spot("synthetic-padded-quantity", "APT");
+    let canonical = adapter
+        .prepare(&request.operation, &request.input)
+        .await
+        .unwrap();
+    request.input["quantity"] = json!(format!("2.{}", "0".repeat(36)));
+    request.input["limitPrice"] = json!("10.0000");
+    let padded = adapter
+        .prepare(&request.operation, &request.input)
+        .await
+        .unwrap();
+    assert_eq!(padded.binding, canonical.binding);
+    assert_eq!(padded.summary, canonical.summary);
+    assert_eq!(
+        serde_json::to_value(padded.intent).unwrap(),
+        serde_json::to_value(canonical.intent).unwrap()
+    );
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn exact_input_filters_fee_asset_and_network_fail_closed() {
     let v = Arc::new(Venue::new());
     let a = adapter(v.clone(), Arc::new(Receipt(AtomicBool::new(false))));

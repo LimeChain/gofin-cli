@@ -30,11 +30,7 @@ fn dec(v: &Value, key: &str) -> Result<ExactDecimal, FinError> {
     observed_decimal(text(v, key)?)
 }
 fn mul(a: &ExactDecimal, b: &ExactDecimal) -> Result<ExactDecimal, FinError> {
-    ExactDecimal::from_coefficient(
-        a.coefficient_for_scale(a.scale()) * b.coefficient_for_scale(b.scale()),
-        a.scale() + b.scale(),
-    )
-    .map_err(domain_error)
+    trading::product(a, b)
 }
 fn asset(coin: &str) -> AssetId {
     AssetId {
@@ -43,6 +39,7 @@ fn asset(coin: &str) -> AssetId {
         decimals: 36,
     }
 }
+
 fn amt(coin: &str, value: &ExactDecimal) -> Result<Amount, FinError> {
     Ok(Amount {
         asset: asset(coin),
@@ -600,5 +597,58 @@ impl BinanceProfile {
             evidence: evidence.clone(),
             verified: Some(make_verified(submission.clone(), effects, evidence)?),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spot_examples_are_valid_direct_operation_inputs() {
+        let definition = crate::adapter::definitions()
+            .into_iter()
+            .find(|definition| definition.name == "binance.spot-order")
+            .unwrap();
+        assert!(!definition.examples.is_empty());
+        for example in definition.examples {
+            serde_json::from_value::<SpotInput>(example.clone()).unwrap();
+            assert!(
+                serde_json::from_value::<SpotInput>(json!({
+                    "operation": "binance.spot-order", "input": example
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn spot_products_preserve_exact_values_at_the_precision_boundary() {
+        let padded_quantity = format!("0.01{}", "0".repeat(34));
+        let smallest = format!("0.{}1", "0".repeat(35));
+        let padded_zero = format!("0.{}", "0".repeat(36));
+        for (left, right, expected) in [
+            (padded_quantity.as_str(), "2000.0", "20"),
+            (smallest.as_str(), "1.0000", smallest.as_str()),
+            (padded_zero.as_str(), smallest.as_str(), "0"),
+        ] {
+            assert_eq!(
+                mul(
+                    &ExactDecimal::parse(left).unwrap(),
+                    &ExactDecimal::parse(right).unwrap()
+                )
+                .unwrap()
+                .canonical(),
+                expected
+            );
+        }
+        // A nonzero 37th fractional digit cannot be rounded away.
+        assert!(
+            mul(
+                &ExactDecimal::parse(&smallest).unwrap(),
+                &ExactDecimal::parse("0.1").unwrap()
+            )
+            .is_err()
+        );
     }
 }

@@ -110,7 +110,7 @@ fn signed(value: &Value, field: &str) -> Result<BigInt, FinError> {
     let integer = BigInt::from(atoms.integer());
     Ok(if negative { -integer } else { integer })
 }
-fn product(a: &ExactDecimal, b: &ExactDecimal) -> Result<ExactDecimal, FinError> {
+pub(super) fn product(a: &ExactDecimal, b: &ExactDecimal) -> Result<ExactDecimal, FinError> {
     let mut coefficient = a.coefficient_for_scale(a.scale()) * b.coefficient_for_scale(b.scale());
     let mut scale = a.scale() + b.scale();
     while scale > 0 && (&coefficient % BigUint::from(10u8)).is_zero() {

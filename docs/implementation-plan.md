@@ -705,3 +705,21 @@ registry gap. No unsupported valuation is inferred or financial guard bypassed.
 limits and journal; reinstall is unnecessary. Stored personal limits remain
 unchanged until a human explicitly approves `fin policy set`. Resolve the pricing
 blocker before claiming the requested APT/SEI portfolio flow is ready.
+
+
+### Spot example and exact multiplication follow-up (2026-10-07)
+
+The spot-order example now contains the direct camelCase input object accepted
+by the operation, and the bundled offline catalog was regenerated. Spot
+multiplication reuses the existing exact product helper: remove only coefficient
+trailing zeros before enforcing the 36-digit fractional limit, never round away
+nonzero digits. Input validation, fees, policy and authorization are unchanged.
+
+Ogi Spark (`glm-5.3-flash`) reviewed the narrow proposal and endorsed both changes;
+its scale-sensitive equality warning was checked against value comparisons.
+Focused synthetic checks passed: two unit tests for example parsing, wrapped-input
+rejection, exact boundary/zero products and unrepresentable precision; six spot
+portfolio tests including identical approved bindings for padded inputs; one CLI
+catalog/compiled-registry consistency test. Strict Binance Clippy and formatting
+passed. No installation or live writes were performed. APT/SEI production pricing
+remains a separate unresolved blocker.

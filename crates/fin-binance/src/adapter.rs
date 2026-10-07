@@ -1757,7 +1757,7 @@ fn definitions() -> Vec<Definition> {
         input_schema: serde_json::to_value(input).unwrap_or(Value::Null),
         output_schema: json!({"type":"object"}),
         error_schema: schema_for!(FinError).into(),
-        examples: if name == "binance.spot-order" { vec![json!({"operation":"binance.spot-order","input":{"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"}})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
+        examples: if name == "binance.spot-order" { vec![json!({"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
         completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
     }).collect();
     if let Some(definition) = result.iter_mut().find(|d| d.name == "binance.withdraw") {

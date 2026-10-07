@@ -7226,17 +7226,14 @@
     },
     "examples": [
       {
-        "input": {
-          "account": "binance-sub",
-          "limitPrice": "2000",
-          "maxFee": "0.00002",
-          "minReceiveAmount": "0.00998",
-          "quantity": "0.01",
-          "requestId": "buy-eth",
-          "side": "BUY",
-          "symbol": "ETHUSDC"
-        },
-        "operation": "binance.spot-order"
+        "account": "binance-sub",
+        "limitPrice": "2000",
+        "maxFee": "0.00002",
+        "minReceiveAmount": "0.00998",
+        "quantity": "0.01",
+        "requestId": "buy-eth",
+        "side": "BUY",
+        "symbol": "ETHUSDC"
       }
     ],
     "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
