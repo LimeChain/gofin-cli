@@ -95,11 +95,6 @@ enum Command {
     Doctor,
     /// Read financial state within the configured tracking scope.
     Snapshot,
-    /// Inspect historical run records.
-    Run {
-        #[command(subcommand)]
-        command: RunCommand,
-    },
     /// Install protected service/storage; macOS may request your Mac login password.
     #[command(
         after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits."
@@ -144,15 +139,6 @@ struct ExecuteArgs {
     /// Stable logical identity for retries of this exact operation.
     #[arg(long)]
     id: String,
-    /// Preserve a historical operation retry identity; omit for new operations.
-    #[arg(long, hide = true)]
-    run: Option<String>,
-}
-
-#[derive(Subcommand, Debug)]
-enum RunCommand {
-    /// Inspect a historical run without requiring portfolio restoration.
-    Status { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -526,7 +512,7 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                     request_id: args.id,
                     operation: args.operation,
                     input: parse_input(&args.input)?,
-                    run_id: args.run,
+                    run_id: None,
                 })
                 .await
         }
@@ -534,9 +520,6 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
         Command::Operations => client.call(BrokerRequest::Operations).await,
         Command::Doctor => client.call(BrokerRequest::Doctor).await,
         Command::Snapshot => client.call(BrokerRequest::Snapshot).await,
-        Command::Run { command } => match command {
-            RunCommand::Status { id } => client.call(BrokerRequest::RunStatus { id }).await,
-        },
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
@@ -858,7 +841,6 @@ fn command_name(command: &Command) -> &'static str {
         Command::Operations => "operations",
         Command::Doctor => "doctor",
         Command::Snapshot => "snapshot",
-        Command::Run { .. } => "run",
         Command::Setup => "setup",
         Command::Daemon { .. } => "daemon",
         Command::Connections { .. } => "connections",
@@ -885,7 +867,6 @@ fn requested_json(args: &[std::ffi::OsString]) -> bool {
             Some(
                 "--input"
                     | "--id"
-                    | "--run"
                     | "--provider"
                     | "--name"
                     | "--role"
