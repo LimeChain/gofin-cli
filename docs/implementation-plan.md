@@ -41,8 +41,8 @@ Blockscout candidate discovery, then verify metadata and balances on RPC.
 Discovery always reports partial coverage. Snapshot tracking scope is explicit
 native plus configured tokens, not a claim to enumerate every holding or dapp.
 Shared CoinGecko USD valuation serves Binance and all EVM networks. ERC-20
-lookups use verified chain/platform plus exact contract; exchange symbols use a
-reviewed coin-ID registry. Missing valuation blocks writes instead of bypassing
+lookups use verified chain/platform plus exact contract; exchange assets use
+dynamic provider ticker IDs cross-checked against exact venue pairs. Missing valuation blocks writes instead of bypassing
 limits; no stablecoin parity or exchange-price fallback is assumed. L2 settlement also requires the RPC finalized
 block to include the receipt; sequencer confirmation remains pending. That marker
 is not a proof of the complete rollup challenge period.
@@ -68,8 +68,8 @@ pending operations recover through original identities without replay.
 `fin-pricing` owns provider-independent async `UsdPriceSource`; the default
 CoinGecko implementation supplies direct USD pricing for Binance and EVM mainnet/
 L2 wallets. Native ETH uses a verified coin ID, ERC-20s use verified platform and
-exact contract, and Binance coins use a reviewed ID registry rather than blind
-symbol search. Unknown mappings or absent listed-token quotes fail closed.
+exact contract, and Binance coins resolve dynamically through complete provider
+ticker pagination and exact venue pairs rather than blind symbol search. Unknown mappings or absent listed-token quotes fail closed.
 Aave collateral/health oracles remain application-specific protocol checks.
 
 Raw JSON numeric lexemes become positive exact decimal text without floating
@@ -723,3 +723,38 @@ portfolio tests including identical approved bindings for padded inputs; one CLI
 catalog/compiled-registry consistency test. Strict Binance Clippy and formatting
 passed. No installation or live writes were performed. APT/SEI production pricing
 remains a separate unresolved blocker.
+
+
+### Dynamic exchange-local pricing resolution (2026-10-07)
+
+Removed the per-coin Binance registry in fin-pricing; the existing shared broker
+valuator remains the financial pricing path. Resolve exact (exchange, asset)
+keys from complete provider exchange-ticker IDs plus active venue base/quote
+metadata. Both ticker sides contribute evidence; conflicting IDs and missing
+matched-pair evidence block valuation. Identical rows deduplicate, but a repeated
+whole page or incomplete scan cannot establish completion. No symbol/name search,
+first-result choice, stablecoin parity, price fallback or asset enrollment.
+
+Expose ExchangeAssetResolver/ExchangeMarketSource and provider-neutral typed
+keys/evidence for later integrations. Binance public HTTPS exchangeInfo omits
+permission sets to fit its response bound. EVM network/contract identity and
+raw-lexeme exact USD parsing are unchanged. Identity cache15min from initial
+venue observation; negative refresh30s; quote cache30s; provider age strictly
+under120s. Honor provider/venue Retry-After; rate-limited reads resume bounded
+in-memory pagination without granting partial mapping/quote authority. Other
+failures discard scan progress. Preserve credentials, headers, approval, limits,
+journal identities and frozen recovery; no execution or store migration.
+
+41 pricing fixtures exercise the production resolver and HTTP parser, including
+APT/SEI, duplicate labels, conflicting mappings, pagination/resume, new-listing
+refresh, separate expiry, outages, stale quotes, header separation and exact EVM
+contract/network identity. Three shared broker pricing/configuration tests passed;
+strict pricing/broker Clippy and formatting passed. Anonymous live resolution
+and fresh USD pricing passed for APT, SEI, USDC and ETH after quota cooldowns.
+Installed old-runtime previews refused APT/SEI unsupported mappings and stale ETH
+pricing; new-runtime previews await human make update. Detailed evidence and
+follow-ups: [dynamic pricing report](reports/dynamic-exchange-pricing.md).
+
+Two ask-ogi implementation/review requests returned HTTP502 with no answer;
+implementation continued locally. No financial writes, credential disclosure,
+installation, reinstall or push occurred.

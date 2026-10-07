@@ -11,7 +11,14 @@ use fin_domain::{AssetId, FinError, Result};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize, de};
 use serde_json::value::RawValue;
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
+
+pub mod resolution;
+pub use resolution::{
+    ExchangeAssetKey, ExchangeAssetResolver, ExchangeMarket, ExchangeMarketSource,
+    ResolvedExchangeAsset,
+};
+use resolution::{IdentityCache, RegisteredExchange};
 use tokio::sync::Mutex;
 
 const BASE_URL: &str = "https://api.coingecko.com/api/v3";
@@ -152,7 +159,7 @@ fn exact_decimal(raw: &str) -> Result<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Lookup {
-    Coin(&'static str),
+    Coin(String),
     Token(&'static str, String),
 }
 
@@ -161,37 +168,9 @@ impl Lookup {
         let unsupported = || {
             failure(
                 "PRICE_ASSET_UNSUPPORTED",
-                "Asset has no reviewed CoinGecko network or exact exchange-coin mapping.",
+                "Asset has no registered exchange resolver or reviewed EVM network/contract identity.",
             )
         };
-        if asset.network == "binance" {
-            // IDs and symbols verified against the provider /coins/list, 2026-10-06.
-            // https://docs.coingecko.com/reference/coins-list
-            let id = match asset.reference.as_str() {
-                "BTC" => "bitcoin",
-                "ETH" => "ethereum",
-                "USDT" => "tether",
-                "USDC" => "usd-coin",
-                "USDG" => "global-dollar",
-                "BNB" => "binancecoin",
-                "SOL" => "solana",
-                "LTC" => "litecoin",
-                "XRP" => "ripple",
-                "ADA" => "cardano",
-                "DOT" => "polkadot",
-                "DOGE" => "dogecoin",
-                "AVAX" => "avalanche-2",
-                "LINK" => "chainlink",
-                "UNI" => "uniswap",
-                "ARB" => "arbitrum",
-                "OP" => "optimism",
-                "AAVE" => "aave",
-                "DAI" => "dai",
-                "WBTC" => "wrapped-bitcoin",
-                _ => return Err(unsupported()),
-            };
-            return Ok(Self::Coin(id));
-        }
         // Platform IDs and native_coin_id=ethereum were verified against the
         // provider /asset_platforms for chain IDs 1, 42161 and 4663.
         // https://docs.coingecko.com/reference/asset-platforms-list
@@ -203,7 +182,7 @@ impl Lookup {
         };
         if asset.reference == "native" {
             return if asset.decimals == 18 {
-                Ok(Self::Coin("ethereum"))
+                Ok(Self::Coin("ethereum".into()))
             } else {
                 Err(unsupported())
             };
@@ -226,17 +205,22 @@ impl Lookup {
     }
 
     fn path(&self) -> String {
-        // No symbols/name search: only exact reviewed IDs or contracts. The
-        // fixed query asks the provider for both full precision and source time.
-        // https://docs.coingecko.com/reference/simple-price
-        // https://docs.coingecko.com/reference/simple-token-price
-        let prefix = match self {
-            Self::Coin(id) => format!("/simple/price?ids={id}"),
-            Self::Token(platform, contract) => {
-                format!("/simple/token_price/{platform}?contract_addresses={contract}")
-            }
+        let (path, field, identity) = match self {
+            Self::Coin(id) => ("/simple/price".to_owned(), "ids", id.as_str()),
+            Self::Token(platform, contract) => (
+                format!("/simple/token_price/{platform}"),
+                "contract_addresses",
+                contract.as_str(),
+            ),
         };
-        format!("{prefix}&vs_currencies=usd&include_last_updated_at=true&precision=full")
+        let mut url = reqwest::Url::parse("https://pricing.invalid").expect("fixed URL");
+        url.set_path(&path);
+        url.query_pairs_mut()
+            .append_pair(field, identity)
+            .append_pair("vs_currencies", "usd")
+            .append_pair("include_last_updated_at", "true")
+            .append_pair("precision", "full");
+        format!("{}?{}", url.path(), url.query().expect("fixed query"))
     }
 
     fn source(&self) -> String {
@@ -341,6 +325,9 @@ pub struct CoinGeckoPrices {
     // native ETH shared across chains. Cancellation drops the lock/request and
     // inserts no incomplete result; another caller can retry.
     cache: Mutex<BTreeMap<Lookup, CachedQuote>>,
+    exchanges: BTreeMap<String, RegisteredExchange>,
+    identities: Mutex<IdentityCache>,
+    rate_limited_until: Mutex<Option<DateTime<Utc>>>,
     #[cfg(test)]
     test_base_url: Option<String>,
     #[cfg(test)]
@@ -390,10 +377,20 @@ impl CoinGeckoPrices {
                     "Public CoinGecko transport could not be initialized.",
                 )
             })?;
+        let exchanges = BTreeMap::from([(
+            "binance".into(),
+            RegisteredExchange {
+                provider_exchange: "binance".into(),
+                source: Arc::new(resolution::BinanceMarkets::new(client.clone())),
+            },
+        )]);
         Ok(Self {
             client,
             authentication,
             cache: Mutex::new(BTreeMap::new()),
+            exchanges,
+            identities: Mutex::new(IdentityCache::default()),
+            rate_limited_until: Mutex::new(None),
             #[cfg(test)]
             test_base_url: None,
             #[cfg(test)]
@@ -401,6 +398,27 @@ impl CoinGeckoPrices {
             #[cfg(test)]
             test_timeout: None,
         })
+    }
+
+    /// Register a venue metadata reader and this provider's exact exchange ID.
+    /// This registers an integration, never an asset-symbol mapping or credentials.
+    pub fn with_exchange_market_source(
+        mut self,
+        exchange: &str,
+        provider_exchange: &str,
+        source: Arc<dyn ExchangeMarketSource>,
+    ) -> Result<Self> {
+        resolution::validate_identifier(exchange)?;
+        resolution::validate_identifier(provider_exchange)?;
+        self.identities = Mutex::new(IdentityCache::default());
+        self.exchanges.insert(
+            exchange.into(),
+            RegisteredExchange {
+                provider_exchange: provider_exchange.into(),
+                source,
+            },
+        );
+        Ok(self)
     }
 
     /// Enrollment-only read. Quotes do not issue a separate ping, and this check
@@ -450,7 +468,23 @@ impl CoinGeckoPrices {
             })?
     }
 
+    async fn check_rate_limit(&self) -> Result<()> {
+        if self
+            .rate_limited_until
+            .lock()
+            .await
+            .is_some_and(|until| self.now() < until)
+        {
+            return Err(failure(
+                "PRICE_RATE_LIMITED",
+                "CoinGecko Retry-After cooldown is active; retry when the provider window reopens.",
+            ));
+        }
+        Ok(())
+    }
+
     async fn request_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        self.check_rate_limit().await?;
         let base = self
             .authentication
             .as_ref()
@@ -475,9 +509,18 @@ impl CoinGeckoPrices {
             ));
         }
         if response.status().as_u16() == 429 {
+            let now = self.now();
+            let seconds = resolution::retry_after_seconds(
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok()),
+                now,
+            );
+            *self.rate_limited_until.lock().await = Some(now + chrono::Duration::seconds(seconds));
             return Err(failure(
                 "PRICE_RATE_LIMITED",
-                "CoinGecko public access is rate limited; no quote was accepted.",
+                "CoinGecko access is rate limited; Retry-After is honored and no quote or partial identity mapping was accepted.",
             ));
         }
         if response.status().as_u16() != 200 {
@@ -517,7 +560,27 @@ impl CoinGeckoPrices {
 #[async_trait]
 impl UsdPriceSource for CoinGeckoPrices {
     async fn quote(&self, asset: &AssetId) -> Result<UsdQuote> {
-        let lookup = Lookup::asset(asset)?;
+        let identity = if let Some(exchange) = resolution::exchange_name(&asset.network) {
+            Some(
+                self.resolve_exchange_asset(&ExchangeAssetKey {
+                    exchange: exchange.into(),
+                    asset: asset.reference.clone(),
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        let lookup = match &identity {
+            Some(identity) => Lookup::Coin(identity.provider_asset_id.clone()),
+            None => Lookup::asset(asset)?,
+        };
+        let annotate = |mut quote: UsdQuote| {
+            if let Some(identity) = &identity {
+                quote.source.push_str(&identity.source_binding());
+            }
+            quote
+        };
         let mut cache = self.cache.lock().await;
         let now = self.now();
         if let Some(cached) = cache.get(&lookup) {
@@ -526,7 +589,7 @@ impl UsdPriceSource for CoinGeckoPrices {
                 && elapsed < chrono::Duration::seconds(CACHE_SECONDS)
                 && provider_time(cached.updated_at.timestamp(), now).is_ok()
             {
-                return Ok(cached.quote.clone());
+                return Ok(annotate(cached.quote.clone()));
             }
         }
         // Failed refresh cannot fall back to even a previously fresh cache item.
@@ -558,7 +621,7 @@ impl UsdPriceSource for CoinGeckoPrices {
                 updated_at,
             },
         );
-        Ok(quote)
+        Ok(annotate(quote))
     }
 }
 
@@ -720,7 +783,7 @@ mod tests {
     fn raw_value_decoding_does_not_round_numbers_above_two_to_the_53() {
         let quote = parse_quote(
             body("ethereum", "9007199254740993.123456789012345678", NOW).as_bytes(),
-            &Lookup::Coin("ethereum"),
+            &Lookup::Coin("ethereum".into()),
             at(NOW),
         )
         .unwrap();
@@ -736,7 +799,7 @@ mod tests {
     fn exact_36_place_price_is_not_rounded_to_zero() {
         let quote = parse_quote(
             body("ethereum", "1e-36", NOW).as_bytes(),
-            &Lookup::Coin("ethereum"),
+            &Lookup::Coin("ethereum".into()),
             at(NOW),
         )
         .unwrap();
@@ -766,7 +829,7 @@ mod tests {
             body("ethereum", "NaN", NOW),
         ] {
             assert!(
-                parse_quote(raw.as_bytes(), &Lookup::Coin("ethereum"), at(NOW)).is_err(),
+                parse_quote(raw.as_bytes(), &Lookup::Coin("ethereum".into()), at(NOW)).is_err(),
                 "{raw}"
             );
         }
@@ -778,7 +841,7 @@ mod tests {
             assert!(
                 parse_quote(
                     body("ethereum", "1", timestamp).as_bytes(),
-                    &Lookup::Coin("ethereum"),
+                    &Lookup::Coin("ethereum".into()),
                     at(NOW)
                 )
                 .is_err()
@@ -786,7 +849,7 @@ mod tests {
         }
         let quote = parse_quote(
             body("ethereum", "1", NOW - 119).as_bytes(),
-            &Lookup::Coin("ethereum"),
+            &Lookup::Coin("ethereum".into()),
             at(NOW),
         )
         .unwrap();
@@ -796,38 +859,11 @@ mod tests {
     }
 
     #[test]
-    fn reviewed_registry_and_native_assets_select_exact_id_lookups() {
-        for (symbol, id) in [
-            ("BTC", "bitcoin"),
-            ("ETH", "ethereum"),
-            ("USDT", "tether"),
-            ("USDC", "usd-coin"),
-            ("USDG", "global-dollar"),
-            ("BNB", "binancecoin"),
-            ("SOL", "solana"),
-            ("LTC", "litecoin"),
-            ("XRP", "ripple"),
-            ("ADA", "cardano"),
-            ("DOT", "polkadot"),
-            ("DOGE", "dogecoin"),
-            ("AVAX", "avalanche-2"),
-            ("LINK", "chainlink"),
-            ("UNI", "uniswap"),
-            ("ARB", "arbitrum"),
-            ("OP", "optimism"),
-            ("AAVE", "aave"),
-            ("DAI", "dai"),
-            ("WBTC", "wrapped-bitcoin"),
-        ] {
-            assert_eq!(
-                Lookup::asset(&asset("binance", symbol, 8)).unwrap(),
-                Lookup::Coin(id)
-            );
-        }
+    fn native_assets_select_exact_id_lookups() {
         for network in ["ethereum:1", "ethereum:42161", "ethereum:4663"] {
             assert_eq!(
                 Lookup::asset(&asset(network, "native", 18)).unwrap(),
-                Lookup::Coin("ethereum")
+                Lookup::Coin("ethereum".into())
             );
         }
     }
@@ -836,8 +872,7 @@ mod tests {
     async fn unsupported_coin_network_and_unsafe_contract_refuse_before_http() {
         let (server, provider, _) = fixture(vec![]).await;
         for selected in [
-            asset("binance", "UNKNOWN", 6),
-            asset("binance", "usdc", 6),
+            asset("exchange:unregistered", "UNKNOWN", 6),
             asset("ethereum:99", CONTRACT, 6),
             asset("ethereum:1", "USDC", 6),
             asset("ethereum:1", "native", 6),
@@ -863,16 +898,16 @@ mod tests {
     #[tokio::test]
     async fn actual_http_requests_use_exact_ids_and_full_precision_source_timestamps() {
         let (server, provider, _) = fixture(vec![(
-            http(200, &body("global-dollar", "0.973421", NOW - 10)),
+            http(200, &body("ethereum", "0.973421", NOW - 10)),
             Duration::ZERO,
         )])
         .await;
-        let quote = provider.quote(&asset("binance", "USDG", 6)).await.unwrap();
+        let quote = provider.quote(&native()).await.unwrap();
         assert_eq!(quote.usd_per_unit, "0.973421");
         assert_eq!(quote.updated_at, at(NOW - 10).to_rfc3339());
         assert_eq!(quote.observed_at, at(NOW).to_rfc3339());
         let requests = server.requests.lock().unwrap();
-        assert!(requests[0].starts_with("GET /simple/price?ids=global-dollar&vs_currencies=usd&include_last_updated_at=true&precision=full HTTP/1.1"));
+        assert!(requests[0].starts_with("GET /simple/price?ids=ethereum&vs_currencies=usd&include_last_updated_at=true&precision=full HTTP/1.1"));
         assert!(!requests[0].contains("api-key"));
         assert!(!requests[0].contains("symbols="));
     }
@@ -1002,7 +1037,7 @@ mod tests {
         }
         assert_eq!(
             provider
-                .quote(&asset("binance", "ETH", 8))
+                .quote(&asset("ethereum:4663", "native", 18))
                 .await
                 .unwrap()
                 .observed_at,
@@ -1040,7 +1075,7 @@ mod tests {
         let (server, provider, clock) = fixture(vec![
             (http(200, &body("ethereum", "1", NOW)), Duration::ZERO),
             (http(429, ""), Duration::ZERO),
-            (http(200, &body("ethereum", "2", NOW + 30)), Duration::ZERO),
+            (http(200, &body("ethereum", "2", NOW + 90)), Duration::ZERO),
         ])
         .await;
         provider.quote(&native()).await.unwrap();
@@ -1050,6 +1085,12 @@ mod tests {
             "PRICE_RATE_LIMITED"
         );
         assert!(provider.cache.lock().await.is_empty());
+        assert_eq!(
+            provider.quote(&native()).await.unwrap_err().code,
+            "PRICE_RATE_LIMITED"
+        );
+        assert_eq!(server.count(), 2);
+        clock.store(NOW + 90, Ordering::SeqCst);
         assert_eq!(provider.quote(&native()).await.unwrap().usd_per_unit, "2");
         assert_eq!(server.count(), 3);
         let (_server, mut disconnected, _) = fixture(vec![]).await;
@@ -1306,5 +1347,9 @@ mod tests {
             assert_eq!(provider.validate_access().await.unwrap_err().code, code);
             assert_eq!(server.count(), 1);
         }
+    }
+    mod exchange_resolution {
+        use super::*;
+        include!("resolution_tests.rs");
     }
 }

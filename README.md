@@ -150,8 +150,28 @@ ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
 native/ERC-20 transfers. Dapps and bridging on those networks are later work.
 Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. Shared CoinGecko USD pricing serves
-Binance and every EVM network: exact contract lookups for ERC-20s, reviewed coin
-IDs for exchange assets and native ETH. Missing or stale quotes block writes;
+Binance and every EVM network: exact contract lookups for ERC-20s, dynamic
+exchange-local identity resolution and the reviewed native ETH identity. Binance
+coin IDs come from fully paginated CoinGecko exchange tickers cross-checked
+against exact active Binance base/quote markets; names or symbols alone never
+select a coin. New covered listings need no asset enrollment or Fin release.
+Missing, conflicting or stale evidence blocks valuation; stablecoins are priced
+from the provider rather than assumed equal to $1.
+
+Identity mappings are cached separately for 15 minutes; missing/conflicting
+mappings refresh on later reads after a 30-second cooldown. Prices retain their
+30-second cache and strict provider age below 120 seconds. `Retry-After` is
+honored; rate-limited ticker scans resume in process without accepting partial
+mappings. Anonymous cold starts can take several reads while provider quota
+reopens. An explicit public probe exercises the production resolver without
+accounts, credentials or financial writes:
+
+```sh
+cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only
+```
+
+See [dynamic pricing verification](docs/reports/dynamic-exchange-pricing.md).
+Missing or stale quotes block writes;
 anonymous public access is best effort. To use your Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 

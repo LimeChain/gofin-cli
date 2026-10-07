@@ -113,8 +113,17 @@ positions. A complete claim must name its scope.
 Shared `fin-pricing` valuation serves Binance and every EVM network through
 `UsdPriceSource`, with CoinGecko as the default. ERC-20 lookups use a verified
 chain/platform and exact contract, allowing listed tokens without a per-token
-allowlist. Native ETH uses its verified coin ID; Binance uses a reviewed symbol
-to coin-ID registry, without blind name/symbol search. Unknown or unquoted assets
+allowlist. Native ETH uses its verified coin ID. Exchange assets resolve by
+`ExchangeAssetKey { exchange, asset }`: provider exchange tickers supply coin IDs,
+while `ExchangeMarketSource` supplies exact venue market/base/quote identifiers.
+Full pagination, exact provider exchange identity and matching active venue pairs
+are required; conflicting IDs or missing evidence fail closed. No symbol registry,
+name search or first-result choice supplies financial identity. Binance is the
+built-in venue reader; `with_exchange_market_source` registers additional venue
+integrations and their provider exchange IDs, never per-asset mappings.
+`ExchangeAssetResolver` and the existing `UsdPriceSource` keep identity and pricing
+provider boundaries extensible. Legacy `binance` asset identities remain intact;
+additional integration keys can use `exchange:<venue>`. Unknown or unquoted assets
 may be observed but cannot bypass write/allocation limits. Aave collateral and
 health-factor oracles remain protocol checks, separate from shared USD pricing. Fee preparation freezes the RPC-estimated envelope;
 L2 terminal reconciliation additionally checks finalized inclusion. A receipt
@@ -235,7 +244,16 @@ conversion. `updated_at` is RFC3339 derived from provider `last_updated_at`,
 separate from retrieval `observed_at`. Quotes older than 120 seconds, future,
 missing, zero or malformed quotes, and rate limits/outages block writes.
 
-A shared/coalesced cache retains responses for at most 30 seconds and rechecks
+A separate coalesced exchange identity cache retains complete snapshots for at
+most 15 minutes from initial venue observation. Missing/conflicting mappings
+refresh automatically after 30 seconds. Rate-limited scans retain bounded
+pagination progress for later reads after `Retry-After`; incomplete snapshots
+never become accepted identities or quote authority, and expired/error snapshots
+cannot fall back to an old mapping. Quote cache entries contain provider coin or
+network/contract identities; caller-specific exchange evidence is appended only
+to the returned quote, avoiding cross-venue cache attribution.
+
+A shared/coalesced price cache retains responses for at most 30 seconds and rechecks
 source freshness; it never serves stale quotes after an outage. The 120-second
 source-age bound accommodates the public provider's roughly 60-second update
 cycle without changing the 90-second preview/approval expiry or financial caps.
