@@ -140,6 +140,9 @@ fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
     );
     assert_eq!(semantics["cli_field_mapping"]["request_id"], "--id");
     assert_eq!(semantics["cli_field_mapping"]["run_id"], "--run");
+    assert_eq!(semantics["cli_field_mapping"]["dry_run"], "--dry-run");
+    assert_eq!(semantics["dry_run"]["journal_write"], false);
+    assert_eq!(semantics["dry_run"]["financial_authorization"], false);
     assert!(
         semantics["command_line_example"]
             .as_str()
@@ -176,6 +179,25 @@ fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
     assert!(help.contains("--id <ID>"));
     assert!(help.contains("--run <RUN>"));
     assert!(!help.contains("--request-id"));
+}
+
+#[test]
+fn execute_dry_run_help_and_schema_are_discoverable_without_a_broker() {
+    let help = run(&["execute", "--help", "--json"]);
+    assert!(help.status.success());
+    assert!(help.stderr.is_empty());
+    assert!(!help.stdout.contains(&0x1b));
+    let help: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert!(help["help"].as_str().unwrap().contains("--dry-run"));
+    let schema = run(&["schema", "execute", "--json"]);
+    assert!(schema.status.success());
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema["input"]["properties"]["dry_run"]["type"], "boolean");
+    assert_eq!(schema["input"]["properties"]["dry_run"]["default"], false);
+    assert_eq!(
+        schema["input"]["allOf"][0]["else"]["required"],
+        serde_json::json!(["request_id"])
+    );
 }
 
 #[test]

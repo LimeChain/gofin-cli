@@ -160,6 +160,20 @@ exact input. Persisted logical IDs distinguish a retry from a new financial
 action. After an uncertain result, reconcile the original operation instead of
 submitting a replacement write.
 
+Use `fin execute --dry-run` to prepare the same operation without financial
+approval or submission. `fin preview` remains an equivalent command:
+
+```sh
+fin execute OPERATION --input "$INPUT_JSON" --id "$REQUEST_ID" --run "$RUN_ID" --dry-run
+```
+
+For dry-run, `--id` is optional and neither the ID nor `--run` is consumed.
+Operation-specific identities inside input JSON remain required where its schema
+requires them. Preview checks, quotes and simulations depend on the adapter; a
+preview does not reserve funds or validate a run's execution policy. Remove
+`--dry-run` to execute with a stable ID and the current protected policy. Fin
+revalidates and requires fresh Touch ID for that write.
+
 Human output is brief; `--verbose` adds diagnostics. `--json` is the stable agent
 contract, with structured results/errors and no terminal prompts, animation or
 color. Setup/enrollment return a human handoff in machine mode. Financial

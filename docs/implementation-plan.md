@@ -487,3 +487,23 @@ a verified restoration plan. It is not permanent payout mode; unknown receipt or
 return coverage cannot pass a bounded test run. This refactor does not implement
 bridging, standing/market orders, Funding-wallet withdrawals, non-NIL Travel Rule
 questionnaires, or unreviewed chain observers.
+
+## Execute dry-run interface (2026-10-07)
+
+`fin execute --dry-run` canonicalizes to the existing `BrokerRequest::Preview`
+path. `fin preview` stays available with identical adapter results and errors.
+Dry-run requires no financial approval, consumes no logical ID or run, and never
+enters write dispatch or uncertain-write recovery. IDs within operation input
+remain adapter-specific requirements. Execution still requires `--id`; its
+policy, authorization, journaling and recovery path are unchanged.
+
+CLI help, completion generation and command discovery expose the flag. The
+execute input schema makes request_id conditional on dry_run=false; machine
+output retains the existing preview contract. Dry-run progress says preparation,
+not waiting for Touch ID. Optional --id/--run may remain on a reusable command,
+but a preview does not reserve funds or attest a scoped run's execution policy.
+
+Synthetic CLI tests verify preview equivalence with/without identity/run flags,
+read-only error handling, malformed input sanitization and normal execution when
+the flag is removed. No production write or biometric verification is performed.
+Normal-operation/verification-run separation is separate policy work.

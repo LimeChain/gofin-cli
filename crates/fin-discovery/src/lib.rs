@@ -129,8 +129,12 @@ pub struct ExecuteInput {
     pub operation: String,
     /// Validated against the selected operation's bundled input schema.
     pub input: Value,
-    pub request_id: String,
+    /// Required for execution; previews do not consume an identity.
+    pub request_id: Option<String>,
     pub run_id: Option<String>,
+    /// Same read-only preparation as `fin preview`, without approval/submission.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -402,7 +406,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<ExecuteInput>(
             "execute",
-            "Execute one approved operation under a stable request identity.",
+            "Execute one approved operation under a stable request identity, or preview it with --dry-run.",
             OperationKind::Write,
             ExecutionActor::AgentInvocable,
             json!({"operation":"binance.transfer","input":{"requestId":"synthetic-venue-request-001","authority":"main","from":"main","to":"savings","coin":"USDT","amount":"1","fromWallet":"SPOT","toWallet":"SPOT"},"request_id":"synthetic-logical-write-001","run_id":"synthetic-bounded-run-001"}),
@@ -413,8 +417,9 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "retry":"reuse the same --id for this logical request; reconcile uncertain submissions before starting a new action",
                 "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --run RUN_ID --json",
                 "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --run synthetic-bounded-run-001 --json",
-                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--run RUN_ID","--json"],
-                "cli_field_mapping":{"request_id":"--id","run_id":"--run"},
+                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--run RUN_ID","--dry-run","--json"],
+                "cli_field_mapping":{"request_id":"--id","run_id":"--run","dry_run":"--dry-run"},
+                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","run_scope":"--run may remain on the command but is not consumed; this preview does not reserve allocation or validate a scoped run's execution policy","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
                 "run_scope":"--run supplies the bounded run ID. It is required for the bounded verification acceptance flow and whenever protected runtime policy requires a run; it may be omitted only when policy permits an unscoped write.",
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
@@ -587,7 +592,13 @@ pub fn operation_definitions() -> Vec<Definition> {
     ]);
     for item in &mut definitions {
         item.semantics["machine_contract"] = machine_contract();
-        if matches!(item.name.as_str(), "connections.add" | "connections.update") {
+        if item.name == "execute" {
+            item.input_schema["allOf"] = json!([{
+                "if":{"required":["dry_run"],"properties":{"dry_run":{"const":true}}},
+                "then":{},
+                "else":{"required":["request_id"],"properties":{"request_id":{"type":"string","minLength":1}}}
+            }]);
+        } else if matches!(item.name.as_str(), "connections.add" | "connections.update") {
             item.input_schema = connection_schema.clone();
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);

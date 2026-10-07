@@ -85,7 +85,7 @@ enum Command {
     Read(OperationArgs),
     /// Review a financial operation without moving funds.
     Preview(OperationArgs),
-    /// Execute an operation with fresh Touch ID approval.
+    /// Execute with fresh Touch ID; --dry-run previews without submitting.
     Execute(ExecuteArgs),
     /// Check and reconcile an existing operation.
     Status { id: String },
@@ -184,10 +184,13 @@ struct ExecuteArgs {
     #[arg(long)]
     input: String,
     /// Stable logical identity for retries of this exact operation.
-    #[arg(long)]
-    id: String,
+    #[arg(long, required_unless_present = "dry_run")]
+    id: Option<String>,
     #[arg(long)]
     run: Option<String>,
+    /// Preview without approval or submission; --id and --run are not consumed.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -523,7 +526,17 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
     if json && human_only(&cli.command) {
         return Err(human_required());
     }
-    match cli.command {
+    // Dry-run takes the same read-only broker route as the preview command.
+    // Keep execution identities/run flags on reusable commands, but do not
+    // consume them, reserve funds or enter write recovery for a preview.
+    let command = match cli.command {
+        Command::Execute(args) if args.dry_run => Command::Preview(OperationArgs {
+            operation: args.operation,
+            input: args.input,
+        }),
+        command => command,
+    };
+    match command {
         Command::InternalCompletions { action } => shell_integration::run(action),
         Command::Capabilities => Ok(capabilities()),
         Command::Completions { shell } => {
@@ -575,7 +588,7 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
         Command::Execute(args) => {
             client
                 .execute(OperationRequest {
-                    request_id: args.id,
+                    request_id: args.id.ok_or_else(generic_input_error)?,
                     operation: args.operation,
                     input: parse_input(&args.input)?,
                     run_id: args.run,
@@ -905,6 +918,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Completions { .. } => "completions",
         Command::Read(_) => "read",
         Command::Preview(_) => "preview",
+        Command::Execute(args) if args.dry_run => "preview",
         Command::Execute(_) => "execute",
         Command::Status { .. } => "status",
         Command::Operations => "operations",
@@ -1048,6 +1062,8 @@ async fn main() {
             Command::Daemon {
                 command: DaemonCommand::Status,
             } => "Checking daemon status...",
+            Command::Execute(args) if args.dry_run => "Preparing preview...",
+            Command::Preview(_) => "Preparing preview...",
             Command::Execute(_) => "Waiting for review, Touch ID and execution...",
             _ => "Checking Fin...",
         }))
@@ -1067,6 +1083,170 @@ mod tests {
     use serde_json::json;
     #[cfg(target_os = "macos")]
     use tokio::net::UnixListener;
+
+    struct PreviewOnlyClient {
+        calls: std::sync::Mutex<Vec<Value>>,
+        fail: bool,
+    }
+    #[async_trait]
+    impl Client for PreviewOnlyClient {
+        async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+            let BrokerRequest::Preview { operation, input } = request else {
+                panic!("dry-run must only send Preview, never recovery/status/write requests")
+            };
+            self.calls
+                .lock()
+                .unwrap()
+                .push(json!({"operation":operation,"input":input}));
+            if self.fail {
+                Err(FinError::new(
+                    "BROKER_TIMEOUT",
+                    "transport",
+                    "Synthetic preview timeout.",
+                    "Retry the preview.",
+                ))
+            } else {
+                Ok(json!({"checks":[{"status":"unchecked"}],"synthetic":"preview"}))
+            }
+        }
+        async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+            panic!("dry-run must never enter execution or financial approval")
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_is_preview_with_or_without_execution_flags() {
+        for extras in [
+            vec![],
+            vec!["--id", "synthetic-write-id", "--run", "synthetic-run"],
+        ] {
+            for machine in [false, true] {
+                let client = PreviewOnlyClient {
+                    calls: Default::default(),
+                    fail: false,
+                };
+                let mut arguments = vec![
+                    "fin",
+                    "execute",
+                    "binance.transfer",
+                    "--input",
+                    "{\"amount\":\"1.000000000000000001\"}",
+                    "--dry-run",
+                ];
+                arguments.extend(extras.clone());
+                if machine {
+                    arguments.push("--json");
+                }
+                let cli = Cli::try_parse_from(arguments).unwrap();
+                assert_eq!(command_name(&cli.command), "preview");
+                let result = dispatch(cli, &client).await.unwrap();
+                let alias = Cli::try_parse_from([
+                    "fin",
+                    "preview",
+                    "binance.transfer",
+                    "--input",
+                    "{\"amount\":\"1.000000000000000001\"}",
+                ])
+                .unwrap();
+                assert_eq!(result, dispatch(alias, &client).await.unwrap());
+                let calls = client.calls.lock().unwrap();
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0], calls[1]);
+                assert_eq!(calls[0]["input"]["amount"], "1.000000000000000001");
+            }
+        }
+        assert!(
+            Cli::try_parse_from(["fin", "execute", "binance.transfer", "--input", "{}"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fin",
+                "execute",
+                "binance.transfer",
+                "--input",
+                "{}",
+                "--id",
+                "synthetic-write-id"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_dry_run_errors_never_enter_write_recovery_or_echo_input() {
+        let client = PreviewOnlyClient {
+            calls: Default::default(),
+            fail: true,
+        };
+        let cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "binance.transfer",
+            "--input",
+            "{}",
+            "--dry-run",
+            "--id",
+            "synthetic-id",
+        ])
+        .unwrap();
+        let error = dispatch(cli, &client).await.unwrap_err();
+        assert_eq!(error.code, "BROKER_TIMEOUT");
+        assert_eq!(client.calls.lock().unwrap().len(), 1);
+        let cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "binance.transfer",
+            "--input",
+            "synthetic-secret-invalid-json",
+            "--dry-run",
+        ])
+        .unwrap();
+        let error = dispatch(cli, &client).await.unwrap_err();
+        assert!(
+            !serde_json::to_string(&error)
+                .unwrap()
+                .contains("synthetic-secret")
+        );
+        assert_eq!(client.calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn removing_dry_run_retains_normal_execution_identity_and_run() {
+        struct ExecutionClient(std::sync::Mutex<Vec<Value>>);
+        #[async_trait]
+        impl Client for ExecutionClient {
+            async fn call(&self, _: BrokerRequest) -> Result<Value, FinError> {
+                panic!("normal execution must use the existing execution/recovery path")
+            }
+            async fn execute(&self, request: OperationRequest) -> Result<Value, FinError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(request).unwrap());
+                Ok(json!({"synthetic":"normal-execution"}))
+            }
+        }
+        let client = ExecutionClient(Default::default());
+        let cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "binance.transfer",
+            "--input",
+            "{\"requestId\":\"synthetic-venue-id\"}",
+            "--id",
+            "synthetic-logical-id",
+            "--run",
+            "synthetic-run-id",
+        ])
+        .unwrap();
+        assert_eq!(command_name(&cli.command), "execute");
+        dispatch(cli, &client).await.unwrap();
+        let calls = client.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["request_id"], "synthetic-logical-id");
+        assert_eq!(calls[0]["run_id"], "synthetic-run-id");
+        assert_eq!(calls[0]["input"]["requestId"], "synthetic-venue-id");
+    }
 
     #[tokio::test]
     async fn offline_discovery_is_available_without_a_broker() {
