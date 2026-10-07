@@ -131,9 +131,6 @@ pub struct ExecuteInput {
     pub input: Value,
     /// Required for execution; previews do not consume an identity.
     pub request_id: Option<String>,
-    /// Historical retry identity only; new operations do not use runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
     /// Same read-only preparation as `fin preview`, without approval/submission.
     #[serde(default)]
     pub dry_run: bool,
@@ -401,10 +398,9 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --json",
                 "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --json",
                 "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--dry-run","--json"],
-                "cli_field_mapping":{"request_id":"--id","run_id":"--run","dry_run":"--dry-run"},
+                "cli_field_mapping":{"request_id":"--id","dry_run":"--dry-run"},
                 "allocation_scope":"Installation-wide rolling 24-hour gross movement, maximum costs and additional borrowed allocation; unresolved submissions continue counting beyond the window. No run, return plan or restoration required.",
-                "historical_retry":"Hidden --run preserves the original request identity for historical retries only; new writes omit it.",
-                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","run_scope":"Historical --run is not consumed; previews do not reserve or validate the rolling allocation budget","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
+                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","allocation_scope":"Previews do not reserve or validate the rolling allocation budget","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
@@ -439,14 +435,6 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::AgentReadable,
             json!({}),
             json!({"client_supplied_state":false,"service_required":true}),
-        ),
-        definition::<IdInput>(
-            "run.status",
-            "Inspect a historical run record, including its original baseline and unresolved reservations.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"id":"run-id"}),
-            json!({"financial_movement":false,"historical_only":true,"recovery":"Use fin operations and fin status to reconcile original submissions; portfolio restoration is not a product prerequisite."}),
         ),
         definition::<EmptyArgs>(
             "setup",

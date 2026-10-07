@@ -301,19 +301,6 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
                 line(&mut output, 0, &safe_text(text));
             }
         }
-    } else if command == "run" && !verbose {
-        let id = value["id"].as_str().unwrap_or("unknown");
-        let status = value["status"].as_str().unwrap_or("unknown");
-        line(
-            &mut output,
-            0,
-            &format!("Historical run {}: {}", safe_text(id), safe_text(status)),
-        );
-        line(
-            &mut output,
-            0,
-            "Use --json for the preserved record; use fin status OPERATION_ID to reconcile pending operations.",
-        );
     } else if command == "daemon" {
         line(
             &mut output,
@@ -905,14 +892,5 @@ mod tests {
             assert!(!text.contains('\x1b'));
             assert_eq!(text.contains("detail"), verbose);
         }
-    }
-    #[test]
-    fn historical_run_summary_keeps_full_evidence_behind_explicit_details() {
-        let value = json!({"id":"old-run","status":"cleanup_outstanding","baseline":{"private_detail":"historical-evidence"},"reservations":{"original-operation":{}}});
-        let brief = render_human("run", &value, false);
-        assert!(brief.contains("Historical run old-run: cleanup_outstanding"));
-        assert!(brief.contains("fin status OPERATION_ID"));
-        assert!(!brief.contains("historical-evidence"));
-        assert!(render_human("run", &value, true).contains("historical-evidence"));
     }
 }

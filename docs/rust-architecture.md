@@ -230,9 +230,10 @@ Historical run records retain their original baseline, origin lots, cost
 reserves and proofs for inspection and compatible settlement. They are not
 required for new operations, and unresolved restoration alone is not a gate on
 normal execution. Existing uncertain operations still retain their actual
-operation reservations. `fin run status` provides historical inspection;
-`fin status` reconciles original operations. Creating, replanning and finishing
-verification runs are retired from product discovery and execution.
+operation reservations. `fin operations` lists recorded operations and
+`fin status` reconciles original operations. The public `run` command, its broker
+inspection endpoint and `execute --run` argument are removed. Internal historical
+records remain available to accounting and recovery; no journal data is deleted.
 
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 

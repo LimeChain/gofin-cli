@@ -512,11 +512,11 @@ policy, authorization, journaling and recovery path are unchanged.
 CLI help, completion generation and command discovery expose the flag. The
 execute input schema makes request_id conditional on dry_run=false; machine
 output retains the existing preview contract. Dry-run progress says preparation,
-not waiting for Touch ID. Optional --id may remain on a reusable command; hidden
-legacy --run is ignored for preview. A preview does not reserve funds or attest execution policy, and
+not waiting for Touch ID. Optional --id may remain on a reusable command; the
+legacy --run argument is no longer accepted. A preview does not reserve funds or attest execution policy, and
 ordinary execution requires no run.
 
-Synthetic CLI tests verify preview equivalence with/without identity/run flags,
+Synthetic CLI tests verify preview equivalence with/without an optional identity,
 read-only error handling, malformed input sanitization and normal execution when
 the flag is removed. No production write or biometric verification is performed.
 The permanent portfolio policy below applies to execution; dry-run remains a
@@ -609,8 +609,8 @@ production credential access, financial writes, commits or pushes were performed
 ## Permanent portfolio operations and personal policy — 7 October 2026
 
 The public CLI executes one operation without `run begin`, `--run`, a purpose,
-return plan or restoration. `run begin/replan/finish` are retired; `run status`
-remains historical inspection and operation status retains recovery. Runtime
+return plan or restoration. All public run commands are removed; operation
+status retains recovery. Runtime
 normal/verification distinctions and hardcoded development ceilings are removed.
 Historical records, approved bounds, reservations, proofs and submission
 identities remain preserved; pending submissions are not replayed or implicitly
@@ -626,7 +626,10 @@ atomically. Historical unrestored runs do not require users to reverse their
 portfolios before ordinary use. Policy mutation still refuses nonterminal work.
 
 CLI help, schemas, discovery, examples and concise policy output share these
-semantics. Hidden legacy `--run` preserves historical retry identity only.
+semantics. The public `run` command, broker inspection endpoint, discovery schema
+and hidden `execute --run` argument are removed. Historical engine/store records
+and reconciliation are preserved; legacy requests are recovered through operation
+status rather than replayed through a CLI run argument.
 Live-test $100 limits, initial snapshots, complete funded return plans and cleanup
 remain explicit LLM obligations in AGENTS.md, testing docs and the companion
 skill. They are separate from permanent portfolio behavior and do not authorize

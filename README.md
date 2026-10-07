@@ -211,8 +211,8 @@ approval or submission. `fin preview` remains an equivalent command:
 fin execute OPERATION --input "$INPUT_JSON" --id "$REQUEST_ID" --dry-run
 ```
 
-For dry-run, `--id` is optional and is not consumed. A supplied legacy `--run`
-is also ignored; new operations require no run.
+For dry-run, `--id` is optional and is not consumed. New operations require no run;
+the legacy `--run` argument is no longer accepted.
 Operation-specific identities inside input JSON remain required where its schema
 requires them. Preview checks, quotes and simulations depend on the adapter; a
 preview does not reserve funds or establish execution-policy approval. Remove
@@ -283,11 +283,10 @@ fin execute OPERATION --input PUBLIC_JSON --id STABLE_REQUEST_ID --json
 ```
 
 Use the selected operation's schema for actual JSON. No run, purpose,
-return plan or restoration is required. `fin run begin`, `run replan` and
-`run finish` are retired. Inspect historical records with `fin run status RUN_ID
---json`; inspect/reconcile operations with `fin operations --json` and `fin status
-OPERATION_ID --json`. The hidden `--run` execute flag is only for preserving an
-old request's exact identity during a retry, never for starting new work.
+return plan or restoration is required. Inspect operations with
+`fin operations --json` and reconcile the original operation with
+`fin status OPERATION_ID --json`. The `run` command and `execute --run` argument
+are removed; stored financial records and unresolved reservations remain intact.
 
 Existing installations keep their stored limits, including the original $100
 values, until a human changes them. A previous requirement to execute inside a
