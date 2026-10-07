@@ -8,6 +8,7 @@ pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
 mod evm_router;
+mod policy;
 mod pricing;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use pricing::SharedUsdValuator;
@@ -20,8 +21,12 @@ use fin_domain::{
     FinancialState, OperationKind, OperationRecord, PreparedOperation, Reconciliation, ResourceId,
     StateSnapshot, Submission, SubmissionJournal, now,
 };
-use fin_engine::{Engine, EngineOptions, RunAllocation, RunPlan, RunResult};
-use fin_protocol::{BrokerRequest, BrokerResponse, RunBeginRequest, encode_response, read_request};
+use fin_engine::{Engine, EngineOptions};
+#[cfg(test)]
+use fin_engine::{RunAllocation, RunPlan, RunResult};
+#[cfg(test)]
+use fin_protocol::RunBeginRequest;
+use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request};
 use fin_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -136,6 +141,8 @@ pub enum ConnectionConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerPolicy {
+    /// Legacy serialized setting, retained for configuration compatibility; ignored at runtime.
+    #[serde(default)]
     pub require_run_for_writes: bool,
     pub max_movement_usd_micros: String,
     pub max_run_allocation_usd_micros: String,
@@ -198,9 +205,11 @@ impl DeploymentConfig {
 impl BrokerPolicy {
     pub fn beta() -> Self {
         Self {
-            require_run_for_writes: true,
-            max_movement_usd_micros: "100000000".into(),
-            max_run_allocation_usd_micros: "100000000".into(),
+            require_run_for_writes: false,
+            max_movement_usd_micros: fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
+                .to_string(),
+            max_run_allocation_usd_micros: fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
+                .to_string(),
             preview_ttl_seconds: 90,
         }
     }
@@ -443,11 +452,11 @@ impl BrokerConfigV2 {
             &self.policy.max_movement_usd_micros,
             &self.policy.max_run_allocation_usd_micros,
         ] {
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            if fin_domain::policy::policy_micros(value).is_err() {
                 return Err(error(
                     "CONFIG_POLICY_INVALID",
                     "configuration",
-                    "Financial policy bounds must be exact integer USD micros.",
+                    "Financial policy bounds must be unsigned 64-bit integer USD micros; zero means no personal limit.",
                     "Repair policy bounds through protected human enrollment.",
                 ));
             }
@@ -1153,6 +1162,7 @@ pub struct BrokerRuntime {
     config: Arc<BrokerConfigV2>,
     adapters: Vec<Arc<dyn Adapter>>,
     observer: Arc<CompositeObserver>,
+    #[cfg(test)]
     valuator: Arc<dyn AssetValuator>,
     accepting: AtomicBool,
     protected_config_check: AtomicBool,
@@ -1178,7 +1188,6 @@ pub fn compose_runtime(
 ) -> fin_domain::Result<Arc<BrokerRuntime>> {
     config.validate()?;
     let options = EngineOptions {
-        require_run_for_writes: config.policy.require_run_for_writes,
         max_movement_and_cost_usd_micros: config.policy.max_movement_usd_micros.clone(),
         max_run_allocation_usd_micros: config.policy.max_run_allocation_usd_micros.clone(),
     };
@@ -1216,6 +1225,7 @@ pub fn compose_runtime(
         config: Arc::new(config),
         adapters: dependencies.adapters,
         observer,
+        #[cfg(test)]
         valuator: dependencies.valuator,
         accepting: AtomicBool::new(true),
         protected_config_check: AtomicBool::new(false),
@@ -1326,6 +1336,7 @@ impl BrokerRuntime {
         if !matches!(
             &request,
             R::Capabilities
+                | R::PolicyShow
                 | R::Connections
                 | R::Doctor
                 | R::Operations
@@ -1339,6 +1350,17 @@ impl BrokerRuntime {
             R::Capabilities => Ok(
                 json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES,"maxResponseFrameBytes":fin_protocol::MAX_RESPONSE_FRAME_BYTES,"exchanges":fin_discovery::exchange_capabilities()}),
             ),
+            R::PolicyShow => {
+                let mut view = fin_discovery::PolicyView::new(
+                    &self.config.policy.max_movement_usd_micros,
+                    &self.config.policy.max_run_allocation_usd_micros,
+                )?;
+                match self.engine.allocation_used_usd_micros() {
+                    Ok(value) => view.allocation_used_usd = Some(format_micros_total(&value)),
+                    Err(error) => view.allocation_usage_error = Some(error),
+                }
+                serde_json::to_value(view).map_err(|_| internal_error())
+            }
             R::Connections => {
                 let mut connections = self
                     .adapters
@@ -1379,21 +1401,13 @@ impl BrokerRuntime {
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
-            R::RunBegin { request } => {
-                serde_json::to_value(self.begin_run(request).await?).map_err(|_| internal_error())
-            }
-            R::RunStatus { id } => {
-                serde_json::to_value(self.engine.run(&id)?).map_err(|_| internal_error())
-            }
-            R::RunReplan { id, remaining } => {
-                serde_json::to_value(self.replan_run(id, remaining).await?)
-                    .map_err(|_| internal_error())
-            }
-            R::RunFinish { id } => {
-                let final_snapshot = self.snapshot().await?;
-                serde_json::to_value(self.engine.finish_run(&id, final_snapshot, Utc::now())?)
-                    .map_err(|_| internal_error())
-            }
+            R::RunStatus { id } => self.engine.historical_run(&id),
+            R::RunBegin { .. } | R::RunReplan { .. } | R::RunFinish { .. } => Err(FinError::new(
+                "RUN_RETIRED",
+                "validation",
+                "Verification run mutations are retired.",
+                "Execute ordinary operations without --run; inspect historical runs with fin run status and reconcile operations with fin status.",
+            )),
             R::DaemonStart => {
                 if self.protected_config_check.load(Ordering::SeqCst) {
                     fin_protocol::daemon::resume_at(
@@ -1421,6 +1435,7 @@ impl BrokerRuntime {
         self.observer.snapshot().await
     }
 
+    #[cfg(test)]
     async fn begin_run(&self, request: RunBeginRequest) -> fin_domain::Result<RunResult> {
         if request.allocations.is_empty()
             || request.planned_operations.is_empty()
@@ -1489,7 +1504,9 @@ impl BrokerRuntime {
                 source,
             });
         }
-        if allocation_value > parse_atoms(&self.config.policy.max_run_allocation_usd_micros)? {
+        if fin_domain::policy::limit(&self.config.policy.max_run_allocation_usd_micros)?
+            .is_some_and(|limit| allocation_value > num_bigint::BigUint::from(limit))
+        {
             return Err(error(
                 "RUN_ALLOCATION_LIMIT",
                 "budget",
@@ -1562,6 +1579,7 @@ impl BrokerRuntime {
             .await
     }
 
+    #[cfg(test)]
     async fn replan_run(
         &self,
         id: String,
@@ -1626,6 +1644,7 @@ impl BrokerRuntime {
             .await
     }
 
+    #[cfg(test)]
     async fn trusted_asset_prices(
         &self,
         snapshot: &StateSnapshot,
@@ -1846,6 +1865,7 @@ impl Adapter for CompositeObserver {
     }
 }
 
+#[cfg(test)]
 fn parse_atoms(value: &str) -> fin_domain::Result<num_bigint::BigUint> {
     value.parse().map_err(|_| {
         error(
@@ -1857,10 +1877,22 @@ fn parse_atoms(value: &str) -> fin_domain::Result<num_bigint::BigUint> {
     })
 }
 
+fn format_micros_total(micros: &str) -> String {
+    let padded = format!("{:0>7}", micros);
+    let (whole, fraction) = padded.split_at(padded.len() - 6);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        whole.into()
+    } else {
+        format!("{whole}.{fraction}")
+    }
+}
+
 fn protocol_methods() -> Vec<&'static str> {
     vec![
         "capabilities",
         "connections",
+        "policy_show",
         "doctor",
         "read",
         "preview",
@@ -1868,9 +1900,7 @@ fn protocol_methods() -> Vec<&'static str> {
         "status",
         "operations",
         "snapshot",
-        "run_begin",
         "run_status",
-        "run_finish",
         "daemon_start",
         "daemon_stop",
     ]
@@ -2493,16 +2523,6 @@ pub fn resource_has_pending_operations(
     store: &Store,
     resource: &ResourceId,
 ) -> fin_domain::Result<bool> {
-    if store.has_active_run().map_err(|_| {
-        error(
-            "STORE_UNAVAILABLE",
-            "configuration",
-            "Active run state could not be inspected.",
-            "Preserve every mapping until the broker journal is available.",
-        )
-    })? {
-        return Ok(true);
-    }
     let records = store.list_records().map_err(|_| {
         error(
             "STORE_UNAVAILABLE",
@@ -3910,6 +3930,47 @@ mod tests {
         (runtime, captures)
     }
 
+    #[tokio::test]
+    async fn policy_reload_replaces_limits_without_reinstalling_or_creating_operations() {
+        let directory = tempfile::tempdir().unwrap();
+        let loader = FixtureRuntimeLoader {
+            database: directory.path().join("operations.sqlite"),
+            loads: AtomicUsize::new(0),
+            fail: false,
+        };
+        let mut runtime = loader.load(config()).await.unwrap();
+        assert_eq!(
+            runtime
+                .handle(BrokerRequest::PolicyShow)
+                .await
+                .result
+                .unwrap()["max_movement_usd"],
+            "100"
+        );
+        let original = runtime.clone();
+        let mut changed = config();
+        changed.policy.max_movement_usd_micros = "1000000000".into();
+        changed.policy.max_run_allocation_usd_micros = "5000000000".into();
+        refresh_runtime(&mut runtime, changed.clone(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&runtime, &original));
+        assert!(runtime.accepting.load(Ordering::SeqCst));
+        assert!(runtime.engine.operations().unwrap().is_empty());
+        let shown = runtime
+            .handle(BrokerRequest::PolicyShow)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(shown["max_movement_usd"], "1000");
+        assert_eq!(shown["max_run_allocation_usd"], "5000");
+        assert!(shown.get("verification_max_run_allocation_usd").is_none());
+        refresh_runtime(&mut runtime, changed, 501, &loader)
+            .await
+            .unwrap();
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 2);
+    }
+
     fn install_test_stop_marker(runtime: &BrokerRuntime, path: PathBuf) {
         *runtime.daemon_marker_path.lock().unwrap() = path;
         runtime.protected_config_check.store(true, Ordering::SeqCst);
@@ -4223,6 +4284,47 @@ mod tests {
                 .unwrap_err()
                 .code,
             "STORE_INVALID_RECORD"
+        );
+    }
+    #[tokio::test]
+    async fn retired_run_mutations_do_not_capture_state_or_change_historical_records() {
+        let (runtime, captures) = runtime_with_capture_counter();
+        let before = captures.load(Ordering::SeqCst);
+        for request in [
+            BrokerRequest::RunBegin {
+                request: RunBeginRequest {
+                    allocations: vec![],
+                    borrowed_proceeds_reserve_usd_micros: "0".into(),
+                    return_cost_reserve_usd_micros: "0".into(),
+                    planned_operations: vec![],
+                    unwind: vec![],
+                },
+            },
+            BrokerRequest::RunReplan {
+                id: "legacy".into(),
+                remaining: vec![],
+            },
+            BrokerRequest::RunFinish {
+                id: "legacy".into(),
+            },
+        ] {
+            let response = runtime.handle(request).await;
+            assert_eq!(response.error.unwrap().code, "RUN_RETIRED");
+        }
+        assert_eq!(captures.load(Ordering::SeqCst), before);
+        assert!(runtime.engine.operations().unwrap().is_empty());
+        let methods = protocol_methods();
+        assert!(methods.contains(&"run_status"));
+        assert!(!methods.contains(&"run_begin") && !methods.contains(&"run_finish"));
+    }
+
+    #[test]
+    fn allocation_display_preserves_totals_larger_than_a_single_policy_limit() {
+        assert_eq!(format_micros_total("0"), "0");
+        assert_eq!(format_micros_total("1"), "0.000001");
+        assert_eq!(
+            format_micros_total("20000000000000000000"),
+            "20000000000000"
         );
     }
 }

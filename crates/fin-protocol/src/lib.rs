@@ -20,6 +20,7 @@ pub const MAX_RESPONSE_FRAME_BYTES: usize = 8 * 1_048_576;
 pub enum BrokerRequest {
     Capabilities,
     Connections,
+    PolicyShow,
     Doctor,
     Read {
         operation: String,
@@ -54,8 +55,8 @@ pub enum BrokerRequest {
     DaemonStop,
 }
 
-/// Client-selected initial holdings. The broker resolves them against its own
-/// fresh snapshot and computes valuation; clients cannot submit a baseline.
+/// Retired wire payload retained so old clients receive an explicit retirement error.
+/// New operations do not create restoration runs.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RunBeginRequest {

@@ -913,7 +913,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -1824,7 +1824,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -1921,7 +1921,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -2882,7 +2882,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -2979,7 +2979,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -3892,7 +3892,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -4860,7 +4860,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -7146,6 +7146,108 @@
     }
   },
   {
+    "name": "binance.spot-order",
+    "description": "Bounded LIMIT FOK spot BUY or SELL using existing holdings; purchased assets may be retained. Exact quantity, limit price, maximum receipt-asset fee and minimum net receipt are approved.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "limitPrice": {
+          "type": "string"
+        },
+        "maxFee": {
+          "description": "Absolute fee cap in the received asset (base for BUY, quote for SELL).",
+          "type": "string"
+        },
+        "minReceiveAmount": {
+          "description": "Exact received-asset minimum after fees for the full FOK fill.",
+          "type": "string"
+        },
+        "quantity": {
+          "description": "Exact base-asset quantity; BUY maximum quote spend is quantity × limitPrice.",
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "account",
+        "symbol",
+        "side",
+        "quantity",
+        "limitPrice",
+        "maxFee",
+        "minReceiveAmount"
+      ],
+      "title": "SpotInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "input": {
+          "account": "binance-sub",
+          "limitPrice": "2000",
+          "maxFee": "0.00002",
+          "minReceiveAmount": "0.00998",
+          "quantity": "0.01",
+          "requestId": "buy-eth",
+          "side": "BUY",
+          "symbol": "ETHUSDC"
+        },
+        "operation": "binance.spot-order"
+      }
+    ],
+    "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
+    "completion": "Matching terminal order plus complete authenticated fills and commissions establish the conversion; submission alone does not.",
+    "semantics": {
+      "amount": "exact decimal string",
+      "credentialValues": "never exposed",
+      "walletType": "SPOT"
+    }
+  },
+  {
     "name": "binance.spot.markets",
     "description": "Binance SPOT market identities and exact price/quantity filters.",
     "kind": "read",
@@ -8701,7 +8803,7 @@
       "coinNetworkSelection": "live Binance metadata; no coin/network allowlist",
       "credentialValues": "never exposed",
       "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending",
-      "trackedRuns": "current bounded/restoration execution requires observable source/destination and a verified return plan",
+      "ordinaryExecution": "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced",
       "walletType": "SPOT"
     }
   },
@@ -9230,7 +9332,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -10230,7 +10332,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -10337,7 +10439,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -11256,7 +11358,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -11353,7 +11455,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -11447,7 +11549,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -11548,7 +11650,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "read-only",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -12467,7 +12569,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -13414,7 +13516,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -14314,7 +14416,7 @@
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
       "authorization": "fresh human per-write authorization",
-      "bounded_all": "Supported cleanup operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
       "retry": "Reconcile the original persisted hash, never blind replay."

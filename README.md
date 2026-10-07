@@ -11,6 +11,26 @@ Ethereum mainnet Uniswap and Aave. The [product concept](docs/fin-product-concep
 exchange, trading and DeFi scope. MCP and general chain-to-chain bridging follow
 later. Fin is open source; license selection is pending.
 
+## Components and responsibilities
+
+| Component | Binary or library | Responsibility |
+| --- | --- | --- |
+| `fin-cli` | Binary: `fin` | Parse arguments, expose help and schemas, render progress/results, and send requests to the broker. |
+| `fin-broker` | Binary: `fin-broker`, plus an internal Rust library | Load protected configuration, construct integrations, independently validate requests, and coordinate execution. |
+| `fin-engine` | Rust library | Enforce financial limits, manage previews and reservations, coordinate fresh approval, prevent duplicates, and recover uncertain outcomes. |
+| `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
+| Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
+| `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
+| `fin-authorization` | Rust library | Enforce OS authorization and verify single-use approval bound to the exact operation. Invoke the internal native helper. |
+| `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
+| Native Touch ID helper | Compiled Swift binary: `fin-touch-id`; human display name **Fin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
+| `fin-domain`, `fin-discovery`, `fin-protocol`, `fin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
+
+Financial business logic runs inside the protected broker process through its
+libraries; those libraries are not separate services. The CLI shares contracts
+and presentation code, but its input validation grants no execution authority.
+The broker enforces approval, policy and credential access independently.
+
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
@@ -64,15 +84,17 @@ make setup
 
 `make setup` builds a debug bundle and runs the real protected installer. Fin
 explains the **Mac login password** request for installation and separately asks
-for Touch ID to approve configuration. Both setup entry points start the broker and verify its reply and running process
-before reporting success. Setup moves no funds. It registers the
-runtime on PATH and automatically enables persistent completion for your login
+for Touch ID to approve configuration and selected financial limits. Setup asks
+for movement and rolling 24-hour allocation limits; Enter keeps $100 for each,
+and 0 means no personal limit for that field. Both setup entry points start the
+broker and verify its reply and running process before reporting success. Setup
+moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). Open a new Terminal afterward and run `fin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
 broker and Touch ID helper with your Mac login password, and restores the broker's
-previous running/stopped state. Connections, credentials and financial history
-are kept. If replacement fails, the broker stays stopped for inspection; no
+previous running/stopped state. Connections, credentials, stored personal limits
+and financial history are kept. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update, not a general
 schema-migration or published-version updater.
 
@@ -100,8 +122,10 @@ reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signin
 and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
 
-Binance can be enrolled before an Ethereum wallet. Withdrawals require an enrolled
-Ethereum mainnet destination and its receipt observer. Connection changes reload
+Binance can be enrolled before an EVM wallet. Withdrawals select the exact
+coin/network from live Binance metadata and accept a named destination or public
+address with its exact memo/tag. Completion requires independent recipient
+evidence from a supported observer; venue success alone does not prove receipt. Connection changes reload
 automatically before the next broker request, without stopping the daemon or
 replaying a request. Local connection listing and service commands remain available
 during venue authentication failures; account operations retain identity checks.
@@ -164,15 +188,35 @@ Use `fin execute --dry-run` to prepare the same operation without financial
 approval or submission. `fin preview` remains an equivalent command:
 
 ```sh
-fin execute OPERATION --input "$INPUT_JSON" --id "$REQUEST_ID" --run "$RUN_ID" --dry-run
+fin execute OPERATION --input "$INPUT_JSON" --id "$REQUEST_ID" --dry-run
 ```
 
-For dry-run, `--id` is optional and neither the ID nor `--run` is consumed.
+For dry-run, `--id` is optional and is not consumed. A supplied legacy `--run`
+is also ignored; new operations require no run.
 Operation-specific identities inside input JSON remain required where its schema
 requires them. Preview checks, quotes and simulations depend on the adapter; a
-preview does not reserve funds or validate a run's execution policy. Remove
+preview does not reserve funds or establish execution-policy approval. Remove
 `--dry-run` to execute with a stable ID and the current protected policy. Fin
 revalidates and requires fresh Touch ID for that write.
+
+Binance spot conversion uses exact `LIMIT` fill-or-kill orders. For example, this
+synthetic preview caps a BUY's quote spend at 20 USDC (`0.01 × 2000`):
+
+```sh
+fin schema binance.spot-order --json
+fin preview binance.spot-order --input '{"requestId":"synthetic-eth-buy-001","account":"savings","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00001","minReceiveAmount":"0.00999"}' --json
+```
+
+Replace synthetic names and bounds with the intended operation. `quantity` is
+always base-asset quantity. `maxFee` is an absolute received-asset fee cap (ETH
+for this BUY; USDC for a SELL), and `minReceiveAmount` is the net receipt after
+fees. Existing holdings can be sold and purchased holdings retained. No opening
+or cleanup leg is required. The adapter rejects active BNB commission discounts
+and supports fees deducted from the received asset only. It conservatively
+checks all current commission components; SELL fee caps must cover the symbol's
+finite maximum price, so a market may be unavailable under practical fee/policy
+bounds. FOK fills completely or expires; uncertain or unexpected partial fills
+retain reservations pending reconciliation. These examples authorize no writes.
 
 Human output is brief; `--verbose` adds diagnostics. `--json` is the stable agent
 contract, with structured results/errors and no terminal prompts, animation or
@@ -181,6 +225,74 @@ approval requirements still apply. `NO_COLOR` disables human color.
 
 The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. Copy
 `skills/fin/` into your agent's skill directory and ensure `fin` is on its PATH.
+
+## Financial limits
+
+```sh
+fin policy show
+fin policy show --json
+fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000
+```
+
+Run `policy set` yourself in macOS Terminal. Both limits are required, as exact
+nonnegative USD decimals with up to six fractional digits. Enter `0` for no
+personal limit on that field. Human output and approval show **No limit**; JSON
+keeps the exact string `"0"`. Fin requests the Mac
+login password for protected configuration access, then fresh Touch ID for the
+exact old/new limits. No funds move; each subsequent write still needs its own
+Touch ID. `--json` on `policy set` returns a structured human-terminal handoff.
+
+The movement limit includes each gross movement plus maximum execution costs.
+The legacy-named `max-run-allocation-usd` setting now limits **installation-wide
+rolling 24-hour gross allocation**, across all accounts and commands: movement,
+maximum costs, and additional borrowed allocation. It is a conservative turnover
+budget, not a net portfolio-value limit. Repeated transfers count again; proceeds
+and fees do not reset accounting. Unresolved submissions continue consuming their
+reserved budget beyond 24 hours until reconciled. Submitted writes remain charged
+for at least 24 hours after terminal settlement, including proved failures;
+unsubmitted denials/cancellations release their reservation. `policy show` reports usage.
+`0` removes the corresponding personal ceiling; it does not remove exact operation
+bounds, funded resource reservations, pricing, receipt checks or fresh approval.
+The maximum finite policy value is 18446744073709.551615 USD (u64 USD micros).
+
+Ordinary operations support permanent portfolio changes, including selling
+existing holdings and retaining purchases. Execute each operation directly:
+
+```sh
+fin execute OPERATION --input PUBLIC_JSON --id STABLE_REQUEST_ID --json
+```
+
+Use the selected operation's schema for actual JSON. No run, purpose,
+return plan or restoration is required. `fin run begin`, `run replan` and
+`run finish` are retired. Inspect historical records with `fin run status RUN_ID
+--json`; inspect/reconcile operations with `fin operations --json` and `fin status
+OPERATION_ID --json`. The hidden `--run` execute flag is only for preserving an
+old request's exact identity during a retry, never for starting new work.
+
+Existing installations keep their stored limits, including the original $100
+values, until a human changes them. A previous requirement to execute inside a
+restoration run no longer governs new operations. Historical run records,
+submission identities, approved bounds, evidence and unresolved reservations
+remain intact; an unrestored historical portfolio does not block normal use.
+Policy changes refuse nonterminal operations: reconcile the original work first.
+A change never expands an already approved operation or replays a write.
+
+The independent **$100 live-test budget and full restoration requirement are
+instructions for the LLM conducting explicitly authorized acceptance tests**,
+not runtime policy. They still apply even when personal limits are larger or
+zero. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
+
+New installations select these limits during `fin setup`, before configuration
+Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
+and approval. Setup cannot overwrite an existing installation.
+
+Both limits are saved atomically under the existing protected configuration lock.
+On the next authenticated request, the broker composes the changed configuration
+and reloads its runtime under the same lock before dispatch, using the same
+journal. Composition failure refuses dispatch against stale configuration. Check
+`fin policy show --json` after changing limits. Fin never replays a financial
+write to reload policy. A `POLICY_SAVE_UNCERTAIN` error means
+both values may already be active; inspect them before retrying the change.
 
 ## Development and contributing
 
@@ -194,6 +306,7 @@ make check                            # formatting and strict Clippy
 make test-ui                          # focused offline CLI/discovery tests
 make test-integration                 # isolated broker/store/installer fixtures
 make test                             # full offline Rust suite
+cargo run --locked --offline -p fin-cli --example financial-catalog > crates/fin-cli/data/financial-catalog.json
 sh scripts/verify-rust-fork.sh         # separately invoked fixed Ethereum fork
 ```
 

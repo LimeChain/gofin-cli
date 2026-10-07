@@ -95,17 +95,25 @@ enum Command {
     Doctor,
     /// Read financial state within the configured tracking scope.
     Snapshot,
-    /// Plan and track a bounded financial test and its restoration.
+    /// Inspect historical run records.
     Run {
         #[command(subcommand)]
         command: RunCommand,
     },
     /// Install and start the protected service; macOS may request your Mac login password.
+    #[command(
+        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits."
+    )]
     Setup,
     /// Start, stop or check the protected service.
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+    /// Show or change protected human-owned financial limits.
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommand,
     },
     /// List or securely manage exchange, wallet and pricing connections.
     Connections {
@@ -186,30 +194,18 @@ struct ExecuteArgs {
     /// Stable logical identity for retries of this exact operation.
     #[arg(long, required_unless_present = "dry_run")]
     id: Option<String>,
-    #[arg(long)]
+    /// Preserve a historical operation retry identity; omit for new operations.
+    #[arg(long, hide = true)]
     run: Option<String>,
-    /// Preview without approval or submission; --id and --run are not consumed.
+    /// Preview without approval or submission; --id is not consumed.
     #[arg(long)]
     dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum RunCommand {
-    /// Capture the baseline and reserve a complete execution and return plan.
-    Begin {
-        #[arg(long)]
-        input: String,
-    },
-    /// Check allocation, operations and restoration progress.
+    /// Inspect a historical run without requiring portfolio restoration.
     Status { id: String },
-    /// Replace the remaining return plan without moving funds.
-    Replan {
-        id: String,
-        #[arg(long)]
-        input: String,
-    },
-    /// Verify restoration before completing the test.
-    Finish { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -220,6 +216,14 @@ enum DaemonCommand {
     Status,
     /// Keep the service stopped until an explicit start.
     Stop,
+}
+
+#[derive(Subcommand, Debug)]
+enum PolicyCommand {
+    /// Show personal limits, included costs and allocation usage.
+    Show,
+    /// Change both limits in your own Terminal with fresh Touch ID; refuses unresolved work.
+    Set(fin_discovery::PolicySetArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -600,30 +604,17 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
         Command::Doctor => client.call(BrokerRequest::Doctor).await,
         Command::Snapshot => client.call(BrokerRequest::Snapshot).await,
         Command::Run { command } => match command {
-            RunCommand::Begin { input } => {
-                client
-                    .call(BrokerRequest::RunBegin {
-                        request: serde_json::from_value(parse_input(&input)?)
-                            .map_err(|_| generic_input_error())?,
-                    })
-                    .await
-            }
             RunCommand::Status { id } => client.call(BrokerRequest::RunStatus { id }).await,
-            RunCommand::Replan { id, input } => {
-                let request: fin_discovery::RunReplanInput =
-                    serde_json::from_value(parse_input(&input)?)
-                        .map_err(|_| generic_input_error())?;
-                client
-                    .call(BrokerRequest::RunReplan {
-                        id,
-                        remaining: request.remaining,
-                    })
-                    .await
-            }
-            RunCommand::Finish { id } => client.call(BrokerRequest::RunFinish { id }).await,
         },
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
+        Command::Policy { command } => match command {
+            PolicyCommand::Show => client.call(BrokerRequest::PolicyShow).await,
+            PolicyCommand::Set(args) => {
+                args.micros()?;
+                launch_human_privileged(PrivilegedAction::PolicySet(args), json, verbose)
+            }
+        },
         Command::Connections { command } => match command {
             None | Some(ConnectionsCommand::List) => client.call(BrokerRequest::Connections).await,
             Some(ConnectionsCommand::Add(args)) => {
@@ -665,6 +656,7 @@ fn completion_definition() -> clap::Command {
 
 enum PrivilegedAction {
     Setup,
+    PolicySet(fin_discovery::PolicySetArgs),
     Add(fin_discovery::AddConnectionArgs),
     Update(fin_discovery::AddConnectionArgs),
     Remove(fin_discovery::NamedConnectionArgs),
@@ -704,6 +696,7 @@ fn launch_human_privileged_with_terminal(
             PrivilegedAction::Setup => {}
             PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
             PrivilegedAction::Remove(args) => drop(args),
+            PrivilegedAction::PolicySet(args) => drop(args),
         }
         Err(FinError::new(
             "PROTECTED_PROVIDER_UNAVAILABLE",
@@ -800,6 +793,12 @@ fn prepare_privileged_command_with_presentation(
                 .args(["enrollment", "update", "--request"])
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
+        PrivilegedAction::PolicySet(args) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "policy-set", "--request"])
+                .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
+        }
         PrivilegedAction::Remove(args) => {
             command
                 .arg(BROKER_PATH)
@@ -824,6 +823,9 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         }
         PrivilegedAction::Update(_) => {
             "Fin needs administrator access to securely update this connection."
+        }
+        PrivilegedAction::PolicySet(_) => {
+            "Fin needs administrator access to change protected financial limits. Touch ID separately approves the exact limits."
         }
         PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
@@ -899,6 +901,9 @@ fn human_only(command: &Command) -> bool {
     matches!(
         command,
         Command::Setup
+            | Command::Policy {
+                command: PolicyCommand::Set(_)
+            }
             | Command::Connections {
                 command: Some(
                     ConnectionsCommand::Add(_)
@@ -928,6 +933,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Setup => "setup",
         Command::Daemon { .. } => "daemon",
         Command::Connections { .. } => "connections",
+        Command::Policy { .. } => "policy",
     }
 }
 
@@ -1358,7 +1364,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 48);
+        assert_eq!(financial_catalog().len(), 49);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 
@@ -1433,6 +1439,18 @@ mod tests {
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, false, false, false)
                 .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn policy_machine_mode_requires_human_even_with_a_terminal() {
+        for tty in [true, false] {
+            let action = PrivilegedAction::PolicySet(fin_discovery::PolicySetArgs {
+                max_movement_usd: "1000".into(),
+                max_run_allocation_usd: "5000".into(),
+            });
+            let result = launch_human_privileged_with_terminal(action, tty, true, true);
+            assert_eq!(result.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+        }
     }
 
     struct NoticeWriter<'a> {

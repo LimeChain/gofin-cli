@@ -2032,8 +2032,13 @@ async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_rep
         client_id: std::sync::Mutex::new(None),
     });
     let adapter = std::sync::Arc::new(
-        fin_binance::BinanceAdapter::new(main_and_child_config(), transport.clone(), None, None)
-            .unwrap(),
+        fin_binance::BinanceAdapter::new(
+            main_and_child_config(),
+            transport.clone(),
+            Some(std::sync::Arc::new(DiagnosticPrices)),
+            None,
+        )
+        .unwrap(),
     );
     let authorizer = std::sync::Arc::new(SyntheticApproval(std::sync::atomic::AtomicUsize::new(0)));
     let engine = fin_engine::Engine::new(
@@ -3575,4 +3580,16 @@ async fn withdrawal_timeout_recovers_from_original_withdraw_order_id_without_rep
             .count(),
         1
     );
+}
+
+struct DiagnosticPrices;
+#[async_trait::async_trait]
+impl fin_binance::BinancePriceProvider for DiagnosticPrices {
+    async fn quote_usd(&self, _coin: &str) -> fin_domain::Result<fin_binance::PriceQuote> {
+        Ok(fin_binance::PriceQuote {
+            usd_per_unit: "1".into(),
+            observed_at: fin_domain::now(),
+            source: "synthetic-diagnostic-fixture".into(),
+        })
+    }
 }

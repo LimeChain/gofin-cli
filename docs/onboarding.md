@@ -33,7 +33,7 @@ from undermining the agent credential-denial test. It grants no authorization
 and does not stop Fin or alter per-write Touch ID. It cannot revoke an already
 root shell or override passwordless sudo policy; check the actual agent's access.
 
-Sudo is used only for setup and connection add/update/remove. Those commands
+Setup, connection add/update/remove and policy set use sudo. Those commands
 explain why they need administrator access before the OS prompt. Reads, previews,
 status, service lifecycle and financial commands use the protected background
 service without sudo; each financial write independently requires fresh Touch ID.
@@ -316,3 +316,28 @@ Complete metadata flags retain the existing protected enrollment path. The JSON
 input schema still uses the canonical `provider` field, and machine mode returns
 a human handoff without prompting. Human errors show `✗` plus their explanation;
 error codes and stages remain in `--verbose` and unchanged JSON errors.
+
+## Financial policy management
+
+`fin policy show` is agent-readable and reports personal limits, included costs,
+and installation-wide rolling 24-hour allocation usage; `--json` returns exact
+decimal strings.
+`fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000` is
+human-interactive, using the same fixed privileged broker and verified human
+Terminal as connection enrollment, without loading credentials. Both amounts
+are required; `0` means no personal limit for that field and is displayed as
+“No limit” in human output/approval. New `fin setup` prompts for both amounts in
+the protected human Terminal (Enter defaults each to $100), before the setup
+Touch ID challenge. Credential input remains hidden; policy input is visible.
+Discover safe fields through `fin explain policy.set --json` and
+`fin schema policy.set --json` before onboarding or service setup.
+
+The Mac login password permits protected configuration access; the subsequent
+90-second terminal-review/Touch ID challenge approves only the displayed limits.
+Cancellation, decline or expiry saves nothing and requires an explicit retry.
+Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
+even with a TTY. Policy changes refuse nonterminal operations, preserving
+reservations and exact approved authority. Historical unrestored run records do
+not block policy changes or ordinary execution. Approved changes retain per-write
+Touch ID. Live-test $100 and restoration instructions remain in the testing guide.
+See [limit and reload behavior](../README.md#financial-limits).

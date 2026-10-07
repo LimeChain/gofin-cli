@@ -175,6 +175,9 @@ fn selected_cross_asset_run(
         resource_asset_key(&source_holding).unwrap()
     );
     RunLedger {
+        purpose: None,
+
+        max_movement_usd_micros: legacy_movement_limit(),
         id: "synthetic-provenance".into(),
         status: RunStatus::Active,
         baseline,

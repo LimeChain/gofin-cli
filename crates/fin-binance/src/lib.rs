@@ -180,6 +180,8 @@ impl ClientIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinanceEndpoint {
+    ExchangeInfo,
+    SpotOrderStatus,
     ApiRestrictions,
     Account,
     SubAccountList,
@@ -225,6 +227,8 @@ pub enum BinanceEndpoint {
 impl BinanceEndpoint {
     pub fn method_path(self) -> (&'static str, &'static str) {
         match self {
+            Self::ExchangeInfo => ("GET", "/api/v3/exchangeInfo"),
+            Self::SpotOrderStatus => ("GET", "/api/v3/order"),
             Self::ApiRestrictions => ("GET", "/sapi/v1/account/apiRestrictions"),
             Self::Account => ("GET", "/api/v3/account"),
             Self::SpotExchangeInfo => ("GET", "/api/v3/exchangeInfo"),
@@ -312,6 +316,11 @@ impl BinanceRequest {
             return Err(BinanceError::DuplicateParameter);
         }
         let (required, allowed): (&[&str], &[&str]) = match self.endpoint {
+            BinanceEndpoint::ExchangeInfo => (&["symbol"], &["symbol"]),
+            BinanceEndpoint::SpotOrderStatus => (
+                &["symbol", "origClientOrderId"],
+                &["symbol", "origClientOrderId", "recvWindow"],
+            ),
             BinanceEndpoint::ApiRestrictions
             | BinanceEndpoint::Account
             | BinanceEndpoint::CapitalConfig
@@ -1430,6 +1439,8 @@ impl BinanceCcxtTransport {
             .validate()
             .map_err(|_| TransportError::InvalidResponse)?;
         let method = match request.endpoint {
+            BinanceEndpoint::ExchangeInfo => Method::BinanceSpotExchangeInfo,
+            BinanceEndpoint::SpotOrderStatus => Method::BinanceSpotOrder,
             BinanceEndpoint::ApiRestrictions => Method::BinanceApiRestrictions,
             BinanceEndpoint::Account => Method::BinanceAccount,
             BinanceEndpoint::SpotExchangeInfo => Method::BinanceSpotExchangeInfo,
@@ -1474,7 +1485,8 @@ impl BinanceCcxtTransport {
         };
         let credentials = if matches!(
             request.endpoint,
-            BinanceEndpoint::SpotExchangeInfo
+            BinanceEndpoint::ExchangeInfo
+                | BinanceEndpoint::SpotExchangeInfo
                 | BinanceEndpoint::FuturesExchangeInfo
                 | BinanceEndpoint::FuturesMarkPrice
         ) {

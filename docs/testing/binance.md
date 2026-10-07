@@ -4,6 +4,10 @@ Read the [shared testing rules](README.md) first. These cases specify required b
 
 ## Goal and setup
 
+The baseline and return requirements here apply to explicitly authorized live
+acceptance tests. Ordinary execution supports intentional permanent portfolio
+changes under human-owned personal limits, without run creation or restoration.
+
 Primary journey: consolidate selected transferable funds from Binance subaccounts into the main account, withdraw to a named Ethereum wallet, and verify receipt. Also verify main-to-subaccount allocation and wallet-to-Binance deposits.
 
 Live acceptance uses **production Binance and Ethereum mainnet** under the [$100 live-test contract](README.md#live-test-contract). Every movement and the total allocation must fit the limits. Before starting, verify that returning from the wallet to Binance and redistributing to the original subaccounts is possible within the remaining funds, fees, and minimums.
@@ -128,8 +132,10 @@ The generic adapter discovers coin/network availability through Binance, accepts
 either a named destination or public address and exact memo/tag, and freezes all
 material fields before submission. Arbitrum uses `network: "ARBITRUM"`; memo is
 required only where live metadata says so. `fin schema binance.withdraw --json`
-is the authoritative input contract. Examples and tests use synthetic addresses;
-never submit their contents to production.
+is the authoritative input contract. `fin execute --dry-run` uses the same preview
+path as `fin preview`, consuming no logical ID or run and requesting no financial
+approval. Execution revalidates protected policy and requires fresh Touch ID.
+Examples and tests use synthetic addresses; never submit their contents to production.
 
 BTC/XRP fixtures establish generic submission/venue reconciliation and explicit
 pending receipt, not production or chain-observer coverage. A custom synthetic BTC
@@ -138,7 +144,30 @@ and typed fee accounting remain covered by the existing suite.
 
 Live verification must first select priced allocation within the existing $100
 limits, capture the baseline and preflight a complete return path. Routes without
-independent receipt/restoration coverage remain blocked for tracked acceptance.
+independent receipt/restoration coverage remain blocked for live acceptance.
 No successful venue status or raw tx ID alone passes destination receipt or
 cleanup. Production withdrawals and the native Touch ID path for this increment
 remain pending until observed together with the human.
+
+## Synthetic permanent portfolio regression
+
+The ordinary product scenario sells an enrolled subaccount's available APT and
+SEI for USDC, buys ETH with at most 20 USDC, transfers purchased ETH to its
+enrolled main account, then withdraws to an enrolled Arbitrum EVM wallet. Verify
+complete fills and fees, internal destination credit, and chain destination
+receipt. Its intentional final portfolio is retained: no run, classification,
+return plan or restoration is an execution prerequisite. This scenario is
+synthetic and authorizes no production execution. Any separately authorized live
+acceptance still follows the independent $100 and restoration contract above.
+
+`binance.spot-order` accepts `requestId`, `account`, `symbol`, `side` (BUY/SELL),
+`quantity`, `limitPrice`, `maxFee` and `minReceiveAmount`. Quantities/prices are
+exact decimal strings. Orders are LIMIT FOK, with base-asset quantity and an
+absolute fee cap in the received asset. BUY quote spending is bounded by
+quantity × limitPrice; SELL spends existing base holdings. Received holdings may
+remain permanently. Current standard, special and tax commissions are included;
+active BNB discounts are unsupported. SELL fee bounds conservatively use the
+symbol's finite maximum price, not an assumed favorable-fill price. Symbols whose
+worst-case fees cannot fit explicit/personal bounds fail before approval.
+Unexpected partial fills, missing trade evidence and unknown withdrawals remain
+unresolved with reservations; venue success alone is not destination receipt.

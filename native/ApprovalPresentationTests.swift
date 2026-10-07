@@ -118,6 +118,10 @@ struct ApprovalPresentationTests {
         assert(!reviewed(financial))
         let setup: [String: Any] = ["action":"initialize", "financial_movement":false, "future_financial_authority":false]
         assert(configurationAuthenticationReason(setup) == "finish setup for your Mac account")
+        let policy: [String: Any] = ["action":"policy_set", "financial_movement":false, "future_financial_authority":false]
+        assert(configurationAuthenticationReason(policy) == "change your financial limits")
+        assert(reviewed(policy))
+        assert(!reviewed(policy, "changed"))
         for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
             var candidate = binding; candidate["action"] = action
             assert(configurationAuthenticationReason(candidate) == "\(verb) the Binance connection \"SYNTHETIC-main\"")
@@ -142,6 +146,6 @@ struct ApprovalPresentationTests {
         badName["connection"] = badConnection
         assert(configurationAuthenticationReason(badName) == nil)
         assert(configurationAuthenticationReason([:]) == nil)
-        print("Approval presentation: 17 summary, 20 terminal-proof/channel and 13 authentication-reason cases passed; no UI or authentication requested.")
+        print("Approval presentation: 17 summary, 22 terminal-proof/channel and 14 authentication-reason cases passed; no UI or authentication requested.")
     }
 }

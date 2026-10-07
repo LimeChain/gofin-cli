@@ -34,11 +34,11 @@ New setups include Ethereum mainnet, Arbitrum One (42161) and Robinhood Chain
 (4663). Wallet-only adapters do not require Uniswap/Aave deployments; these dapps
 remain mainnet-only. RPC URLs are protected network configuration; changing them
 through a public command is future work. Per-write approval, reservations,
-request identity, recovery and the $100 verification policy remain shared.
+request identity, recovery and protected personal policy remain shared.
 
 Wallet balance reads combine configured/explicit tokens with bounded cached
 Blockscout candidate discovery, then verify metadata and balances on RPC.
-Discovery always reports partial coverage. Snapshot restoration scope is explicit
+Discovery always reports partial coverage. Snapshot tracking scope is explicit
 native plus configured tokens, not a claim to enumerate every holding or dapp.
 Shared CoinGecko USD valuation serves Binance and all EVM networks. ERC-20
 lookups use verified chain/platform plus exact contract; exchange symbols use a
@@ -57,7 +57,13 @@ The selected implementation is a compiled Rust workspace. The [Rust architecture
 
 Concrete choices are Rust 1.97.1, edition 2024, a pinned Cargo lockfile, Clap/Schemars discovery, SQLite through bundled `rusqlite`, and Alloy for EVM envelopes. Official CCXT Rust `ccxt-base =4.5.85` supplies exchange connectivity and HMAC/RSA/Ed25519 signing behind `fin-exchange`; `fin-binance` retains venue-specific policy, mapping and evidence. `fin` is the public client; `fin-broker` and `fin-touch-id` are internal protected executables. The macOS bundle contains all three, an inspectable terminal installer, and checksums. Commands and the current crate layout are in the [README](../README.md); [exchange verification](reports/ccxt-exchange.md) and [runtime lifecycle verification](reports/runtime-lifecycle.md) distinguish automated results from pending human acceptance.
 
-The broker uses configuration version 2 and local protocol version 2. Run planning captures its own fresh complete baseline for the declared observer scope and trusted prices, conditionally proves every forward and return step, and reserves the entire path before financial execution. The physical allocation cap counts selected holdings plus gross borrowed proceeds. Gas and return-cost reserves earmark cash already included in those selected holdings; each route prefix must finance its additional cash costs from selected holdings and bounded prior credits. A reserve never creates extra spending funds. Exact origin lots follow custody, conversions, positions, debt and costs. Fin checks the final independent snapshot against the original accounts/assets and receipt-backed origin ledger; quote movement losses/gains are reported separately from fees and lending accrual. Replanning preserves the original baseline, allocation, spent costs, request identities and settled prefix. An uncertain operation retains its reservation and original submission identity.
+The broker uses protected configuration and durable operation-level execution.
+New writes require no restoration run, return plan or baseline. Personal movement
+and installation-wide rolling 24-hour gross allocation ceilings apply across
+commands; unresolved submissions continue reserving budget beyond the window.
+Every write retains exact bounds, fresh approval, resource reservations and a
+journaled submission identity. Historical runs remain inspectable and their
+pending operations recover through original identities without replay.
 
 `fin-pricing` owns provider-independent async `UsdPriceSource`; the default
 CoinGecko implementation supplies direct USD pricing for Binance and EVM mainnet/
@@ -71,7 +77,7 @@ point. Provider `last_updated_at` becomes RFC3339 source time, distinct from
 retrieval time. Maximum quote age is 120 seconds; a shared/coalesced 30-second
 cache rechecks freshness and never supplies stale data on outage. Missing, zero,
 malformed, future or stale quotes and rate limits block financial execution.
-The $100 verification policy and 90-second preview expiry are unchanged.
+The 90-second preview expiry remains unchanged; live-test budgets are external testing instructions.
 No Binance/Coinbase/Kraken price fallback is implemented. Anonymous public access
 is best effort. Optional CoinGecko Demo/Pro enrollment uses a hidden protected
 key prompt, read-only authenticated ping plus a fresh ETH/USD quote, and
@@ -81,7 +87,7 @@ A single `market-data:coingecko` resource prevents duplicate pricing credentials
 keys grant market-data access only and calls may consume plan quota/billing.
 Saving the connection grants no financial approval; no environment key is loaded. See [pricing tests and public probes](testing/evm-wallets.md#reproducible-offline-tests).
 
-The TS SQLite database is not silently opened or replayed by Rust. The read-only `fin-store` legacy inspection example preserves original records and emits hashes and unresolved/reservation counts. Active legacy records block a separate Rust financial run; recovery or migration still needs compatible historical interpretation.
+The TS SQLite database is not silently opened or replayed by Rust. The read-only `fin-store` legacy inspection example preserves original records and emits hashes and unresolved/reservation counts. Unresolved legacy operations retain resource protection; recovery or migration still needs compatible historical interpretation. An unrestored historical run alone does not block new work.
 
 The [terminal onboarding/discovery contract](onboarding.md) is part of the implementation, not a later convenience. A human asks an LLM how to add Binance; the LLM must discover the command and prerequisites from the installed CLI, direct the human to their own terminal, and safely check the result. Setup, daemon lifecycle, and connection add/list/update/remove must expose consistent help/explanation/schemas and human-interaction metadata before configuration or a broker exists. Secret fields belong to protected human enrollment, never normal CLI/JSON arguments. No custom credential-entry windows or `.pkg` distribution requirement is introduced.
 
@@ -97,7 +103,7 @@ The public CLI explains administrator authentication before replacing itself
 with macOS sudo: an action-specific reason, the Mac login password, hidden
 typing, cancellation and the later independent Touch ID approval. Shared
 discovery constants supply the password explanation and labelled sudo prompt.
-Only setup and connection add/update/remove use sudo; routine broker requests
+Setup, connection add/update/remove and policy set use sudo; routine broker requests
 do not. A failed explanation write/flush must prevent the privileged launch.
 
 Keep terminal notices brief: explain the immediate action and required input.
@@ -280,7 +286,7 @@ In the compiled Rust CLI, help, explanation, schemas and machine output use shar
 fin capabilities --json
 fin schema binance.withdraw --json
 fin explain aave.repay --json
-fin schema run.begin --json
+fin schema policy.set --json
 ```
 
 Define discoverable operations for connection metadata, capabilities, balance/position reads, the writes in the flow guides, and operation-status lookup. Write commands need explicit source, destination, asset/contract, units, network/market where relevant, and applicable fee/slippage bounds. Token symbols alone are insufficient on-chain identities.
@@ -374,10 +380,14 @@ reopening the same journal without replay. Composition errors return directly an
 do not dispatch against stale configuration. Approver changes require socket repair.
 Binance identity probes run before account operations instead of blocking startup
 or local management. Verification remains pending after failure and resets on reload;
-financial writes retain the identity gate, run limits and per-write authorization.
+financial writes retain the identity gate, protected personal limits and per-write authorization.
 
 
 ## Binance trading increment — 6 October 2026
+
+This records the earlier scoped trading design. Restoration-run requirements
+and spot opening/cleanup restrictions below were superseded by the permanent
+portfolio policy increment; venue evidence and per-write approval still apply.
 
 Implement spot and USDⓈ-M **USDT perpetuals** first. Named reads expose market
 metadata, bounded orders/trades, collateral, positions and income without
@@ -482,10 +492,12 @@ new configured chain ordering. Arbitrum whitelist comparisons normalize hex
 casing; absent optional tags mean empty only when exact network metadata proves
 withdrawTag=false. Account whitelist enforcement/cooldown remain unknown.
 
-Current tracked execution requires independent snapshots, USD valuation and
-a verified restoration plan. It is not permanent payout mode; unknown receipt or
-return coverage cannot pass a bounded test run. This refactor does not implement
-bridging, standing/market orders, Funding-wallet withdrawals, non-NIL Travel Rule
+Ordinary withdrawals require exact USD valuation, protected personal limits,
+resource reservations, per-write approval and independent recipient evidence.
+They may retain permanent portfolio changes without a restoration run. Live
+acceptance separately requires snapshots and a funded verified return path;
+unknown receipt or return coverage cannot pass that test. This refactor does not
+implement bridging, standing/market orders, Funding-wallet withdrawals, non-NIL Travel Rule
 questionnaires, or unreviewed chain observers.
 
 ## Execute dry-run interface (2026-10-07)
@@ -500,10 +512,196 @@ policy, authorization, journaling and recovery path are unchanged.
 CLI help, completion generation and command discovery expose the flag. The
 execute input schema makes request_id conditional on dry_run=false; machine
 output retains the existing preview contract. Dry-run progress says preparation,
-not waiting for Touch ID. Optional --id/--run may remain on a reusable command,
-but a preview does not reserve funds or attest a scoped run's execution policy.
+not waiting for Touch ID. Optional --id may remain on a reusable command; hidden
+legacy --run is ignored for preview. A preview does not reserve funds or attest execution policy, and
+ordinary execution requires no run.
 
 Synthetic CLI tests verify preview equivalence with/without identity/run flags,
 read-only error handling, malformed input sanitization and normal execution when
 the flag is removed. No production write or biometric verification is performed.
-Normal-operation/verification-run separation is separate policy work.
+The permanent portfolio policy below applies to execution; dry-run remains a
+read-only preview and introduces no runtime verification classification.
+
+## Earlier limits implementation — superseded runtime design
+
+The following records earlier implementation and observed synthetic results. Its
+run classification, restoration gates and runtime verification ceilings were
+superseded by the product-policy change below; these results do not establish
+verification of the newer implementation.
+
+### Configurable financial limits — 7 October 2026
+
+Implemented `fin policy show` and human-only `fin policy set
+--max-movement-usd 1000 --max-run-allocation-usd 5000`. Shared safe argument and
+output types drive Clap, discovery and schemas. Decimal USD is parsed with
+checked integer arithmetic into nonnegative u64 micros (six fractional places;
+no rounding, signs or exponents). At the user's updated request, zero removes
+that personal ceiling; the engine represents it as an absent cap, never a huge
+finite substitute. This bounded representation
+is for policy values only; financial asset quantities remain their exact types.
+
+Policy mutation reuses protected enrollment, the exclusive maintenance lock,
+human-terminal review proof, fresh configuration Touch ID, durable approval
+audit and atomic config replacement. It changes only the two limits. Active or
+cleanup-outstanding runs, malformed records and nonterminal operations refuse
+mutation before approval. Holding the lock across inspection, approval and save
+prevents concurrent dispatch. Save uncertainty instructs inspection, not replay.
+The existing broker config comparison stops stale execution and launchd reloads
+on subsequent activation; no new service/restart mechanism was introduced.
+
+`run.begin` accepts `purpose: normal | verification`; omitted purpose and legacy
+records mean verification. Normal runs use personal limits. Verification takes
+the lower of finite personal limits and independent $100 movement/allocation ceilings.
+The engine persists purpose and the movement cap at creation, enforces the cap
+including cleanup costs, and retains original allocation, return reserves and
+restoration semantics. Raises cannot expand an existing run. Config version 2
+and stored default $100 values are preserved; legacy run fields migrate in memory
+conservatively without altering identities or reservations.
+
+Focused synthetic cases cover exact/invalid/overflow amounts, denied/expired
+approval, unauthorized entrypoints, atomic save and uncertainty, reload, active
+and pending preservation, legacy records, independent verification caps, CLI
+machine handoff and terminal rendering. See the [policy human checklist](testing/rust-human-handoff.md#financial-policy-checks).
+
+Verification observed for this change: `cargo fmt --all -- --check` and
+`git diff --check` passed; `cargo clippy --locked --workspace --all-targets --
+-D warnings` passed; `cargo test --locked --workspace` passed **487 tests**, with
+**0 failures** and **1 explicitly ignored Anvil fork test**. The separately run
+Swift presentation harness passed without UI or authentication:
+
+```sh
+/usr/bin/xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift \
+  -o /tmp/fin-policy-approval-presentation-tests
+/tmp/fin-policy-approval-presentation-tests
+```
+
+The final policy-focused run (`cargo test --locked -p fin-broker -p fin-engine
+-p fin-presentation policy`) passed 16 tests. Real human authorization,
+installation/credential isolation, installed launchd reload and live financial
+verification remain pending/not run. The fork was not invoked for this policy
+change. No production credentials were accessed, and no installation, financial
+writes, commits or pushes were performed.
+
+
+Follow-up: `fin setup` now collects both policy values in the protected human
+Terminal with visible decimal input; Enter selects $100. A zero is explicitly
+shown as “No limit” in setup and policy-change review. The existing setup
+challenge binds both selected values before fresh Touch ID and atomic save.
+Setup refuses an existing config before collecting replacement values. There is
+no change to hidden credential input or agent/machine handoffs. Cancellation,
+EOF, input timeout, malformed/negative/overflow values save no configuration.
+The shared terminal guard restores input settings on all exits. Synthetic PTYs
+cover visible input, zero, Enter/default, cancellation, EOF, timeout and restoration.
+Normal runs can have either or both personal ceilings removed, while verification
+still enforces $100 with zero policy. Frozen finite run caps cannot be expanded
+by changing policy to zero; selected inventory, return reserves and all approval
+requirements remain in force.
+
+
+Follow-up verification: `cargo test --locked --workspace` passed **492 tests**,
+with **0 failures** and the same **1 ignored fork test**; strict workspace Clippy,
+formatting and whitespace checks passed. This includes synthetic macOS PTY tests
+for the new public setup input. Actual installation, human terminal isolation,
+Touch ID acceptance/decline and installed reload remain pending. No installation,
+production credential access, financial writes, commits or pushes were performed.
+
+
+## Permanent portfolio operations and personal policy — 7 October 2026
+
+The public CLI executes one operation without `run begin`, `--run`, a purpose,
+return plan or restoration. `run begin/replan/finish` are retired; `run status`
+remains historical inspection and operation status retains recovery. Runtime
+normal/verification distinctions and hardcoded development ceilings are removed.
+Historical records, approved bounds, reservations, proofs and submission
+identities remain preserved; pending submissions are not replayed or implicitly
+settled by this migration.
+
+The retained `max-run-allocation-usd` name now describes an installation-wide
+rolling 24-hour **gross** budget across commands/accounts: movement, maximum costs
+and additional borrowed allocation. Pending submissions remain charged past the
+window until reconciliation. It does not reset per command or treat net holdings
+as spent allocation. Setup collects both human limits (Enter defaults to $100,
+zero means no personal ceiling); protected fresh human approval changes both
+atomically. Historical unrestored runs do not require users to reverse their
+portfolios before ordinary use. Policy mutation still refuses nonterminal work.
+
+CLI help, schemas, discovery, examples and concise policy output share these
+semantics. Hidden legacy `--run` preserves historical retry identity only.
+Live-test $100 limits, initial snapshots, complete funded return plans and cleanup
+remain explicit LLM obligations in AGENTS.md, testing docs and the companion
+skill. They are separate from permanent portfolio behavior and do not authorize
+production execution. Automated results for this revision are reported after
+execution; real protected authorization, installation and live cases remain
+pending until observed.
+
+Implementation details: the rolling budget derives exact charges from durable
+operation previews. Submitted writes stay charged for at least 24 hours after
+terminal settlement, including proved failures; pending submissions never age
+out. Unsubmitted denial/cancellation releases only its own reservation. A
+SQLite immediate transaction compares the complete operation snapshot before
+atomically storing the new preview and resource reservations, preventing
+concurrent commands from spending the same available policy budget. The existing
+journal schema remains unchanged; migration never rebuilds or discards records.
+Historical run inspection reads the original document; only existing request
+identities can use the hidden legacy run binding for reconciliation.
+
+Binance now provides ordinary LIMIT FOK spot conversions with explicit exact
+quantity, price, fee and net-receipt bounds. SELL uses existing free holdings and
+BUY retains its proceeds. Fees are supported in the received asset; active BNB
+commission discounts fail closed. SELL maximum-price envelopes and commission
+rounding reserves can be conservative under finite personal limits. Complete
+authenticated order/fill/fee evidence is required. Arbitrum withdrawals use the
+enrolled chain-specific destination and independent recipient verification;
+external-credit proofs now honor the configured finalized-block requirement and
+recheck canonical inclusion before completion.
+
+Verification for this revision: `cargo test --locked --workspace --offline`
+passed **508 tests**, **0 failed**, **1 ignored** isolated-fork test. The permanent
+APT/SEI → USDC → ETH → master → Arbitrum wallet synthetic scenario passes without
+a run or restoration, including timeout/restart, stable identities and receipt
+gating. Actual Arbitrum RPC fixtures cover finality, canonical inclusion,
+recipient, chain and amount mismatches. `cargo clippy --locked --workspace
+--all-targets --offline -- -D warnings`, `cargo fmt --all -- --check`, and
+`git diff --check` passed. The native presentation harness passed **53 synthetic
+cases** (17 summaries, 22 terminal-proof/channel, 14 authentication reasons),
+without UI or authentication. Real protected-terminal isolation, setup/policy
+Touch ID acceptance/denial/cancellation/expiry, installed reload, and per-write
+Touch ID remain pending in the human handoff. The fork was not run. No production
+credentials, production writes, installation, commits or pushes were used.
+
+
+### Main policy merge review (2026-10-07)
+
+Merged `bb9f8f3` with generic withdrawals and `execute --dry-run`. Kept automatic
+protected configuration reload, legacy pending withdrawal identities (including
+Arbitrum records), and the shared journal-before-dispatch exchange path. The
+new ordinary spot operation and existing spot/futures operations remain distinct
+compatible names; the generated offline registry contains 49 unique operations.
+Adapted trading regressions to ordinary operations and retained exact fees,
+positions, funding, cancellation, duplicate identity and restart checks.
+
+Cancellation-only typed intents acquire no new financial reservation or gross
+allocation: their original unresolved order retains its own allocation and locks.
+This fixes the merged policy path rejecting cancellation or blocking a later
+close because a zero-movement cancellation had no USD valuation.
+
+Verification: 547 distinct Rust tests passed across Binance, broker, CLI,
+discovery, Ethereum, human-terminal, presentation, domain, engine and store;
+formatting and strict workspace Clippy passed. Runtime-update fixtures passed
+29 tests, and native presentation checks passed 53 cases without invoking UI or
+biometrics. The guarded fork test was not run; no live writes or new human
+Touch ID verification occurred. A read-only production market lookup confirmed
+APTUSDC trading metadata; it does not establish order execution.
+
+Review findings left for a separate fix: the production exact-coin USD registry
+has no APT/SEI mappings, so both requested sales remain blocked even with zero
+personal ceilings. The new spot discovery example wraps `operation`/`input`
+although its strict input schema requires the fields directly. The new decimal
+product also rejects representable values with excessive trailing-zero scale.
+Synthetic portfolio tests use their own prices and do not cover the production
+registry gap. No unsupported valuation is inferred or financial guard bypassed.
+
+`make update` can preserve this installation's credentials, configuration,
+limits and journal; reinstall is unnecessary. Stored personal limits remain
+unchanged until a human explicitly approves `fin policy set`. Resolve the pricing
+blocker before claiming the requested APT/SEI portfolio flow is ready.

@@ -500,7 +500,10 @@ fn make_engine(
         store,
         vec![adapter(venue, prices)],
         authorizer,
-        EngineOptions::default(),
+        EngineOptions {
+            max_run_allocation_usd_micros: "1000000000".into(),
+            ..Default::default()
+        },
     )
     .unwrap()
     .with_cost_origin_price_provider(cost_prices)
@@ -824,19 +827,7 @@ fn trusted_prices() -> Vec<fin_domain::AssetPrice> {
     })
     .collect()
 }
-async fn start_round_trip_run(
-    engine: &Engine,
-    id: &str,
-    futures: bool,
-    open_side: &str,
-) -> (Value, Value) {
-    let baseline = engine.snapshot("binance.balances").await.unwrap();
-    assert!(baseline.complete, "{baseline:?}");
-    let resource = ResourceId(if futures {
-        format!("{SPOT}:USD_M")
-    } else {
-        SPOT.into()
-    });
+async fn round_trip_inputs(id: &str, futures: bool, open_side: &str) -> (Value, Value) {
     let mut open = input(&format!("{id}-open"), open_side, futures);
     let mut close = input(
         &format!("{id}-close"),
@@ -855,53 +846,11 @@ async fn start_round_trip_run(
         open["time_in_force"] = json!("FOK");
         close["time_in_force"] = json!("FOK");
     }
-    let operation = if futures {
-        "binance.futures.order-place"
-    } else {
-        "binance.spot.order-place"
-    };
-    let step = |data: &Value| fin_domain::PlanStep {
-        operation: operation.into(),
-        input: data.clone(),
-        maximum_fee_usd_micros: if futures { "450000" } else { "100000" }.into(),
-        description: "Synthetic bounded immediate order; no live action".into(),
-    };
-    let plan = fin_engine::RunPlan {
-        id: id.into(),
-        baseline,
-        allocations: vec![fin_engine::RunAllocation {
-            holding: fin_domain::ResourceAmount {
-                resource,
-                amount: fin_domain::Amount {
-                    asset: priced_asset("USDT"),
-                    atoms: fin_domain::Quantity::from_decimal("45", 36).unwrap(),
-                },
-            },
-            value_usd_micros: "45000000".into(),
-            observed_at: now(),
-            source: "synthetic-only:fixed-prices".into(),
-        }],
-        borrowed_proceeds_reserve_usd_micros: "0".into(),
-        return_cost_reserve_usd_micros: if futures { "900000" } else { "200000" }.into(),
-        planned_operations: vec![step(&open)],
-        unwind: vec![step(&close)],
-        route_proofs: vec![],
-        asset_prices: vec![],
-    };
-    engine
-        .begin_run_from_observer_with_asset_prices(
-            "binance.balances",
-            plan,
-            trusted_prices(),
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
     (open, close)
 }
 
 #[tokio::test]
-async fn scoped_spot_round_trip_restores_cash_and_exposure_net_exact_fees() {
+async fn ordinary_spot_buy_sell_settles_cash_and_exposure_net_exact_fees() {
     let venue = Venue::new(vec![
         Fill::full("ETH", "0.00002"),
         Fill::full("USDT", "0.03996"),
@@ -912,26 +861,27 @@ async fn scoped_spot_round_trip_restores_cash_and_exposure_net_exact_fees() {
         vec![adapter(venue.clone(), prices())],
         auth.clone(),
         EngineOptions {
-            require_run_for_writes: true,
+            max_run_allocation_usd_micros: "1000000000".into(),
             ..Default::default()
         },
     )
     .unwrap()
     .with_cost_origin_price_provider(prices());
-    let id = "synthetic-scoped-spot";
-    let (open, close) = start_round_trip_run(&engine, id, false, "BUY").await;
+    let id = "synthetic-ordinary-spot";
+    let (open, close) = round_trip_inputs(id, false, "BUY").await;
     for data in [open, close] {
-        let mut request = request(data, false);
-        request.run_id = Some(id.into());
+        let request = request(data, false);
         let settled = engine.execute(request).await.unwrap();
         assert_eq!(settled.status, Status::Completed, "{settled:?}");
+        assert!(settled.run_id.is_none());
+        assert!(settled.effects.is_some());
     }
-    let final_snapshot = engine.snapshot("binance.balances").await.unwrap();
-    let run = engine
-        .finish_run(id, final_snapshot, chrono::Utc::now())
-        .unwrap();
-    assert_eq!(run.status, fin_engine::RunStatus::Restored, "{run:?}");
-    assert!(run.differences.is_empty(), "{run:?}");
+    let records = engine.operations().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_ne!(
+        records[0].submission.as_ref().unwrap().reference,
+        records[1].submission.as_ref().unwrap().reference
+    );
     let state = venue.state.lock().unwrap();
     assert_eq!(state.spot["ETH"], 0);
     assert_eq!(decimal(state.spot["USDT"]), "59.92004");
@@ -940,7 +890,7 @@ async fn scoped_spot_round_trip_restores_cash_and_exposure_net_exact_fees() {
 }
 
 #[tokio::test]
-async fn scoped_futures_round_trip_restores_exposure_with_proven_fees_and_pnl_loss() {
+async fn ordinary_futures_open_close_settles_exposure_with_proven_fees_and_pnl_loss() {
     for open_side in ["BUY", "SELL"] {
         let mut close = Fill::full("USDT", "0.04");
         close.pnl = "-0.2";
@@ -951,26 +901,27 @@ async fn scoped_futures_round_trip_restores_exposure_with_proven_fees_and_pnl_lo
             vec![adapter(venue.clone(), prices())],
             auth.clone(),
             EngineOptions {
-                require_run_for_writes: true,
+                max_run_allocation_usd_micros: "1000000000".into(),
                 ..Default::default()
             },
         )
         .unwrap()
         .with_cost_origin_price_provider(prices());
-        let id = "synthetic-scoped-futures";
-        let (open, close) = start_round_trip_run(&engine, id, true, open_side).await;
+        let id = "synthetic-ordinary-futures";
+        let (open, close) = round_trip_inputs(id, true, open_side).await;
         for data in [open, close] {
-            let mut request = request(data, true);
-            request.run_id = Some(id.into());
+            let request = request(data, true);
             let settled = engine.execute(request).await.unwrap();
             assert_eq!(settled.status, Status::Completed, "{settled:?}");
+            assert!(settled.run_id.is_none());
+            assert!(settled.effects.is_some());
         }
-        let final_snapshot = engine.snapshot("binance.balances").await.unwrap();
-        let run = engine
-            .finish_run(id, final_snapshot, chrono::Utc::now())
-            .unwrap();
-        assert_eq!(run.status, fin_engine::RunStatus::Restored, "{run:?}");
-        assert!(run.differences.is_empty(), "{run:?}");
+        let records = engine.operations().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_ne!(
+            records[0].submission.as_ref().unwrap().reference,
+            records[1].submission.as_ref().unwrap().reference
+        );
         let state = venue.state.lock().unwrap();
         assert_eq!(state.position, 0);
         assert_eq!(decimal(state.collateral), "59.72");
@@ -979,28 +930,25 @@ async fn scoped_futures_round_trip_restores_exposure_with_proven_fees_and_pnl_lo
 }
 
 #[tokio::test]
-async fn configured_run_guard_refuses_unscoped_write_before_approval() {
+async fn retired_run_id_refuses_new_write_before_approval() {
     let venue = Venue::new(vec![]);
     let auth = approve(ApprovalMode::Accept);
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![adapter(venue.clone(), prices())],
+    let engine = make_engine(
+        venue.clone(),
+        prices(),
         auth.clone(),
-        EngineOptions {
-            require_run_for_writes: true,
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .with_cost_origin_price_provider(prices());
-    let error = engine
-        .execute(request(
-            input("synthetic-unscoped-order", "BUY", false),
-            false,
-        ))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "RUN_REQUIRED");
+        Store::in_memory().unwrap(),
+    );
+    let mut operation = request(input("synthetic-retired-run-order", "BUY", false), false);
+    operation.run_id = Some("synthetic-retired-run".into());
+    let rejected = engine.execute(operation.clone()).await.unwrap();
+    assert_eq!(rejected.status, Status::Rejected);
+    assert_eq!(rejected.error.as_ref().unwrap().code, "RUN_RETIRED");
+    assert!(rejected.preview.is_none());
+    assert!(rejected.submission.is_none());
+    let duplicate = engine.execute(operation).await.unwrap();
+    assert_eq!(duplicate.id, rejected.id);
+    assert_eq!(engine.operations().unwrap().len(), 1);
     assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
 }
@@ -1085,7 +1033,7 @@ async fn missing_fill_proof_retains_original_unknown_identity_without_another_wr
 }
 
 #[tokio::test]
-async fn scoped_production_contract_blocks_allocation_over_100_usd_before_approval() {
+async fn ordinary_policy_blocks_allocation_over_100_usd_before_approval() {
     let venue = Venue::new(vec![]);
     venue.state.lock().unwrap().collateral = units("200");
     let auth = approve(ApprovalMode::Accept);
@@ -1094,61 +1042,18 @@ async fn scoped_production_contract_blocks_allocation_over_100_usd_before_approv
         vec![adapter(venue.clone(), prices())],
         auth.clone(),
         EngineOptions {
-            require_run_for_writes: true,
-            ..Default::default()
+            max_movement_and_cost_usd_micros: "0".into(),
+            max_run_allocation_usd_micros: "100000000".into(),
         },
     )
     .unwrap()
     .with_cost_origin_price_provider(prices());
-    let id = "synthetic-scoped-100-usd-cap";
-    let baseline = engine.snapshot("binance.balances").await.unwrap();
     let mut open = input("synthetic-102-dollar-open", "BUY", true);
     open["quantity"] = json!("0.051");
     open["maximum_fees"] = json!({"USDT":"0.2"});
-    let mut close = input("synthetic-102-dollar-close", "SELL", true);
-    close["quantity"] = json!("all");
-    close["maximum_quantity"] = json!("0.051");
-    close["reduce_only"] = json!(true);
-    close["maximum_fees"] = json!({"USDT":"0.2"});
-    let step = |data: &Value| fin_domain::PlanStep {
-        operation: "binance.futures.order-place".into(),
-        input: data.clone(),
-        maximum_fee_usd_micros: "500000".into(),
-        description: "Synthetic $102 perpetual notional; must be rejected before write".into(),
-    };
-    let plan = fin_engine::RunPlan {
-        id: id.into(),
-        baseline,
-        allocations: vec![fin_engine::RunAllocation {
-            holding: fin_domain::ResourceAmount {
-                resource: ResourceId(format!("{SPOT}:USD_M")),
-                amount: fin_domain::Amount {
-                    asset: priced_asset("USDT"),
-                    atoms: fin_domain::Quantity::from_decimal("110", 36).unwrap(),
-                },
-            },
-            value_usd_micros: "110000000".into(),
-            observed_at: now(),
-            source: "synthetic-only:fixed-prices".into(),
-        }],
-        borrowed_proceeds_reserve_usd_micros: "0".into(),
-        return_cost_reserve_usd_micros: "1000000".into(),
-        planned_operations: vec![step(&open)],
-        unwind: vec![step(&close)],
-        route_proofs: vec![],
-        asset_prices: vec![],
-    };
-    let error = engine
-        .begin_run_from_observer_with_asset_prices(
-            "binance.balances",
-            plan,
-            trusted_prices(),
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "ALLOCATION_LIMIT");
-    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+    let record = engine.execute(request(open, true)).await.unwrap();
+    assert_no_post(&record, &venue);
+    assert_eq!(record.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1229,7 +1134,7 @@ async fn fund_between_legs(venue: &Venue, income: &str) {
 }
 
 #[tokio::test]
-async fn scoped_funding_loss_and_profit_between_legs_restore_using_original_cursor() {
+async fn ordinary_funding_loss_and_profit_between_legs_settle_using_original_cursor() {
     for income in ["-0.05", "0.05"] {
         let venue = Venue::new(vec![Fill::full("USDT", "0.04"), Fill::full("USDT", "0.04")]);
         let auth = approve(ApprovalMode::Accept);
@@ -1238,21 +1143,19 @@ async fn scoped_funding_loss_and_profit_between_legs_restore_using_original_curs
             vec![adapter(venue.clone(), prices())],
             auth.clone(),
             EngineOptions {
-                require_run_for_writes: true,
+                max_run_allocation_usd_micros: "1000000000".into(),
                 ..Default::default()
             },
         )
         .unwrap()
         .with_cost_origin_price_provider(prices());
         let id = "synthetic-funding-roundtrip";
-        let (open, close) = start_round_trip_run(&engine, id, true, "BUY").await;
-        let mut opening = request(open, true);
-        opening.run_id = Some(id.into());
+        let (open, close) = round_trip_inputs(id, true, "BUY").await;
+        let opening = request(open, true);
         let opened = engine.execute(opening).await.unwrap();
         assert_eq!(opened.status, Status::Completed, "{opened:?}");
         fund_between_legs(&venue, income).await;
-        let mut closing = request(close, true);
-        closing.run_id = Some(id.into());
+        let closing = request(close, true);
         let closed = engine.execute(closing).await.unwrap();
         assert_eq!(closed.status, Status::Completed, "{closed:?}");
         let effects = &closed.effects.as_ref().unwrap().effects;
@@ -1265,15 +1168,7 @@ async fn scoped_funding_loss_and_profit_between_legs_restore_using_original_curs
         };
         assert!(effects.iter().any(|effect| matches!(effect, fin_domain::FinancialEffect::Settlement { category: fin_domain::SettlementCategory::Funding, delta, .. } if *delta == expected_delta)));
         assert_eq!(effects.iter().filter(|effect| matches!(effect, fin_domain::FinancialEffect::Cost { category, treatment: fin_domain::CostTreatment::IncludedInDebit, amount, .. } if category == "funding_loss" && amount.atoms == funding_atoms)).count(), usize::from(income.starts_with('-')));
-        let final_snapshot = engine.snapshot("binance.balances").await.unwrap();
-        let restored = engine
-            .finish_run(id, final_snapshot, chrono::Utc::now())
-            .unwrap();
-        assert_eq!(
-            restored.status,
-            fin_engine::RunStatus::Restored,
-            "{restored:?}"
-        );
+        assert_eq!(venue.state.lock().unwrap().position, 0);
         assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -1292,21 +1187,19 @@ async fn funding_above_frozen_loss_cap_remains_unknown_without_budget_increase_o
         vec![adapter(venue.clone(), prices())],
         auth.clone(),
         EngineOptions {
-            require_run_for_writes: true,
+            max_run_allocation_usd_micros: "1000000000".into(),
             ..Default::default()
         },
     )
     .unwrap()
     .with_cost_origin_price_provider(prices());
     let id = "synthetic-funding-cap";
-    let (open, close) = start_round_trip_run(&engine, id, true, "BUY").await;
-    let mut opening = request(open, true);
-    opening.run_id = Some(id.into());
+    let (open, close) = round_trip_inputs(id, true, "BUY").await;
+    let opening = request(open, true);
     let opened = engine.execute(opening).await.unwrap();
     assert_eq!(opened.status, Status::Completed, "{opened:?}");
     fund_between_legs(&venue, "-0.2").await;
-    let mut closing = request(close, true);
-    closing.run_id = Some(id.into());
+    let closing = request(close, true);
     let outcome = engine.execute(closing.clone()).await.unwrap();
     assert_ne!(outcome.status, Status::Completed, "{outcome:?}");
     assert!(outcome.error.is_some() || outcome.last_reconciliation_evidence.is_some());
@@ -1314,109 +1207,44 @@ async fn funding_above_frozen_loss_cap_remains_unknown_without_budget_increase_o
     let duplicate = engine.execute(closing).await.unwrap();
     assert_eq!(duplicate.id, outcome.id);
     assert_eq!(venue.posts.load(Ordering::SeqCst), before);
-    let final_snapshot = engine.snapshot("binance.balances").await.unwrap();
-    let run = engine
-        .finish_run(id, final_snapshot, chrono::Utc::now())
-        .unwrap();
-    assert_eq!(
-        run.status,
-        fin_engine::RunStatus::CleanupOutstanding,
-        "{run:?}"
-    );
+    assert!(outcome.effects.is_none());
+    assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn low_limit_futures_sell_uses_fresh_mark_for_margin_and_100_usd_risk_guard() {
+async fn low_limit_futures_sell_uses_fresh_mark_for_margin_and_personal_risk_ceiling() {
     let venue = Venue::new(vec![]);
     venue.state.lock().unwrap().collateral = units("200");
     *venue.mark_price.lock().unwrap() = "6000".into();
     let auth = approve(ApprovalMode::Accept);
-    let engine = Engine::new(
-        Store::in_memory().unwrap(),
-        vec![adapter(venue.clone(), prices())],
+    let engine = make_engine(
+        venue.clone(),
+        prices(),
         auth.clone(),
-        EngineOptions {
-            require_run_for_writes: true,
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .with_cost_origin_price_provider(prices());
-    let id = "synthetic-low-limit-sell-risk";
-    let baseline = engine.snapshot("binance.balances").await.unwrap();
+        Store::in_memory().unwrap(),
+    );
     let mut open = input("synthetic-low-limit-short", "SELL", true);
     open["limit_price"] = json!("500");
     open["maximum_fees"] = json!({"USDT":"0.15"});
-    let mut close = input("synthetic-low-limit-short-close", "BUY", true);
-    close["limit_price"] = json!("500");
-    close["quantity"] = json!("all");
-    close["maximum_quantity"] = json!("0.02");
-    close["reduce_only"] = json!(true);
-    close["maximum_fees"] = json!({"USDT":"0.15"});
-    let step = |data: &Value| fin_domain::PlanStep {
-        operation: "binance.futures.order-place".into(),
-        input: data.clone(),
-        maximum_fee_usd_micros: "450000".into(),
-        description: "Synthetic low sell limit must not understate actual perpetual exposure"
-            .into(),
-    };
-    let plan = fin_engine::RunPlan {
-        id: id.into(),
-        baseline,
-        allocations: vec![fin_engine::RunAllocation {
-            holding: fin_domain::ResourceAmount {
-                resource: ResourceId(format!("{SPOT}:USD_M")),
-                amount: fin_domain::Amount {
-                    asset: priced_asset("USDT"),
-                    atoms: fin_domain::Quantity::from_decimal("95", 36).unwrap(),
-                },
-            },
-            value_usd_micros: "95000000".into(),
-            observed_at: now(),
-            source: "synthetic-only:fixed-prices".into(),
-        }],
-        borrowed_proceeds_reserve_usd_micros: "0".into(),
-        return_cost_reserve_usd_micros: "900000".into(),
-        planned_operations: vec![step(&open)],
-        unwind: vec![step(&close)],
-        route_proofs: vec![],
-        asset_prices: vec![],
-    };
-    match engine
-        .begin_run_from_observer_with_asset_prices(
-            "binance.balances",
-            plan,
-            trusted_prices(),
-            chrono::Utc::now(),
-        )
-        .await
-    {
-        Err(error) => assert_eq!(error.code, "PLAN_FUNDS_UNAVAILABLE", "{error:?}"),
-        Ok(_) => {
-            let mut operation = request(open, true);
-            operation.run_id = Some(id.into());
-            let record = engine.execute(operation).await.unwrap();
-            assert_no_post(&record, &venue);
-            assert_eq!(
-                record.error.as_ref().unwrap().code,
-                "MOVEMENT_LIMIT",
-                "{record:?}"
-            );
-            assert_eq!(
-                record
-                    .preview
-                    .as_ref()
-                    .unwrap()
-                    .valuation
-                    .as_ref()
-                    .unwrap()
-                    .movement_usd_micros
-                    .to_string(),
-                "120000000"
-            );
-        }
-    }
-    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+    let record = engine.execute(request(open, true)).await.unwrap();
+    assert_no_post(&record, &venue);
+    assert_eq!(
+        record.error.as_ref().unwrap().code,
+        "MOVEMENT_LIMIT",
+        "{record:?}"
+    );
+    assert_eq!(
+        record
+            .preview
+            .as_ref()
+            .unwrap()
+            .valuation
+            .as_ref()
+            .unwrap()
+            .movement_usd_micros
+            .to_string(),
+        "120000000"
+    );
     assert_eq!(auth.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -1455,7 +1283,7 @@ async fn enabled_futures_bnb_burn_requires_reserved_fee_asset_and_preserves_its_
 }
 
 #[tokio::test]
-async fn scoped_usdm_ioc_partial_cancel_then_close_restores_without_releasing_original_twice() {
+async fn ordinary_usdm_ioc_partial_cancel_then_close_settles_original_once() {
     let mut partial = Fill::full("USDT", "0.02");
     partial.fraction = 500;
     partial.pending = true;
@@ -1466,32 +1294,31 @@ async fn scoped_usdm_ioc_partial_cancel_then_close_restores_without_releasing_or
         vec![adapter(venue.clone(), prices())],
         auth.clone(),
         EngineOptions {
-            require_run_for_writes: true,
+            max_run_allocation_usd_micros: "1000000000".into(),
             ..Default::default()
         },
     )
     .unwrap()
     .with_cost_origin_price_provider(prices());
-    let id = "synthetic-scoped-partial-cancel";
-    let (open, close) = start_round_trip_run(&engine, id, true, "BUY").await;
-    let mut opening = request(open, true);
-    opening.run_id = Some(id.into());
+    let id = "synthetic-ordinary-partial-cancel";
+    let (open, close) = round_trip_inputs(id, true, "BUY").await;
+    let opening = request(open, true);
     let original = engine.execute(opening.clone()).await.unwrap();
     assert_eq!(original.status, Status::Pending, "{original:?}");
     let identity = original.submission.clone().unwrap();
     assert!(original.effects.is_none());
-    let snapshot = engine.snapshot("binance.balances").await.unwrap();
-    let unresolved = engine.finish_run(id, snapshot, chrono::Utc::now()).unwrap();
-    assert_eq!(unresolved.status, fin_engine::RunStatus::CleanupOutstanding);
     assert!(
-        unresolved.differences.contains_key("reservations"),
-        "{unresolved:?}"
+        engine
+            .operations()
+            .unwrap()
+            .iter()
+            .any(|record| record.id == original.id && !record.status.terminal())
     );
     let cancellation = OperationRequest {
-        request_id: "synthetic-scoped-cancel-remainder".into(),
+        request_id: "synthetic-ordinary-cancel-remainder".into(),
         operation: "binance.futures.order-cancel".into(),
-        input: json!({"request_id":"synthetic-scoped-cancel-remainder","account":ACCOUNT,"symbol":"ETHUSDT","operation_id":original.id,"original_submission":identity}),
-        run_id: Some(id.into()),
+        input: json!({"request_id":"synthetic-ordinary-cancel-remainder","account":ACCOUNT,"symbol":"ETHUSDT","operation_id":original.id,"original_submission":identity}),
+        run_id: None,
     };
     let cancelled = engine.execute(cancellation.clone()).await.unwrap();
     assert_eq!(cancelled.status, Status::Completed, "{cancelled:?}");
@@ -1518,8 +1345,7 @@ async fn scoped_usdm_ioc_partial_cancel_then_close_restores_without_releasing_or
     assert_eq!(duplicate_cancel.id, cancelled.id);
     assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
     assert_eq!(venue.cancels.load(Ordering::SeqCst), 1);
-    let mut closing = request(close, true);
-    closing.run_id = Some(id.into());
+    let closing = request(close, true);
     let cleanup = engine.execute(closing).await.unwrap();
     assert_eq!(cleanup.status, Status::Completed, "{cleanup:?}");
     {
@@ -1532,14 +1358,6 @@ async fn scoped_usdm_ioc_partial_cancel_then_close_restores_without_releasing_or
         assert_eq!(orders[1].get("quantity"), Some("0.01"));
         assert_eq!(orders[1].get("reduceOnly"), Some("true"));
     }
-    let snapshot = engine.snapshot("binance.balances").await.unwrap();
-    let restored = engine.finish_run(id, snapshot, chrono::Utc::now()).unwrap();
-    assert_eq!(
-        restored.status,
-        fin_engine::RunStatus::Restored,
-        "{restored:?}"
-    );
-    assert!(restored.differences.is_empty());
     let state = venue.state.lock().unwrap();
     assert_eq!(state.position, 0);
     assert_eq!(decimal(state.collateral), "59.96");
@@ -1693,7 +1511,7 @@ async fn available_futures_collateral_must_cover_margin_plus_all_fees_and_loss_c
 }
 
 #[tokio::test]
-async fn scoped_partial_or_expired_ioc_close_retains_exposure_and_invalidates_return_proof() {
+async fn ordinary_partial_or_expired_ioc_close_retains_exposure_and_exact_identity() {
     for partial in [true, false] {
         let close = if partial {
             Fill {
@@ -1712,40 +1530,29 @@ async fn scoped_partial_or_expired_ioc_close_retains_exposure_and_invalidates_re
             vec![adapter(venue.clone(), prices())],
             auth.clone(),
             EngineOptions {
-                require_run_for_writes: true,
+                max_run_allocation_usd_micros: "1000000000".into(),
                 ..Default::default()
             },
         )
         .unwrap()
         .with_cost_origin_price_provider(prices());
         let id = "synthetic-unfinished-ioc-close";
-        let (open, close) = start_round_trip_run(&engine, id, true, "BUY").await;
-        let mut opening = request(open, true);
-        opening.run_id = Some(id.into());
+        let (open, close) = round_trip_inputs(id, true, "BUY").await;
+        let opening = request(open, true);
         let opened = engine.execute(opening).await.unwrap();
         assert_eq!(opened.status, Status::Completed, "{opened:?}");
-        let mut closing = request(close, true);
-        closing.run_id = Some(id.into());
+        let closing = request(close, true);
         let settled = engine.execute(closing.clone()).await.unwrap();
         assert_eq!(settled.status, Status::Completed, "{settled:?}");
         let remaining = if partial { "0.01" } else { "0.02" };
         assert_eq!(decimal(venue.state.lock().unwrap().position), remaining);
         assert!(settled.effects.as_ref().unwrap().effects.iter().any(|effect|matches!(effect,fin_domain::FinancialEffect::PositionChange{anchor:Some(anchor),..} if anchor.principal.atoms.to_decimal(36)==remaining)));
-        let persisted = Store::open(&path).unwrap().get_run(id).unwrap().unwrap();
-        assert_eq!(persisted["route_invalidated"], true, "{persisted}");
+        assert!(Store::open(&path).unwrap().get_run(id).unwrap().is_none());
         let duplicate = engine.execute(closing).await.unwrap();
         assert_eq!(duplicate.id, settled.id);
         assert_eq!(duplicate.effects, settled.effects);
         assert_eq!(venue.posts.load(Ordering::SeqCst), 2);
         assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
-        let snapshot = engine.snapshot("binance.balances").await.unwrap();
-        let run = engine.finish_run(id, snapshot, chrono::Utc::now()).unwrap();
-        assert_eq!(
-            run.status,
-            fin_engine::RunStatus::CleanupOutstanding,
-            "{run:?}"
-        );
-        assert!(!run.differences.is_empty());
         assert_eq!(
             decimal(venue.state.lock().unwrap().collateral),
             if partial { "59.94" } else { "59.96" }

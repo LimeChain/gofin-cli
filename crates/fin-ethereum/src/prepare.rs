@@ -108,7 +108,7 @@ impl EthereumAdapter {
             debt_anchor: None,
             debt_rounding_maximum: None,
         };
-        let mut warnings=vec!["Every financial write, including cleanup, requires a fresh human authorization. An uncertain hash is reconciled without resubmission.".into()];
+        let mut warnings=vec!["Every financial write requires a fresh human authorization. An uncertain hash is reconciled without resubmission.".into()];
         let mut to = address(&token.reference).unwrap_or(owner);
         let mut value = U256::ZERO;
         let calldata: Bytes = match operation {
@@ -464,7 +464,7 @@ impl EthereumAdapter {
                             direction: Direction::Increase,
                             maximum_change: quantity(qty),
                         });
-                        warnings.push("Supply may enable collateral automatically. Restore the original collateral setting and allowance during cleanup.".into());
+                        warnings.push("Supply may enable collateral automatically. Collateral settings and allowances persist until explicitly changed by another approved write.".into());
                         Pool::supplyCall {
                             asset,
                             amount: qty,

@@ -17,6 +17,7 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
           CFGetTypeID(authority) == CFBooleanGetTypeID(), !authority.boolValue,
           let action = binding["action"] as? String else { return nil }
     if action == "initialize" { return "finish setup for your Mac account" }
+    if action == "policy_set" { return "change your financial limits" }
     guard ["add", "update", "remove"].contains(action),
           let connection = binding["connection"] as? [String: Any],
           let name = connection["name"] as? String, !name.isEmpty, name.count <= 96,
@@ -186,7 +187,7 @@ func terminalConfigurationReviewed(_ review: TerminalConfigurationReview?, bindi
           review.bindingHash == hash, review.nonce == nonce,
           review.operation == operation, review.expiresAt == expiry,
           operation.hasPrefix("configuration:"),
-          let action = binding["action"] as? String, ["initialize", "add", "update", "remove"].contains(action),
+          let action = binding["action"] as? String, ["initialize", "add", "update", "remove", "policy_set"].contains(action),
           let movement = binding["financial_movement"] as? NSNumber,
           CFGetTypeID(movement) == CFBooleanGetTypeID(), !movement.boolValue,
           let authority = binding["future_financial_authority"] as? NSNumber,

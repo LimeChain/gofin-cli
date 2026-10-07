@@ -150,12 +150,19 @@ Until observed, mark human installation/onboarding, actual biometric checks, cre
 
 ### $100 limits
 
+These are LLM/test-operator obligations for explicitly authorized live acceptance,
+not Fin runtime policy. There is no runtime verification purpose or verification
+run command. Ordinary portfolio changes need no restoration. Personal policy
+still applies independently and can be stricter; raising it or setting it to zero
+does not authorize exceeding this live-test contract. Record and check the test
+budget outside runtime run records before every live write.
+
 - Never execute an individual asset movement above **$100 equivalent**. Check the gross debit and applicable maximum fee/gas bounds before approval and again before submission. Transfers, swaps, supply, borrowing, repayment, withdrawal, and cleanup are all covered.
 - Keep the **total allocation to the run at or below $100**, including funds reserved for gas, fees, interest, and returning to the baseline. Reusing the same funds through a round trip does not make cumulative turnover the budget. Count collateral and borrowed proceeds separately as assets controlled by the test; do not inflate the available allowance by netting off debt or count a receipt token twice.
 - Select amounts comfortably below the ceiling. Use fresh, recorded USD price/quote information and conservative execution bounds; do not assume a stablecoin is worth exactly $1. If valuation is unavailable or a required minimum/cost exceeds the remaining allocation, block the write and report the reason.
 - Recheck after price changes. Never increase the budget, draw on unrelated holdings, or perform an extra borrow to rescue a test. Bound token allowances/spending permits to what the test needs, within the same value limit; no unlimited approvals in live verification.
 
-The test runner/verification path must check these limits itself; a reminder in an LLM prompt is not the only control. Existing per-write human approval remains required. A market can move after submission, so record the valuation time and executable bounds without promising control over future market value.
+The LLM conducting the test must explicitly calculate and record these checks, including fresh valuation and the complete return path, before requesting each write. Any test harness must enforce the same contract. Product execution does not enforce a separate development budget. Existing per-write human approval remains required. A market can move after submission, so record the valuation time and executable bounds without promising control over future market value.
 
 ### Return to the initial financial state
 

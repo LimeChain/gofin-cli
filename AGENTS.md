@@ -4,6 +4,26 @@ Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the im
 
 Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). Retired TypeScript source and verification reports are available in Git history; historical evidence does not establish Rust verification.
 
+## Components and responsibilities
+
+| Component | Binary or library | Responsibility |
+| --- | --- | --- |
+| `fin-cli` | Binary: `fin` | Parse arguments, expose help and schemas, render progress/results, and send requests to the broker. |
+| `fin-broker` | Binary: `fin-broker`, plus an internal Rust library | Load protected configuration, construct integrations, independently validate requests, and coordinate execution. |
+| `fin-engine` | Rust library | Enforce financial limits, manage previews and reservations, coordinate fresh approval, prevent duplicates, and recover uncertain outcomes. |
+| `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
+| Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
+| `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
+| `fin-authorization` | Rust library | Enforce OS authorization and verify single-use approval bound to the exact operation. Invoke the internal native helper. |
+| `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
+| Native Touch ID helper | Compiled Swift binary: `fin-touch-id`; human display name **Fin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
+| `fin-domain`, `fin-discovery`, `fin-protocol`, `fin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
+
+Financial business logic runs inside the protected broker process through its
+libraries; those libraries are not separate services. The CLI shares contracts
+and presentation code, but its input validation grants no execution authority.
+The broker enforces approval, policy and credential access independently.
+
 ## Product decisions
 
 - Product Fin, repository/package `fin-cli`, binary `fin`; open source, license pending.
@@ -19,9 +39,10 @@ Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-arch
 - An EVM wallet is one protected signer/address reusable across reviewed networks. Keep network RPC, fees, finality and protocol deployments separate from credentials. Preserve legacy chain-qualified financial identities and pending records; broadening a legacy connection uses protected configuration approval.
 - Token indexers supply candidates, not exact balance or exhaustive coverage evidence. Verify quantities through pinned RPC reads and label discovery coverage honestly. Financial snapshots declare a bounded tracked asset scope; unsupported USD valuation must block a bounded write rather than infer value from a symbol.
 - Start with Binance funding and Ethereum wallet/Uniswap/Aave flows without silently dropping the remaining concept scope.
+- Normal operations support intentional permanent portfolio changes without run creation, verification classification, return planning or baseline restoration. Product ceilings are human-owned protected configuration; setup collects them and changes need fresh human authorization. Zero removes the corresponding personal ceiling. The legacy-named allocation setting is an installation-wide rolling 24-hour gross budget across commands; unresolved submissions remain reserved beyond that window. Historical runs are inspection/recovery records, not gates on normal use.
 - Keep beta engineering practical. Do not introduce additional release-hardening or formal audit gates from unaccepted review suggestions.
 - Acceptance verification targets production exchange accounts and Ethereum mainnet with real funds. Every movement is capped at $100 equivalent, with total test allocation also at most $100 including execution/unwind costs. Follow the [live-test contract](docs/testing/README.md#live-test-contract); these are test limits, not global product limits.
-- Snapshot the initial financial state and plan the complete return path before a live write. Restore account allocation, holdings/exposure, positions/debt, and test-modified allowances, net unavoidable costs. Never mark a run complete while restoration is unresolved; cleanup writes also require fresh Touch ID.
+- For explicitly authorized live acceptance tests only, the LLM must snapshot the initial financial state and plan the complete return path before a live write. Restore account allocation, holdings/exposure, positions/debt, and test-modified allowances, net unavoidable costs. Never mark a run complete while restoration is unresolved; cleanup writes also require fresh Touch ID.
 
 ## CLI experience conventions
 

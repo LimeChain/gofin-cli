@@ -1,14 +1,14 @@
 //! Shared safe CLI arguments, validation, and offline onboarding discovery.
 //! Enrollment DTOs were drafted by Ogi Spark/GLM and reviewed against the CLI contract.
 use clap::{Args, ValueEnum};
-use fin_domain::{
-    Definition, ExecutionActor, FinError, OperationKind, PlanStep, ResourceAmount, Result,
-};
+use fin_domain::{Definition, ExecutionActor, FinError, OperationKind, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod enrollment_contract;
+pub mod policy;
+pub use policy::{PolicySetArgs, PolicyView};
 
 /// Shared human-facing explanation for macOS administrator authentication.
 pub const MACOS_ADMIN_PASSWORD_PROMPT: &str = "Mac login password for %p: ";
@@ -131,29 +131,12 @@ pub struct ExecuteInput {
     pub input: Value,
     /// Required for execution; previews do not consume an identity.
     pub request_id: Option<String>,
+    /// Historical retry identity only; new operations do not use runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     /// Same read-only preparation as `fin preview`, without approval/submission.
     #[serde(default)]
     pub dry_run: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RunBeginInput {
-    pub allocations: Vec<ResourceAmount>,
-    /// Separate borrowed-proceeds reserve, counted once alongside selected physical holdings.
-    pub borrowed_proceeds_reserve_usd_micros: String,
-    /// Earmark drawn from the selected physical allocation; this value is not added to the cap again.
-    pub return_cost_reserve_usd_micros: String,
-    pub planned_operations: Vec<PlanStep>,
-    pub unwind: Vec<PlanStep>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RunReplanInput {
-    /// Fresh bounded cleanup steps; the broker supplies observer state and prices.
-    pub remaining: Vec<PlanStep>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -321,7 +304,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "provider":"macOS sudo",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
-        "scope":"Setup and connection add/update/remove only. Everyday commands use the protected background service without sudo.",
+        "scope":"Setup, policy set and connection add/update/remove only. Everyday commands use the protected background service without sudo.",
         "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
         "financial_approval":"Every financial write requires its own fresh Touch ID approval."
     });
@@ -409,18 +392,19 @@ pub fn operation_definitions() -> Vec<Definition> {
             "Execute one approved operation under a stable request identity, or preview it with --dry-run.",
             OperationKind::Write,
             ExecutionActor::AgentInvocable,
-            json!({"operation":"binance.transfer","input":{"requestId":"synthetic-venue-request-001","authority":"main","from":"main","to":"savings","coin":"USDT","amount":"1","fromWallet":"SPOT","toWallet":"SPOT"},"request_id":"synthetic-logical-write-001","run_id":"synthetic-bounded-run-001"}),
+            json!({"operation":"binance.transfer","input":{"requestId":"synthetic-venue-request-001","authority":"main","from":"main","to":"savings","coin":"USDT","amount":"1","fromWallet":"SPOT","toWallet":"SPOT"},"request_id":"synthetic-logical-write-001"}),
             json!({
                 "input_validation":"operation-specific bundled schema",
                 "service_required":true,
                 "fresh_approval":"broker enforced per write",
                 "retry":"reuse the same --id for this logical request; reconcile uncertain submissions before starting a new action",
-                "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --run RUN_ID --json",
-                "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --run synthetic-bounded-run-001 --json",
-                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--run RUN_ID","--dry-run","--json"],
+                "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --json",
+                "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --json",
+                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--dry-run","--json"],
                 "cli_field_mapping":{"request_id":"--id","run_id":"--run","dry_run":"--dry-run"},
-                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","run_scope":"--run may remain on the command but is not consumed; this preview does not reserve allocation or validate a scoped run's execution policy","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
-                "run_scope":"--run supplies the bounded run ID. It is required for the bounded verification acceptance flow and whenever protected runtime policy requires a run; it may be omitted only when policy permits an unscoped write.",
+                "allocation_scope":"Installation-wide rolling 24-hour gross movement, maximum costs and additional borrowed allocation; unresolved submissions continue counting beyond the window. No run, return plan or restoration required.",
+                "historical_retry":"Hidden --run preserves the original request identity for historical retries only; new writes omit it.",
+                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","run_scope":"Historical --run is not consumed; previews do not reserve or validate the rolling allocation budget","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
@@ -456,37 +440,13 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"client_supplied_state":false,"service_required":true}),
         ),
-        definition::<RunBeginInput>(
-            "run.begin",
-            "Capture a fresh baseline, select physical holdings, earmark return costs from those same holdings, and reserve a complete return path.",
-            OperationKind::Configuration,
-            ExecutionActor::AgentInvocable,
-            json!({"allocations":[{"resource":"binance:main:spot","amount":{"asset":{"network":"binance","reference":"USDT","decimals":6},"atoms":"1000000"}}],"borrowed_proceeds_reserve_usd_micros":"0","return_cost_reserve_usd_micros":"1000000","planned_operations":[{"operation":"binance.transfer","input":{"requestId":"synthetic-forward","authority":"main","from":"main","to":"savings","coin":"USDT","amount":"1","fromWallet":"SPOT","toWallet":"SPOT"},"maximum_fee_usd_micros":"500000","description":"Move one selected USDT from the configured main account to its subaccount"}],"unwind":[{"operation":"binance.transfer","input":{"requestId":"synthetic-return","authority":"main","from":"savings","to":"main","coin":"USDT","amount":"1","fromWallet":"SPOT","toWallet":"SPOT"},"maximum_fee_usd_micros":"500000","description":"Return one USDT from the subaccount to the main account"}]}),
-            json!({"baseline":"captured by trusted broker observer","client_supplied_state":false,"maximum_allocation_usd_micros":"100000000","cap_counts":"selected physical holdings plus borrowed-proceeds reserve","return_cost_reserve":"earmarked within selected physical holding value; never an additional source","cost_source":"each actual additional fee must be funded by selected-origin cash at its exact resource and asset"}),
-        ),
         definition::<IdInput>(
             "run.status",
-            "Read the durable run baseline, reservations, and restoration status.",
+            "Inspect a historical run record, including its original baseline and unresolved reservations.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({"id":"run-id"}),
-            json!({"financial_movement":false}),
-        ),
-        definition::<RunReplanInput>(
-            "run.replan",
-            "Replace only the unexecuted return route after a fresh broker-observed state and bounded restoration proof.",
-            OperationKind::Configuration,
-            ExecutionActor::AgentInvocable,
-            json!({"remaining":[{"operation":"wallet.transfer","input":{"wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"1","recipient":"0x0000000000000000000000000000000000000001","request_id":"synthetic-replan","max_fee_eth":"0.001"},"maximum_fee_usd_micros":"1000","description":"Return the observed excess to its selected origin"}]}),
-            json!({"baseline":"original run baseline retained","allocation":"unchanged","cost_budget":"remaining amount of original reserve","writes":"none; each later operation still requires fresh approval","unknown_submission":"must reconcile original identity before replanning"}),
-        ),
-        definition::<IdInput>(
-            "run.finish",
-            "Observe the final state and mark the run restored only when all tracked allocation is returned.",
-            OperationKind::Configuration,
-            ExecutionActor::AgentInvocable,
-            json!({"id":"run-id"}),
-            json!({"final_state":"captured by trusted broker observer","unresolved_state":"remains cleanup_outstanding"}),
+            json!({"financial_movement":false,"historical_only":true,"recovery":"Use fin operations and fin status to reconcile original submissions; portfolio restoration is not a product prerequisite."}),
         ),
         definition::<EmptyArgs>(
             "setup",
@@ -494,7 +454,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"Fin-owned files and exact marked blocks only; preserve user edits"},"installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication.clone(),"financial_movement":false,"secret_input":"none","shell_completion":{"automatic":true,"selection":"configured human account login shell and home from account database","supported":["zsh","bash","fish"],"activation":"new shell","unsupported":"brief notice; setup continues","cleanup":"Fin-owned files and exact marked blocks only; preserve user edits"},"financial_limits":{"input":"protected human terminal prompts before setup Touch ID","default_usd":"100","zero":"no personal limit for that field","later_change":"fin policy set"},"installs":["one public fin CLI","protected internal broker","bundled native OS authorization helper","private credential/configuration/journal storage","macOS PATH registration in /etc/paths.d/fin"],"command_availability":"Open a new macOS Terminal after setup to use fin. Existing shells can run: export PATH=\"/Library/Fin/runtime:$PATH\". Custom PATH overrides must retain this directory.","boundary":"Installation authorizes no financial action. Run sudo -K to clear all cached sudo credentials, close elevated shells, and verify the agent lacks root access. This does not change Fin's per-write Touch ID requirement.","next_check":"fin daemon status --json"}),
         ),
         definition::<AddConnectionArgs>(
             "connections.add",
@@ -519,6 +479,22 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::HumanInteractive,
             json!({"name":"main"}),
             json!({"requires_human_terminal":true,"requires_administrator":true,"administrator_authentication":administrator_authentication,"secret_input":"none","financial_movement":false,"pending_work":"Refuse while an unresolved operation needs this physical resource or credential.","next_check":"fin connections list --json"}),
+        ),
+        definition::<EmptyArgs>(
+            "policy.show",
+            "Show human-owned financial limits, included costs and durable allocation scope.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({}),
+            json!({"financial_movement":false,"command_line_examples":["fin policy show", "fin policy show --json"]}),
+        ),
+        definition::<PolicySetArgs>(
+            "policy.set",
+            "Atomically change both financial limits after protected human review and fresh Touch ID.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({"max_movement_usd":"1000","max_run_allocation_usd":"5000"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":true,"financial_movement":false,"future_financial_authority":false,"secret_input":"none","amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000"],"next_check":"fin policy show --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",
@@ -598,6 +574,8 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "then":{},
                 "else":{"required":["request_id"],"properties":{"request_id":{"type":"string","minLength":1}}}
             }]);
+        } else if matches!(item.name.as_str(), "policy.show" | "policy.set") {
+            item.output_schema = schema::<PolicyView>();
         } else if matches!(item.name.as_str(), "connections.add" | "connections.update") {
             item.input_schema = connection_schema.clone();
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();

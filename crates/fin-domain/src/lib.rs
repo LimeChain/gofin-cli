@@ -1,5 +1,7 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 pub mod money;
+pub mod policy;
+
 use async_trait::async_trait;
 pub use money::{Quantity, SignedQuantity};
 use schemars::JsonSchema;

@@ -71,7 +71,7 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 48);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 49);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
@@ -123,20 +123,19 @@ fn offline_discovery_commands_work_without_service() {
 }
 
 #[test]
-fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
+fn execute_discovery_supports_permanent_operations_without_runs() {
     let capabilities = run(&["capabilities", "--json"]);
     assert!(capabilities.status.success());
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
-    let execute = capabilities["commands"]
-        .as_array()
-        .unwrap()
+    let commands = capabilities["commands"].as_array().unwrap();
+    let execute = commands
         .iter()
         .find(|definition| definition["name"] == "execute")
         .unwrap();
     let semantics = &execute["semantics"];
     assert_eq!(
         semantics["command_line_template"],
-        "fin execute OPERATION --input JSON --id REQUEST_ID --run RUN_ID --json"
+        "fin execute OPERATION --input JSON --id REQUEST_ID --json"
     );
     assert_eq!(semantics["cli_field_mapping"]["request_id"], "--id");
     assert_eq!(semantics["cli_field_mapping"]["run_id"], "--run");
@@ -150,35 +149,44 @@ fn execute_discovery_maps_json_fields_to_real_run_scoped_cli_flags() {
             .contains(" --id ")
     );
     assert!(
-        semantics["command_line_example"]
+        !semantics["command_line_example"]
             .as_str()
             .unwrap()
             .contains(" --run ")
     );
+    assert!(execute["examples"][0].get("run_id").is_none());
     assert!(
-        !semantics["command_line_example"]
+        semantics["allocation_scope"]
             .as_str()
             .unwrap()
-            .contains("--request-id")
+            .contains("No run")
     );
-    assert_eq!(
-        execute["examples"][0]["run_id"],
-        "synthetic-bounded-run-001"
-    );
+    for retired in ["run.begin", "run.replan", "run.finish"] {
+        assert!(
+            !commands
+                .iter()
+                .any(|definition| definition["name"] == retired)
+        );
+        assert!(!run(&["schema", retired, "--json"]).status.success());
+    }
     assert!(
-        semantics["run_scope"]
-            .as_str()
-            .unwrap()
-            .contains("whenever protected runtime policy requires a run")
+        commands
+            .iter()
+            .any(|definition| definition["name"] == "run.status")
     );
-
-    // Targeted Clap help is local parsing only and never contacts the broker.
     let help = run(&["execute", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--id <ID>"));
-    assert!(help.contains("--run <RUN>"));
-    assert!(!help.contains("--request-id"));
+    assert!(!help.contains("--run"));
+    let run_help = run(&["run", "--help"]);
+    let run_help = String::from_utf8(run_help.stdout).unwrap();
+    assert!(run_help.contains("status"));
+    for retired in ["begin", "replan", "finish"] {
+        assert!(!run_help.contains(retired));
+        let result = run(&["run", retired, "--json"]);
+        assert!(!result.status.success());
+    }
 }
 
 #[test]
@@ -628,10 +636,10 @@ fn generic_withdrawal_discovery_explains_routes_targets_and_receipt_limits_offli
             .contains("pending")
     );
     assert!(
-        schema["semantics"]["trackedRuns"]
+        schema["semantics"]["ordinaryExecution"]
             .as_str()
             .unwrap()
-            .contains("return plan")
+            .contains("restoration")
     );
 }
 
@@ -668,4 +676,91 @@ fn address_book_discovery_exposes_reads_and_human_mutation_handoff_without_servi
             .unwrap()
             .contains("binance.whitelist")
     );
+}
+
+#[test]
+fn policy_discovery_and_machine_handoff_are_offline_and_noninteractive() {
+    let help = run(&["policy", "set", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--max-movement-usd") && help.contains("--max-run-allocation-usd"));
+    for name in ["policy.show", "policy.set"] {
+        let output = run(&["schema", name, "--json"]);
+        assert!(output.status.success());
+        let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(schema["output"]["properties"]["max_movement_usd"].is_object());
+    }
+    for extra in [vec![], vec!["--verbose"]] {
+        let mut args = vec![
+            "policy",
+            "set",
+            "--max-movement-usd",
+            "1000",
+            "--max-run-allocation-usd",
+            "5000",
+            "--json",
+        ];
+        args.extend(extra);
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.contains(&0x1b));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+    }
+    let output = run(&[
+        "policy",
+        "set",
+        "--max-movement-usd",
+        "1000",
+        "--max-run-allocation-usd",
+        "5000",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.starts_with("✗ "));
+    assert!(message.contains("human-owned interactive terminal"));
+    assert!(!message.contains("HUMAN_TERMINAL_REQUIRED"));
+    assert!(!output.stderr.contains(&0x1b));
+    for bad in ["-1", "1e3", "NaN", "0.0000001", "18446744073709.551616"] {
+        let output = run(&[
+            "policy",
+            "set",
+            &format!("--max-movement-usd={bad}"),
+            "--max-run-allocation-usd",
+            "5000",
+        ]);
+        assert!(!output.status.success());
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.starts_with("✗ "));
+        assert!(message.contains("USD limits must be nonnegative exact decimals"));
+        assert!(!message.contains("INVALID_POLICY_AMOUNT"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Mac login password"));
+    }
+}
+
+#[test]
+fn setup_discovers_limit_prompts_and_zero_keeps_machine_handoff() {
+    let help = run(&["setup", "--help"]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("0 means no personal limit"));
+    let schema = run(&["explain", "setup", "--json"]);
+    let value: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(value["semantics"]["financial_limits"]["default_usd"], "100");
+    let output = run(&[
+        "policy",
+        "set",
+        "--max-movement-usd",
+        "0",
+        "--max-run-allocation-usd",
+        "0",
+        "--json",
+    ]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["error"]["code"],
+        "HUMAN_TERMINAL_REQUIRED"
+    );
+    assert!(output.stderr.is_empty());
 }
