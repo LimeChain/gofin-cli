@@ -26,7 +26,12 @@ distribution are not provided.
 Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
 Terminal can run `fin` directly. It leaves Homebrew directories untouched and
 automatically configures completion for the user's login shell, using only
-Fin-owned files and marked shell blocks. For the Terminal already open during setup, run:
+Fin-owned files and marked shell blocks. After success it asks
+`Install Fin's optional Codex skill? [y/N]`. Enter skips; y/yes invokes the skill
+installer as the human account. Optional failure or cancellation preserves the
+completed setup. The skill is embedded in the `fin` binary,
+including Linux discovery bundles, and installs offline without sudo or approval.
+Setup never opts an agent environment in automatically. For the Terminal already open during setup, run:
 
 ```sh
 export PATH="/Library/Fin/runtime:$PATH"
@@ -73,6 +78,14 @@ retain the same installed-code, credential and Touch ID checks as release builds
 In your own macOS Terminal, `make setup` builds and installs a debug bundle for
 an intentional human checkpoint. Run Make as your normal user, not with sudo;
 Fin requests elevation when needed and the wrapper clears it on exit.
+`make update` builds a debug bundle and invokes the reviewed runtime updater,
+including its installer/helper update option. Review local changes first. It
+preserves credentials and financial records, retains a runtime-only backup, and
+does not rerun setup or restart the service. After runtime commit, skill refresh
+runs as the invoking human with a clean environment and uses their account home.
+Only previously installed, unmodified Fin-managed copies are refreshed; missing,
+unmanaged or edited copies are preserved. Skill conflicts do not roll back the
+runtime update. Inspect them with `fin skill inspect --agent codex --json`.
 `make uninstall` is a destructive local reset: it deletes installed credentials
 and configuration, refusing financial history. Neither target runs implicitly.
 Use Apple's Make supplied with macOS/Xcode/Command Line Tools; other executable

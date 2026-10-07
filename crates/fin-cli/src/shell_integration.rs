@@ -97,6 +97,10 @@ fn account() -> Result<Account> {
     Err(failure())
 }
 
+pub(crate) fn account_home() -> Result<PathBuf> {
+    Ok(account()?.home)
+}
+
 pub(crate) fn run(action: Action) -> Result<Value> {
     let account = account()?;
     apply(&account, action).map_err(|_| failure())

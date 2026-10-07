@@ -66,7 +66,7 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod"):
             sys.exit(0)
     path = ("/usr/bin/" if name == "mktemp" else "/bin/") + name
     os.execv(path, [name] + args)
-elif name in ("awk", "shasum", "cmp"):
+elif name in ("awk", "shasum", "cmp", "sudo"):
     os.execv("/usr/bin/" + name, [name] + args)
 elif name == "uname":
     print("Darwin" if args == ["-s"] else "arm64")
@@ -114,6 +114,8 @@ elif name == "pgrep":
         sys.exit(0)
     # A persistent broker daemon by itself is deliberately allowed.
     sys.exit(1)
+elif name == "sudo":
+    sys.exit(1 if options.get("skill_refresh_failure") else 0)
 elif name != "chown":
     sys.exit("Unexpected mock command: " + name)
 '''
@@ -160,7 +162,7 @@ class RuntimeUpdateFixture(unittest.TestCase):
                                for path in self.private.rglob("*") if path.is_file()}
         driver = "#!" + sys.executable + "\n" + DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown",
-                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp"):
+                     "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo"):
             self.bin.joinpath(name).write_text(driver)
             self.bin.joinpath(name).chmod(0o755)
         source = SCRIPT.read_text()
@@ -182,9 +184,9 @@ class RuntimeUpdateFixture(unittest.TestCase):
             for name in FILES[:-1]))
         bundle.joinpath("SHA256SUMS").chmod(0o644)
 
-    def run_update(self, sudo_uid="501", presentation_update=False):
+    def run_update(self, sudo_uid="501", presentation_update=False, from_runtime=False):
         self.root.joinpath("options.json").write_text(json.dumps(self.options))
-        arguments = ["/bin/bash", str(self.script), "--from", str(self.old), "--to", str(self.new)]
+        arguments = ["/bin/bash", str(self.script), "--from", str(self.runtime if from_runtime else self.old), "--to", str(self.new)]
         if presentation_update:
             arguments.append("--presentation-update")
         result = subprocess.run(
@@ -253,6 +255,27 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.script.write_text(self.script.read_text().replace(
             "true || fail 'Use a fresh human Terminal", "[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || fail 'Use a fresh human Terminal"))
         self.assert_refused("without pipelines or redirection")
+
+    def test_make_update_can_use_verified_runtime_as_old_bundle(self):
+        result = self.run_update(from_runtime=True, presentation_update=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_runtime_matches(self.new)
+
+    def test_skill_refresh_drops_privileges_after_runtime_commit(self):
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = self.events()
+        refresh = [event for event in events if event[0] == "sudo"]
+        self.assertEqual(len(refresh), 1)
+        self.assertEqual(refresh[0][1], ["-n", "-H", "-u", "#501", str(self.bin / "env"), "-i", str(self.runtime / "fin"), "internal-skills-refresh"])
+        self.assertGreater(events.index(refresh[0]), max(i for i, event in enumerate(events) if event[0] == "mv"))
+
+    def test_skill_refresh_failure_preserves_successful_runtime_update(self):
+        self.options["skill_refresh_failure"] = True
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("optional skill refresh needs attention", result.stderr)
+        self.assertEqual((self.runtime / "fin").read_bytes(), (self.new / "fin").read_bytes())
 
     def test_installed_hash_mismatch_is_preserved(self):
         self.runtime.joinpath("fin-broker").write_text("unexpected installed bytes\n")

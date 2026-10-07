@@ -147,6 +147,40 @@ The existing synthetic broker/store/engine tests are the current isolated loop;
 a standalone interactive synthetic broker is not yet implemented. No dependency,
 financial policy, credential backend, or live authorization mode was added.
 
+### Optional companion skill maintenance
+
+The CLI embeds `skills/fin/SKILL.md`; no download, extra bundle component or
+source checkout is needed at runtime. Shared Clap/Serde/Schemars types expose
+`skill install/inspect/update/remove --agent codex`, versioned capability metadata
+and typed results. The environment enum owns reviewed destination mappings and
+is the extension point for later agents; Codex uses `$HOME/.agents/skills/fin`.
+Per-environment user-owned records retain the exact installed bytes and version.
+A local file lock serializes Fin writers; atomic record replacement and content
+comparison make interrupted or modified copies conflicts, never silent adoption.
+Unmanaged/modified content is refused by default. Explicit `--backup` moves the
+conflicting directory into Fin's user-owned data directory before replacement or
+removal. Symlinks/invalid records are refused; no recursive deletion is used.
+
+Successful human setup offers `Install Fin's optional Codex skill? [y/N]`.
+Only explicit y/yes installs; Enter/No/EOF skip. The installer reuses the public
+skill command after dropping to the human UID, with no backup flag or further
+approval. The offer has no activity indicator, is absent from JSON/non-TTY paths,
+and cancellation or optional installation failure preserves completed setup.
+After runtime verification/commit,
+the updater runs skill refresh with the invoking human UID and a clean environment;
+it reads that account's home from the account database. Only registered, existing,
+unmodified copies are refreshed. Failure preserves the runtime update and gives
+an inspection command. `make update` builds a debug bundle and invokes this
+existing reviewed updater, accepting the reviewed installer/helper changes; it
+never reruns setup. No broker request, protected configuration or financial
+approval is involved in skill maintenance.
+
+`execute --dry-run` is a client alias for the existing broker preview request,
+keeping the required stable `--id` without consuming it. The non-dry execution
+path and broker authorization are unchanged. The skill now recommends this
+preview and discovers operations from current capabilities/explanations/schemas.
+See [maintenance and verification](companion-skill.md).
+
 ### Shared CLI presentation
 
 `fin-presentation` centralizes human rendering, safe terminal text, restrained

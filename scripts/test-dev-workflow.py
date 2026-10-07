@@ -39,7 +39,7 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertNotIn('arg:', result.stdout)
 
     def test_human_and_bundle_targets_route_explicitly(self):
-        for target in ('setup', 'uninstall', 'bundle', 'release'):
+        for target in ('setup', 'update', 'uninstall', 'bundle', 'release'):
             with self.subTest(target=target):
                 result = self.make(target)
                 self.assertEqual(result.returncode, 0)
@@ -62,7 +62,7 @@ class DevWorkflowTests(unittest.TestCase):
     def test_real_human_actions_refuse_pipes_before_privilege_or_packaging(self):
         if os.uname().sysname != 'Darwin':
             self.skipTest('macOS helper')
-        for target in ('setup', 'uninstall'):
+        for target in ('setup', 'update', 'uninstall'):
             result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), target],
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
@@ -88,7 +88,7 @@ class DevWorkflowTests(unittest.TestCase):
             .replace("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }", 'true'))
         (mocks / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         (mocks / 'id').write_text('#!/bin/sh\necho 501\n')
-        (mocks / 'sudo').write_text('#!/bin/sh\nexit 0\n')
+        (mocks / 'sudo').write_text('#!/bin/sh\nprintf \"sudo:%s\\n\" \"$*\" >> \"$EVENTS\"\nexit 0\n')
         for mock in mocks.iterdir():
             mock.chmod(0o700)
         (scripts / 'package-rust-macos.sh').write_text('''#!/bin/sh
@@ -111,7 +111,7 @@ chmod 700 "$bundle/fin"
             result = subprocess.run(args, cwd=fixture, capture_output=True, text=True,
                                     timeout=10, env=dict(os.environ, EVENTS=str(events)))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            lines = events.read_text().splitlines()
+            lines = [line for line in events.read_text().splitlines() if line != 'sudo:-K']
             self.assertEqual(len(lines), 2, lines)
             self.assertTrue(lines[0].startswith('package:'), lines)
             if verbose:
@@ -120,6 +120,37 @@ chmod 700 "$bundle/fin"
             else:
                 self.assertEqual(lines[1], 'fin:setup')
                 self.assertNotIn('--verbose', lines[0])
+
+    def test_update_builds_then_invokes_reviewed_updater_and_clears_elevation(self):
+        fixture = self.root / 'update-workflow'
+        scripts = fixture / 'scripts'
+        mocks = fixture / 'mocks'
+        scripts.mkdir(parents=True)
+        mocks.mkdir()
+        events = fixture / 'events.txt'
+        source = (REPO / 'scripts/dev-macos.sh').read_text()
+        source = source.replace('/usr/bin/uname', str(mocks / 'uname')).replace('/usr/bin/id', str(mocks / 'id')).replace('/usr/bin/sudo', str(mocks / 'sudo'))
+        source = source.replace('[ -t 0 ] && [ -t 1 ] && [ -t 2 ]', 'true')
+        source = source.replace('/Library/Fin', str(fixture / 'Library/Fin'))
+        (scripts / 'dev-macos.sh').write_text(source)
+        (mocks / 'uname').write_text('#!/bin/sh\necho Darwin\n')
+        (mocks / 'id').write_text('#!/bin/sh\necho 501\n')
+        (mocks / 'sudo').write_text('#!/bin/sh\nprintf "sudo:%s\\n" "$*" >> "$EVENTS"\n')
+        for mock in mocks.iterdir():
+            mock.chmod(0o700)
+        (scripts / 'package-rust-macos.sh').write_text('#!/bin/sh\nprintf "package:%s\\n" "$*" >> "$EVENTS"\n')
+        result = subprocess.run(['/bin/sh', str(scripts / 'dev-macos.sh'), 'update'], cwd=fixture,
+                                env=dict(os.environ, EVENTS=str(events)), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = events.read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith('package:'))
+        self.assertIn('--dev', lines[0])
+        self.assertIn('update-rust-macos-runtime.sh', lines[1])
+        self.assertIn('--from ' + str(fixture / 'Library/Fin/runtime'), lines[1])
+        self.assertIn('--presentation-update', lines[1])
+        self.assertEqual(lines[2], 'sudo:-K')
+        self.assertNotIn('fin setup', '\n'.join(lines))
 
     def test_invalid_helper_action_is_rejected(self):
         result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), 'anything'], capture_output=True, text=True)
