@@ -130,9 +130,6 @@ pub struct ExecuteInput {
     /// Validated against the selected operation's bundled input schema.
     pub input: Value,
     pub request_id: String,
-    /// Historical retry identity only; new operations do not use runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -395,9 +392,8 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --json",
                 "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --json",
                 "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--json"],
-                "cli_field_mapping":{"request_id":"--id","run_id":"--run"},
+                "cli_field_mapping":{"request_id":"--id"},
                 "allocation_scope":"Installation-wide rolling 24-hour gross movement, maximum costs and additional borrowed allocation; unresolved submissions continue counting beyond the window. No run, return plan or restoration required.",
-                "historical_retry":"Hidden --run preserves the original request identity for historical retries only; new writes omit it.",
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
@@ -432,14 +428,6 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::AgentReadable,
             json!({}),
             json!({"client_supplied_state":false,"service_required":true}),
-        ),
-        definition::<IdInput>(
-            "run.status",
-            "Inspect a historical run record, including its original baseline and unresolved reservations.",
-            OperationKind::Read,
-            ExecutionActor::AgentReadable,
-            json!({"id":"run-id"}),
-            json!({"financial_movement":false,"historical_only":true,"recovery":"Use fin operations and fin status to reconcile original submissions; portfolio restoration is not a product prerequisite."}),
         ),
         definition::<EmptyArgs>(
             "setup",

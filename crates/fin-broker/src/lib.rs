@@ -1354,12 +1354,11 @@ impl BrokerRuntime {
             R::Snapshot => {
                 serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
             }
-            R::RunStatus { id } => self.engine.historical_run(&id),
             R::RunBegin { .. } | R::RunReplan { .. } | R::RunFinish { .. } => Err(FinError::new(
                 "RUN_RETIRED",
                 "validation",
                 "Verification run mutations are retired.",
-                "Execute ordinary operations without --run; inspect historical runs with fin run status and reconcile operations with fin status.",
+                "Execute ordinary operations directly; inspect operations with fin operations and reconcile them with fin status.",
             )),
             R::DaemonStart => {
                 if self.protected_config_check.load(Ordering::SeqCst) {
@@ -1853,7 +1852,6 @@ fn protocol_methods() -> Vec<&'static str> {
         "status",
         "operations",
         "snapshot",
-        "run_status",
         "daemon_start",
         "daemon_stop",
     ]
@@ -3636,7 +3634,7 @@ mod tests {
         assert_eq!(captures.load(Ordering::SeqCst), before);
         assert!(runtime.engine.operations().unwrap().is_empty());
         let methods = protocol_methods();
-        assert!(methods.contains(&"run_status"));
+        assert!(!methods.contains(&"run_status"));
         assert!(!methods.contains(&"run_begin") && !methods.contains(&"run_finish"));
     }
 

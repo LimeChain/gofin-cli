@@ -107,6 +107,12 @@ fn execute_discovery_supports_permanent_operations_without_runs() {
         "fin execute OPERATION --input JSON --id REQUEST_ID --json"
     );
     assert_eq!(semantics["cli_field_mapping"]["request_id"], "--id");
+    assert!(semantics["cli_field_mapping"].get("run_id").is_none());
+    assert!(
+        execute["input_schema"]["properties"]
+            .get("run_id")
+            .is_none()
+    );
     assert!(
         !semantics["command_line_example"]
             .as_str()
@@ -114,13 +120,17 @@ fn execute_discovery_supports_permanent_operations_without_runs() {
             .contains(" --run ")
     );
     assert!(execute["examples"][0].get("run_id").is_none());
+    let mut public_request = execute["examples"][0].clone();
+    assert!(serde_json::from_value::<fin_discovery::ExecuteInput>(public_request.clone()).is_ok());
+    public_request["run_id"] = Value::String("synthetic-legacy-run".into());
+    assert!(serde_json::from_value::<fin_discovery::ExecuteInput>(public_request).is_err());
     assert!(
         semantics["allocation_scope"]
             .as_str()
             .unwrap()
             .contains("No run")
     );
-    for retired in ["run.begin", "run.replan", "run.finish"] {
+    for retired in ["run.begin", "run.replan", "run.finish", "run.status"] {
         assert!(
             !commands
                 .iter()
@@ -128,23 +138,98 @@ fn execute_discovery_supports_permanent_operations_without_runs() {
         );
         assert!(!run(&["schema", retired, "--json"]).status.success());
     }
-    assert!(
-        commands
-            .iter()
-            .any(|definition| definition["name"] == "run.status")
-    );
+    assert!(!commands.iter().any(|definition| {
+        definition["name"]
+            .as_str()
+            .is_some_and(|name| name == "run" || name.starts_with("run."))
+    }));
     let help = run(&["execute", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--id <ID>"));
     assert!(!help.contains("--run"));
-    let run_help = run(&["run", "--help"]);
-    let run_help = String::from_utf8(run_help.stdout).unwrap();
-    assert!(run_help.contains("status"));
-    for retired in ["begin", "replan", "finish"] {
-        assert!(!run_help.contains(retired));
-        let result = run(&["run", retired, "--json"]);
-        assert!(!result.status.success());
+    let schema = run(&["schema", "execute", "--json"]);
+    assert!(schema.status.success());
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert!(schema["input"]["properties"].get("run_id").is_none());
+    assert!(
+        schema["input"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "request_id")
+    );
+}
+
+#[test]
+fn removed_run_interface_is_rejected_before_service_access() {
+    for args in [
+        vec!["run", "--json"],
+        vec!["run", "status", "SYNTHETIC_REMOVED_ARG", "--json"],
+        vec!["run", "--help", "--json"],
+        vec![
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "synthetic",
+            "--run",
+            "SYNTHETIC_REMOVED_ARG",
+            "--json",
+        ],
+        vec![
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "synthetic",
+            "--run=SYNTHETIC_REMOVED_ARG",
+            "--json",
+            "--verbose",
+        ],
+    ] {
+        let result = run(&args);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stderr.is_empty());
+        let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["error"]["code"], "INVALID_COMMAND");
+        assert!(!result.to_string().contains("SYNTHETIC_REMOVED_ARG"));
+    }
+    for command in ["explain", "schema"] {
+        let result = run(&[command, "run.status", "--json"]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stderr.is_empty());
+        let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(result["error"]["code"], "UNKNOWN_DEFINITION");
+    }
+    let human = run(&["run", "status", "SYNTHETIC_REMOVED_ARG"]);
+    assert_eq!(human.status.code(), Some(1));
+    assert!(human.stdout.is_empty());
+    let error = String::from_utf8(human.stderr).unwrap();
+    assert!(error.contains("INVALID_COMMAND"));
+    assert!(!error.contains("SYNTHETIC_REMOVED_ARG") && !error.contains('\u{1b}'));
+}
+
+#[test]
+fn removed_run_interface_is_absent_from_help_and_completions() {
+    let help = run(&["--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(
+        !help
+            .lines()
+            .any(|line| line.trim_start().starts_with("run "))
+    );
+    for shell in ["zsh", "bash", "fish"] {
+        let output = run(&["completions", shell, "--json"]);
+        assert!(output.status.success());
+        let output: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let script = output["script"].as_str().unwrap();
+        assert!(!script.contains("--run"));
+        assert!(!script.contains("fin__run"));
+        assert!(!script.contains("'run:") && !script.contains("-a run "));
     }
 }
 

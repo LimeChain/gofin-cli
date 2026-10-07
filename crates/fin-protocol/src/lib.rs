@@ -38,9 +38,6 @@ pub enum BrokerRequest {
     RunBegin {
         request: RunBeginRequest,
     },
-    RunStatus {
-        id: String,
-    },
     RunReplan {
         id: String,
         remaining: Vec<PlanStep>,
@@ -164,6 +161,13 @@ mod tests {
 
         let mut unknown = BufReader::new(&b"{\"method\":\"signed_venue_call\"}\n"[..]);
         assert!(read_request(&mut unknown).await.is_err());
+
+        let mut removed =
+            BufReader::new(&b"{\"method\":\"run_status\",\"id\":\"synthetic-run\"}\n"[..]);
+        assert_eq!(
+            read_request(&mut removed).await.unwrap_err().code,
+            "INVALID_PROTOCOL_FRAME"
+        );
 
         let mut unterminated = BufReader::new(&b"{\"method\":\"capabilities\"}"[..]);
         assert!(read_request(&mut unterminated).await.is_err());

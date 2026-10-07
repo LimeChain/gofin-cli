@@ -227,11 +227,10 @@ fin execute OPERATION --input PUBLIC_JSON --id STABLE_REQUEST_ID --json
 ```
 
 Use the selected operation's schema for actual JSON. No run, purpose,
-return plan or restoration is required. `fin run begin`, `run replan` and
-`run finish` are retired. Inspect historical records with `fin run status RUN_ID
---json`; inspect/reconcile operations with `fin operations --json` and `fin status
-OPERATION_ID --json`. The hidden `--run` execute flag is only for preserving an
-old request's exact identity during a retry, never for starting new work.
+return plan or restoration is required. Inspect operations with
+`fin operations --json` and reconcile the original operation with
+`fin status OPERATION_ID --json`. The `run` command and `execute --run` argument
+are removed; stored financial records and unresolved reservations remain intact.
 
 Existing installations keep their stored limits, including the original $100
 values, until a human changes them. A previous requirement to execute inside a
