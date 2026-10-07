@@ -3,11 +3,11 @@
 set -eu
 fin_action=${1:-}
 fin_verbose=0
-case "$fin_action" in bundle|release|setup|uninstall) ;; *) echo 'Usage: dev-macos.sh bundle|release|setup|uninstall [--verbose]' >&2; exit 2 ;; esac
+case "$fin_action" in bundle|release|setup|update|uninstall) ;; *) echo 'Usage: dev-macos.sh bundle|release|setup|update|uninstall [--verbose]' >&2; exit 2 ;; esac
 shift
 if [ "$#" -gt 0 ]; then
   [ "$#" = 1 ] && [ "$1" = --verbose ] && [ "$fin_action" != uninstall ] || {
-    echo 'Usage: dev-macos.sh bundle|release|setup|uninstall [--verbose]' >&2
+    echo 'Usage: dev-macos.sh bundle|release|setup|update|uninstall [--verbose]' >&2
     exit 2
   }
   fin_verbose=1
@@ -15,7 +15,7 @@ fi
 fin_source=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$fin_source"
 [ "$(/usr/bin/uname -s)" = Darwin ] || { echo 'This target requires macOS; use make dev or make test-ui here.' >&2; exit 1; }
-if [ "$fin_action" = setup ] || [ "$fin_action" = uninstall ]; then
+if [ "$fin_action" = setup ] || [ "$fin_action" = update ] || [ "$fin_action" = uninstall ]; then
   [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }
   [ "$(/usr/bin/id -u)" -ge 501 ] || { echo 'Run make as your own user, without sudo.' >&2; exit 1; }
   # Clear cached elevation after success, failure, or cancellation.
@@ -44,6 +44,11 @@ else
   if [ "$fin_verbose" = 1 ]; then /bin/sh scripts/package-rust-macos.sh "$fin_bundle" --dev --verbose
   else /bin/sh scripts/package-rust-macos.sh "$fin_bundle" --dev
   fi
+fi
+if [ "$fin_action" = update ]; then
+  printf '%s\n' 'Fin needs your Mac login password to update its runtime; credentials and financial records stay in place.' >&2
+  /usr/bin/sudo -k -p 'Mac login password for %p: ' -- /bin/bash "$fin_source/scripts/update-rust-macos-runtime.sh" \
+    --from /Library/Fin/runtime --to "$fin_bundle" --presentation-update
 fi
 if [ "$fin_action" = setup ]; then
   if [ "$fin_verbose" = 1 ]; then "$fin_bundle/fin" setup --verbose

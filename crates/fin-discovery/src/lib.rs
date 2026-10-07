@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod companion_skill;
 pub mod enrollment_contract;
 pub mod policy;
 pub use policy::{PolicySetArgs, PolicyView};
@@ -130,6 +131,9 @@ pub struct ExecuteInput {
     /// Validated against the selected operation's bundled input schema.
     pub input: Value,
     pub request_id: String,
+    /// Preview only; no approval or submission.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -391,7 +395,8 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "retry":"reuse the same --id for this logical request; reconcile uncertain submissions before starting a new action",
                 "command_line_template":"fin execute OPERATION --input JSON --id REQUEST_ID --json",
                 "command_line_example":"fin execute binance.transfer --input '{\"requestId\":\"synthetic-venue-request-001\",\"authority\":\"main\",\"from\":\"main\",\"to\":\"savings\",\"coin\":\"USDT\",\"amount\":\"1\",\"fromWallet\":\"SPOT\",\"toWallet\":\"SPOT\"}' --id synthetic-logical-write-001 --json",
-                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--json"],
+                "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--dry-run","--json"],
+                "dry_run":"--dry-run routes exclusively to preview: no financial approval, reservation or submission; --id remains required but is not consumed. Returns the preview output for the selected operation.",
                 "cli_field_mapping":{"request_id":"--id"},
                 "allocation_scope":"Installation-wide rolling 24-hour gross movement, maximum costs and additional borrowed allocation; unresolved submissions continue counting beyond the window. No run, return plan or restoration required.",
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
@@ -510,6 +515,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup.","restart":"Only explicit fin daemon start clears protected stop intent; ordinary commands cannot reactivate it."}),
         ),
     ];
+    definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
     connection_schema["$defs"]["Provider"]["enum"] =
         json!(["binance", "evm", "ethereum", "coingecko"]);
@@ -549,6 +555,33 @@ pub fn operation_definitions() -> Vec<Definition> {
     ]);
     for item in &mut definitions {
         item.semantics["machine_contract"] = machine_contract();
+        if item.name == "execute" {
+            let mut dry_run = item.examples[0].clone();
+            dry_run["dry_run"] = json!(true);
+            item.examples.push(dry_run);
+            item.semantics["command_line_examples"] = json!([
+                item.semantics["command_line_example"],
+                format!(
+                    "{} --dry-run",
+                    item.semantics["command_line_example"]
+                        .as_str()
+                        .unwrap_or_default()
+                )
+            ]);
+        }
+        if item.name == "setup" {
+            item.semantics["optional_companion_skill"] = companion_skill::metadata();
+            item.semantics["companion_skill_offer"] = json!({
+                "prompt":companion_skill::SETUP_PROMPT,
+                "default":"no",
+                "when":"After successful human setup; never in JSON mode.",
+                "installation":"Only an explicit y/yes runs fin skill install --agent codex as the human account; conflicts are preserved without automatic backup or replacement.",
+                "failure":"Optional skill failure or cancellation leaves the completed Fin installation intact."
+            });
+        }
+        if item.name == "capabilities" {
+            item.semantics["companion_skill"] = companion_skill::metadata();
+        }
         if matches!(item.name.as_str(), "policy.show" | "policy.set") {
             item.output_schema = schema::<PolicyView>();
         } else if matches!(item.name.as_str(), "connections.add" | "connections.update") {

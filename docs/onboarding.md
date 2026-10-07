@@ -280,7 +280,20 @@ The [completion reference](shell-completion.md) covers file locations and custom
 5. After enrollment, the LLM checks named connections and account-specific capabilities/permissions. The read-only check proves only the observations actually obtained, not financial write success.
 6. It proceeds to reads, planning, previews, and individually authorized writes through the existing engine.
 
-The companion skill teaches this discovery sequence and the boundary between human and agent work. It must refer to implemented commands and remain short; Fin itself must supply complete current onboarding guidance.
+The companion skill teaches this discovery sequence and the boundary between
+human and agent work. Successful human setup asks
+`Install Fin's optional Codex skill? [y/N]`. Only explicit y/yes installs it as
+the human account; Enter/No/EOF skips it. Existing content keeps the normal
+conflict protection. Cancellation or optional installation failure preserves the
+completed Fin setup.
+`--json` continues to return only the human-terminal handoff. The skill is bundled
+in the binary and can be installed before protected setup. Use
+`fin skill inspect --agent codex --json`, `fin skill update --agent codex`, and
+`fin skill remove --agent codex` for later maintenance. These local user-file
+commands require neither sudo nor financial approval and support machine mode.
+Capabilities include version, purpose, destinations and conflict handling.
+See [companion skill maintenance](companion-skill.md). Fin itself remains the
+source for complete current onboarding guidance.
 
 ## Acceptance and handoff
 

@@ -43,6 +43,27 @@ run_stage() {
     return "$status"
   fi
 }
+# Optional user-file work after protected setup has succeeded. No default opt-in,
+# no spinner during input, and no privileged writes to the agent's skill files.
+offer_companion_skill() {
+  local fin_skill_answer=''
+  [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 0
+  printf "Install Fin's optional Codex skill? [y/N] " >&2
+  if ! IFS= read -r fin_skill_answer; then
+    printf '\n' >&2
+    return 0
+  fi
+  case "$fin_skill_answer" in
+    y|Y|yes|YES|Yes)
+      local fin_skill_env=("TERM=${TERM:-dumb}")
+      if [ "${NO_COLOR+x}" = x ]; then fin_skill_env+=("NO_COLOR=$NO_COLOR"); fi
+      if ! /usr/bin/sudo -n -H -u "#$fin_uid" /usr/bin/env "${fin_skill_env[@]}" \
+        /Library/Fin/runtime/fin skill install --agent codex; then
+        echo 'Fin is installed; optional skill installation did not finish. Run fin skill inspect --agent codex.' >&2
+      fi
+      ;;
+  esac
+}
 fin_active_pid=''
 fin_active_log=''
 cancel_active_stage() {
@@ -215,6 +236,7 @@ else
   echo 'Fin is installed, but shell completion setup was skipped because its owner marker could not be secured.' >&2
 fi
 echo 'Fin installed. Next: open a new Terminal and run fin daemon start.'
+offer_companion_skill
 if [ "$fin_verbose" = 1 ]; then
   echo 'Fin setup: installed runtime: /Library/Fin/runtime' >&2
   echo 'Fin setup: protected configuration and operation journal: /Library/Fin/private' >&2
