@@ -89,11 +89,13 @@ fn transfer_request_is_spot_only_and_keeps_exact_amount_as_text() {
 }
 
 #[test]
-fn withdrawal_request_freezes_eth_spot_and_exact_quantity() {
+fn withdrawal_request_freezes_selected_network_spot_and_exact_quantity() {
     let request = StandardWithdrawalIntent {
         coin: "ETH".into(),
+        network: "ETH".into(),
         amount: amount("0.005000000000000001"),
         address: "0x1111111111111111111111111111111111111111".into(),
+        memo: None,
         client_id: fin_binance::ClientIdentity::withdrawal("request-000001").unwrap(),
     }
     .request()
@@ -120,6 +122,170 @@ fn withdrawal_request_freezes_eth_spot_and_exact_quantity() {
     );
     arbitrary.params.pop();
     assert!(arbitrary.validate().is_ok());
+}
+
+#[test]
+fn withdrawal_request_supports_native_bitcoin_arbitrum_and_tagged_xrp_without_substitution() {
+    for (coin, network, address, memo) in [
+        ("BTC", "BTC", "bc1qsyntheticfixtureaddress", None),
+        (
+            "ETH",
+            "ARBITRUM",
+            "0x1111111111111111111111111111111111111111",
+            None,
+        ),
+        ("XRP", "XRP", "rSyntheticFixtureAddress", Some("00123456")),
+        ("币", "网络", "synthetic-address", Some("memo 雪+&%=tag")),
+    ] {
+        let client_id = fin_binance::ClientIdentity::withdrawal("generic-request-000001").unwrap();
+        let request = StandardWithdrawalIntent {
+            coin: coin.into(),
+            network: network.into(),
+            amount: amount("0.123456789012345678901234567890"),
+            address: address.into(),
+            memo: memo.map(str::to_owned),
+            client_id: client_id.clone(),
+        }
+        .request()
+        .unwrap();
+        assert_eq!(
+            request.endpoint.method_path(),
+            ("POST", "/sapi/v1/capital/withdraw/apply")
+        );
+        assert_eq!(request.get("coin"), Some(coin));
+        assert_eq!(request.get("network"), Some(network));
+        assert_eq!(request.get("address"), Some(address));
+        assert_eq!(request.get("addressTag"), memo);
+        assert_eq!(
+            request.get("amount"),
+            Some("0.12345678901234567890123456789")
+        );
+        assert_eq!(request.get("walletType"), Some("0"));
+        assert_eq!(request.get("withdrawOrderId"), Some(client_id.as_str()));
+        let recovered: BinanceRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        assert_eq!(
+            recovered, request,
+            "persisted request retains the exact route, memo and identity"
+        );
+    }
+}
+
+#[test]
+fn withdrawal_request_rejects_malformed_fields_duplicate_parameters_and_arbitrary_routing() {
+    let request = StandardWithdrawalIntent {
+        coin: "XRP".into(),
+        network: "XRP".into(),
+        amount: amount("1"),
+        address: "rSyntheticFixtureAddress".into(),
+        memo: Some("123456".into()),
+        client_id: fin_binance::ClientIdentity::withdrawal("validation-request-000001").unwrap(),
+    }
+    .request()
+    .unwrap();
+    let replace = |key: &str, value: &str| {
+        let mut changed = request.clone();
+        changed
+            .params
+            .iter_mut()
+            .find(|param| param.key == key)
+            .unwrap()
+            .value = value.into();
+        changed
+    };
+    for (key, max_bytes) in [
+        ("coin", 40),
+        ("network", 40),
+        ("address", 256),
+        ("addressTag", 256),
+    ] {
+        for value in [
+            "",
+            " leading",
+            "trailing ",
+            "\u{2003}leading",
+            "line\nfeed",
+            "tab\tvalue",
+            "null\0byte",
+        ] {
+            assert_eq!(
+                replace(key, value).validate(),
+                Err(BinanceError::InvalidRequest),
+                "{key}={value:?}"
+            );
+        }
+        assert!(replace(key, &"a".repeat(max_bytes)).validate().is_ok());
+        assert_eq!(
+            replace(key, &"a".repeat(max_bytes + 1)).validate(),
+            Err(BinanceError::InvalidRequest)
+        );
+        assert_eq!(
+            replace(key, &"雪".repeat(max_bytes / 3 + 1)).validate(),
+            Err(BinanceError::InvalidRequest),
+            "bound uses UTF-8 bytes"
+        );
+        assert_eq!(
+            request.clone().push(key, "duplicate").validate(),
+            Err(BinanceError::DuplicateParameter)
+        );
+    }
+    for value in ["0", "0.000", "-1", "+1", "1e-8", "0.1 ", ".1", "1."] {
+        assert!(
+            replace("amount", value).validate().is_err(),
+            "amount={value:?}"
+        );
+    }
+    for value in ["1", "SPOT", "MARGIN", ""] {
+        assert_eq!(
+            replace("walletType", value).validate(),
+            Err(BinanceError::InvalidRequest)
+        );
+    }
+    for key in [
+        "path",
+        "method",
+        "transactionFeeFlag",
+        "sideEffectType",
+        "name",
+        "memo",
+    ] {
+        assert_eq!(
+            request.clone().push(key, "arbitrary").validate(),
+            Err(BinanceError::UnsupportedParameter)
+        );
+    }
+    let mut missing_network = request;
+    missing_network
+        .params
+        .retain(|param| param.key != "network");
+    assert_eq!(
+        missing_network.validate(),
+        Err(BinanceError::MissingParameter)
+    );
+}
+
+#[test]
+fn capital_network_preserves_optional_venue_address_and_memo_patterns() {
+    let with_patterns: fin_binance::CapitalNetwork = parse_response(json!({
+        "coin":"XRP", "network":"XRP", "addressRegex":"^r[1-9A-HJ-NP-Za-km-z]{25,34}$",
+        "memoRegex":"^[0-9]{1,10}$", "withdrawTag":true
+    }))
+    .unwrap();
+    assert_eq!(
+        with_patterns.address_regex.as_deref(),
+        Some("^r[1-9A-HJ-NP-Za-km-z]{25,34}$")
+    );
+    assert_eq!(with_patterns.memo_regex.as_deref(), Some("^[0-9]{1,10}$"));
+    let without_patterns: fin_binance::CapitalNetwork =
+        parse_response(json!({"coin":"BTC", "network":"BTC"})).unwrap();
+    assert_eq!(without_patterns.address_regex, None);
+    assert_eq!(without_patterns.memo_regex, None);
+    assert!(
+        parse_response::<fin_binance::CapitalNetwork>(
+            json!({"coin":"BTC", "network":"BTC", "addressRegex":42})
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2570,6 +2736,86 @@ async fn ccxt_transport_keeps_exact_parameters_closed_endpoint_and_large_integer
     assert_eq!(params["clientTranId"], client_id.as_str());
     assert_eq!(params["signature"].len(), 64);
     assert!(params["timestamp"].parse::<u64>().is_ok());
+    assert!(!wire.contains("synthetic-fixture-hmac-secret-not-a-real-key"));
+}
+
+#[tokio::test]
+async fn ccxt_withdrawal_encodes_utf8_route_address_and_memo_as_individual_parameters() {
+    use tokio::io::AsyncWriteExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_fixture_http_request(&mut stream).await;
+        let body = r#"{"id":"synthetic-withdrawal-id"}"#;
+        stream.write_all(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        ).as_bytes()).await.unwrap();
+        request
+    });
+    let transport = fixture_ccxt_transport(address);
+    let client_id = fin_binance::ClientIdentity::withdrawal("encoded-withdrawal-000001").unwrap();
+    let request = StandardWithdrawalIntent {
+        coin: "币".into(),
+        network: "网络".into(),
+        amount: amount("0.000000000000000000123456"),
+        address: "synthetic+&%雪?=address".into(),
+        memo: Some("memo 雪+&%=tag".into()),
+        client_id: client_id.clone(),
+    }
+    .request()
+    .unwrap();
+    let response = fin_binance::BinanceTransport::request(
+        &transport,
+        &fin_binance::CredentialHandle::new("test-only-http-credential").unwrap(),
+        request,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["id"], "synthetic-withdrawal-id");
+    let wire = server.await.unwrap();
+    let first_line = wire.lines().next().unwrap();
+    let mut parts = first_line.split_whitespace();
+    assert_eq!(parts.next(), Some("POST"));
+    assert_eq!(
+        parts.next().unwrap().split('?').next(),
+        Some("/sapi/v1/capital/withdraw/apply")
+    );
+    let params = request_parameters(&wire);
+    assert_eq!(params["coin"], "币");
+    assert_eq!(params["network"], "网络");
+    assert_eq!(params["address"], "synthetic+&%雪?=address");
+    assert_eq!(params["addressTag"], "memo 雪+&%=tag");
+    assert_eq!(params["amount"], "0.000000000000000000123456");
+    assert_eq!(params["walletType"], "0");
+    assert_eq!(params["withdrawOrderId"], client_id.as_str());
+    assert_eq!(params["signature"].len(), 64);
+    assert!(params["timestamp"].parse::<u64>().is_ok());
+    assert_eq!(
+        params
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "coin",
+            "network",
+            "address",
+            "addressTag",
+            "amount",
+            "walletType",
+            "withdrawOrderId",
+            "recvWindow",
+            "timestamp",
+            "signature"
+        ]
+        .into_iter()
+        .collect(),
+        "encoded delimiters cannot create extra parameters"
+    );
+    assert!(matches!(
+        params["recvWindow"].parse::<u64>(),
+        Ok(1..=60_000)
+    ));
     assert!(!wire.contains("synthetic-fixture-hmac-secret-not-a-real-key"));
 }
 

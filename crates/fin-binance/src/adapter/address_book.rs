@@ -122,11 +122,7 @@ fn selector(value: &str) -> Result<(), FinError> {
 }
 
 fn same_address(network: Option<&str>, a: &str, b: &str) -> bool {
-    if network == Some("ETH") {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
+    super::withdrawal::same_address(network.unwrap_or_default(), a, b)
 }
 
 impl BinanceProfile {
@@ -277,6 +273,36 @@ impl BinanceProfile {
                         })
                 })
                 .collect();
+        // A null/missing tag can mean no memo on a tagless route, but only
+        // venue metadata for this exact coin/network can establish that.
+        // Retain the original row; this inference affects matching only.
+        let missing_tag_is_empty = if input.address.is_some()
+            && input.memo.as_deref().unwrap_or("").is_empty()
+            && matches!(rows.as_slice(), [row]
+                if row.coin == input.coin && row.network == input.network
+                    && row.address_tag.is_none()
+                    && row.whitelist_status != WithdrawWhitelistStatus::Unknown)
+        {
+            self.capital_config(account)
+                .await
+                .ok()
+                .is_some_and(|currencies| {
+                    let mut routes = currencies
+                        .iter()
+                        .filter(|currency| Some(&currency.coin) == input.coin.as_ref())
+                        .flat_map(|currency| &currency.network_list)
+                        .filter(|route| {
+                            Some(&route.coin) == input.coin.as_ref()
+                                && Some(&route.network) == input.network.as_ref()
+                        });
+                    routes
+                        .next()
+                        .is_some_and(|route| route.withdraw_tag == Some(false))
+                        && routes.next().is_none()
+                })
+        } else {
+            false
+        };
         let match_status = if input.address.is_none() {
             "not_requested"
         } else {
@@ -285,7 +311,7 @@ impl BinanceProfile {
                 [row]
                     if row.coin == input.coin
                         && row.network == input.network
-                        && row.address_tag.is_some() =>
+                        && (row.address_tag.is_some() || missing_tag_is_empty) =>
                 {
                     match row.whitelist_status {
                         WithdrawWhitelistStatus::Enabled => "enabled",

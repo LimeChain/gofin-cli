@@ -33,7 +33,7 @@ for an opening. Spot/futures wallet transfers are not exposed by this increment.
    positions and funding history. Snapshot the complete starting allocation and
    holdings/exposure. Select a route that fits current tick/lot/notional filters
    in both directions, including base-asset commission dust or reserved BNB.
-3. Prepare a tracked run using the actual `run.plan` schema and original IDs.
+3. Prepare a tracked run using the actual `run.begin` schema and original IDs.
    Both each movement and total selected allocation are at most $100 equivalent,
    including execution/unwind costs. Reserve loss, funding and commission bounds
    explicitly. A quote/schema example is not a live order recommendation.

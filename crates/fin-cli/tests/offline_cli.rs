@@ -580,6 +580,40 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
 }
 
 #[test]
+fn generic_withdrawal_discovery_explains_routes_targets_and_receipt_limits_offline() {
+    let result = run(&["schema", "binance.withdraw", "--json", "--verbose"]);
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    assert!(!result.stdout.contains(&0x1b));
+    let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(schema["execution_actor"], "agent_invocable");
+    assert_eq!(schema["input"]["additionalProperties"], false);
+    assert_eq!(schema["input"]["oneOf"].as_array().unwrap().len(), 2);
+    for selector in ["coin", "network"] {
+        assert!(
+            schema["input"]["properties"][selector]
+                .get("enum")
+                .is_none()
+        );
+    }
+    assert_eq!(schema["input"]["properties"]["address"]["maxLength"], 256);
+    assert_eq!(schema["input"]["properties"]["memo"]["maxLength"], 256);
+    assert_eq!(schema["examples"][0]["network"], "ARBITRUM");
+    assert!(
+        schema["semantics"]["destinationReceipt"]
+            .as_str()
+            .unwrap()
+            .contains("pending")
+    );
+    assert!(
+        schema["semantics"]["trackedRuns"]
+            .as_str()
+            .unwrap()
+            .contains("return plan")
+    );
+}
+
+#[test]
 fn address_book_discovery_exposes_reads_and_human_mutation_handoff_without_service() {
     for name in ["binance.deposit-addresses", "binance.whitelist"] {
         let result = run(&["schema", name, "--json", "--verbose"]);

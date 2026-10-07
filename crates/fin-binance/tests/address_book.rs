@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 const ADDRESS: &str = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
 struct Fixture {
     response: Value,
-    enabled: bool,
+    capital_response: Result<Value, TransportError>,
     seen: Mutex<Vec<BinanceRequest>>,
 }
 #[async_trait::async_trait]
@@ -23,9 +23,7 @@ impl BinanceTransport for Fixture {
         request.validate().unwrap();
         self.seen.lock().unwrap().push(request.clone());
         match request.endpoint {
-            E::CapitalConfig => Ok(
-                json!([{"coin":"ETH","networkList":[{"network":"ETH","coin":"ETH","depositEnable":self.enabled}]}]),
-            ),
+            E::CapitalConfig => self.capital_response.clone(),
             E::DepositAddressList | E::WithdrawAddressList => Ok(self.response.clone()),
             _ => panic!(
                 "Only documented read routes are allowed: {:?}",
@@ -35,9 +33,20 @@ impl BinanceTransport for Fixture {
     }
 }
 fn fixture(response: Value, enabled: bool) -> (BinanceAdapter, Arc<Fixture>) {
+    fixture_with_capital(
+        response,
+        Ok(
+            json!([{"coin":"ETH","networkList":[{"network":"ETH","coin":"ETH","depositEnable":enabled}]}]),
+        ),
+    )
+}
+fn fixture_with_capital(
+    response: Value,
+    capital_response: Result<Value, TransportError>,
+) -> (BinanceAdapter, Arc<Fixture>) {
     let transport = Arc::new(Fixture {
         response,
-        enabled,
+        capital_response,
         seen: Mutex::new(vec![]),
     });
     let adapter = BinanceAdapter::new(
@@ -67,6 +76,171 @@ fn target() -> Value {
 }
 fn entry(status: Value) -> Value {
     json!({"coin":"ETH","network":"ETH","address":ADDRESS,"addressTag":"","whiteStatus":status})
+}
+
+fn capital_route(coin: &str, network: &str, withdraw_tag: Value) -> Value {
+    json!([{"coin":coin,"networkList":[{"coin":coin,"network":network,"withdrawTag":withdraw_tag}]}])
+}
+
+#[tokio::test]
+async fn whitelist_arbitrum_matches_lowercase_and_mixed_case_hex_addresses() {
+    let mixed_case = ADDRESS.replace("abcdef", "aBcDeF");
+    let row = json!({"coin":"ETH","network":"ARBITRUM","address":mixed_case,"addressTag":"","whiteStatus":true});
+    let (adapter, transport) = fixture(json!([row]), true);
+    let mut input = target();
+    input["network"] = json!("ARBITRUM");
+    let result = adapter.read("binance.whitelist", &input).await.unwrap();
+    assert_eq!(result["matchStatus"], "enabled");
+    assert_eq!(result["entries"][0]["address"], mixed_case);
+    assert_eq!(
+        transport.seen.lock().unwrap().len(),
+        1,
+        "explicit tag needs no metadata inference"
+    );
+}
+
+#[tokio::test]
+async fn whitelist_null_tag_matches_only_after_exact_route_confirms_no_memo() {
+    for requested_memo in [Some(""), None] {
+        for (white_status, expected) in [(true, "enabled"), (false, "disabled")] {
+            let mixed_case = ADDRESS.replace("abcdef", "aBcDeF");
+            let (adapter, transport) = fixture_with_capital(
+                json!([{"coin":"ETH","network":"ARBITRUM","address":mixed_case,"addressTag":null,"whiteStatus":white_status}]),
+                Ok(capital_route("ETH", "ARBITRUM", json!(false))),
+            );
+            let mut input = target();
+            input["network"] = json!("ARBITRUM");
+            if requested_memo.is_none() {
+                input.as_object_mut().unwrap().remove("memo");
+            }
+            let result = adapter.read("binance.whitelist", &input).await.unwrap();
+            assert_eq!(result["matchStatus"], expected);
+            assert_eq!(
+                result["entries"][0]["addressTag"],
+                Value::Null,
+                "inferred matching does not replace missing venue metadata"
+            );
+            assert_eq!(result["accountWhitelistEnforcement"], "unknown");
+            assert_eq!(result["activationStatus"], "unknown");
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[0].endpoint, E::WithdrawAddressList);
+            assert_eq!(seen[1].endpoint, E::CapitalConfig);
+            assert!(
+                seen.iter().all(|request| request.params.is_empty()
+                    && request.endpoint.method_path().0 == "GET")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn whitelist_missing_tag_stays_unknown_for_required_unknown_or_failed_metadata() {
+    let input = json!({"account":"synthetic-main","coin":"XRP","network":"XRP","address":"rSyntheticBase58Address","memo":""});
+    let row = json!({"coin":"XRP","network":"XRP","address":"rSyntheticBase58Address","addressTag":null,"whiteStatus":true});
+    let mut omitted_requirement = capital_route("XRP", "XRP", Value::Null);
+    omitted_requirement[0]["networkList"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("withdrawTag");
+    let mut duplicate_route = capital_route("XRP", "XRP", json!(false));
+    let route = duplicate_route[0]["networkList"][0].clone();
+    duplicate_route[0]["networkList"]
+        .as_array_mut()
+        .unwrap()
+        .push(route);
+    for capital_response in [
+        Ok(capital_route("XRP", "XRP", json!(true))),
+        Ok(capital_route("XRP", "XRP", Value::Null)),
+        Ok(omitted_requirement),
+        Ok(capital_route("ETH", "XRP", json!(false))),
+        Ok(capital_route("XRP", "OTHER", json!(false))),
+        Ok(duplicate_route),
+        Ok(json!({"malformed":"capital metadata"})),
+        Err(TransportError::Unavailable),
+    ] {
+        let (adapter, transport) = fixture_with_capital(json!([row.clone()]), capital_response);
+        assert_eq!(
+            adapter.read("binance.whitelist", &input).await.unwrap()["matchStatus"],
+            "unknown"
+        );
+        assert_eq!(transport.seen.lock().unwrap().len(), 2);
+    }
+    for field in ["coin", "network"] {
+        let mut missing = row.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        let (adapter, transport) = fixture_with_capital(
+            json!([missing]),
+            Ok(capital_route("XRP", "XRP", json!(false))),
+        );
+        assert_eq!(
+            adapter.read("binance.whitelist", &input).await.unwrap()["matchStatus"],
+            "unknown"
+        );
+        assert_eq!(
+            transport.seen.lock().unwrap().len(),
+            1,
+            "missing row identity cannot be repaired by route metadata"
+        );
+    }
+    let (adapter, transport) = fixture_with_capital(
+        json!([row.clone()]),
+        Ok(capital_route("XRP", "XRP", json!(false))),
+    );
+    let mut nonempty_memo = input.clone();
+    nonempty_memo["memo"] = json!("00123");
+    assert_eq!(
+        adapter
+            .read("binance.whitelist", &nonempty_memo)
+            .await
+            .unwrap()["matchStatus"],
+        "unknown"
+    );
+    assert_eq!(
+        transport.seen.lock().unwrap().len(),
+        1,
+        "missing tag cannot match a requested nonempty memo"
+    );
+    let (adapter, transport) =
+        fixture_with_capital(json!([row]), Ok(capital_route("XRP", "XRP", json!(false))));
+    assert_eq!(
+        adapter
+            .read("binance.whitelist", &json!({"account":"synthetic-main"}))
+            .await
+            .unwrap()["matchStatus"],
+        "not_requested"
+    );
+    assert_eq!(transport.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn whitelist_preserves_exact_memo_leading_zeros_and_case_sensitive_base58_addresses() {
+    let row = json!({"coin":"XRP","network":"XRP","address":"rSyntheticBase58Address","addressTag":"00123","whiteStatus":true});
+    let (adapter, transport) = fixture_with_capital(json!([row]), Err(TransportError::Unavailable));
+    let mut input = json!({"account":"synthetic-main","coin":"XRP","network":"XRP","address":"rSyntheticBase58Address","memo":"00123"});
+    assert_eq!(
+        adapter.read("binance.whitelist", &input).await.unwrap()["matchStatus"],
+        "enabled"
+    );
+    input["memo"] = json!("123");
+    assert_eq!(
+        adapter.read("binance.whitelist", &input).await.unwrap()["matchStatus"],
+        "absent"
+    );
+    input["memo"] = json!("00123");
+    input["address"] = json!("rsyntheticBase58Address");
+    assert_eq!(
+        adapter.read("binance.whitelist", &input).await.unwrap()["matchStatus"],
+        "absent"
+    );
+    assert!(
+        transport
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.endpoint == E::WithdrawAddressList)
+    );
 }
 
 #[tokio::test]

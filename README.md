@@ -283,7 +283,29 @@ cannot satisfy a planned zero-position return: refresh the remaining route.
 Loss, funding and commission bounds use exact decimals; no default fee estimate
 or USDT peg substitutes for observed evidence.
 
-Withdrawal support currently covers ETH to an enrolled Ethereum mainnet wallet.
+Binance SPOT withdrawals select any enabled coin/network from live Binance metadata,
+using either a named wallet or an explicit public `address`, plus `memo` where
+required. The adapter checks venue formats, exact increments, limits, fee bounds,
+permissions and Travel Rule eligibility; it has no coin/network allowlist.
+Named reusable EVM wallets select their chain using the Binance network identifier
+(for example `ARBITRUM`). Independent receipt observers currently cover configured
+reviewed EVM chains and standard native/ERC-20 assets; other routes explicitly
+remain pending after Binance reports completion. Observer routing is separate
+from exchange submission support.
+
+The current execution engine still requires priced, bounded tracked runs with
+observable holdings and a complete return plan. Generic exchange submission does
+not relax these requirements or provide permanent payout mode. A route without
+receipt/restoration coverage can be previewed but cannot pass a tracked run.
+
+Inspect the exact withdrawal contract before preparing a real amount:
+
+```sh
+fin schema binance.withdraw --json
+fin explain binance.withdraw --json
+fin read binance.networks --input '{"account":"master","coin":"ETH"}' --json
+```
+
 Deposit-address lookup/listing and withdrawal whitelist inspection are available.
 Binance's documented public API exposes no explicit address creation/rotation or
 whitelist add/remove endpoint; those changes require Binance's website/app.
@@ -301,7 +323,8 @@ destination. A whitelist check returns `enabled`, `disabled`, `absent` or
 enforcement or expiry of Binance's activation cooldown. See the
 [address-book report](docs/reports/binance-address-book.md).
 
-[Trading verification and limitations](docs/reports/binance-trading.md) and the
+[Generic withdrawal verification](docs/reports/binance-generic-withdrawal.md),
+[trading verification and limitations](docs/reports/binance-trading.md) and the
 [human trading checklist](docs/testing/binance-trading.md) separate synthetic
 readiness from pending production/Touch ID acceptance. Reproduce the focused suite:
 

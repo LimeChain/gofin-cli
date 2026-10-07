@@ -731,7 +731,6 @@ pub fn build_protected_applications(
     credentials: Arc<dyn BrokerCredentialProvider>,
 ) -> fin_domain::Result<ProtectedApplications> {
     config.validate()?;
-    let mut networks_by_id = BTreeMap::<String, &NetworkConfig>::new();
     let mut eth_rpcs = BTreeMap::<u64, Arc<dyn fin_evm::EvmRpc>>::new();
     for network in &config.networks {
         let rpc = Arc::new(fin_evm::HttpRpc::new(
@@ -739,7 +738,6 @@ pub fn build_protected_applications(
             network.chain_id,
         )?);
         eth_rpcs.insert(network.chain_id, rpc.clone());
-        networks_by_id.insert(network.id.clone(), network);
     }
     let source: Arc<dyn fin_pricing::UsdPriceSource> = if let Some(ConnectionConfig::CoinGecko {
         credential_ref,
@@ -903,54 +901,7 @@ pub fn build_protected_applications(
                 }
             })
             .collect::<Vec<_>>();
-        let mut destinations = Vec::new();
-        for connection in &config.connections {
-            let (name, address, resource, assets) = match connection {
-                ConnectionConfig::Ethereum {
-                    name,
-                    resource,
-                    network,
-                    address,
-                    assets,
-                    ..
-                } if networks_by_id
-                    .get(network)
-                    .is_some_and(|network| network.chain_id == 1) =>
-                {
-                    (name, address, resource.clone(), assets.clone())
-                }
-                ConnectionConfig::Evm { name, address, .. }
-                    if networks_by_id.values().any(|network| network.chain_id == 1) =>
-                {
-                    (
-                        name,
-                        address,
-                        ResourceId(format!("ethereum:1:{}", address.to_ascii_lowercase())),
-                        vec![AssetId {
-                            network: "ethereum:1".into(),
-                            reference: "native".into(),
-                            decimals: 18,
-                        }],
-                    )
-                }
-                _ => continue,
-            };
-            let assets = assets
-                .into_iter()
-                .filter(|asset| asset.network == "ethereum:1" && asset.reference == "native")
-                .map(|asset| ("ETH".to_owned(), asset))
-                .collect::<BTreeMap<_, _>>();
-            if !assets.is_empty() {
-                destinations.push(fin_binance::EthereumDestination {
-                    name: name.clone(),
-                    resource,
-                    address: address.clone(),
-                    chain_id: 1,
-                    assets,
-                    confirmations: 2,
-                });
-            }
-        }
+        let destinations = configured_binance_destinations(config)?;
         if accounts.is_empty() {
             return Err(error(
                 "BINANCE_CONNECTIONS_INVALID",
@@ -965,11 +916,10 @@ pub fn build_protected_applications(
             exchange_client.clone(),
             exchange_credentials,
         ));
-        // Binance-only enrollment has no Ethereum payout destinations. Keep
-        // funding/reads available without requiring an unrelated wallet; a
-        // configured payout destination still requires its receipt observer.
+        // Binance reads and enrollment do not require a wallet observer.
+        // Payout preparation checks the selected configured chain separately.
         let payout_verifier: Option<Arc<dyn fin_binance::BinanceRecipientVerifier>> =
-            if destinations.is_empty() {
+            if ethereum_adapters.is_empty() {
                 None
             } else {
                 Some(Arc::new(EthereumPayoutVerifier::new(
@@ -1003,6 +953,76 @@ pub fn build_protected_applications(
     Ok(ProtectedApplications { adapters, valuator })
 }
 
+/// A reusable wallet has one payout destination per configured chain. Legacy
+/// connections retain their original custody and configured asset identities.
+fn configured_binance_destinations(
+    config: &BrokerConfigV2,
+) -> fin_domain::Result<Vec<fin_binance::EthereumDestination>> {
+    let mut destinations = Vec::new();
+    for connection in &config.connections {
+        for network in &config.networks {
+            let (name, address, resource, assets) = match connection {
+                ConnectionConfig::Ethereum {
+                    name,
+                    address,
+                    resource,
+                    network: wallet_network,
+                    assets,
+                    ..
+                } if wallet_network == &network.id => {
+                    (name, address, resource.clone(), assets.clone())
+                }
+                ConnectionConfig::Evm { name, address, .. } => (
+                    name,
+                    address,
+                    ResourceId(format!("{}:{}", network.id, address.to_ascii_lowercase())),
+                    vec![AssetId {
+                        network: network.id.clone(),
+                        reference: "native".into(),
+                        decimals: 18,
+                    }],
+                ),
+                _ => continue,
+            };
+            let confirmations = u32::try_from(network.confirmations).map_err(|_| {
+                error(
+                    "CONFIG_CONFIRMATIONS_INVALID",
+                    "configuration",
+                    "Payout confirmations exceed the supported count.",
+                    "Configure a confirmation count representable by the payout verifier.",
+                )
+            })?;
+            destinations.push(fin_binance::EthereumDestination {
+                name: name.clone(),
+                resource,
+                address: address.clone(),
+                chain_id: network.chain_id,
+                assets: assets
+                    .into_iter()
+                    .map(|asset| {
+                        let key = if asset.reference == "native"
+                            && matches!(network.chain_id, 1 | 42161 | 4663)
+                        {
+                            "ETH".to_owned()
+                        } else {
+                            asset.reference.clone()
+                        };
+                        (key, asset)
+                    })
+                    .collect(),
+                confirmations,
+            });
+        }
+    }
+    Ok(destinations)
+}
+
+fin_evm::alloy::sol! {
+    interface PayoutErc20 {
+        function decimals() external view returns (uint8 value);
+    }
+}
+
 fn pow10(power: u32) -> num_bigint::BigUint {
     num_bigint::BigUint::from(10u8).pow(power)
 }
@@ -1025,6 +1045,67 @@ impl EthereumPayoutVerifier {
 
 #[async_trait]
 impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
+    fn supports_chain(&self, chain_id: u64) -> bool {
+        self.adapters.contains_key(&chain_id)
+    }
+
+    async fn resolve_asset(
+        &self,
+        chain_id: u64,
+        coin: &str,
+        contract: Option<&str>,
+    ) -> fin_domain::Result<Option<AssetId>> {
+        let Some(adapter) = self.adapters.get(&chain_id) else {
+            return Ok(None);
+        };
+        if !matches!(chain_id, 1 | 42161 | 4663)
+            || adapter.config.chain_id != chain_id
+            || adapter.runtime.chain_id != chain_id
+        {
+            return Ok(None);
+        }
+        let contract = contract.unwrap_or("");
+        let (reference, decimals) = if contract.is_empty() {
+            if coin != "ETH" {
+                return Ok(None);
+            }
+            adapter.runtime.assert_chain().await?;
+            ("native".to_owned(), 18)
+        } else {
+            if !contract.starts_with("0x") || !valid_eth_address(contract) {
+                return Ok(None);
+            }
+            let token = fin_evm::address(contract)?;
+            if token == fin_evm::alloy::primitives::Address::ZERO {
+                return Ok(None);
+            }
+            adapter.runtime.assert_chain().await?;
+            // Deployment and decimals are observed at one pinned block, rather
+            // than accepting exchange symbols as an onchain asset identity.
+            let block = fin_evm::rpc_u64(
+                &adapter
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?;
+            adapter.runtime.code_at(token, Some(block)).await?;
+            let decimals = adapter
+                .runtime
+                .call(token, &PayoutErc20::decimalsCall {}, Some(block))
+                .await?;
+            if u32::from(decimals) > fin_binance::MAX_DECIMAL_SCALE {
+                return Ok(None);
+            }
+            (fin_evm::lower_address(token), decimals)
+        };
+        Ok(Some(AssetId {
+            network: format!("ethereum:{chain_id}"),
+            reference,
+            decimals,
+        }))
+    }
+
     async fn verify(&self, request: fin_binance::PayoutRequest) -> fin_binance::PayoutResult {
         let Some(adapter) = self.adapters.get(&request.chain_id) else {
             return fin_binance::PayoutResult {
@@ -3367,6 +3448,270 @@ mod tests {
         assert!(!withdrawal.ok);
         assert_eq!(withdrawal.error.unwrap().code, "UNKNOWN_CONNECTION");
         assert!(runtime.handle(BrokerRequest::DaemonStop).await.ok);
+    }
+
+    #[test]
+    fn binance_payout_destinations_cover_reusable_chains_and_preserve_legacy_scope() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let mut config = binance_only_config();
+        config.networks = NetworkConfig::reviewed_evm_networks();
+        config.networks[0].confirmations = 7;
+        config.networks[1].confirmations = 11;
+        config.connections.push(ConnectionConfig::Evm {
+            name: "synthetic-reusable".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            signing_enabled: false,
+            credential_ref: None,
+        });
+        let legacy_assets = vec![
+            AssetId {
+                network: "ethereum:42161".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            AssetId {
+                network: "ethereum:42161".into(),
+                reference: "0x2222222222222222222222222222222222222222".into(),
+                decimals: 7,
+            },
+        ];
+        config.connections.push(ConnectionConfig::Ethereum {
+            name: "synthetic-legacy".into(),
+            resource: ResourceId("ethereum:42161:preserved-legacy-resource".into()),
+            network: "ethereum:42161".into(),
+            address: "0x3333333333333333333333333333333333333333".into(),
+            signing_enabled: false,
+            credential_ref: None,
+            assets: legacy_assets.clone(),
+        });
+        config.validate().unwrap();
+        let destinations = configured_binance_destinations(&config).unwrap();
+        assert_eq!(destinations.len(), 4);
+        let reusable = destinations
+            .iter()
+            .filter(|d| d.name == "synthetic-reusable")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reusable.iter().map(|d| d.chain_id).collect::<Vec<_>>(),
+            vec![1, 42161, 4663]
+        );
+        for destination in reusable {
+            assert_eq!(
+                destination.resource.0,
+                format!("ethereum:{}:{address}", destination.chain_id)
+            );
+            assert_eq!(
+                destination.assets["ETH"].network,
+                format!("ethereum:{}", destination.chain_id)
+            );
+            assert_eq!(
+                destination.confirmations,
+                if destination.chain_id == 1 {
+                    7
+                } else if destination.chain_id == 42161 {
+                    11
+                } else {
+                    2
+                }
+            );
+        }
+        let legacy = destinations
+            .iter()
+            .find(|d| d.name == "synthetic-legacy")
+            .unwrap();
+        assert_eq!(legacy.chain_id, 42161);
+        assert_eq!(
+            legacy.resource.0,
+            "ethereum:42161:preserved-legacy-resource"
+        );
+        assert_eq!(legacy.confirmations, 11);
+        assert_eq!(
+            legacy.assets.values().cloned().collect::<BTreeSet<_>>(),
+            legacy_assets.into_iter().collect()
+        );
+        assert!(build_protected_applications(&config, Arc::new(UnusedCredentials)).is_ok());
+    }
+
+    struct PayoutMetadataRpc {
+        chain_id: u64,
+        decimals: u8,
+        deployed: bool,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+    #[async_trait]
+    impl fin_evm::EvmRpc for PayoutMetadataRpc {
+        async fn request(&self, method: &str, params: Value) -> fin_domain::Result<Value> {
+            self.calls.lock().unwrap().push((method.into(), params));
+            match method {
+                "eth_chainId" => Ok(json!(format!("0x{:x}", self.chain_id))),
+                "eth_blockNumber" => Ok(json!("0x2a")),
+                "eth_getCode" => Ok(json!(if self.deployed { "0x6000" } else { "0x" })),
+                "eth_call" => Ok(json!(format!("0x{:064x}", self.decimals))),
+                _ => panic!("unexpected synthetic payout RPC method: {method}"),
+            }
+        }
+    }
+
+    fn payout_metadata_verifier(
+        chain_id: u64,
+        rpc: Arc<PayoutMetadataRpc>,
+    ) -> EthereumPayoutVerifier {
+        let adapter = Arc::new(
+            fin_ethereum::EthereumAdapter::new(
+                fin_ethereum::EthereumConfig::wallet_only(chain_id, 2, vec![]),
+                vec![fin_ethereum::WalletConnection {
+                    name: "synthetic-payout".into(),
+                    address: "0x1111111111111111111111111111111111111111".into(),
+                    signing_enabled: false,
+                }],
+                Arc::new(fin_evm::EvmRuntime::new(rpc, chain_id, None)),
+            )
+            .unwrap(),
+        );
+        EthereumPayoutVerifier::new(BTreeMap::from([(chain_id, adapter)])).unwrap()
+    }
+
+    #[tokio::test]
+    async fn payout_asset_resolution_verifies_generic_tokens_at_a_pinned_configured_chain() {
+        use fin_binance::BinanceRecipientVerifier;
+        let rpc = Arc::new(PayoutMetadataRpc {
+            chain_id: 42161,
+            decimals: 7,
+            deployed: true,
+            calls: Mutex::new(vec![]),
+        });
+        let verifier = payout_metadata_verifier(42161, rpc.clone());
+        assert!(verifier.supports_chain(42161));
+        assert!(!verifier.supports_chain(1));
+        let contract = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa";
+        let asset = verifier
+            .resolve_asset(42161, "UNLISTED", Some(contract))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            asset,
+            AssetId {
+                network: "ethereum:42161".into(),
+                reference: contract.to_ascii_lowercase(),
+                decimals: 7,
+            }
+        );
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eth_chainId", "eth_blockNumber", "eth_getCode", "eth_call"]
+        );
+        assert_eq!(calls[2].1, json!([contract.to_ascii_lowercase(), "0x2a"]));
+        assert_eq!(
+            calls[3].1,
+            json!([{"to": contract.to_ascii_lowercase(), "data": "0x313ce567"}, "0x2a"])
+        );
+    }
+
+    #[tokio::test]
+    async fn payout_asset_resolution_never_infers_native_from_unknown_chain_or_contract() {
+        use fin_binance::BinanceRecipientVerifier;
+        let rpc = Arc::new(PayoutMetadataRpc {
+            chain_id: 4663,
+            decimals: 18,
+            deployed: true,
+            calls: Mutex::new(vec![]),
+        });
+        let verifier = payout_metadata_verifier(4663, rpc.clone());
+        for (chain, coin, contract) in [
+            (1, "ETH", None),
+            (56, "ETH", None),
+            (4663, "BTC", None),
+            (4663, "ETH", Some("unknown")),
+            (
+                4663,
+                "ETH",
+                Some("0x0000000000000000000000000000000000000000"),
+            ),
+        ] {
+            assert!(
+                verifier
+                    .resolve_asset(chain, coin, contract)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(rpc.calls.lock().unwrap().is_empty());
+        for contract in [None, Some("")] {
+            assert_eq!(
+                verifier
+                    .resolve_asset(4663, "ETH", contract)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                AssetId {
+                    network: "ethereum:4663".into(),
+                    reference: "native".into(),
+                    decimals: 18,
+                }
+            );
+        }
+        assert_eq!(rpc.calls.lock().unwrap().len(), 2);
+        let unreviewed_rpc = Arc::new(PayoutMetadataRpc {
+            chain_id: 56,
+            decimals: 18,
+            deployed: true,
+            calls: Mutex::new(vec![]),
+        });
+        let unreviewed = payout_metadata_verifier(56, unreviewed_rpc.clone());
+        assert!(
+            unreviewed
+                .resolve_asset(56, "ETH", None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(unreviewed_rpc.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn payout_asset_resolution_rejects_wrong_rpc_chain_missing_code_and_excess_precision() {
+        use fin_binance::BinanceRecipientVerifier;
+        let contract = "0x2222222222222222222222222222222222222222";
+        for (rpc_chain, deployed, decimals, expected_code) in [
+            (1, true, 6, "WRONG_CHAIN"),
+            (42161, false, 6, "CONTRACT_UNAVAILABLE"),
+        ] {
+            let rpc = Arc::new(PayoutMetadataRpc {
+                chain_id: rpc_chain,
+                decimals,
+                deployed,
+                calls: Mutex::new(vec![]),
+            });
+            let verifier = payout_metadata_verifier(42161, rpc);
+            assert_eq!(
+                verifier
+                    .resolve_asset(42161, "TOKEN", Some(contract))
+                    .await
+                    .unwrap_err()
+                    .code,
+                expected_code
+            );
+        }
+        let rpc = Arc::new(PayoutMetadataRpc {
+            chain_id: 42161,
+            decimals: 37,
+            deployed: true,
+            calls: Mutex::new(vec![]),
+        });
+        assert!(
+            payout_metadata_verifier(42161, rpc)
+                .resolve_asset(42161, "TOKEN", Some(contract))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

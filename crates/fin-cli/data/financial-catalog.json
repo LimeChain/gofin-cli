@@ -8554,14 +8554,47 @@
   },
   {
     "name": "binance.withdraw",
-    "description": "Standard Binance SPOT withdrawal to a named Ethereum mainnet wallet with current fee, network, precision, Travel Rule, and receipt checks.",
+    "description": "Binance SPOT withdrawal on any advertised coin/network to a named wallet or explicit public address, with exact memo/tag, limits and fees.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "address"
+            ]
+          },
+          "properties": {
+            "destination": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "destination"
+          ]
+        },
+        {
+          "properties": {
+            "destination": {
+              "const": ""
+            }
+          },
+          "required": [
+            "address"
+          ]
+        }
+      ],
       "properties": {
         "account": {
+          "type": "string"
+        },
+        "address": {
+          "maxLength": 256,
+          "minLength": 1,
           "type": "string"
         },
         "amount": {
@@ -8571,9 +8604,14 @@
           "type": "string"
         },
         "destination": {
+          "minLength": 0,
           "type": "string"
         },
         "maxFee": {
+          "type": "string"
+        },
+        "memo": {
+          "maxLength": 256,
           "type": "string"
         },
         "minReceiveAmount": {
@@ -8592,7 +8630,6 @@
       "required": [
         "requestId",
         "account",
-        "destination",
         "coin",
         "amount",
         "network",
@@ -8632,12 +8669,39 @@
       "title": "FinError",
       "type": "object"
     },
-    "examples": [],
+    "examples": [
+      {
+        "account": "master",
+        "amount": "0.001",
+        "coin": "ETH",
+        "destination": "wallet",
+        "maxFee": "0.00005",
+        "minReceiveAmount": "0.00095",
+        "network": "ARBITRUM",
+        "requestId": "example-arbitrum-withdraw",
+        "walletType": "SPOT"
+      },
+      {
+        "account": "master",
+        "address": "rEXAMPLE_SYNTHETIC_ADDRESS",
+        "amount": "10",
+        "coin": "XRP",
+        "maxFee": "0.2",
+        "memo": "000123",
+        "minReceiveAmount": "9.8",
+        "network": "XRP",
+        "requestId": "example-tagged-withdraw",
+        "walletType": "SPOT"
+      }
+    ],
     "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
-    "completion": "Matching completed withdrawal, bounded source debit/fee, and verified Ethereum mainnet recipient receipt.",
+    "completion": "Matching venue withdrawal plus bounded source debit/fee and independently verified destination receipt. Unobserved routes remain pending after venue completion.",
     "semantics": {
       "amount": "exact decimal string",
+      "coinNetworkSelection": "live Binance metadata; no coin/network allowlist",
       "credentialValues": "never exposed",
+      "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending",
+      "trackedRuns": "current bounded/restoration execution requires observable source/destination and a verified return plan",
       "walletType": "SPOT"
     }
   },

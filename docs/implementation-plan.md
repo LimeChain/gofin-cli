@@ -457,3 +457,33 @@ broker encoding and client decoding, advertised through broker capabilities.
 Keep adapter row bounds and response validation. Targeted regressions cover a
 large response round trip, rejected oversized responses and unchanged rejected
 large requests. No request envelope, financial identity or write policy changes.
+
+## Generic Binance withdrawal routing (2026-10-07)
+
+The Binance SPOT withdrawal adapter now selects exact coin/network pairs from
+live capital metadata rather than forcing ETH/mainnet. Explicit public addresses
+and exact memo/tags complement named wallets. Live venue patterns, increments,
+limits, permissions and fee caps are checked before approval and refreshed before
+submission. Shared closed-endpoint CCXT dispatch, journal-before-submit, stable
+withdrawOrderId, per-write authorization and typed settlement remain unchanged.
+
+Recipient observation is an independent extension: route/asset capability and
+resolution methods on BinanceRecipientVerifier permit additional chain observers
+without changing withdrawal dispatch. The EVM provider resolves deployed ERC-20
+precision at a pinned block and verifies configured chain/finality; coin symbols
+never substitute for contract identity. The reviewed EVM identifier table routes
+observers, not Binance availability. Unobserved routes retain exact venue-unit
+identities and cannot falsely settle from Binance status6. Nonunit denomination
+is not silently converted into token units.
+
+New bindings freeze recipient address/resource/chain/asset/finality and memo.
+Legacy pending ETH records keep their mainnet destination fallback regardless of
+new configured chain ordering. Arbitrum whitelist comparisons normalize hex
+casing; absent optional tags mean empty only when exact network metadata proves
+withdrawTag=false. Account whitelist enforcement/cooldown remain unknown.
+
+Current tracked execution requires independent snapshots, USD valuation and
+a verified restoration plan. It is not permanent payout mode; unknown receipt or
+return coverage cannot pass a bounded test run. This refactor does not implement
+bridging, standing/market orders, Funding-wallet withdrawals, non-NIL Travel Rule
+questionnaires, or unreviewed chain observers.

@@ -500,6 +500,7 @@ impl BinanceRequest {
                     "withdrawOrderId",
                     "network",
                     "address",
+                    "addressTag",
                     "amount",
                     "walletType",
                     "recvWindow",
@@ -647,12 +648,24 @@ impl BinanceRequest {
                 return Err(BinanceError::InvalidRequest);
             }
         }
-        if matches!(self.endpoint, BinanceEndpoint::StandardWithdrawal)
-            && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
-                || self.get("network") != Some("ETH")
-                || self.get("walletType") != Some("0"))
-        {
-            return Err(BinanceError::InvalidRequest);
+        if matches!(self.endpoint, BinanceEndpoint::StandardWithdrawal) {
+            let safe_text = |value: &str, max_bytes: usize| {
+                !value.is_empty()
+                    && value.len() <= max_bytes
+                    && value.trim() == value
+                    && !value.chars().any(char::is_control)
+            };
+            if ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
+                || !safe_text(self.get("coin").unwrap(), 40)
+                || !safe_text(self.get("network").unwrap(), 40)
+                || !safe_text(self.get("address").unwrap(), 256)
+                || self
+                    .get("addressTag")
+                    .is_some_and(|memo| !safe_text(memo, 256))
+                || self.get("walletType") != Some("0")
+            {
+                return Err(BinanceError::InvalidRequest);
+            }
         }
         if matches!(self.endpoint, BinanceEndpoint::SubAccountTransferHistory) {
             let valid_u64 = |key: &str| {
@@ -835,20 +848,25 @@ impl UniversalTransferIntent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StandardWithdrawalIntent {
     pub coin: String,
+    pub network: String,
     pub amount: ExactDecimal,
     pub address: String,
+    pub memo: Option<String>,
     pub client_id: ClientIdentity,
 }
 
 impl StandardWithdrawalIntent {
     pub fn request(&self) -> Result<BinanceRequest, BinanceError> {
-        let request = BinanceRequest::new(BinanceEndpoint::StandardWithdrawal)
+        let mut request = BinanceRequest::new(BinanceEndpoint::StandardWithdrawal)
             .push("coin", self.coin.clone())
             .push("withdrawOrderId", self.client_id.as_str())
-            .push("network", "ETH")
+            .push("network", self.network.clone())
             .push("address", self.address.clone())
             .push("amount", self.amount.canonical())
             .push("walletType", "0");
+        if let Some(memo) = &self.memo {
+            request = request.push("addressTag", memo.clone());
+        }
         request.validate()?;
         Ok(request)
     }
@@ -1151,6 +1169,10 @@ pub struct CapitalNetwork {
     pub unlock_confirm: Option<u64>,
     #[serde(rename = "withdrawTag")]
     pub withdraw_tag: Option<bool>,
+    #[serde(rename = "addressRegex")]
+    pub address_regex: Option<String>,
+    #[serde(rename = "memoRegex")]
+    pub memo_regex: Option<String>,
     pub busy: Option<bool>,
     #[serde(rename = "contractAddress")]
     pub contract_address: Option<String>,

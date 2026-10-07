@@ -115,3 +115,30 @@ network/memo metadata, conflicting entries, exact memo matching, Ethereum addres
 case, oversized lists, secret/unknown input rejection and GET-only routing.
 A reported enabled entry is not proof of account-wide enforcement or cooldown
 expiry. Authenticated live observations remain pending for these new reads.
+
+## Generic withdrawal regression checks
+
+```sh
+cargo test --locked -p fin-binance -p fin-broker
+cargo test --locked -p fin-cli --test offline_cli
+make check
+```
+
+The generic adapter discovers coin/network availability through Binance, accepts
+either a named destination or public address and exact memo/tag, and freezes all
+material fields before submission. Arbitrum uses `network: "ARBITRUM"`; memo is
+required only where live metadata says so. `fin schema binance.withdraw --json`
+is the authoritative input contract. Examples and tests use synthetic addresses;
+never submit their contents to production.
+
+BTC/XRP fixtures establish generic submission/venue reconciliation and explicit
+pending receipt, not production or chain-observer coverage. A custom synthetic BTC
+observer demonstrates the independent extension boundary. Legacy ETH round trips
+and typed fee accounting remain covered by the existing suite.
+
+Live verification must first select priced allocation within the existing $100
+limits, capture the baseline and preflight a complete return path. Routes without
+independent receipt/restoration coverage remain blocked for tracked acceptance.
+No successful venue status or raw tx ID alone passes destination receipt or
+cleanup. Production withdrawals and the native Touch ID path for this increment
+remain pending until observed together with the human.
