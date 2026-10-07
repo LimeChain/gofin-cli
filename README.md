@@ -10,6 +10,26 @@ Arbitrum One and Robinhood Chain, plus Ethereum mainnet Uniswap and Aave. The [p
 exchange, trading and DeFi scope. MCP and general chain-to-chain bridging follow
 later. Fin is open source; license selection is pending.
 
+## Components and responsibilities
+
+| Component | Binary or library | Responsibility |
+| --- | --- | --- |
+| `fin-cli` | Binary: `fin` | Parse arguments, expose help and schemas, render progress/results, and send requests to the broker. |
+| `fin-broker` | Binary: `fin-broker`, plus an internal Rust library | Load protected configuration, construct integrations, independently validate requests, and coordinate execution. |
+| `fin-engine` | Rust library | Enforce financial limits, manage previews and reservations, coordinate fresh approval, prevent duplicates, and recover uncertain outcomes. |
+| `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
+| Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
+| `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
+| `fin-authorization` | Rust library | Enforce OS authorization and verify single-use approval bound to the exact operation. Invoke the internal native helper. |
+| `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
+| Native Touch ID helper | Compiled Swift binary: `fin-touch-id`; human display name **Fin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
+| `fin-domain`, `fin-discovery`, `fin-protocol`, `fin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
+
+Financial business logic runs inside the protected broker process through its
+libraries; those libraries are not separate services. The CLI shares contracts
+and presentation code, but its input validation grants no execution authority.
+The broker enforces approval, policy and credential access independently.
+
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
