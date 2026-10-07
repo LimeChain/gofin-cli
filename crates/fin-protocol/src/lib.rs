@@ -11,6 +11,9 @@ use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 pub const MAX_FRAME_BYTES: usize = 1_048_576;
+/// Responses can contain bounded full market catalogs and account snapshots.
+/// Untrusted request frames retain the separate 1 MiB limit above.
+pub const MAX_RESPONSE_FRAME_BYTES: usize = 8 * 1_048_576;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
@@ -131,9 +134,9 @@ pub fn encode_response(response: &BrokerResponse) -> Result<Vec<u8>, FinError> {
     let mut bytes = serde_json::to_vec(response)
         .map_err(|_| protocol_error("The response could not be encoded."))?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_FRAME_BYTES {
+    if bytes.len() > MAX_RESPONSE_FRAME_BYTES {
         return Err(protocol_error(
-            "The response frame exceeds the 1 MiB limit.",
+            "The response frame exceeds the 8 MiB limit.",
         ));
     }
     Ok(bytes)
@@ -209,5 +212,29 @@ mod tests {
             error: None,
         };
         assert!(encode_response(&invalid).is_err());
+    }
+
+    #[tokio::test]
+    async fn large_catalog_response_does_not_increase_the_request_limit() {
+        let value = serde_json::json!({"markets": "x".repeat(MAX_FRAME_BYTES + 1)});
+        let encoded = encode_response(&BrokerResponse::success(value.clone())).unwrap();
+        assert!(encoded.len() > MAX_FRAME_BYTES);
+        assert!(encoded.len() < MAX_RESPONSE_FRAME_BYTES);
+        let request =
+            serde_json::json!({"method":"read", "operation":"synthetic.read", "input":value});
+        let mut request = serde_json::to_vec(&request).unwrap();
+        request.push(b'\n');
+        assert!(
+            read_request(&mut BufReader::new(request.as_slice()))
+                .await
+                .is_err()
+        );
+        let oversized = BrokerResponse::success(
+            serde_json::json!({"markets":"x".repeat(MAX_RESPONSE_FRAME_BYTES)}),
+        );
+        assert_eq!(
+            encode_response(&oversized).unwrap_err().code,
+            "INVALID_PROTOCOL_FRAME"
+        );
     }
 }

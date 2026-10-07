@@ -40,7 +40,8 @@ The installer cannot change its parent shell's PATH. Existing app/agent sessions
 may also need restarting to inherit the new PATH; custom shell configurations
 that replace PATH must include `/Library/Fin/runtime` themselves.
 
-Setup preserves and refuses an existing installation or journal. Upgrades must
+Setup preserves and refuses an existing installation or journal. `make update`
+updates a compatible local installation without deleting saved connections. Upgrades must
 preserve pending requests, reservations, proofs, and financial run state; do not
 delete the existing installation to get past this check.
 
@@ -78,6 +79,13 @@ an intentional human checkpoint. Run Make as your normal user, not with sudo;
 Fin requests elevation when needed and the wrapper clears it on exit.
 `make uninstall` is a destructive local reset: it deletes installed credentials
 and configuration, refusing financial history. Neither target runs implicitly.
+`make update` builds a new debug bundle and invokes the existing runtime updater
+with the installed public runtime as the verified old bundle. It includes helper
+and installer presentation updates, preserves private state and pending records,
+and clears cached sudo on success, failure or cancellation. It stops the old broker
+before replacement and restarts it only if it was running; a failed update leaves
+it stopped for inspection. Neither configuration nor financial approval is reused.
+
 Use Apple's Make supplied with macOS/Xcode/Command Line Tools; other executable
 paths remain outside the protected terminal ancestry allowlist.
 

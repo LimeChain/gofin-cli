@@ -7,8 +7,9 @@ synthetic and historical non-biometric results do not establish the human bounda
 
 ## Maintenance and terminal presentation
 
-Initial setup preserves and refuses an existing installation or journal. Use the
-reviewed runtime updater for an existing installation; do not delete financial
+Initial setup preserves and refuses an existing installation or journal. Use
+`make update` for a compatible local update of an existing installation; do not
+delete financial
 state to bypass setup. `make uninstall` is a destructive local development reset
 that deletes installed credentials/configuration only when its journal checks
 establish no financial history. Run it in your own macOS Terminal, and follow the
@@ -87,12 +88,18 @@ separate from the fresh Touch ID required by Fin for each write.
 Sudo is needed for setup and connection add/update/remove. Ordinary Fin commands
 use the background service without sudo; financial writes request Touch ID.
 
-For a reviewed compatible runtime update on an existing installation, finish or
-cancel enrollment and stop issuing Fin commands. Review
-`scripts/update-rust-macos-runtime.sh` and the exact old/new bundles, then run
+For a compatible local runtime update, finish or cancel enrollment and run
+`make update` yourself in Terminal. It builds a debug bundle, pauses the broker,
+uses the existing verified runtime updater (including presentation helper changes)
+and restores the observed service state. Connections, credentials and financial
+history are preserved; failure leaves the broker stopped for inspection.
+
+For manual bundle selection, finish or cancel enrollment and stop issuing Fin
+commands. Review `scripts/update-rust-macos-runtime.sh` and the exact old/new bundles, then run
 the script in your own Terminal with fresh sudo and absolute `--from`/`--to`
-paths. It requires the installed runtime to match the old bundle and keeps the
-approval helper and installer byte-identical. It replaces runtime files, retains
+paths. It requires the installed runtime to match the old bundle; helper/installer
+presentation changes require its explicit `--presentation-update` option. It
+replaces runtime files, retains
 a runtime-only backup, and leaves the running service and private state alone.
 This is a compatible local hotfix procedure, not a general version updater:
 process checks are advisory and replacement is atomic per file. Interrupted or
@@ -136,8 +143,9 @@ protected hidden prompt. No real credential values go in this document, chat,
 arguments, JSON, shell environment, screen recordings, or agent terminals. The
 human reviews the independently resolved UID/address, permissions and warnings,
 then approves only the configuration change. Verify `connections list --json`.
-The child UID/email relationship includes an explicit human confirmation where
-Binance's normal list cannot attest the association.
+The child UID and email remain visible in the approval summary without a repeated
+association warning. Details retain the API limitation; it is not an independently
+verified UID/email association.
 
 For RSA/Ed25519, verify the API-key receipt message, then paste the complete PEM
 with actual newlines or literal `\n` separators and press Enter. Check that Fin

@@ -95,6 +95,14 @@ account during development; manual generation remains read-only.
   ID remains mandatory; financial approvals are unaffected. Apple system/CLT/Xcode
   Make paths are accepted as ancestors only with the existing kernel identity,
   root-owned executable, human Terminal, descriptor and topology checks.
+- `make update`: human Terminal only. Build a compatible debug bundle, pause the
+  broker, update protected runtime/helper files and restore its observed service
+  state. Keep credentials, configuration and journal; leave the service stopped
+  on replacement failure. `python3 scripts/test-dev-workflow.py` exercises routing,
+  no-TTY refusal, running/stopped state, cancellation and failures in temporary
+  fixtures. `python3 scripts/test-rust-macos-runtime-update.py` verifies actual
+  updater staging/rollback and unchanged synthetic private state. No fixture
+  accesses the real installation or tests native authorization.
 - `make uninstall`: human Terminal only; runs the reviewed credential-deleting reset
   with labelled fresh sudo and clears cached elevation even on failure. The
   financial-history and maintenance-lock checks remain mandatory.

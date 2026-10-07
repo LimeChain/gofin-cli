@@ -95,7 +95,6 @@ func configurationPresentation(_ binding: [String: Any]) -> ConfigurationPresent
             childEmail = email
             lines.append("Main connection: \(parent)\nChild email: \(email)")
             if action != "remove" {
-                warnings.insert("Verify in Binance that UID \(identity) belongs to \(email). The main account list verifies the email, not this UID association.", at: 0)
                 expectedChecks.formUnion(["parent child email", "child UID/email association"])
             }
         } else if !(connection["parent"] is NSNull) || !(connection["email"] is NSNull) { return nil }

@@ -39,8 +39,12 @@ struct ApprovalPresentationTests {
         ]
         sub["warnings"] = ["SYNTHETIC visible warning"]
         let childSummary = configurationPresentation(sub)!.body
-        assert(childSummary.hasPrefix("Warning: Verify in Binance"))
-        for text in ["UID 10001 belongs to synthetic@example.invalid", "SYNTHETIC-parent", "SYNTHETIC visible warning"] { assert(childSummary.contains(text)) }
+        assert(!childSummary.contains("Verify in Binance") && !childSummary.contains("UID association"))
+        for text in ["UID 10001", "Child email: synthetic@example.invalid", "SYNTHETIC-parent", "SYNTHETIC visible warning"] { assert(childSummary.contains(text)) }
+        var childUpdate = sub; childUpdate["action"] = "update"
+        let childUpdateSummary = configurationPresentation(childUpdate)!.body
+        assert(!childUpdateSummary.contains("Verify in Binance") && !childUpdateSummary.contains("UID association"))
+        assert(childUpdateSummary.contains("Child email: synthetic@example.invalid") && childUpdateSummary.contains("UID 10001"))
         var missingAssociation = sub; missingAssociation["checks"] = checks
         assert(configurationPresentation(missingAssociation) == nil)
 

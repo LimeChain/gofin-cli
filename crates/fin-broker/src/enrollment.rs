@@ -616,7 +616,6 @@ async fn validate_connection(
                 }
                 checks.push(json!({"name":"parent child email","status":"passed","email":email}));
                 checks.push(json!({"name":"child UID/email association","status":"human_confirmation_required","uid":uid,"email":email}));
-                warnings.push("Before approving, verify in Binance that the observed UID belongs to the displayed child email. The parent list attests the email, not this UID association.".into());
             }
             let connection = ConnectionConfig::Binance {
                 name: args.name.clone(),

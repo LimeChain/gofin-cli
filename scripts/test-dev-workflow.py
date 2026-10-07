@@ -39,7 +39,7 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertNotIn('arg:', result.stdout)
 
     def test_human_and_bundle_targets_route_explicitly(self):
-        for target in ('setup', 'uninstall', 'bundle', 'release'):
+        for target in ('setup', 'update', 'uninstall', 'bundle', 'release'):
             with self.subTest(target=target):
                 result = self.make(target)
                 self.assertEqual(result.returncode, 0)
@@ -62,7 +62,7 @@ class DevWorkflowTests(unittest.TestCase):
     def test_real_human_actions_refuse_pipes_before_privilege_or_packaging(self):
         if os.uname().sysname != 'Darwin':
             self.skipTest('macOS helper')
-        for target in ('setup', 'uninstall'):
+        for target in ('setup', 'update', 'uninstall'):
             result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), target],
                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
@@ -120,6 +120,130 @@ chmod 700 "$bundle/fin"
             else:
                 self.assertEqual(lines[1], 'fin:setup')
                 self.assertNotIn('--verbose', lines[0])
+
+    def update_fixture(self, options):
+        import sys
+        fixture = self.root / 'update workflow'
+        scripts, mocks = fixture / 'scripts', fixture / 'mocks'
+        scripts.mkdir(parents=True)
+        mocks.mkdir()
+        runtime = fixture / 'Library/Fin/runtime'
+        runtime.mkdir(parents=True)
+        private = fixture / 'Library/Fin/private'
+        private.mkdir()
+        (private / 'config.json').write_bytes(b'synthetic saved connections')
+        (private / 'operations.sqlite').write_bytes(b'synthetic pending financial history')
+        (private / 'credentials').write_bytes(b'synthetic credentials only')
+        self.private_before = {p.name: p.read_bytes() for p in private.iterdir()}
+        options_file, events = fixture / 'options.json', fixture / 'events.jsonl'
+        options_file.write_text(json.dumps(options))
+        driver = r"""
+import json,os,subprocess,sys
+from pathlib import Path
+name=Path(sys.argv[0]).name
+args=sys.argv[1:]
+if name == 'driver.py': name=args.pop(0)
+options_path=Path(os.environ['OPTIONS'])
+options=json.loads(options_path.read_text())
+with Path(os.environ['EVENTS']).open('a') as log: log.write(json.dumps([name,args])+'\n')
+if name=='uname': print('Darwin')
+elif name=='id': print('501')
+elif name=='sudo':
+    if args==['-K']: sys.exit(0)
+    if options.get('fail')=='sudo': sys.exit(130)
+    assert args[:4]==['-k','-p','Mac login password for %p: ','--'], args
+    sys.exit(subprocess.run(args[4:]).returncode)
+elif name=='package':
+    if options.get('fail')=='package': sys.exit(1)
+    bundle=Path(args[0]); bundle.mkdir(parents=True)
+    binary=bundle/'fin'; binary.write_text(Path(os.environ['FIN_FIXTURE']).read_text()); binary.chmod(0o700)
+elif name=='update':
+    assert args[0]=='--from' and args[2]=='--to' and args[4]=='--presentation-update', args
+    if options.get('fail')=='update': sys.exit(1)
+    (Path(args[1])/'fin').write_bytes((Path(args[3])/'fin').read_bytes())
+    print('✓ Fin updated.')
+elif name=='fin':
+    assert args[:1]==['daemon'], args
+    action=args[1]
+    if options.get('fail')==action: sys.exit(1)
+    if action=='status' and options.get('bad_status'):
+        print('invalid status'); sys.exit(0)
+    if action=='stop': options['state']='stopped'
+    elif action=='start': options['state']='running'
+    options_path.write_text(json.dumps(options))
+    if '--json' in args:
+        print(json.dumps({'status':options['state'],'registered':options.get('registered',True)}))
+    else: print('✓ Fin daemon '+options['state']+'.')
+else: sys.exit('unexpected command: '+name)
+"""
+        source = (REPO / 'scripts/dev-macos.sh').read_text()
+        for name in ('uname', 'id', 'sudo'):
+            source = source.replace('/usr/bin/' + name, '"' + str(mocks / name) + '"')
+            mock = mocks / name
+            mock.write_text('#!' + sys.executable + '\n' + driver)
+            mock.chmod(0o700)
+        source = source.replace('/Library/Fin', str(fixture / 'Library/Fin'))
+        source = source.replace("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }", 'true')
+        (scripts / 'dev-macos.sh').write_text(source)
+        driver_file = fixture / 'driver.py'
+        driver_file.write_text(driver)
+        for script, action in [('package-rust-macos.sh', 'package'), ('update-rust-macos-runtime.sh', 'update')]:
+            (scripts / script).write_text('#!/bin/sh\nexec "' + sys.executable + '" "$DRIVER" ' + action + ' "$@"\n')
+        binary = runtime / 'fin'
+        binary.write_text('#!' + sys.executable + '\n' + driver)
+        binary.chmod(0o700)
+        result = subprocess.run(['/bin/sh', str(scripts / 'dev-macos.sh'), 'update'],
+                                capture_output=True, text=True, timeout=15,
+                                env=dict(os.environ, OPTIONS=str(options_file), EVENTS=str(events),
+                                         DRIVER=str(driver_file), FIN_FIXTURE=str(binary)))
+        self.assertEqual(self.private_before, {p.name: p.read_bytes() for p in private.iterdir()})
+        recorded = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
+        self.assertNotIn('setup', result.stdout)
+        self.assertFalse(any(str(private) in arg for _, args in recorded for arg in args))
+        return result, recorded, json.loads(options_file.read_text())
+
+    def test_update_preserves_private_state_and_restores_service_state(self):
+        for state in ('running', 'stopped'):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as root:
+                self.root = Path(root)
+                result, events, observed = self.update_fixture({'state':state})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(observed['state'], state)
+                service = [args for name,args in events if name=='fin']
+                self.assertEqual(service, [['daemon','status','--json'], ['daemon','stop'],
+                                           ['daemon','start'] if state=='running' else ['daemon','status']])
+                names = [name for name,_ in events]
+                self.assertLess(names.index('package'), names.index('fin'))
+                self.assertLess(names.index('update'), max(i for i,name in enumerate(names) if name=='fin'))
+                clears = [i for i,(name,args) in enumerate(events) if name=='sudo' and args==['-K']]
+                self.assertTrue(clears)
+                self.assertLess(clears[0], max(i for i,name in enumerate(names) if name=='fin'))
+                self.assertIn('Saved connections are kept', result.stderr)
+                self.assertIn('Touch ID helper', result.stderr)
+
+    def test_update_failures_never_resume_or_claim_unverified_success(self):
+        for failure in ('package','status','stop','sudo','update','start'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                self.root = Path(root)
+                result, events, observed = self.update_fixture({'state':'running','fail':failure})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(any(name=='sudo' and args==['-K'] for name,args in events))
+                if failure in ('package','status','stop'):
+                    self.assertFalse(any(name=='update' for name,_ in events))
+                if failure in ('sudo','update'):
+                    self.assertEqual(observed['state'], 'stopped')
+                    self.assertFalse(any(name=='fin' and args==['daemon','start'] for name,args in events))
+                    self.assertIn('Fin remains stopped', result.stderr)
+                if failure=='sudo': self.assertEqual(result.returncode,130)
+                if failure=='start': self.assertEqual(observed['state'],'stopped')
+
+    def test_update_rejects_invalid_or_unregistered_service_before_stopping(self):
+        for options in ({'state':'running','bad_status':True}, {'state':'running','registered':False}):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as root:
+                self.root = Path(root)
+                result, events, _ = self.update_fixture(options)
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse(any(name=='update' or name=='fin' and args==['daemon','stop'] for name,args in events))
 
     def test_invalid_helper_action_is_rejected(self):
         result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), 'anything'], capture_output=True, text=True)

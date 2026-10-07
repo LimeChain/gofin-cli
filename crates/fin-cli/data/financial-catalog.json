@@ -5566,7 +5566,8 @@
           "type": "integer"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -5707,7 +5708,8 @@
       "additionalProperties": false,
       "properties": {
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": [
             "string",
             "null"
@@ -5907,7 +5909,8 @@
           ]
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -6379,7 +6382,8 @@
           "type": "integer"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -6580,7 +6584,8 @@
           "type": "string"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": [
             "string",
             "null"
@@ -6788,7 +6793,8 @@
           "type": "integer"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -7149,7 +7155,8 @@
       "additionalProperties": false,
       "properties": {
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": [
             "string",
             "null"
@@ -7349,7 +7356,8 @@
           ]
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -7809,7 +7817,8 @@
           "type": "integer"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },
@@ -8011,7 +8020,8 @@
           "type": "integer"
         },
         "symbol": {
-          "pattern": "^[A-Z0-9_]{1,32}$",
+          "description": "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization.",
+          "pattern": "^[A-Z0-9_\\u3400-\\u4DBF\\u4E00-\\u9FFF]{1,32}$",
           "type": "string"
         }
       },

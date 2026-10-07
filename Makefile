@@ -2,7 +2,7 @@
 SHELL := /bin/sh
 ARGS ?= --help
 
-.PHONY: help dev build catalog test-ui test-integration test-delivery test check bundle release setup uninstall
+.PHONY: help dev build catalog test-ui test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -17,6 +17,7 @@ help:
 	  'make bundle            Build an inspectable debug macOS bundle; do not install' \
 	  'make release           Build an optimized macOS release bundle; do not install' \
 	  'make setup             HUMAN: build debug bundle and run real protected setup' \
+	  'make update            HUMAN: update compatible local binaries; keep connections' \
 	  'make uninstall         HUMAN: delete installed credentials/config; refuse financial history'
 
 dev:
@@ -60,6 +61,9 @@ release:
 
 setup:
 	@/bin/sh scripts/dev-macos.sh setup
+
+update:
+	@/bin/sh scripts/dev-macos.sh update
 
 uninstall:
 	@/bin/sh scripts/dev-macos.sh uninstall

@@ -84,6 +84,136 @@ fn futures_markets() -> (BinanceEndpoint, Value) {
         json!({"symbols":[market("ETHUSDT", "PERPETUAL"),market("ETHUSDT_261225", "CURRENT_QUARTER")]}),
     )
 }
+
+fn han_market() -> Value {
+    let mut row = market("币安人生USDT", "PERPETUAL");
+    row["baseAsset"] = json!("币安人生");
+    row
+}
+
+#[tokio::test]
+async fn native_han_markets_do_not_break_full_or_selected_market_discovery() {
+    for futures in [false, true] {
+        for selected in [false, true] {
+            let endpoint = if futures {
+                BinanceEndpoint::FuturesExchangeInfo
+            } else {
+                BinanceEndpoint::SpotExchangeInfo
+            };
+            let venue = Fixture::new(vec![(
+                endpoint,
+                json!({"symbols":[han_market(), market("ETHUSDT", "PERPETUAL")]}),
+            )]);
+            let operation = if futures {
+                "binance.futures.markets"
+            } else {
+                "binance.spot.markets"
+            };
+            let args = if selected {
+                json!({"symbol":"ETHUSDT"})
+            } else {
+                json!({})
+            };
+            let result = trading_read(operation, &args, &config(), &venue)
+                .await
+                .unwrap();
+            assert_eq!(
+                result["markets"].as_array().unwrap().len(),
+                if selected { 1 } else { 2 }
+            );
+            if !selected {
+                assert_eq!(result["markets"][0]["symbol"], "币安人生USDT");
+                assert_eq!(result["markets"][0]["baseAsset"], "币安人生");
+            }
+            venue.finished();
+        }
+    }
+}
+
+#[tokio::test]
+async fn futures_positions_for_a_subaccount_accept_unrelated_native_han_markets() {
+    let venue = Fixture::new(vec![
+        (
+            BinanceEndpoint::FuturesExchangeInfo,
+            json!({"symbols":[han_market(), market("ETHUSDT", "PERPETUAL")]}),
+        ),
+        (
+            BinanceEndpoint::FuturesPositions,
+            json!([{"symbol":"ETHUSDT", "positionSide":"SHORT", "marginAsset":"USDT", "positionAmt":"-0.001", "entryPrice":"1234.123456789012345678", "markPrice":"1235", "unRealizedProfit":"-0.001", "notional":"-1.235"}]),
+        ),
+    ]);
+    let mut accounts = config();
+    let mut child = accounts.accounts[0].clone();
+    child.name = "synthetic-child".into();
+    child.role = AccountRole::Sub;
+    child.parent = Some("main".into());
+    child.email = Some("synthetic-child@example.invalid".into());
+    child.resource = ResourceId("binance:uid:124:SPOT".into());
+    accounts.accounts.push(child);
+    let result = trading_read(
+        "binance.futures.positions",
+        &json!({"account":"synthetic-child"}),
+        &accounts,
+        &venue,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["account"], "synthetic-child");
+    assert_eq!(result["positions"][0]["positionAmt"], "-0.001");
+    assert_eq!(
+        result["positions"][0]["entryPrice"],
+        "1234.123456789012345678"
+    );
+    venue.finished();
+}
+
+#[tokio::test]
+async fn native_han_symbol_selectors_are_preserved_in_reviewed_read_requests() {
+    let venue = Fixture::new(vec![
+        (
+            BinanceEndpoint::FuturesExchangeInfo,
+            json!({"symbols":[han_market()]}),
+        ),
+        (BinanceEndpoint::FuturesOpenOrders, json!([])),
+    ]);
+    let result = trading_read(
+        "binance.futures.orders",
+        &json!({"account":"main", "symbol":"币安人生USDT"}),
+        &config(),
+        &venue,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["orders"], json!([]));
+    assert_eq!(
+        venue.seen.lock().unwrap()[1].1.get("symbol"),
+        Some("币安人生USDT")
+    );
+    venue.finished();
+}
+
+#[tokio::test]
+async fn control_characters_and_punctuation_remain_invalid_native_symbol_selectors() {
+    for symbol in [
+        "币安人生USDT&x=y",
+        "币安\n人生USDT",
+        "币安\u{202e}人生USDT",
+        "ethusdt",
+        "😀USDT",
+    ] {
+        let venue = Fixture::new(vec![]);
+        let failure = trading_read(
+            "binance.futures.orders",
+            &json!({"account":"main", "symbol":symbol}),
+            &config(),
+            &venue,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.code, "INVALID_SYMBOL");
+        assert!(venue.seen.lock().unwrap().is_empty());
+    }
+}
 fn order() -> Value {
     json!({"symbol":"ETHUSDT","orderId":9007199254740993u64,"clientOrderId":"fixture-order","status":"PARTIALLY_FILLED","side":"BUY","type":"LIMIT",
         "price":"1234.000000000000000001","origQty":"0.123456789012345678","executedQty":"0.000000000000000001",

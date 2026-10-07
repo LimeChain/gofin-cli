@@ -5,7 +5,7 @@ use fin_domain::{FinError, OperationRequest};
 use fin_presentation::Ui;
 use fin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
-use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES};
+use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
 mod daemon;
 mod onboarding;
 mod shell_integration;
@@ -305,11 +305,11 @@ async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinErro
     let reader = BufReader::new(reader);
     let mut bytes = Vec::with_capacity(1024);
     let read = reader
-        .take((MAX_FRAME_BYTES + 1) as u64)
+        .take((MAX_RESPONSE_FRAME_BYTES + 1) as u64)
         .read_until(b'\n', &mut bytes)
         .await
         .map_err(|_| broker_unavailable())?;
-    if read == 0 || bytes.len() > MAX_FRAME_BYTES || bytes.last() != Some(&b'\n') {
+    if read == 0 || bytes.len() > MAX_RESPONSE_FRAME_BYTES || bytes.last() != Some(&b'\n') {
         return Err(protocol_error());
     }
     let response: BrokerResponse = serde_json::from_slice(&bytes).map_err(|_| protocol_error())?;
@@ -1213,10 +1213,18 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_broker_response_is_rejected() {
-        let mut bytes = vec![b'x'; MAX_FRAME_BYTES + 2];
+        let mut bytes = vec![b'x'; MAX_RESPONSE_FRAME_BYTES + 2];
         bytes.push(b'\n');
         let error = read_response(&bytes[..]).await.unwrap_err();
         assert_eq!(error.code, "BROKER_PROTOCOL_ERROR");
+    }
+
+    #[tokio::test]
+    async fn full_catalog_response_over_one_mib_is_read_without_truncation() {
+        let value = json!({"markets":"x".repeat(MAX_FRAME_BYTES + 1)});
+        let encoded =
+            fin_protocol::encode_response(&BrokerResponse::success(value.clone())).unwrap();
+        assert_eq!(read_response(encoded.as_slice()).await.unwrap(), value);
     }
 
     #[cfg(target_os = "macos")]

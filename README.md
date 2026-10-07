@@ -68,6 +68,14 @@ for Touch ID to approve configuration. Both setup entry points start the broker 
 before reporting success. Setup moves no funds. It registers the
 runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). Open a new Terminal afterward and run `fin doctor`.
+For later compatible local edits, run `make update` in your own Terminal instead
+of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
+broker and Touch ID helper with your Mac login password, and restores the broker's
+previous running/stopped state. Connections, credentials and financial history
+are kept. If replacement fails, the broker stays stopped for inspection; no
+financial operation is replayed. This is a local development update, not a general
+schema-migration or published-version updater.
+
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
 and [completion](docs/shell-completion.md).
 
@@ -166,6 +174,7 @@ The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. Copy
 make dev                              # debug CLI help; no installation
 make dev ARGS='capabilities --json'    # incremental CLI execution
 make build                            # debug CLI and broker
+make update                           # HUMAN: update installed local build; keep connections
 make catalog                          # regenerate offline financial discovery
 make check                            # formatting and strict Clippy
 make test-ui                          # focused offline CLI/discovery tests
@@ -299,3 +308,18 @@ readiness from pending production/Touch ID acceptance. Reproduce the focused sui
 ```sh
 cargo test --locked -p fin-binance --test trading_reads --test trading_contract
 ```
+
+Binance read compatibility and an explicit authenticated read audit are documented
+in the [read audit report](docs/reports/binance-read-audit.md). Native Han market
+identifiers no longer break discovery or unrelated futures reads:
+
+```sh
+cargo test --locked -p fin-binance --test trading_reads
+python3 scripts/test-binance-read-audit.py
+# Explicit live reads through your installed broker; use enrolled names.
+python3 scripts/audit-binance-reads.py --accounts MAIN_NAME SUB_NAME
+```
+
+The audit moves no funds. Single-order lookups require an observed existing ID;
+missing history is reported as not run, without creating an order. Full positions
+and bounded order/trade/income slices retain their different coverage.

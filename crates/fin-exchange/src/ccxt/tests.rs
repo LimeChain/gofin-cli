@@ -903,6 +903,31 @@ async fn trading_write_timeout_never_retries() {
 }
 
 #[tokio::test]
+async fn native_han_read_symbols_are_utf8_encoded_before_ccxt_signs() {
+    use hmac::{Hmac, Mac};
+    let server = Server::new(200, "[]", Duration::ZERO);
+    CcxtClient::for_test(&server.url)
+        .unwrap()
+        .request(
+            ExchangeId::Binance,
+            Method::BinanceFuturesOpenOrders,
+            credentials("SYNTHETIC-HMAC-SECRET".into()),
+            vec![("symbol".into(), "币安人生USDT".into())],
+        )
+        .await
+        .unwrap();
+    let wire = server.request();
+    assert!(wire.starts_with("GET /fapi/v1/openOrders?"));
+    let (payload, signature) = signed_payload(&wire);
+    assert!(payload.contains("symbol=%E5%B8%81%E5%AE%89%E4%BA%BA%E7%94%9FUSDT"));
+    assert!(!payload.contains("%25E5"));
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"SYNTHETIC-HMAC-SECRET").unwrap();
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+    assert_eq!(server.finish(), 1);
+}
+
+#[tokio::test]
 async fn trading_reads_preserve_bounded_history_and_large_ids_in_signed_query() {
     use hmac::{Hmac, Mac};
     let server = Server::new(200, "[]", Duration::ZERO);

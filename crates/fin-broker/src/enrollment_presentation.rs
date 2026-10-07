@@ -132,9 +132,6 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                         safe(parent),
                         safe(email)
                     ));
-                    if action != "remove" {
-                        lines.push(format!("VERIFY: UID {} belongs to {}. Binance's main-account list verifies the email, not this UID association.", safe(physical_identity), safe(email)));
-                    }
                 }
                 if action != "remove" {
                     let permissions = binding["checks"]
@@ -359,13 +356,18 @@ mod tests {
         assert!(text.lines().count() <= 12);
     }
     #[test]
-    fn child_relationship_warnings_and_cleanup_remain_visible() {
+    fn child_identity_and_cleanup_remain_visible_without_association_warning() {
         let mut binding = binance("sub");
         let text = review(&binding).unwrap();
-        assert!(text.contains("VERIFY: UID 123 belongs to synthetic@example.invalid"));
+        assert!(text.contains("UID 123"));
+        assert!(text.contains("Child email: synthetic@example.invalid"));
+        assert!(!text.contains("VERIFY:") && !text.contains("UID association"));
+        assert!(text.contains("Synthetic warning"));
         assert!(text.contains("Main connection: SYNTHETIC-main"));
         binding["action"] = "update".into();
-        assert!(review(&binding).unwrap().contains("Revoke obsolete keys"));
+        let text = review(&binding).unwrap();
+        assert!(text.contains("Revoke obsolete keys"));
+        assert!(!text.contains("VERIFY:") && !text.contains("UID association"));
         binding["action"] = "remove".into();
         assert!(
             review(&binding)

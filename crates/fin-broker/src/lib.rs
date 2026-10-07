@@ -1256,7 +1256,7 @@ impl BrokerRuntime {
         }
         match request {
             R::Capabilities => Ok(
-                json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES,"exchanges":fin_discovery::exchange_capabilities()}),
+                json!({"version":2,"methods":protocol_methods(),"maxFrameBytes":fin_protocol::MAX_FRAME_BYTES,"maxResponseFrameBytes":fin_protocol::MAX_RESPONSE_FRAME_BYTES,"exchanges":fin_discovery::exchange_capabilities()}),
             ),
             R::Connections => {
                 let mut connections = self

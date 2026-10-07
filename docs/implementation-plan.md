@@ -135,7 +135,16 @@ Make is a thin entry point over Cargo and the existing reviewed scripts, not a
 second CLI implementation. Default help, incremental debug execution/builds and
 focused UI/integration tests are separate from human setup/uninstall and optimized
 release packaging. Debug setup uses the same protected install and real Touch ID;
-only compiler optimization and test repetition differ. Apple Make ancestry is
+only compiler optimization and test repetition differ.
+
+`make update` rebuilds a compatible debug bundle and delegates protected runtime
+replacement, including reviewed presentation helper changes, to the existing
+updater. It uses the installed public runtime as the verified previous bundle,
+preserves private state, pauses the broker before replacement and restores its
+observed running/stopped state after success. Cancellation/failure clears cached
+sudo and leaves a paused service for inspection; there is no financial replay or
+schema-migration shortcut. Tests use isolated synthetic trees only.
+Apple Make ancestry is
 supported through the existing terminal provenance checks, with no agent exception.
 The existing synthetic broker/store/engine tests are the current isolated loop;
 a standalone interactive synthetic broker is not yet implemented. No dependency,
@@ -426,3 +435,25 @@ instructions and exact recheck commands; do not invent endpoints, reuse website
 sessions, or advertise a local alias as a Binance whitelist edit. Fresh approval
 and limits on existing financial writes remain unchanged. No live mutation is
 performed by these reads. [Verification](reports/binance-address-book.md).
+
+
+## Binance read compatibility — 7 October 2026
+
+Audit the exposed read inventory on both enrolled account roles. Preserve native
+Han identifiers in read catalogs and selectors so unrelated rows do not block
+ASCII market queries or all-position reads. Keep exact financial strings and
+unsafe-selector rejection. The explicit read-audit runner discovers the read-kind
+inventory, uses main authority for hierarchy, queries bounded observed-position
+markets, and takes single-order IDs only from existing read evidence. Private live
+results remain ignored; no read audit can create a financial action. See the
+[read audit report](reports/binance-read-audit.md) for actual and pending results.
+
+
+## Full-catalog IPC correction — 7 October 2026
+
+Observed live spot-market output exceeds the old 1 MiB shared frame bound. Keep
+untrusted requests at 1 MiB and give responses a separate finite 8 MiB limit in
+broker encoding and client decoding, advertised through broker capabilities.
+Keep adapter row bounds and response validation. Targeted regressions cover a
+large response round trip, rejected oversized responses and unchanged rejected
+large requests. No request envelope, financial identity or write policy changes.

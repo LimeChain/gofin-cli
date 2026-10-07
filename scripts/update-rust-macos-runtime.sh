@@ -279,4 +279,8 @@ if [ -e "$fin_auth_dir" ] || [ -L "$fin_auth_dir" ]; then check_auth_helper; fi
 fin_complete=1
 /bin/rm -rf "$fin_backup/incoming" "$fin_backup/restore"
 /bin/rm -f "$fin_backup/incoming-Fin" "$fin_backup/restore-Fin"
-echo 'Fin updated. Run sudo -K, then retry enrollment.'
+if [ "${NO_COLOR+x}" != x ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
+  printf '\033[32m✓ Fin updated.\033[0m\n'
+else
+  printf '✓ Fin updated.\n'
+fi

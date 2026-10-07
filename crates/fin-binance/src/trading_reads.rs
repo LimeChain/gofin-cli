@@ -75,11 +75,17 @@ fn input<T: for<'de> Deserialize<'de>>(value: &Value) -> Result<T, FinError> {
         )
     })
 }
+// Binance lists native Han identifiers (for example 币安人生USDT). Keep the
+// request alphabet finite and the same in discovery, without normalizing names.
+const SYMBOL_PATTERN: &str = r"^[A-Z0-9_\u3400-\u4DBF\u4E00-\u9FFF]{1,32}$";
+fn han_character(value: char) -> bool {
+    matches!(value, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
+}
 fn valid_symbol(value: &str) -> bool {
-    (1..=32).contains(&value.len())
+    (1..=32).contains(&value.chars().count())
         && value
-            .bytes()
-            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || han_character(c))
 }
 fn check_symbol(value: &str) -> Result<(), FinError> {
     if valid_symbol(value) {
@@ -87,7 +93,7 @@ fn check_symbol(value: &str) -> Result<(), FinError> {
     } else {
         Err(error(
             "INVALID_SYMBOL",
-            "Use a Binance symbol of at most 32 uppercase letters, digits or underscores.",
+            "Use the exact Binance symbol: at most 32 uppercase ASCII letters, digits, underscores or Han characters.",
         ))
     }
 }
@@ -165,8 +171,8 @@ fn token(value: &Value, key: &str) -> Result<String, FinError> {
         .filter(|s| {
             !s.is_empty()
                 && s.len() <= 128
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_:/.-".contains(&b))
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_:/.-".contains(c) || han_character(c))
         })
         .map(str::to_owned)
         .ok_or_else(invalid_response)
@@ -883,7 +889,10 @@ pub fn trading_read_definitions() -> Vec<Definition> {
     ] {
         if let Some(properties) = schema["properties"].as_object_mut() {
             if let Some(symbol) = properties.get_mut("symbol") {
-                symbol["pattern"] = json!("^[A-Z0-9_]{1,32}$");
+                symbol["pattern"] = json!(SYMBOL_PATTERN);
+                symbol["description"] = json!(
+                    "Exact Binance market identifier; uppercase ASCII letters, digits, underscores and native Han characters are supported without normalization."
+                );
             }
             if let Some(account) = properties.get_mut("account") {
                 account["minLength"] = json!(1);

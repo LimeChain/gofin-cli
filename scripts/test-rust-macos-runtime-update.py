@@ -182,9 +182,9 @@ class RuntimeUpdateFixture(unittest.TestCase):
             for name in FILES[:-1]))
         bundle.joinpath("SHA256SUMS").chmod(0o644)
 
-    def run_update(self, sudo_uid="501", presentation_update=False):
+    def run_update(self, sudo_uid="501", presentation_update=False, from_installed=False):
         self.root.joinpath("options.json").write_text(json.dumps(self.options))
-        arguments = ["/bin/bash", str(self.script), "--from", str(self.old), "--to", str(self.new)]
+        arguments = ["/bin/bash", str(self.script), "--from", str(self.runtime if from_installed else self.old), "--to", str(self.new)]
         if presentation_update:
             arguments.append("--presentation-update")
         result = subprocess.run(
@@ -238,7 +238,15 @@ class RuntimeUpdateFixture(unittest.TestCase):
         renamed = [Path(args[-1]).name for command, args in self.events() if command == "mv"]
         self.assertEqual(renamed, ["fin", "fin-broker", "BUILDINFO", "SHA256SUMS"])
         self.assertFalse(self.lock.exists())
-        self.assertEqual(result.stdout, "Updating Fin...\nFin updated. Run sudo -K, then retry enrollment.\n")
+        self.assertEqual(result.stdout, "Updating Fin...\n✓ Fin updated.\n")
+
+    def test_installed_runtime_can_supply_verified_old_bundle_without_private_access(self):
+        self.new.joinpath("fin-touch-id").write_text("synthetic new presentation helper\n")
+        self.manifest(self.new)
+        result = self.run_update(presentation_update=True, from_installed=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_runtime_matches(self.new)
+        self.assertFalse(self.lock.exists())
 
     def test_requires_human_sudo_and_root(self):
         self.options["uid"] = "501"
