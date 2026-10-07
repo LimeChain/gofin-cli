@@ -261,7 +261,7 @@ async fn identity_cache_and_price_cache_have_separate_expiry_and_no_outage_fallb
     clock.store(NOW + 31, Ordering::SeqCst);
     assert_eq!(provider.quote(&selected).await.unwrap().usd_per_unit, "1.3");
     assert_eq!(server.count(), 4);
-    clock.store(NOW + 901, Ordering::SeqCst);
+    clock.store(NOW + 86_401, Ordering::SeqCst);
     assert_eq!(
         provider.quote(&selected).await.unwrap_err().code,
         "PRICE_UNAVAILABLE"
@@ -540,4 +540,272 @@ async fn venue_outage_and_retry_after_do_not_fall_back_to_symbol_prices() {
             assert_eq!(server.count(), 1);
         }
     }
+}
+
+#[derive(Default)]
+struct MemoryIdentityStore(StdMutex<Option<Vec<u8>>>);
+impl IdentityStore for MemoryIdentityStore {
+    fn load(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn save(&self, bytes: &[u8]) -> Result<()> {
+        *self.0.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn action_prices_are_one_exact_batch_in_input_order_with_duplicate_deduplication() {
+    let prices = format!(
+        "{{\"aptos\":{{\"usd\":0.12345678901234567890123456789,\"last_updated_at\":{NOW}}},\"sei-network\":{{\"usd\":0.06,\"last_updated_at\":{NOW}}},\"usd-coin\":{{\"usd\":0.9971,\"last_updated_at\":{NOW}}}}}"
+    );
+    let (server, provider, _) = exchange_fixture(vec![
+        response(&market_rows(&[("APT", "USDC"), ("SEI", "USDC")])),
+        response(&page(vec![
+            ticker("APT", "USDC", "aptos", "usd-coin"),
+            ticker("SEI", "USDC", "sei-network", "usd-coin"),
+        ])),
+        response(&prices),
+    ])
+    .await;
+    let assets = ["SEI", "APT", "USDC", "APT"].map(|coin| asset("binance", coin, 36));
+    let quotes = provider.quotes(&assets).await.unwrap();
+    assert_eq!(quotes.len(), 4);
+    assert_eq!(quotes[0].usd_per_unit, "0.06");
+    assert_eq!(quotes[1].usd_per_unit, "0.12345678901234567890123456789");
+    assert_eq!(quotes[2].usd_per_unit, "0.9971");
+    assert_eq!(quotes[1].source, quotes[3].source);
+    provider.quotes(&assets).await.unwrap();
+    assert_eq!(server.count(), 3);
+    assert!(
+        server.requests.lock().unwrap()[2]
+            .starts_with("GET /simple/price?ids=aptos%2Csei-network%2Cusd-coin&")
+    );
+}
+
+#[tokio::test]
+async fn missing_stale_or_invalid_batch_member_cannot_cache_a_partial_batch() {
+    for bad in ["missing", "stale", "negative"] {
+        let first = body("ethereum", "2", NOW);
+        let second = match bad {
+            "missing" => "{}".into(),
+            "stale" => body(CONTRACT, "1", NOW - 120),
+            _ => body(CONTRACT, "-1", NOW),
+        };
+        // Two exact contracts on one platform are batched together.
+        let other = "0x2222222222222222222222222222222222222222";
+        let payload = format!(
+            "{{\"{other}\":{{\"usd\":2,\"last_updated_at\":{NOW}}},{} }}",
+            second.trim_start_matches('{').trim_end_matches('}')
+        );
+        let payload = if bad == "missing" {
+            body(other, "2", NOW)
+        } else {
+            payload
+        };
+        let (server, provider, _) = fixture(vec![
+            response(&payload),
+            response(&body(other, "3", NOW)),
+            response(&first),
+        ])
+        .await;
+        assert!(
+            provider
+                .quotes(&[
+                    asset("ethereum:1", other, 18),
+                    asset("ethereum:1", CONTRACT, 18)
+                ])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            provider
+                .quote(&asset("ethereum:1", other, 18))
+                .await
+                .unwrap()
+                .usd_per_unit,
+            "3"
+        );
+        assert_eq!(server.count(), 2);
+    }
+}
+
+#[tokio::test]
+async fn batching_keeps_contracts_and_platforms_separate_and_bounds_action_size() {
+    let other = "0x2222222222222222222222222222222222222222";
+    let batch = format!(
+        "{{\"{CONTRACT}\":{{\"usd\":1,\"last_updated_at\":{NOW}}},\"{other}\":{{\"usd\":2,\"last_updated_at\":{NOW}}}}}"
+    );
+    let (server, provider, _) = fixture(vec![
+        response(&body("ethereum", "2000", NOW)),
+        response(&body(CONTRACT, "3", NOW)),
+        response(&batch),
+    ])
+    .await;
+    let assets = [
+        native(),
+        asset("ethereum:1", CONTRACT, 18),
+        asset("ethereum:1", other, 18),
+        asset("ethereum:42161", CONTRACT, 18),
+    ];
+    let quotes = provider.quotes(&assets).await.unwrap();
+    assert_eq!(
+        quotes
+            .iter()
+            .map(|q| q.usd_per_unit.as_str())
+            .collect::<Vec<_>>(),
+        ["2000", "1", "2", "3"]
+    );
+    assert_eq!(server.count(), 3);
+    {
+        let requests = server.requests.lock().unwrap();
+        assert!(requests[1].contains("/simple/token_price/arbitrum-one?"));
+        assert!(requests[2].contains("/simple/token_price/ethereum?contract_addresses="));
+    }
+    assert_eq!(
+        provider.quotes(&vec![native(); 65]).await.unwrap_err().code,
+        "PRICE_REQUEST_TOO_LARGE"
+    );
+    assert_eq!(server.count(), 3);
+}
+
+#[tokio::test]
+async fn completed_identity_survives_provider_recreation_without_persisting_quotes() {
+    let store = Arc::new(MemoryIdentityStore::default());
+    let (first, provider, _) = exchange_fixture(vec![
+        response(&market_rows(&[("APT", "USDC")])),
+        response(&page(vec![ticker("APT", "USDC", "aptos", "usd-coin")])),
+        response(&body("aptos", "1", NOW)),
+    ])
+    .await;
+    let provider = provider.with_identity_store(store.clone()).unwrap();
+    provider.quote(&asset("binance", "APT", 36)).await.unwrap();
+    assert_eq!(first.count(), 3);
+    let saved = String::from_utf8(store.load().unwrap().unwrap()).unwrap();
+    assert!(
+        !saved.contains("usd_per_unit")
+            && !saved.contains("last_updated_at")
+            && !saved.contains("api_key")
+    );
+    let (second, provider, _) = exchange_fixture(vec![response(&body("aptos", "2", NOW))]).await;
+    let provider = provider.with_identity_store(store).unwrap();
+    assert_eq!(
+        provider
+            .quote(&asset("binance", "APT", 36))
+            .await
+            .unwrap()
+            .usd_per_unit,
+        "2"
+    );
+    assert_eq!(second.count(), 1);
+    assert!(second.requests.lock().unwrap()[0].contains("/simple/price?ids=aptos&"));
+}
+
+#[tokio::test]
+async fn saved_pagination_resumes_after_recreation_and_cooldown_without_accepting_partial_identity()
+{
+    let store = Arc::new(MemoryIdentityStore::default());
+    let rows = (0..100)
+        .map(|_| ticker("APT", "USDC", "aptos", "usd-coin"))
+        .collect();
+    let rate =
+        b"HTTP/1.1 429 Fixture\r\nRetry-After: 2\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec();
+    let (_first_server, provider, _) = exchange_fixture(vec![
+        response(&market_rows(&[("APT", "USDC")])),
+        response(&page(rows)),
+        (rate, Duration::ZERO),
+    ])
+    .await;
+    let provider = provider.with_identity_store(store.clone()).unwrap();
+    assert_eq!(
+        provider
+            .quote(&asset("binance", "APT", 36))
+            .await
+            .unwrap_err()
+            .code,
+        "PRICE_RATE_LIMITED"
+    );
+    let (server, provider, clock) = exchange_fixture(vec![
+        response(&page(vec![])),
+        response(&body("aptos", "2", NOW + 2)),
+    ])
+    .await;
+    clock.store(NOW + 2, Ordering::SeqCst);
+    let provider = provider.with_identity_store(store).unwrap();
+    assert_eq!(
+        provider
+            .quote(&asset("binance", "APT", 36))
+            .await
+            .unwrap()
+            .usd_per_unit,
+        "2"
+    );
+    assert_eq!(server.count(), 2);
+    assert!(
+        server.requests.lock().unwrap()[0]
+            .contains("/exchanges/binance/tickers?order=base_target&page=2")
+    );
+}
+
+#[tokio::test]
+async fn corrupt_or_different_provider_state_is_refreshed_instead_of_trusted() {
+    for bytes in [b"invalid cache".to_vec(), br#"{"version":999,"origin":"https://attacker.invalid","exchanges":{},"cache":{"exchanges":{},"pending":{}}}"#.to_vec()] {
+        let store = Arc::new(MemoryIdentityStore(StdMutex::new(Some(bytes))));
+        let (server, provider, _) = exchange_fixture(vec![response(&market_rows(&[("APT", "USDC")])), response(&page(vec![ticker("APT", "USDC", "aptos", "usd-coin")])), response(&body("aptos", "2", NOW))]).await;
+        let provider = provider.with_identity_store(store).unwrap();
+        assert_eq!(provider.quote(&asset("binance", "APT", 36)).await.unwrap().usd_per_unit, "2");
+        assert_eq!(server.count(), 3);
+    }
+}
+
+#[tokio::test]
+async fn request_pacing_is_shared_and_cancelling_a_queue_does_not_spend_an_extra_slot() {
+    let (server, mut provider, _) = fixture(vec![
+        response(&body("ethereum", "2", NOW)),
+        response(&body(CONTRACT, "3", NOW)),
+    ])
+    .await;
+    provider.test_pacing = Some(Duration::from_millis(50));
+    provider.quote(&native()).await.unwrap();
+    let reserved = *provider.next_request.lock().await;
+    let provider = Arc::new(provider);
+    let pending = {
+        let provider = provider.clone();
+        tokio::spawn(async move { provider.quote(&asset("ethereum:1", CONTRACT, 18)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(server.count(), 1);
+    pending.abort();
+    let _ = pending.await;
+    assert_eq!(*provider.next_request.lock().await, reserved);
+    assert_eq!(
+        provider
+            .quote(&asset("ethereum:1", CONTRACT, 18))
+            .await
+            .unwrap()
+            .usd_per_unit,
+        "3"
+    );
+    assert_eq!(server.count(), 2);
+}
+
+#[tokio::test]
+async fn short_cooldown_is_waited_once_then_public_price_read_retries_automatically() {
+    let current = Utc::now().timestamp();
+    let rate =
+        b"HTTP/1.1 429 Fixture\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_vec();
+    let (server, mut provider, _) = fixture(vec![
+        (rate, Duration::ZERO),
+        response(&body("ethereum", "2", current)),
+    ])
+    .await;
+    provider.test_clock = None;
+    provider.test_rate_retry = true;
+    let started = tokio::time::Instant::now();
+    assert_eq!(provider.quote(&native()).await.unwrap().usd_per_unit, "2");
+    assert!(started.elapsed() >= Duration::from_millis(950));
+    assert_eq!(server.count(), 2);
+    assert_eq!(provider.pacing_seconds.load(Ordering::Relaxed), 12);
 }

@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 pub mod resolution;
 pub use resolution::{
-    ExchangeAssetKey, ExchangeAssetResolver, ExchangeMarket, ExchangeMarketSource,
+    ExchangeAssetKey, ExchangeAssetResolver, ExchangeMarket, ExchangeMarketSource, IdentityStore,
     ResolvedExchangeAsset,
 };
 use resolution::{IdentityCache, RegisteredExchange};
@@ -74,6 +74,14 @@ pub struct UsdQuote {
 #[async_trait]
 pub trait UsdPriceSource: Send + Sync {
     async fn quote(&self, asset: &AssetId) -> Result<UsdQuote>;
+    /// Return quotes in input order; providers may batch exact identities.
+    async fn quotes(&self, assets: &[AssetId]) -> Result<Vec<UsdQuote>> {
+        let mut quotes = Vec::with_capacity(assets.len());
+        for asset in assets {
+            quotes.push(self.quote(asset).await?);
+        }
+        Ok(quotes)
+    }
 }
 
 fn failure(code: &str, message: &str) -> FinError {
@@ -328,6 +336,13 @@ pub struct CoinGeckoPrices {
     exchanges: BTreeMap<String, RegisteredExchange>,
     identities: Mutex<IdentityCache>,
     rate_limited_until: Mutex<Option<DateTime<Utc>>>,
+    next_request: Mutex<Option<tokio::time::Instant>>,
+    pacing_seconds: std::sync::atomic::AtomicU64,
+    identity_store: Option<Arc<dyn IdentityStore>>,
+    #[cfg(test)]
+    test_pacing: Option<Duration>,
+    #[cfg(test)]
+    test_rate_retry: bool,
     #[cfg(test)]
     test_base_url: Option<String>,
     #[cfg(test)]
@@ -384,6 +399,7 @@ impl CoinGeckoPrices {
                 source: Arc::new(resolution::BinanceMarkets::new(client.clone())),
             },
         )]);
+        let pacing_seconds = if authentication.is_some() { 1 } else { 6 };
         Ok(Self {
             client,
             authentication,
@@ -391,6 +407,13 @@ impl CoinGeckoPrices {
             exchanges,
             identities: Mutex::new(IdentityCache::default()),
             rate_limited_until: Mutex::new(None),
+            next_request: Mutex::new(None),
+            pacing_seconds: std::sync::atomic::AtomicU64::new(pacing_seconds),
+            identity_store: None,
+            #[cfg(test)]
+            test_pacing: None,
+            #[cfg(test)]
+            test_rate_retry: false,
             #[cfg(test)]
             test_base_url: None,
             #[cfg(test)]
@@ -458,14 +481,65 @@ impl CoinGeckoPrices {
         let timeout = REQUEST_TIMEOUT;
         #[cfg(test)]
         let timeout = self.test_timeout.unwrap_or(timeout);
-        tokio::time::timeout(timeout, self.request_bytes(path))
-            .await
-            .map_err(|_| {
-                failure(
-                    "PRICE_UNAVAILABLE",
-                    "Public CoinGecko request exceeded its total timeout.",
-                )
-            })?
+        #[cfg(not(test))]
+        let retries = 1;
+        #[cfg(test)]
+        let retries = usize::from(self.test_rate_retry);
+        for attempt in 0..=retries {
+            // Only public idempotent reads retry. Each wait and HTTP response
+            // remains bounded; no financial submission or consent is replayed.
+            if retries > 0 {
+                let until = *self.rate_limited_until.lock().await;
+                if let Some(until) = until {
+                    let wait = until - self.now();
+                    if wait > chrono::Duration::seconds(60) {
+                        return Err(failure(
+                            "PRICE_RATE_LIMITED",
+                            "Provider cooldown exceeds the bounded read wait; retry after its window reopens.",
+                        ));
+                    }
+                    if let Ok(wait) = wait.to_std() {
+                        tokio::time::sleep(wait).await;
+                    }
+                }
+            }
+            self.request_slot().await?;
+            let result = tokio::time::timeout(timeout, self.request_bytes(path))
+                .await
+                .map_err(|_| {
+                    failure(
+                        "PRICE_UNAVAILABLE",
+                        "Public CoinGecko request exceeded its total timeout.",
+                    )
+                })?;
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == "PRICE_RATE_LIMITED")
+                && attempt < retries
+            {
+                continue;
+            }
+            return result;
+        }
+        unreachable!("bounded read attempt always returns")
+    }
+
+    async fn request_slot(&self) -> Result<()> {
+        self.check_rate_limit().await?;
+        let interval = Duration::from_secs(
+            self.pacing_seconds
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        #[cfg(test)]
+        let interval = self.test_pacing.unwrap_or(interval);
+        let mut next = self.next_request.lock().await;
+        if let Some(at) = *next {
+            tokio::time::sleep_until(at).await;
+        }
+        self.check_rate_limit().await?;
+        // Reserve only when sending: cancelling a queued read consumes no slot.
+        *next = Some(tokio::time::Instant::now() + interval);
+        Ok(())
     }
 
     async fn check_rate_limit(&self) -> Result<()> {
@@ -518,6 +592,17 @@ impl CoinGeckoPrices {
                 now,
             );
             *self.rate_limited_until.lock().await = Some(now + chrono::Duration::seconds(seconds));
+            self.pacing_seconds
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |interval| Some((interval * 2).min(60)),
+                )
+                .ok();
+            if let Ok(cache) = self.identities.try_lock() {
+                self.save_identities(&cache)?;
+            }
+
             return Err(failure(
                 "PRICE_RATE_LIMITED",
                 "CoinGecko access is rate limited; Retry-After is honored and no quote or partial identity mapping was accepted.",
@@ -560,69 +645,137 @@ impl CoinGeckoPrices {
 #[async_trait]
 impl UsdPriceSource for CoinGeckoPrices {
     async fn quote(&self, asset: &AssetId) -> Result<UsdQuote> {
-        let identity = if let Some(exchange) = resolution::exchange_name(&asset.network) {
-            Some(
-                self.resolve_exchange_asset(&ExchangeAssetKey {
-                    exchange: exchange.into(),
-                    asset: asset.reference.clone(),
-                })
-                .await?,
-            )
-        } else {
-            None
-        };
-        let lookup = match &identity {
-            Some(identity) => Lookup::Coin(identity.provider_asset_id.clone()),
-            None => Lookup::asset(asset)?,
-        };
-        let annotate = |mut quote: UsdQuote| {
-            if let Some(identity) = &identity {
-                quote.source.push_str(&identity.source_binding());
-            }
-            quote
-        };
+        self.quotes(std::slice::from_ref(asset))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(invalid_price)
+    }
+
+    async fn quotes(&self, assets: &[AssetId]) -> Result<Vec<UsdQuote>> {
+        if assets.len() > 64 {
+            return Err(failure(
+                "PRICE_REQUEST_TOO_LARGE",
+                "At most 64 exact assets may be priced in one action.",
+            ));
+        }
+        let mut selected = Vec::with_capacity(assets.len());
+        for asset in assets {
+            let identity = if let Some(exchange) = resolution::exchange_name(&asset.network) {
+                Some(
+                    self.resolve_exchange_asset(&ExchangeAssetKey {
+                        exchange: exchange.into(),
+                        asset: asset.reference.clone(),
+                    })
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let lookup = match &identity {
+                Some(id) => Lookup::Coin(id.provider_asset_id.clone()),
+                None => Lookup::asset(asset)?,
+            };
+            selected.push((lookup, identity));
+        }
         let mut cache = self.cache.lock().await;
         let now = self.now();
-        if let Some(cached) = cache.get(&lookup) {
-            let elapsed = now - cached.fetched_at;
-            if elapsed >= chrono::Duration::zero()
-                && elapsed < chrono::Duration::seconds(CACHE_SECONDS)
-                && provider_time(cached.updated_at.timestamp(), now).is_ok()
-            {
-                return Ok(annotate(cached.quote.clone()));
+        let mut missing = std::collections::BTreeSet::new();
+        for (lookup, _) in &selected {
+            let fresh = cache.get(lookup).is_some_and(|entry| {
+                let elapsed = now - entry.fetched_at;
+                elapsed >= chrono::Duration::zero()
+                    && elapsed < chrono::Duration::seconds(CACHE_SECONDS)
+                    && provider_time(entry.updated_at.timestamp(), now).is_ok()
+            });
+            if !fresh {
+                cache.remove(lookup);
+                missing.insert(lookup.clone());
             }
         }
-        // Failed refresh cannot fall back to even a previously fresh cache item.
-        cache.remove(&lookup);
-        let bytes = self.bounded_request(&lookup.path()).await?;
-        let fetched_at = self.now();
-        let quote = parse_quote(&bytes, &lookup, fetched_at)?;
-        let updated_at = DateTime::parse_from_rfc3339(&quote.updated_at)
-            .map_err(|_| {
-                failure(
-                    "PRICE_DATA_INVALID",
-                    "Provider observation time is invalid.",
-                )
-            })?
-            .with_timezone(&Utc);
-        if cache.len() == MAX_CACHE_KEYS
-            && let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.fetched_at)
-                .map(|(key, _)| key.clone())
-        {
-            cache.remove(&oldest);
+        // Batch coins together and ERC20s only within the same exact platform.
+        let mut groups: BTreeMap<Option<&str>, Vec<Lookup>> = BTreeMap::new();
+        for lookup in missing {
+            let platform = match &lookup {
+                Lookup::Coin(_) => None,
+                Lookup::Token(platform, _) => Some(*platform),
+            };
+            groups.entry(platform).or_default().push(lookup);
         }
-        cache.insert(
-            lookup,
-            CachedQuote {
-                quote: quote.clone(),
-                fetched_at,
-                updated_at,
-            },
-        );
-        Ok(annotate(quote))
+        for lookups in groups.values() {
+            for batch in lookups.chunks(16) {
+                let path = batch_path(batch);
+                let bytes = self.bounded_request(&path).await?;
+                let fetched_at = self.now();
+                // Validate the entire requested batch before accepting any price.
+                let mut parsed = Vec::new();
+                for lookup in batch {
+                    let quote = parse_quote(&bytes, lookup, fetched_at)?;
+                    let updated_at = DateTime::parse_from_rfc3339(&quote.updated_at)
+                        .map_err(|_| invalid_price())?
+                        .with_timezone(&Utc);
+                    parsed.push((
+                        lookup.clone(),
+                        CachedQuote {
+                            quote,
+                            fetched_at,
+                            updated_at,
+                        },
+                    ));
+                }
+                for (lookup, entry) in parsed {
+                    if cache.len() >= MAX_CACHE_KEYS
+                        && let Some(oldest) = cache
+                            .iter()
+                            .min_by_key(|(_, value)| value.fetched_at)
+                            .map(|(key, _)| key.clone())
+                    {
+                        cache.remove(&oldest);
+                    }
+                    cache.insert(lookup, entry);
+                }
+            }
+        }
+        let checked_at = self.now();
+        selected
+            .into_iter()
+            .map(|(lookup, identity)| {
+                let cached = cache.get(&lookup).ok_or_else(invalid_price)?;
+                provider_time(cached.updated_at.timestamp(), checked_at)?;
+                let mut quote = cached.quote.clone();
+                if let Some(identity) = identity {
+                    quote.source.push_str(&identity.source_binding());
+                }
+                Ok(quote)
+            })
+            .collect()
     }
+}
+
+fn batch_path(lookups: &[Lookup]) -> String {
+    if lookups.len() == 1 {
+        return lookups[0].path();
+    }
+    let (path, field) = match &lookups[0] {
+        Lookup::Coin(_) => ("/simple/price".into(), "ids"),
+        Lookup::Token(platform, _) => (
+            format!("/simple/token_price/{platform}"),
+            "contract_addresses",
+        ),
+    };
+    let ids = lookups
+        .iter()
+        .map(Lookup::response_key)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut url = reqwest::Url::parse("https://pricing.invalid").expect("fixed URL");
+    url.set_path(&path);
+    url.query_pairs_mut()
+        .append_pair(field, &ids)
+        .append_pair("vs_currencies", "usd")
+        .append_pair("include_last_updated_at", "true")
+        .append_pair("precision", "full");
+    format!("{}?{}", url.path(), url.query().expect("fixed query"))
 }
 
 #[cfg(test)]
@@ -737,6 +890,7 @@ mod tests {
         let server = Server::new(responses).await;
         let clock = Arc::new(AtomicI64::new(NOW));
         let mut provider = CoinGeckoPrices::new().unwrap();
+        provider.test_pacing = Some(Duration::ZERO);
         provider.test_base_url = Some(server.base.clone());
         provider.test_clock = Some(clock.clone());
         (server, provider, clock)
@@ -1187,6 +1341,7 @@ mod tests {
     fn authenticated(plan: ApiPlan, server: &Server) -> CoinGeckoPrices {
         let mut provider =
             CoinGeckoPrices::with_api_key(plan, "SYNTHETIC-COINGECKO-KEY-NEVER-LIVE").unwrap();
+        provider.test_pacing = Some(Duration::ZERO);
         provider.test_base_url = Some(server.base.clone());
         provider.test_clock = Some(Arc::new(AtomicI64::new(NOW)));
         provider

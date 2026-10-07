@@ -246,13 +246,32 @@ separate from retrieval `observed_at`. Quotes older than 120 seconds, future,
 missing, zero or malformed quotes, and rate limits/outages block writes.
 
 A separate coalesced exchange identity cache retains complete snapshots for at
-most 15 minutes from initial venue observation. Missing/conflicting mappings
+most 24 hours from initial venue observation. Missing/conflicting mappings
 refresh automatically after 30 seconds. Rate-limited scans retain bounded
 pagination progress for later reads after `Retry-After`; incomplete snapshots
 never become accepted identities or quote authority, and expired/error snapshots
 cannot fall back to an old mapping. Quote cache entries contain provider coin or
 network/contract identities; caller-specific exchange evidence is appended only
 to the returned quote, avoiding cross-venue cache attribution.
+
+The shared price source supports action-scoped batches. Binance trading warms
+movement/commission/loss assets through that API before the existing exact
+valuation calculations. Coin IDs deduplicate into batches of 16; contracts batch
+only within one provider platform. Each result retains its own source timestamp
+and exchange binding; any missing/invalid member rejects its response batch.
+
+A common request scheduler starts anonymous calls six seconds apart (one second
+for protected authenticated access), doubling the interval after 429 up to 60
+seconds. One automatic retry is limited to public reads and cooldowns up to 60
+seconds. No financial submission or authorization uses that mechanism. A scan
+attempt is bounded to 240 seconds, and pending scans expire after 15 minutes.
+The protected caller supplies IdentityStore; the macOS broker stores only public
+identity metadata, scan checkpoints, pacing and cooldown in a bounded root-owned
+0600 file. Invalid/version-mismatched metadata refreshes from the provider. Price
+values, keys, operation identities, financial journals and approvals are never
+persisted in this performance cache. Auth-mode changes retain valid public
+identities but do not inherit the previous mode's throttle state. Preview IPC
+allows at most 300 seconds for cold preparation, without changing approval expiry.
 
 A shared/coalesced price cache retains responses for at most 30 seconds and rechecks
 source freshness; it never serves stale quotes after an outage. The 120-second

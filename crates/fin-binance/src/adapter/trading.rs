@@ -430,6 +430,16 @@ impl BinanceProfile {
         fees: &BTreeMap<String, String>,
         loss: Option<(&str, &ExactDecimal)>,
     ) -> Result<Option<Valuation>, FinError> {
+        if let Some(provider) = &self.price_provider {
+            let mut coins = BTreeSet::from([coin.to_owned()]);
+            coins.extend(fees.keys().cloned());
+            if let Some((loss_coin, _)) = loss {
+                coins.insert(loss_coin.to_owned());
+            }
+            provider
+                .prefetch_usd(&coins.into_iter().collect::<Vec<_>>())
+                .await?;
+        }
         let Some(mut value) = self.valuation(coin, &movement.canonical(), "0").await? else {
             return Ok(None);
         };

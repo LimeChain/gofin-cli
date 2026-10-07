@@ -10,6 +10,7 @@ mod evm_public_data;
 mod evm_router;
 mod policy;
 mod pricing;
+mod pricing_cache;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use pricing::SharedUsdValuator;
 
@@ -609,10 +610,10 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                         "pro" => fin_pricing::ApiPlan::Pro,
                         _ => return Err(FinError::validation("The CoinGecko plan is invalid.")),
                     };
-                    Ok(
-                        Arc::new(fin_pricing::CoinGeckoPrices::with_api_key(plan, api_key)?)
-                            as Arc<dyn fin_pricing::UsdPriceSource>,
-                    )
+                    Ok(Arc::new(pricing_cache::attach(
+                        fin_pricing::CoinGeckoPrices::with_api_key(plan, api_key)?,
+                    )?)
+                        as Arc<dyn fin_pricing::UsdPriceSource>)
                 }
                 _ => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
@@ -762,7 +763,7 @@ pub fn build_protected_applications(
             api_plan,
         )?
     } else {
-        Arc::new(fin_pricing::CoinGeckoPrices::new()?)
+        Arc::new(pricing_cache::attach(fin_pricing::CoinGeckoPrices::new()?)?)
     };
     let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
     let wallet_prices = binance_prices.clone();

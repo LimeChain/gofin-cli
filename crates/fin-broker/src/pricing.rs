@@ -81,6 +81,20 @@ impl fin_ethereum::WalletValuation for SharedUsdValuator {
 }
 #[async_trait]
 impl fin_binance::BinancePriceProvider for SharedUsdValuator {
+    async fn prefetch_usd(&self, coins: &[String]) -> fin_domain::Result<()> {
+        let assets = coins
+            .iter()
+            .map(|coin| AssetId {
+                network: "binance".into(),
+                reference: coin.clone(),
+                decimals: 36,
+            })
+            .collect::<Vec<_>>();
+        for quote in self.source.quotes(&assets).await? {
+            validate_binance_quote(&quote)?;
+        }
+        Ok(())
+    }
     async fn quote_usd(&self, coin: &str) -> fin_domain::Result<fin_binance::PriceQuote> {
         let asset = AssetId {
             network: "binance".into(),
@@ -234,5 +248,39 @@ pub(crate) mod tests {
                     .is_err()
             );
         }
+    }
+    #[tokio::test]
+    async fn binance_action_prefetch_uses_shared_batch_source_for_exact_fee_and_movement_assets() {
+        struct BatchOnly(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl UsdPriceSource for BatchOnly {
+            async fn quote(&self, _: &AssetId) -> fin_domain::Result<UsdQuote> {
+                panic!("prefetch must use the shared batch API");
+            }
+            async fn quotes(&self, assets: &[AssetId]) -> fin_domain::Result<Vec<UsdQuote>> {
+                for asset in assets {
+                    assert_eq!(asset.network, "binance");
+                    self.0.lock().unwrap().push(asset.reference.clone());
+                }
+                Ok(assets
+                    .iter()
+                    .map(|_| UsdQuote {
+                        usd_per_unit: "0.9971".into(),
+                        updated_at: now(),
+                        observed_at: now(),
+                        source: "synthetic exact verified identity".into(),
+                    })
+                    .collect())
+            }
+        }
+        let source = Arc::new(BatchOnly(Default::default()));
+        let valuator = SharedUsdValuator::with_source(source.clone());
+        fin_binance::BinancePriceProvider::prefetch_usd(
+            &valuator,
+            &["APT".into(), "BNB".into(), "USDC".into()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(*source.0.lock().unwrap(), ["APT", "BNB", "USDC"]);
     }
 }

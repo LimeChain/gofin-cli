@@ -72,6 +72,10 @@ pub struct PriceQuote {
 #[async_trait]
 pub trait BinancePriceProvider: Send + Sync {
     async fn quote_usd(&self, coin: &str) -> Result<PriceQuote, FinError>;
+    /// Optional action-scoped warmup; exact valuation still validates each quote.
+    async fn prefetch_usd(&self, _coins: &[String]) -> Result<(), FinError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]

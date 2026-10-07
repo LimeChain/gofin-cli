@@ -253,13 +253,7 @@ impl UnixTransport {
         if self.path == std::path::Path::new(SOCKET_PATH) {
             daemon::check_activation(&request, fin_protocol::daemon::stop_requested)?;
         }
-        let response_timeout = match &request {
-            BrokerRequest::Execute { .. } => FINANCIAL_WRITE_TIMEOUT,
-            BrokerRequest::RunBegin { .. }
-            | BrokerRequest::RunReplan { .. }
-            | BrokerRequest::Snapshot => OBSERVER_TIMEOUT,
-            _ => BROKER_TIMEOUT,
-        };
+        let response_timeout = broker_response_timeout(&request);
         let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.path))
             .await
             .map_err(|_| broker_timeout(&request))?
@@ -406,6 +400,18 @@ fn broker_unavailable() -> FinError {
         "Start the installed Fin service and retry the same request ID.",
     )
 }
+#[cfg(any(target_os = "macos", test))]
+fn broker_response_timeout(request: &BrokerRequest) -> Duration {
+    match request {
+        BrokerRequest::Execute { .. } => FINANCIAL_WRITE_TIMEOUT,
+        BrokerRequest::RunBegin { .. }
+        | BrokerRequest::RunReplan { .. }
+        | BrokerRequest::Snapshot => OBSERVER_TIMEOUT,
+        BrokerRequest::Preview { .. } => FINANCIAL_WRITE_TIMEOUT,
+        _ => BROKER_TIMEOUT,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn broker_timeout(request: &BrokerRequest) -> FinError {
     let next_action = if matches!(request, BrokerRequest::Execute { .. }) {
@@ -1255,6 +1261,21 @@ mod tests {
             Some("record-123")
         );
         assert_eq!(find_original_operation(&records, "other"), None);
+    }
+
+    #[test]
+    fn paced_readonly_preview_has_a_bounded_preparation_wait() {
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Preview {
+                operation: "binance.spot.order-place".into(),
+                input: json!({})
+            }),
+            FINANCIAL_WRITE_TIMEOUT
+        );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Doctor),
+            BROKER_TIMEOUT
+        );
     }
 
     #[test]

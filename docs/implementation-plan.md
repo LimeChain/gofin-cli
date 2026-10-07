@@ -761,3 +761,31 @@ follow-ups: [dynamic pricing report](reports/dynamic-exchange-pricing.md).
 Two ask-ogi implementation/review requests returned HTTP502 with no answer;
 implementation continued locally. No financial writes, credential disclosure,
 installation, reinstall or push occurred.
+
+
+### Anonymous CoinGecko request budget (2026-10-07)
+
+The earlier dynamic resolver remains the exact identity authority. Avoid a
+symbol-candidate shortcut: the provider's exchange endpoint filters by coin ID,
+not the exact exchange-local identifier; filtering guesses could hide conflicting
+or alias evidence. Keep the complete cold catalog check, then persist and reuse
+its verified public mappings for 24 hours. Automatic missing/conflicting refresh
+remains 30 seconds; current USD prices remain separately cached for 30 seconds
+and strictly younger than 120 seconds. Newly covered listings remain automatic.
+
+Add a shared batch source API with a sequential default for other providers.
+Binance trading prefetches the action's movement and fee/loss assets; CoinGecko
+batches up to 16 unique coin IDs or exact contracts within one platform. Keep
+existing decimal arithmetic and valuation/approval/recovery semantics unchanged.
+Start anonymous requests six seconds apart, adapt slower on 429, and honor
+Retry-After. Retry only public reads once within a short bounded cooldown. Save
+completed identities, interrupted scan checkpoints and throttle state through a
+provider-neutral store supplied by the protected broker. Keep cache files root
+owned and separate from keys and the financial journal. Scope durable throttle
+state to public provider origin and authentication mode; cache no key bytes.
+
+Cold scans can still take minutes, with a bounded 240-second attempt and no
+partial identity acceptance. Preview/dry-run IPC now allows a 300-second wait;
+financial approval expiry and all execution gates remain unchanged. No installer,
+reinstall, provider key or financial write is needed to verify the public path.
+Verification: [anonymous pricing report](reports/anonymous-coingecko-pricing.md).

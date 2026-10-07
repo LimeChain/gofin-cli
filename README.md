@@ -158,19 +158,32 @@ select a coin. New covered listings need no asset enrollment or Fin release.
 Missing, conflicting or stale evidence blocks valuation; stablecoins are priced
 from the provider rather than assumed equal to $1.
 
-Identity mappings are cached separately for 15 minutes; missing/conflicting
-mappings refresh on later reads after a 30-second cooldown. Prices retain their
-30-second cache and strict provider age below 120 seconds. `Retry-After` is
-honored; rate-limited ticker scans resume in process without accepting partial
-mappings. Anonymous cold starts can take several reads while provider quota
-reopens. An explicit public probe exercises the production resolver without
-accounts, credentials or financial writes:
+Anonymous access requires no CoinGecko setup. Complete identity mappings are
+cached separately for up to 24 hours in protected storage; missing/conflicting
+mappings refresh on later reads after 30 seconds. Prices keep their 30-second
+cache and strict provider age below 120 seconds. Trading requests batch only the
+movement and fee assets needed by that action, deduplicated by exact identity.
+Anonymous requests start six seconds apart and slow further after a 429.
+`Retry-After` is honored, with one automatic public-read retry for cooldowns up
+to 60 seconds; financial submissions never use that retry.
+
+The first uncached venue identity scan can take minutes. Rate-limited or timed-out
+scans checkpoint their progress without accepting partial identities. The
+protected broker retains mappings, pagination and provider cooldown across
+configuration reloads/restarts. A preview/dry-run waits at most 300 seconds;
+incomplete discovery returns an error and a later read resumes it. No approval
+or financial movement happens during discovery.
+
+An explicit public probe exercises this path without accounts, credentials or
+financial writes. Its optional cache file is public verification state, separate
+from the broker's root-owned identity cache:
 
 ```sh
-cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only
+cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only --identity-cache work/public-pricing-identities.json
 ```
 
-See [dynamic pricing verification](docs/reports/dynamic-exchange-pricing.md).
+See [anonymous pricing verification](docs/reports/anonymous-coingecko-pricing.md)
+and [dynamic identity verification](docs/reports/dynamic-exchange-pricing.md).
 Missing or stale quotes block writes;
 anonymous public access is best effort. To use your Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):

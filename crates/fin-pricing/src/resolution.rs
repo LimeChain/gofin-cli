@@ -3,7 +3,8 @@
 use super::*;
 use std::collections::{BTreeSet, HashSet};
 
-const IDENTITY_SECONDS: i64 = 900;
+const IDENTITY_SECONDS: i64 = 86_400;
+const SCAN_SECONDS: i64 = 900;
 const MISS_REFRESH_SECONDS: i64 = 30;
 const MAX_TICKER_PAGES: usize = 128;
 const PAGE_SIZE: usize = 100;
@@ -60,25 +61,70 @@ pub(super) struct RegisteredExchange {
     pub source: Arc<dyn ExchangeMarketSource>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct CachedIdentities {
     fetched_at: DateTime<Utc>,
     mappings: BTreeMap<String, Result<ResolvedExchangeAsset>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct IdentityCache {
     exchanges: BTreeMap<String, CachedIdentities>,
     pending: BTreeMap<String, PendingScan>,
 }
 
+/// Public identity metadata only. The protected caller owns storage permissions.
+/// No API key, price, financial record or approval is stored here.
+pub trait IdentityStore: Send + Sync {
+    fn load(&self) -> Result<Option<Vec<u8>>>;
+    fn save(&self, bytes: &[u8]) -> Result<()>;
+}
+#[derive(Serialize, Deserialize)]
+struct StoredIdentities {
+    version: u8,
+    origin: String,
+    #[serde(default)]
+    auth_mode: String,
+    exchanges: BTreeMap<String, String>,
+    cache: IdentityCache,
+    #[serde(default)]
+    cooldown_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pacing_seconds: u64,
+}
+
 type TickerIdentity = (String, String, Option<String>, Option<String>);
 
+#[derive(Clone, Serialize, Deserialize)]
 struct PendingScan {
     started_at: DateTime<Utc>,
     next_page: usize,
+    #[serde(with = "market_pairs")]
     pairs: BTreeMap<(String, String), String>,
     candidates: BTreeMap<String, Candidate>,
     seen_pages: HashSet<Vec<TickerIdentity>>,
+}
+
+mod market_pairs {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        pairs: &BTreeMap<(String, String), String>,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        pairs.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<BTreeMap<(String, String), String>, D::Error> {
+        let rows = Vec::<((String, String), String)>::deserialize(deserializer)?;
+        let mut pairs = BTreeMap::new();
+        for (pair, market) in rows {
+            if pairs.insert(pair, market).is_some() {
+                return Err(serde::de::Error::custom("duplicate venue pair"));
+            }
+        }
+        Ok(pairs)
+    }
 }
 
 pub(super) fn exchange_name(network: &str) -> Option<&str> {
@@ -147,7 +193,7 @@ struct TickerMarket {
     identifier: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Candidate {
     ids: BTreeMap<String, String>,
     missing: bool,
@@ -173,6 +219,77 @@ fn add_candidate(
 }
 
 impl CoinGeckoPrices {
+    /// Attach caller-controlled durable metadata storage; invalid/old metadata
+    /// is discarded and resolved afresh, never used as a price fallback.
+    pub fn with_identity_store(mut self, store: Arc<dyn IdentityStore>) -> Result<Self> {
+        if let Some(bytes) = store.load()?
+            && bytes.len() <= 16 * 1024 * 1024
+            && let Ok(saved) = serde_json::from_slice::<StoredIdentities>(&bytes)
+            && saved.version == 1
+            && saved.origin == self.provider_origin()
+            && saved.exchanges == self.exchange_ids()
+            && valid_cache(&saved.cache)
+        {
+            self.identities = Mutex::new(saved.cache);
+            if saved.auth_mode == self.auth_mode() {
+                self.rate_limited_until = Mutex::new(saved.cooldown_until);
+                let minimum = if self.authentication.is_some() { 1 } else { 6 };
+                self.pacing_seconds.store(
+                    saved.pacing_seconds.clamp(minimum, 60),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+        self.identity_store = Some(store);
+        Ok(self)
+    }
+    fn auth_mode(&self) -> String {
+        match self.authentication.as_ref().map(|(plan, _)| plan) {
+            None => "anonymous",
+            Some(ApiPlan::Demo) => "demo",
+            Some(ApiPlan::Pro) => "pro",
+        }
+        .into()
+    }
+    fn provider_origin(&self) -> String {
+        self.authentication
+            .as_ref()
+            .map(|(plan, _)| plan.base_url())
+            .unwrap_or(BASE_URL)
+            .into()
+    }
+    fn exchange_ids(&self) -> BTreeMap<String, String> {
+        self.exchanges
+            .iter()
+            .map(|(name, venue)| (name.clone(), venue.provider_exchange.clone()))
+            .collect()
+    }
+    pub(super) fn save_identities(&self, cache: &IdentityCache) -> Result<()> {
+        if let Some(store) = &self.identity_store {
+            let bytes = serde_json::to_vec(&StoredIdentities {
+                version: 1,
+                origin: self.provider_origin(),
+                auth_mode: self.auth_mode(),
+                exchanges: self.exchange_ids(),
+                cache: cache.clone(),
+                cooldown_until: self
+                    .rate_limited_until
+                    .try_lock()
+                    .ok()
+                    .and_then(|until| *until),
+                pacing_seconds: self
+                    .pacing_seconds
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            })
+            .map_err(|_| invalid_metadata())?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err(invalid_metadata());
+            }
+            store.save(&bytes)?;
+        }
+        Ok(())
+    }
+
     async fn identity_snapshot(
         &self,
         key: &ExchangeAssetKey,
@@ -282,7 +399,7 @@ impl CoinGeckoPrices {
             }
             if complete {
                 let now = scan.started_at;
-                if self.now() - now >= chrono::Duration::seconds(IDENTITY_SECONDS) {
+                if self.now() - now >= chrono::Duration::seconds(SCAN_SECONDS) {
                     return Err(unavailable());
                 }
                 let mappings = std::mem::take(&mut scan.candidates).into_iter().map(|(asset, candidate)| {
@@ -342,20 +459,32 @@ impl ExchangeAssetResolver for CoinGeckoPrices {
         self.check_rate_limit().await?;
         let mut pending = cache.pending.remove(&key.exchange).filter(|scan| {
             let age = now - scan.started_at;
-            age >= chrono::Duration::zero() && age < chrono::Duration::seconds(IDENTITY_SECONDS)
+            age >= chrono::Duration::zero() && age < chrono::Duration::seconds(SCAN_SECONDS)
         });
-        let outcome = tokio::time::timeout(Duration::from_secs(90), self.identity_snapshot(key, registered, &mut pending))
-            .await.map_err(|_| failure("PRICE_IDENTITY_UNAVAILABLE", "Complete exchange identity refresh exceeded its bounded timeout; no partial mapping was accepted."))?;
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(240),
+            self.identity_snapshot(key, registered, &mut pending),
+        )
+        .await;
         let snapshot = match outcome {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if error.code == "PRICE_RATE_LIMITED"
-                    && let Some(scan) = pending
+            Ok(Ok(snapshot)) => snapshot,
+            failed => {
+                let error = match failed {
+                    Ok(Err(error)) => error,
+                    Err(_) => failure(
+                        "PRICE_IDENTITY_PENDING",
+                        "Paced identity discovery is still incomplete; saved pagination will resume on the next read. No identity or price was accepted.",
+                    ),
+                    _ => unreachable!(),
+                };
+                if matches!(
+                    error.code.as_str(),
+                    "PRICE_RATE_LIMITED" | "PRICE_IDENTITY_PENDING"
+                ) && let Some(scan) = pending
                 {
-                    // Retain only pagination progress, never an accepted identity
-                    // or quote. A later read resumes after Retry-After.
                     cache.pending.insert(key.exchange.clone(), scan);
                 }
+                self.save_identities(&cache)?;
                 return Err(error);
             }
         };
@@ -365,8 +494,65 @@ impl ExchangeAssetResolver for CoinGeckoPrices {
             .cloned()
             .unwrap_or_else(|| Err(unavailable()));
         cache.exchanges.insert(key.exchange.clone(), snapshot);
+        self.save_identities(&cache)?;
         result
     }
+}
+
+fn valid_cache(cache: &IdentityCache) -> bool {
+    if cache.exchanges.len() > 16 || cache.pending.len() > 16 {
+        return false;
+    }
+    for (exchange, snapshot) in &cache.exchanges {
+        if validate_identifier(exchange).is_err() || snapshot.mappings.len() > MAX_MARKETS {
+            return false;
+        }
+        for (asset, result) in &snapshot.mappings {
+            if validate_identifier(asset).is_err() {
+                return false;
+            }
+            if let Ok(id) = result
+                && (id.provider != "coingecko"
+                    || id.exchange != *exchange
+                    || id.asset != *asset
+                    || validate_identifier(&id.provider_asset_id).is_err()
+                    || validate_identifier(&id.market_id).is_err()
+                    || DateTime::parse_from_rfc3339(&id.observed_at).is_err())
+            {
+                return false;
+            }
+        }
+    }
+    for (exchange, scan) in &cache.pending {
+        if validate_identifier(exchange).is_err()
+            || !(1..=MAX_TICKER_PAGES).contains(&scan.next_page)
+            || scan.pairs.len() > MAX_MARKETS
+            || scan.candidates.len() > MAX_MARKETS
+            || scan.seen_pages.len() > MAX_TICKER_PAGES
+            || scan.seen_pages.iter().any(|page| page.len() > PAGE_SIZE)
+        {
+            return false;
+        }
+        for ((base, quote), market) in &scan.pairs {
+            if [base, quote, market]
+                .iter()
+                .any(|s| validate_identifier(s).is_err())
+            {
+                return false;
+            }
+        }
+        for (asset, candidate) in &scan.candidates {
+            if validate_identifier(asset).is_err()
+                || candidate.ids.len() > MAX_MARKETS
+                || candidate.ids.iter().any(|(id, market)| {
+                    validate_identifier(id).is_err() || validate_identifier(market).is_err()
+                })
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 pub(super) struct BinanceMarkets {
