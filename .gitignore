@@ -10,3 +10,6 @@ coverage/
 target/
 work/
 __pycache__/
+.env
+.env.*
+!.env.fin-dev.example

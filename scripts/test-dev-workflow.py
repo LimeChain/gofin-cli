@@ -25,6 +25,9 @@ class DevWorkflowTests(unittest.TestCase):
         cargo = self.root / 'bin/cargo'
         cargo.write_text('#!/bin/sh\nprintf "arg:%s\\n" "$@"\n')
         cargo.chmod(0o700)
+        (self.root / 'scripts/fin-dev.py').write_text(
+            'import json,sys\nprint(json.dumps(sys.argv[1:]))\n'
+            'sys.exit(7 if "unavailable" in sys.argv else 0)\n')
 
     def make(self, *args):
         env = dict(os.environ, PATH=str(self.root / 'bin') + ':/usr/bin:/bin')
@@ -58,6 +61,58 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('arg:{"account":"synthetic main"}\n', result.stdout)
         self.assertTrue(result.stdout.endswith('arg:--json\n'))
+
+    def test_environment_lifecycle_routes_name_and_machine_flag(self):
+        for action in ('start', 'stop', 'reset'):
+            result = self.make('dev-env-' + action)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            suffix = ['--mode', 'synthetic'] if action == 'start' else []
+            self.assertEqual(json.loads(result.stdout), [action, 'local', *suffix])
+            result = self.make('dev-env-' + action, 'DEV_ENV=feature-a', 'DEV_FLAGS=--json')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), ['--json', action, 'feature-a', *suffix])
+
+    def test_live_mode_and_credential_file_path_are_forwarded_without_reading_secrets(self):
+        result = self.make('dev-env-start', 'DEV_ENV=live', 'DEV_MODE=live', 'DEV_FLAGS=--json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['--json', 'start', 'live', '--mode', 'live'])
+        result = self.make('dev-env-import', 'DEV_ENV=live', 'DEV_FLAGS=--json',
+                           'DEV_CREDENTIALS_FILE=/synthetic path/fixture.env')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['--json', 'import', 'live',
+                         '--credentials-file', '/synthetic path/fixture.env'])
+        discovery = self.make('dev-env-import', 'DEV_ENV=live',
+                              'DEV_CREDENTIALS_FILE=/synthetic path/fixture.env',
+                              'DEV_IMPORT_FLAGS=--discover-identities')
+        self.assertEqual(discovery.returncode, 0, discovery.stderr)
+        self.assertEqual(json.loads(discovery.stdout), ['import', 'live',
+                         '--credentials-file', '/synthetic path/fixture.env', '--discover-identities'])
+        missing = self.make('dev-env-import')
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(missing.stdout, '')
+        self.assertIn('DEV_CREDENTIALS_FILE', missing.stderr)
+
+    def test_environment_cli_preserves_json_arguments_and_failure(self):
+        result = self.make('dev-env-cli', 'DEV_ENV=feature-a',
+                           'ARGS=read synthetic.echo --input \'{"value":"two words"}\' --json')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ['cli', 'feature-a', '--', 'read',
+                         'synthetic.echo', '--input', '{"value":"two words"}', '--json'])
+        result = self.make('dev-env-cli', 'DEV_ENV=unavailable', 'ARGS=operations --json')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), ['cli', 'unavailable', '--', 'operations', '--json'])
+
+    def test_environment_tests_and_fork_are_separate_targets(self):
+        scripts = ('test-fin-dev.py', 'test-dev-runtime.py', 'test-fork-runner.py', 'test-dev-workflow.py')
+        for script in scripts:
+            (self.root / 'scripts' / script).write_text('print(' + repr(script) + ')\n')
+        (self.root / 'scripts/verify-rust-fork.sh').write_text('#!/bin/sh\nprintf "fork-fixture\\n"\n')
+        result = self.make('test-dev-env')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), list(scripts))
+        result = self.make('test-fork')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'fork-fixture\n')
 
     def test_real_human_actions_refuse_pipes_before_privilege_or_packaging(self):
         if os.uname().sysname != 'Darwin':

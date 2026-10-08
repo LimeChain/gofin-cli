@@ -747,14 +747,6 @@ pub fn build_protected_applications(
     credentials: Arc<dyn BrokerCredentialProvider>,
 ) -> fin_domain::Result<ProtectedApplications> {
     config.validate()?;
-    let mut eth_rpcs = BTreeMap::<u64, Arc<dyn fin_evm::EvmRpc>>::new();
-    for network in &config.networks {
-        let rpc = Arc::new(fin_evm::HttpRpc::new(
-            network.rpc_urls.clone(),
-            network.chain_id,
-        )?);
-        eth_rpcs.insert(network.chain_id, rpc.clone());
-    }
     let source: Arc<dyn fin_pricing::UsdPriceSource> = if let Some(ConnectionConfig::CoinGecko {
         credential_ref,
         api_plan,
@@ -773,6 +765,25 @@ pub fn build_protected_applications(
             pricing_cache::attach(fin_pricing::CoinGeckoPrices::new()?)?,
         )?)
     };
+    build_applications_with_price_source(config, credentials, source)
+}
+
+/// Compose the same real adapters with explicitly supplied credentials and pricing.
+/// Callers own those dependencies; this constructor never selects installed state.
+pub fn build_applications_with_price_source(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn fin_pricing::UsdPriceSource>,
+) -> fin_domain::Result<ProtectedApplications> {
+    config.validate()?;
+    let mut eth_rpcs = BTreeMap::<u64, Arc<dyn fin_evm::EvmRpc>>::new();
+    for network in &config.networks {
+        let rpc = Arc::new(fin_evm::HttpRpc::new(
+            network.rpc_urls.clone(),
+            network.chain_id,
+        )?);
+        eth_rpcs.insert(network.chain_id, rpc.clone());
+    }
     let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
@@ -1271,13 +1282,18 @@ async fn protected_runtime_from_config(
         },
     )?;
     runtime.protected_config_check.store(true, Ordering::SeqCst);
-    runtime
-        .account_identity_check_pending
-        .store(true, Ordering::SeqCst);
+    runtime.require_account_identity_verification();
     Ok(runtime)
 }
 
 impl BrokerRuntime {
+    /// Gate account operations on verified venue identity. Local discovery and
+    /// recovery inventory remain available while a venue is unavailable.
+    pub fn require_account_identity_verification(&self) {
+        self.account_identity_check_pending
+            .store(true, Ordering::SeqCst);
+    }
+
     async fn verify_account_identities(&self) -> fin_domain::Result<()> {
         if !self.account_identity_check_pending.load(Ordering::SeqCst) {
             return Ok(());
@@ -3419,9 +3435,7 @@ mod tests {
             },
         )
         .unwrap();
-        runtime
-            .account_identity_check_pending
-            .store(true, Ordering::SeqCst);
+        runtime.require_account_identity_verification();
         for request in [
             BrokerRequest::DaemonStart,
             BrokerRequest::Connections,
@@ -3476,9 +3490,7 @@ mod tests {
             },
         )
         .unwrap();
-        runtime
-            .account_identity_check_pending
-            .store(true, Ordering::SeqCst);
+        runtime.require_account_identity_verification();
         for request in [
             BrokerRequest::DaemonStart,
             BrokerRequest::Doctor,

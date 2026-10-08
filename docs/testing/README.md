@@ -6,7 +6,7 @@ These are acceptance specifications, not claims that every case passed. Start wi
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
-sh scripts/verify-rust-fork.sh
+make test-fork
 ```
 
 The default workspace tests are offline and synthetic. The separately invoked
@@ -84,6 +84,34 @@ restoration requirements also apply to any separately authorized L2 live test.
 
 ## Local development loop
 
+Use [isolated development environments](development-environments.md) to run
+different worktree CLI/broker builds concurrently without the installed service.
+Start, CLI invocation, stop and explicit synthetic reset are available through
+`make dev-env-start`, `make dev-env-cli ARGS='...'`, `make dev-env-stop` and
+`make dev-env-reset`; persistent journals survive restart. `DEV_ENV` defaults to
+`local` within the current worktree. `make test-dev-env` runs the synthetic
+environment checks without Anvil. The separate
+[fork runner](fork.md) owns a fresh loopback endpoint, Anvil instance and evidence
+directory for each invocation. Synthetic development does not require Anvil.
+The [8 October verification record](development-environments.md#verification-record--8-october-2026)
+records passing workspace and synthetic isolation tests, the two concurrent fork
+failures at Aave borrow reconciliation, and pending human authorization checks.
+
+For real-adapter development with disposable, agent-accessible keys, see
+[live development](development-environments.md#live-development-with-disposable-credentials).
+Use `make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env"` with
+supplied public Binance UIDs/email, or add
+`DEV_IMPORT_FLAGS=--discover-identities` for authenticated read-only identity
+discovery. Master/subaccount HMAC, RSA and Ed25519 keys and EVM wallet keys are
+supported; this import performs no financial write.
+`make dev-env-import DEV_CREDENTIALS_FILE=...` imports once, and
+`make dev-env-start DEV_MODE=live` reuses those credentials without sudo or
+Touch ID. This is an explicit development-only exception to the protected
+production approval contract; it does not change production acceptance or prove
+credential isolation. Default tests of this mode use synthetic keys and do not
+contact remote accounts. Real-fund development still requires the budget,
+selected operation scope and restoration evidence below.
+
 Daemon lifecycle tests use an injected service manager/client plus temporary
 stop-marker paths: `cargo test --locked -p fin-cli daemon` and
 `cargo test --locked -p fin-protocol daemon`. Broker tests cover persisted stop
@@ -113,9 +141,9 @@ account during development; manual generation remains read-only.
 - `make test-integration`: actual Rust broker, engine, store, human-terminal and
   authorization tests with injected synthetic dependencies, temporary databases
   and local IPC; isolated installer/update/uninstall/Make fixtures afterward.
-  No production secrets, real approval or financial calls are used. A standalone
-  interactive synthetic broker/enrollment demo remains a follow-up, not an
-  implemented claim of these targets.
+  No production secrets, real approval or financial calls are used. The separate
+  synthetic broker environment supports operation development; private credential
+  enrollment and real Touch ID remain human verification cases.
 - `make setup`: human macOS Terminal only. Incrementally builds a debug bundle,
   validates/signs it through the same packaging path, then invokes `fin setup`.
   Existing installations are refused before rebuilding. Real configuration Touch
@@ -199,13 +227,13 @@ budget outside runtime run records before every live write.
 - Select amounts comfortably below the ceiling. Use fresh, recorded USD price/quote information and conservative execution bounds; do not assume a stablecoin is worth exactly $1. If valuation is unavailable or a required minimum/cost exceeds the remaining allocation, block the write and report the reason.
 - Recheck after price changes. Never increase the budget, draw on unrelated holdings, or perform an extra borrow to rescue a test. Bound token allowances/spending permits to what the test needs, within the same value limit; no unlimited approvals in live verification.
 
-The LLM conducting the test must explicitly calculate and record these checks, including fresh valuation and the complete return path, before requesting each write. Any test harness must enforce the same contract. Product execution does not enforce a separate development budget. Existing per-write human approval remains required. A market can move after submission, so record the valuation time and executable bounds without promising control over future market value.
+The LLM conducting the test must explicitly calculate and record these checks, including fresh valuation and the complete return path, before requesting each write. Any test harness must enforce the same contract. Product execution does not enforce a separate development budget. Existing per-write human approval remains required for the protected production runtime. The explicitly selected disposable-credential development mode records automatic approval instead; it does not establish biometric acceptance. A market can move after submission, so record the valuation time and executable bounds without promising control over future market value.
 
 ### Return to the initial financial state
 
 Before the first live write, capture the relevant account allocations, token balances, supplied collateral, debt, open positions/orders, and allowances. Plan the inverse operations and confirm the required permissions, deposit/withdrawal routes, minimums, gas, and funds for the entire return path. Prefer isolated test holdings/positions so unrelated activity can remain untouched.
 
-The run must restore the original account destinations and asset exposure, remove test-created debt/positions/orders, return supplied collateral and displaced funds, and restore test-modified allowances where applicable. Reverse swaps, unwrapping, repayment, exchange deposits, and redistribution are part of the test, not an optional later task. Every cleanup write still requires fresh Touch ID.
+The run must restore the original account destinations and asset exposure, remove test-created debt/positions/orders, return supplied collateral and displaced funds, and restore test-modified allowances where applicable. Reverse swaps, unwrapping, repayment, exchange deposits, and redistribution are part of the test, not an optional later task. Every cleanup write through the protected production runtime still requires fresh Touch ID. Explicit disposable-credential development runs retain their automatic approval mode for cleanup and must report that distinction.
 
 Exact numerical restoration is not possible after gas, fees, interest, or round-trip execution differences, and transaction history/nonces cannot be erased. Record these differences explicitly; unexplained losses or residual test positions are not successful restoration. Check for dust and use the asset's actual precision; report any remaining unreturnable amount rather than silently treating it as zero.
 

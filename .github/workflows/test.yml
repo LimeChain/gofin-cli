@@ -1,5 +1,8 @@
 name: Automated financial regressions
-on: [push, pull_request]
+on: [push]
+concurrency:
+  group: fin-regressions-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   rust:
     strategy:
