@@ -133,6 +133,66 @@ mod final_submission_valuation_tests {
     use fin_engine::{Engine, EngineOptions};
     use fin_evm::{EnvelopeSigner, alloy::primitives::Bytes};
     use fin_store::Store;
+    use std::sync::atomic::AtomicBool;
+
+    struct CoinGeckoStylePrices {
+        unit_price: AtomicU64,
+        updated_at: AtomicU64,
+        stale: AtomicBool,
+        changed_identity: AtomicBool,
+    }
+
+    impl CoinGeckoStylePrices {
+        fn fresh() -> Self {
+            Self {
+                unit_price: AtomicU64::new(3_000_000_000),
+                updated_at: AtomicU64::new(
+                    u64::try_from(chrono::Utc::now().timestamp()).unwrap() - 10,
+                ),
+                stale: AtomicBool::new(false),
+                changed_identity: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WalletValuation for CoinGeckoStylePrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            let amount = fin_evm::u256(&units)?
+                .checked_mul(U256::from(self.unit_price.load(Ordering::SeqCst)))
+                .ok_or_else(|| {
+                    error("SYNTHETIC_OVERFLOW", "test", "Synthetic quote overflowed.")
+                })?
+                / pow10(asset.decimals)?;
+            let updated_at =
+                chrono::DateTime::from_timestamp(self.updated_at.load(Ordering::SeqCst) as i64, 0)
+                    .unwrap()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let coin_id = if self.changed_identity.load(Ordering::SeqCst) {
+                "different-coin"
+            } else {
+                "ethereum"
+            };
+            Ok((
+                quantity(amount),
+                format!("CoinGecko public USD quote; coin_id={coin_id}; updated:{updated_at}"),
+            ))
+        }
+
+        async fn quote_observation(
+            &self,
+            asset: &AssetId,
+            units: Quantity,
+        ) -> Result<(Quantity, String, String)> {
+            let (value, source) = self.quote_usd(asset, units).await?;
+            let observed_at = if self.stale.load(Ordering::SeqCst) {
+                (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339()
+            } else {
+                now()
+            };
+            Ok((value, source, observed_at))
+        }
+    }
 
     type ValuationMutation = (&'static str, fn(&mut Valuation));
 
@@ -185,6 +245,135 @@ mod final_submission_valuation_tests {
                 .iter()
                 .any(|method| method == "eth_sendRawTransaction")
         );
+    }
+    fn coin_transfer_input() -> Value {
+        let mut value = input();
+        value.as_object_mut().unwrap().extend(
+            json!({
+                "token":"native",
+                "recipient":lower_address(addr(2)),
+                "amount":"0.001001"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        value
+    }
+
+    #[tokio::test]
+    async fn coin_gecko_quote_refresh_within_displayed_ceiling_keeps_approval_stable() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let prices = Arc::new(CoinGeckoStylePrices::fresh());
+        let a = counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
+        let prepared = a
+            .prepare("wallet.transfer", &coin_transfer_input())
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .binding
+                .get(fin_domain::value_bounds::KEY)
+                .is_some()
+        );
+        assert!(prepared.summary.contains("USD ceilings: $3.01 movement"));
+        let approved_binding = fin_domain::authorization_binding(&prepared);
+        let approved_price = prepared.valuation.as_ref().unwrap().prices[0]
+            .usd_micros_per_unit
+            .clone();
+
+        prices.unit_price.store(3_001_000_000, Ordering::SeqCst);
+        prices.updated_at.fetch_add(1, Ordering::SeqCst);
+        let refreshed = a.revalidate(&prepared).await.unwrap();
+        assert_eq!(
+            fin_domain::authorization_binding(&refreshed),
+            approved_binding,
+            "a new quote round inside the visible ceiling must retain the approval binding"
+        );
+        assert_eq!(refreshed.summary, prepared.summary);
+        assert_ne!(
+            refreshed.valuation.as_ref().unwrap().prices[0].usd_micros_per_unit,
+            approved_price,
+            "fresh valuation evidence remains available for actual-cost accounting"
+        );
+
+        let journal = Arc::new(CountingJournal::default());
+        assert_eq!(
+            a.submit(&prepared, journal.clone()).await.unwrap_err().code,
+            "SYNTHETIC_SIGNER_REACHED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 1);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn price_above_ceiling_changed_identity_and_stale_quote_never_reach_signing() {
+        for case in ["above-ceiling", "changed-identity", "stale"] {
+            let rpc = Arc::new(Fixture::new());
+            let signer = Arc::new(CountingSigner::default());
+            let prices = Arc::new(CoinGeckoStylePrices::fresh());
+            let a =
+                counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
+            let prepared = a
+                .prepare("wallet.transfer", &coin_transfer_input())
+                .await
+                .unwrap();
+            match case {
+                "above-ceiling" => prices.unit_price.store(3_011_000_000, Ordering::SeqCst),
+                "changed-identity" => prices.changed_identity.store(true, Ordering::SeqCst),
+                _ => prices.stale.store(true, Ordering::SeqCst),
+            }
+            prices.updated_at.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                a.revalidate(&prepared).await.is_err(),
+                "{case} must fail during the fresh adapter check"
+            );
+            let journal = Arc::new(CountingJournal::default());
+            assert!(
+                a.submit(&prepared, journal.clone()).await.is_err(),
+                "{case}"
+            );
+            assert_eq!(signer.0.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(journal.authorized.load(Ordering::SeqCst), 0, "{case}");
+            assert_eq!(journal.persisted.load(Ordering::SeqCst), 0, "{case}");
+            assert_no_dispatch(&rpc);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_unbounded_preview_keeps_exact_source_and_price_revalidation() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let prices = Arc::new(CoinGeckoStylePrices::fresh());
+        let a = counted_adapter(rpc.clone(), signer.clone()).with_wallet_valuation(prices.clone());
+        let prepared = a
+            .prepare_operation(
+                "wallet.transfer",
+                &coin_transfer_input(),
+                None,
+                &PreparationContext::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            prepared
+                .binding
+                .get(fin_domain::value_bounds::KEY)
+                .is_none()
+        );
+        prices.updated_at.fetch_add(1, Ordering::SeqCst);
+        let journal = Arc::new(CountingJournal::default());
+        assert_eq!(
+            a.submit(&prepared, journal.clone()).await.unwrap_err().code,
+            "VALUATION_CHANGED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
     }
 
     /// Changes the oracle only after the real post-approval adapter check has
@@ -271,7 +460,7 @@ mod final_submission_valuation_tests {
             run_id: None,
         };
         let record = engine.execute(request.clone()).await.unwrap();
-        assert_eq!(record.error.as_ref().unwrap().code, "VALUATION_CHANGED");
+        assert_eq!(record.error.as_ref().unwrap().code, "VALUE_BOUND_EXCEEDED");
         assert_eq!(record.status, Status::Failed);
         assert!(record.approval.is_some());
         assert!(record.submission.is_none());
@@ -350,31 +539,15 @@ mod final_submission_valuation_tests {
                 U80::from(2),
             )),
         );
-        let refreshed = a.revalidate(&prepared).await.unwrap();
-        assert_eq!(refreshed.binding, prepared.binding);
-        let approved = prepared.valuation.as_ref().unwrap();
-        let fresh = refreshed.valuation.as_ref().unwrap();
-        assert_eq!(fresh.movement_usd_micros, approved.movement_usd_micros);
         assert_eq!(
-            fresh.maximum_fee_usd_micros,
-            approved.maximum_fee_usd_micros
+            a.revalidate(&prepared).await.unwrap_err().code,
+            "VALUE_BOUND_EXCEEDED",
+            "Aave oracle publication timestamps remain part of the exact source identity"
         );
-        assert_eq!(
-            fresh.additional_allocation_usd_micros,
-            approved.additional_allocation_usd_micros
-        );
-        assert_ne!(fresh.source, approved.source);
-        assert_eq!(fresh.prices.len(), approved.prices.len());
-        for (current, original) in fresh.prices.iter().zip(&approved.prices) {
-            assert_eq!(current.asset, original.asset);
-            assert_eq!(current.unit_atoms, original.unit_atoms);
-            assert_eq!(current.usd_micros_per_unit, original.usd_micros_per_unit);
-            assert_ne!(current.source, original.source);
-        }
         let journal = Arc::new(CountingJournal::default());
         assert_eq!(
             a.submit(&prepared, journal.clone()).await.unwrap_err().code,
-            "VALUATION_CHANGED"
+            "VALUE_BOUND_EXCEEDED"
         );
         assert_eq!(signer.0.load(Ordering::SeqCst), 0);
         assert_eq!(journal.authorized.load(Ordering::SeqCst), 0);
@@ -387,7 +560,15 @@ mod final_submission_valuation_tests {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let a = counted_adapter(rpc.clone(), signer.clone());
-        let prepared = a.prepare("wallet.wrap", &wrap_input()).await.unwrap();
+        let prepared = a
+            .prepare_operation(
+                "wallet.wrap",
+                &wrap_input(),
+                None,
+                &PreparationContext::default(),
+            )
+            .await
+            .unwrap();
         let changes: &[ValuationMutation] = &[
             ("movement", |v| v.movement_usd_micros = Quantity::zero()),
             ("fee", |v| v.maximum_fee_usd_micros = Quantity::zero()),
@@ -573,6 +754,395 @@ async fn external_funding_proves_net_credit_and_checks_finality_before_revert() 
             .unwrap()
             .contains(&"eth_sendRawTransaction".into())
     );
+}
+
+struct ExternalPayoutFinalityRpc {
+    inner: Arc<Fixture>,
+    finalized_calls: AtomicUsize,
+    finalized_height: Option<u64>,
+}
+
+#[async_trait]
+impl EvmRpc for ExternalPayoutFinalityRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_getBlockByNumber" && params[0] == json!("finalized") {
+            self.finalized_calls.fetch_add(1, Ordering::SeqCst);
+            return match self.finalized_height {
+                Some(height) => {
+                    Ok(json!({"number":format!("{height:#x}"),"hash":blockhash(height)}))
+                }
+                None => Err(FinError::new(
+                    "SYNTHETIC_FINALITY_UNSUPPORTED",
+                    "rpc",
+                    "Synthetic provider does not implement the finalized tag.",
+                    "Fixture only.",
+                )),
+            };
+        }
+        self.inner.request(method, params).await
+    }
+}
+
+struct MissingHistoricalTokenStateRpc {
+    inner: Arc<dyn EvmRpc>,
+}
+
+#[async_trait]
+impl EvmRpc for MissingHistoricalTokenStateRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_call"
+            && params[1].as_str().is_some_and(|tag| tag != "latest")
+            && params[0]["data"].as_str().is_some_and(|data| {
+                data.starts_with(&format!(
+                    "0x{}",
+                    hex::encode(Erc20::balanceOfCall::SELECTOR)
+                ))
+            })
+        {
+            return Err(FinError::new(
+                "SYNTHETIC_HISTORICAL_STATE_UNAVAILABLE",
+                "rpc",
+                "Historical token state is unavailable in the isolated fixture.",
+                "Fixture only.",
+            ));
+        }
+        self.inner.request(method, params).await
+    }
+}
+
+struct ReorgAfterHistoricalTokenReadRpc {
+    inner: Arc<dyn EvmRpc>,
+    historical_token_read: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl EvmRpc for ReorgAfterHistoricalTokenReadRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_call"
+            && params[1].as_str().is_some_and(|tag| tag != "latest")
+            && params[0]["data"].as_str().is_some_and(|data| {
+                data.starts_with(&format!(
+                    "0x{}",
+                    hex::encode(Erc20::balanceOfCall::SELECTOR)
+                ))
+            })
+        {
+            self.historical_token_read.store(true, Ordering::SeqCst);
+        }
+        if method == "eth_getBlockByNumber"
+            && params[0] == json!("0x15")
+            && self.historical_token_read.load(Ordering::SeqCst)
+        {
+            return Ok(json!({"number":"0x15","hash":blockhash(99)}));
+        }
+        self.inner.request(method, params).await
+    }
+}
+
+fn payout_proof_adapter(chain: u64, rpc: Arc<dyn EvmRpc>) -> EthereumAdapter {
+    EthereumAdapter::new(
+        EthereumConfig::wallet_only(chain, 2, vec![]),
+        vec![WalletConnection {
+            name: "synthetic-payout-target".into(),
+            address: lower_address(addr(2)),
+            signing_enabled: false,
+        }],
+        Arc::new(EvmRuntime::new(rpc, chain, None)),
+    )
+    .unwrap()
+}
+
+fn set_external_native_receipt(rpc: &Fixture, chain: u64) {
+    let block = 21u64;
+    rpc.chain.store(chain, Ordering::SeqCst);
+    *rpc.tx.lock().unwrap() = Some(FrozenTransaction {
+        chain_id: chain,
+        sender: lower_address(addr(1)),
+        to: lower_address(addr(2)),
+        value: Quantity::from_decimal("0.001", 18).unwrap(),
+        calldata: "0x".into(),
+        nonce: 0,
+        gas: 21_000,
+        max_fee_per_gas: Quantity::from_u64(1),
+        max_priority_fee_per_gas: Quantity::from_u64(1),
+    });
+    *rpc.receipt.lock().unwrap() = json!({
+        "transactionHash":txhash(),
+        "blockHash":blockhash(block),
+        "blockNumber":format!("{block:#x}"),
+        "status":"0x1",
+        "gasUsed":"0x5208",
+        "effectiveGasPrice":"0x1",
+        "logs":[]
+    });
+}
+
+fn set_external_erc20_receipt(rpc: &Fixture, chain: u64, logs: Vec<Value>) {
+    let block = 21u64;
+    rpc.chain.store(chain, Ordering::SeqCst);
+    *rpc.tx.lock().unwrap() = Some(FrozenTransaction {
+        chain_id: chain,
+        sender: lower_address(addr(1)),
+        to: lower_address(addr(101)),
+        value: Quantity::zero(),
+        calldata: "0xa9059cbb".into(),
+        nonce: 0,
+        gas: 65_000,
+        max_fee_per_gas: Quantity::from_u64(1),
+        max_priority_fee_per_gas: Quantity::from_u64(1),
+    });
+    *rpc.receipt.lock().unwrap() = json!({
+        "transactionHash":txhash(),
+        "blockHash":blockhash(block),
+        "blockNumber":format!("{block:#x}"),
+        "status":"0x1",
+        "gasUsed":"0x10000",
+        "effectiveGasPrice":"0x1",
+        "logs":logs
+    });
+}
+
+#[tokio::test]
+async fn external_payouts_use_l2_sequencer_inclusion_without_weakening_mainnet_finality() {
+    for chain in [42161, 4663] {
+        for case in [
+            "success",
+            "wrong-recipient",
+            "revert",
+            "wrong-hash",
+            "noncanonical",
+        ] {
+            let rpc = Arc::new(Fixture::new());
+            let finality_rpc = Arc::new(ExternalPayoutFinalityRpc {
+                inner: rpc.clone(),
+                finalized_calls: AtomicUsize::new(0),
+                finalized_height: None,
+            });
+            let adapter = payout_proof_adapter(chain, finality_rpc.clone());
+            rpc.latest.store(21, Ordering::SeqCst); // One sequencer-included L2 block.
+            set_external_native_receipt(&rpc, chain);
+            match case {
+                "revert" => rpc.receipt.lock().unwrap()["status"] = json!("0x0"),
+                "wrong-hash" => {
+                    rpc.receipt.lock().unwrap()["transactionHash"] =
+                        json!(format!("0x{}", "ef".repeat(32)))
+                }
+                "noncanonical" => rpc.receipt.lock().unwrap()["blockHash"] = json!(blockhash(99)),
+                _ => {}
+            }
+            let recipient = if case == "wrong-recipient" {
+                lower_address(addr(3))
+            } else {
+                lower_address(addr(2))
+            };
+            let result = adapter
+                .verify_external_credit(
+                    &txhash(),
+                    &recipient,
+                    &AssetId {
+                        network: format!("ethereum:{chain}"),
+                        reference: "native".into(),
+                        decimals: 18,
+                    },
+                    "0.001",
+                    "0.001",
+                    1,
+                )
+                .await;
+            match case {
+                "success" => {
+                    let proof = result.unwrap();
+                    assert_eq!(proof.status, Status::Completed, "{chain}: {case}");
+                    assert_eq!(proof.evidence["finality"], json!("sequencer-inclusion"));
+                    assert_eq!(proof.evidence["confirmations"], json!(1));
+                }
+                "revert" => assert_eq!(result.unwrap().status, Status::Failed, "{chain}: {case}"),
+                "noncanonical" => {
+                    assert_eq!(result.unwrap().status, Status::Pending, "{chain}: {case}")
+                }
+                "wrong-recipient" => assert_eq!(
+                    result.unwrap_err().code,
+                    "FUNDING_RECIPIENT_MISMATCH",
+                    "{chain}: {case}"
+                ),
+                "wrong-hash" => assert_eq!(
+                    result.unwrap_err().code,
+                    "FUNDING_IDENTITY_MISMATCH",
+                    "{chain}: {case}"
+                ),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                finality_rpc.finalized_calls.load(Ordering::SeqCst),
+                0,
+                "{chain}: {case}"
+            );
+        }
+
+        let amount_atoms = U256::from(1_250_000u64);
+        let asset = AssetId {
+            network: format!("ethereum:{chain}"),
+            reference: lower_address(addr(101)),
+            decimals: 6,
+        };
+        let rpc = Arc::new(Fixture::new());
+        let finality_rpc = Arc::new(ExternalPayoutFinalityRpc {
+            inner: rpc.clone(),
+            finalized_calls: AtomicUsize::new(0),
+            finalized_height: None,
+        });
+        let adapter = payout_proof_adapter(chain, finality_rpc.clone());
+        rpc.latest.store(21, Ordering::SeqCst);
+        set_external_erc20_receipt(
+            &rpc,
+            chain,
+            vec![event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(3),
+                    to: addr(2),
+                    value: amount_atoms,
+                },
+                21,
+            )],
+        );
+        let proof = adapter
+            .verify_external_credit(
+                &txhash(),
+                &lower_address(addr(2)),
+                &asset,
+                "1.25",
+                "1.25",
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(proof.status, Status::Completed, "{chain}: ERC20 payout");
+        assert_eq!(proof.amount_atoms, Some(quantity(amount_atoms)));
+        assert_eq!(proof.evidence["finality"], json!("sequencer-inclusion"));
+        assert_eq!(proof.evidence["recipient"], json!(lower_address(addr(2))));
+        assert_eq!(finality_rpc.finalized_calls.load(Ordering::SeqCst), 0);
+
+        // The exact inclusion is checked again after historical state reads;
+        // if it changed during those reads, the credit remains unresolved.
+        let rpc = Arc::new(Fixture::new());
+        rpc.latest.store(21, Ordering::SeqCst);
+        set_external_erc20_receipt(
+            &rpc,
+            chain,
+            vec![event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(3),
+                    to: addr(2),
+                    value: amount_atoms,
+                },
+                21,
+            )],
+        );
+        let finality_rpc = Arc::new(ExternalPayoutFinalityRpc {
+            inner: rpc.clone(),
+            finalized_calls: AtomicUsize::new(0),
+            finalized_height: None,
+        });
+        let reorg_rpc = Arc::new(ReorgAfterHistoricalTokenReadRpc {
+            inner: finality_rpc.clone(),
+            historical_token_read: std::sync::atomic::AtomicBool::new(false),
+        });
+        let adapter = payout_proof_adapter(chain, reorg_rpc.clone());
+        let proof = adapter
+            .verify_external_credit(
+                &txhash(),
+                &lower_address(addr(2)),
+                &asset,
+                "1.25",
+                "1.25",
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            proof.status,
+            Status::Pending,
+            "{chain}: reorg after historical read"
+        );
+        assert_eq!(proof.evidence["canonical_confirmed"], json!(false));
+        assert_eq!(finality_rpc.finalized_calls.load(Ordering::SeqCst), 0);
+
+        // Inclusion policy does not bypass historical holding checks. If the
+        // configured RPC cannot serve the exact historical token state, proof
+        // remains an error for the caller to preserve as unresolved.
+        let rpc = Arc::new(Fixture::new());
+        rpc.latest.store(21, Ordering::SeqCst);
+        set_external_erc20_receipt(
+            &rpc,
+            chain,
+            vec![event(
+                addr(101),
+                Erc20::Transfer {
+                    from: addr(3),
+                    to: addr(2),
+                    value: amount_atoms,
+                },
+                21,
+            )],
+        );
+        let finality_rpc = Arc::new(ExternalPayoutFinalityRpc {
+            inner: rpc.clone(),
+            finalized_calls: AtomicUsize::new(0),
+            finalized_height: None,
+        });
+        let historical_rpc = Arc::new(MissingHistoricalTokenStateRpc {
+            inner: finality_rpc.clone(),
+        });
+        let adapter = payout_proof_adapter(chain, historical_rpc);
+        assert_eq!(
+            adapter
+                .verify_external_credit(
+                    &txhash(),
+                    &lower_address(addr(2)),
+                    &asset,
+                    "1.25",
+                    "1.25",
+                    1,
+                )
+                .await
+                .unwrap_err()
+                .code,
+            "SYNTHETIC_HISTORICAL_STATE_UNAVAILABLE"
+        );
+        assert_eq!(finality_rpc.finalized_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // Ethereum mainnet still requires its configured two confirmations and
+    // the provider's finalized marker when that policy is enabled.
+    let rpc = Arc::new(Fixture::new());
+    let finality_rpc = Arc::new(ExternalPayoutFinalityRpc {
+        inner: rpc.clone(),
+        finalized_calls: AtomicUsize::new(0),
+        finalized_height: Some(21),
+    });
+    let adapter = payout_proof_adapter(1, finality_rpc.clone());
+    rpc.latest.store(22, Ordering::SeqCst);
+    set_external_native_receipt(&rpc, 1);
+    let proof = adapter
+        .verify_external_credit(
+            &txhash(),
+            &lower_address(addr(2)),
+            &AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            "0.001",
+            "0.001",
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(proof.status, Status::Completed);
+    assert_eq!(proof.evidence["finality"], json!("rpc-finalized"));
+    assert_eq!(finality_rpc.finalized_calls.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
 async fn collateral_requires_matching_event_and_inclusion_state() {
@@ -3924,6 +4494,66 @@ async fn broker_verified_native_deposit_is_exact_scoped_fresh_and_decimal_safe()
     let binding: Binding = serde_json::from_value(prepared.binding).unwrap();
     assert_eq!(binding.transaction.to, target.address);
     assert_eq!(binding.transaction.value, debit);
+
+    // The generalized internal seam preserves exact ERC20 units instead of
+    // assuming every source asset has native ETH's 18 decimal places.
+    let token_asset = a.asset(&lower_address(addr(101)), 6);
+    let mut token_context = context.clone();
+    token_context.allocations.push(ResourceAmount {
+        resource: owner.clone(),
+        amount: Amount {
+            asset: token_asset.clone(),
+            atoms: Quantity::from_decimal("2", 6).unwrap(),
+        },
+    });
+    let mut token_target = target.clone();
+    token_target.asset.reference = "USDC".into();
+    token_context.baseline.state.holdings.push(ResourceAmount {
+        resource: venue.clone(),
+        amount: Amount {
+            asset: token_target.asset.clone(),
+            atoms: Quantity::zero(),
+        },
+    });
+    token_context.projected.cash.push(ProjectedCash {
+        resource: venue.clone(),
+        asset: token_target.asset.clone(),
+        amount: QuantityInterval {
+            minimum: Quantity::zero(),
+            maximum: Quantity::zero(),
+        },
+    });
+    let mut token_input = inner.clone();
+    token_input["token"] = json!(token_asset.reference);
+    token_input["amount"] = json!("1.000001");
+    let proof = a
+        .preflight_deposit_transfer(&token_input, &token_context, &token_target, &token_asset)
+        .await
+        .unwrap();
+    assert!(proof.intent.expected.iter().any(|effect| matches!(effect,
+        EffectConstraint::Transfer { debit_asset, maximum_debit, minimum_credit, .. }
+        if debit_asset == &token_asset
+        && maximum_debit == &Quantity::from_decimal("1.000001", 6).unwrap()
+        && minimum_credit == &Quantity::from_decimal("1.000001", 36).unwrap()
+    )));
+    let mut wrong_asset = token_asset.clone();
+    wrong_asset.decimals = 18;
+    assert_eq!(
+        a.preflight_deposit_transfer(&token_input, &token_context, &token_target, &wrong_asset)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_MISMATCH"
+    );
+    wrong_asset = token_asset.clone();
+    wrong_asset.network = "ethereum:42161".into();
+    assert_eq!(
+        a.preflight_deposit_transfer(&token_input, &token_context, &token_target, &wrong_asset)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_TARGET_MISMATCH"
+    );
 }
 
 mod wallet_only_tests {
@@ -4239,12 +4869,9 @@ mod wallet_only_tests {
                 changed.input["recipient"] = json!(lower_address(addr(3)));
                 assert!(a.revalidate(&changed).await.is_err());
                 prices.0.store(3_100_000_000, Ordering::SeqCst);
-                let fresh = a.revalidate(&prepared).await.unwrap();
                 assert_eq!(
-                    require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())
-                        .unwrap_err()
-                        .code,
-                    "VALUATION_CHANGED"
+                    a.revalidate(&prepared).await.unwrap_err().code,
+                    "VALUE_BOUND_EXCEEDED"
                 );
                 let mut overfee = input.clone();
                 overfee["max_fee_eth"] = json!("0.00000000000001");

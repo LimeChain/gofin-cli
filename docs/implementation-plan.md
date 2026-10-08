@@ -34,6 +34,29 @@ post-dispatch receipt evidence is journaled separately from the pre-dispatch
 submission. Missing receipt identity is unresolved, never inferred from a
 similar amount/time or retried automatically.
 
+Binance deposits compose the existing wallet transfer with own-account funding
+reads. Dynamic coin/network metadata establishes the route; reviewed network
+mapping and exact contract/RPC metadata establish the source asset. Native and
+ERC20 custody effects use their actual scales and the existing shared ledger.
+Post-approval deposit checks refresh Binance route and balance evidence while
+revalidating the original wallet-transfer preview. Reuse the EVM adapter's frozen
+transaction checks so current gas estimates within approved bounds do not replace
+the approved envelope or cause a spurious binding change.
+EVM preparation reserves 20% gas-unit headroom and up to 50% headroom for both
+the required maximum fee per gas and priority fee, clipped to the explicit total
+fee cap. These bounds are approved before signing; revalidation accepts changes
+inside them without regenerating transaction fields.
+New EVM previews and composite deposits use the existing shared, cent-rounded
+USD approval ceilings. Refresh actual quote evidence within those ceilings while
+preserving exact asset units and transaction fields; historical previews without
+ceiling metadata retain their original exact pricing contract.
+The legacy deposit target/binding and original EVM submission remain readable;
+recovery never prepares or broadcasts a replacement. Standalone subaccount
+credentials verify their own UID; optional parent associations enable only the
+separate hierarchy operations that need them. Enrollment approval summaries
+support standalone subaccounts for add, update and remove, while still rejecting
+partial parent/email associations and unverified or mismatched account identities.
+
 ## Approval contracts
 
 Standalone writes use exact, fresh approval. Operation-boundary consent is an
@@ -82,14 +105,25 @@ networks, while legacy chain-qualified identities remain unchanged until a
 protected human-approved update. Wallet-only support does not imply dapp support.
 
 Indexers supply bounded discovery candidates. Confirm token metadata and balances
-with pinned RPC reads and declare partial coverage. L2 settlement must verify the
-configured finality rule; a sequencer receipt alone is insufficient. Adding an
-exchange withdrawal network does not add independent chain receipt verification.
+with pinned RPC reads and declare partial coverage. Fin-originated EVM writes
+must verify the configured finality rule; a sequencer receipt alone is
+insufficient for wallet transfers and Binance deposits. Binance withdrawal
+recipient verification has a distinct policy: for a withdrawal mapped to
+Arbitrum One (`42161`) or Robinhood Chain (`4663`), one canonical
+sequencer-included block is sufficient when the original hash, chain, recipient,
+asset identity and expected amount match the approved withdrawal. Preserve its
+original operation identity for reconciliation after response loss or restart.
+This evidence does not claim parent-chain finality, and an observer does not
+establish that Binance offers a route; the Robinhood network mapping is currently
+unavailable/unverified.
 
 ## CLI and local development
 
 Reuse shared command definitions and `fin-presentation`. Keep human messages
 concise, color entire semantic rows, and show activity only while work runs.
+Deposit summaries use account aliases and discovery network names; the Touch ID
+reason omits its redundant action prefix while retaining exact amounts and caps.
+Technical identities remain bound and available in detailed review.
 The OS Touch ID prompt is the only approval popup. `--json` is a quiet,
 noninteractive execution contract with structured errors and stable behavior.
 
@@ -97,7 +131,13 @@ Use the [local development commands](../README.md#development-and-contributing)
 and targeted synthetic tests. Debug client execution may talk to the installed
 protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects
-of a test or build. Use temporary homes and databases for fixtures.
+of a test or build. Use temporary homes and databases for fixtures. Explicit
+human-confirmed uninstall deletes all Fin-owned local state, including financial
+history and unresolved recovery records; history content or schema is not an
+uninstall gate. Explain irreversible data loss and that external submissions
+continue independently, then confirm before service/file mutations. Keep
+maintenance-lock, active-command, service-stop and path-ownership checks. Normal
+updates and recovery still preserve financial identities and reservations.
 
 Isolated worktree development uses separate Cargo example binaries, sharing the
 CLI parser, dispatch and presentation and the broker's injected composition,

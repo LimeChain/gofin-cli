@@ -107,6 +107,7 @@ impl EthereumAdapter {
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,
+            value_bounds: original.and_then(|binding| binding.value_bounds.clone()),
         };
         let mut warnings=vec!["Every financial write requires a fresh human authorization. An uncertain hash is reconciled without resubmission.".into()];
         let mut to = address(&token.reference).unwrap_or(owner);

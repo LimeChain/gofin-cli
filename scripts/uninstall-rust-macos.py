@@ -6,11 +6,9 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
-import sqlite3
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 ROOT = Path('/Library/Fin')
@@ -29,62 +27,39 @@ def protected(path, directory=False):
         raise ResetError('Unexpected installation ownership or path type; nothing was deleted.')
 
 
-def journal_error_reason(error):
-    # macOS system Python 3.9 does not expose sqlite_errorcode/name. Translate
-    # only known fixed messages; never print arbitrary database error contents.
-    message = str(error).lower()
-    reasons = {
-        'database is locked': 'database is locked',
-        'database table is locked': 'database table is locked',
-        'database is busy': 'database is busy',
-        'unable to open database file': 'database could not be opened',
-        'attempt to write a readonly database': 'SQLite needs write access for recovery',
-        'disk i/o error': 'SQLite disk I/O failure',
-        'file is not a database': 'file is not a SQLite database',
-        'database disk image is malformed': 'database is damaged',
-    }
-    for table in ('operations', 'runs', 'submissions', 'reservations', 'effect_ledger', 'proof_records'):
-        if message == 'no such table: ' + table:
-            return 'missing expected ' + table + ' table'
-    return reasons.get(message, 'unclassified SQLite failure')
+def protect_financial_storage(private):
+    # Do not parse current/history data during removal. Keep owner and file-type
+    # checks for present SQLite files while allowing missing or damaged stores.
+    database = private / 'operations.sqlite'
+    for path in (database, database.with_name(database.name + '-wal'),
+                 database.with_name(database.name + '-shm')):
+        if path.exists() or path.is_symlink():
+            protected(path)
 
 
-def empty_journal(path):
-    # Caller holds the maintenance lock and has stopped the broker. Snapshot the
-    # DB AND its WAL, never just the main file: committed rows may live only in
-    # WAL. Let SQLite rebuild support files in this private disposable snapshot.
-    protected(path)
-    wal = path.with_name(path.name + '-wal')
-    has_wal = wal.exists() or wal.is_symlink()
-    if has_wal:
-        protected(wal)
-    stage = 'opening snapshot'
+def confirm_data_loss(input_stream=sys.stdin, output_stream=sys.stderr):
+    output_stream.write(
+        'Uninstall permanently deletes saved credentials, settings and financial history, including '
+        'pending records used for recovery or avoiding duplicates. It does not cancel existing '
+        'transactions or orders on exchanges or chains. No backup is created.\n'
+        'Delete Fin and all saved data? [y/N] '
+    )
+    output_stream.flush()
     try:
-        with tempfile.TemporaryDirectory(prefix='.fin-journal-check-', dir=path.parent.parent) as directory:
-            snapshot = Path(directory) / 'journal.sqlite'
-            shutil.copyfile(path, snapshot)
-            snapshot.chmod(0o600)
-            if has_wal:
-                snapshot_wal = snapshot.with_name(snapshot.name + '-wal')
-                shutil.copyfile(wal, snapshot_wal)
-                snapshot_wal.chmod(0o600)
-            connection = sqlite3.connect(snapshot.as_uri() + '?mode=rw', uri=True)
-            try:
-                # Original DB is never opened by SQLite, checkpointed or modified.
-                for table in ('operations', 'runs', 'submissions', 'reservations', 'effect_ledger', 'proof_records'):
-                    stage = 'checking ' + table
-                    if connection.execute('SELECT EXISTS(SELECT 1 FROM ' + table + ' LIMIT 1)').fetchone()[0]:
-                        raise ResetError('Financial history exists. Reset stopped; credentials and journal are intact. Resolve or preserve that history before resetting.')
-            finally:
-                connection.close()
-    except sqlite3.Error as error:
-        raise ResetError('Could not verify the financial journal: ' + journal_error_reason(error) + ' (' + stage + '). Nothing was deleted.') from None
+        answer = input_stream.readline()
+    except KeyboardInterrupt:
+        output_stream.write('\n')
+        output_stream.flush()
+        return None
+    return answer.strip().lower() in ('y', 'yes')
 
 
-def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run):
+def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run,
+              confirm=confirm_data_loss):
     protected(root, True)
     protected(root / 'private', True)
     protected(root / 'private/maintenance.lock')
+    protect_financial_storage(root / 'private')
     protected(plist)
     protected(registration)
     if registration.read_text() != str(root / 'runtime') + '\n':
@@ -135,11 +110,17 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         if command('/usr/bin/pgrep', '-x', 'fin|fin-touch-id|Fin').returncode != 1:
             raise ResetError('A Fin command or approval is active; finish it before resetting.')
         state = command('/bin/launchctl', 'print', 'system/io.fin-cli.broker').returncode
-        if state == 0:
-            if command('/bin/launchctl', 'bootout', 'system/io.fin-cli.broker').returncode != 0:
-                raise ResetError('Could not stop the Fin service; nothing was deleted.')
-        elif state not in (3, 113):
+        if state not in (0, 3, 113):
             raise ResetError('Could not inspect the Fin service; nothing was deleted.')
+        # All checks above are read-only. Ask before stopping launchd or changing
+        # completion files, credentials, configuration, journal, or install paths.
+        confirmation = confirm()
+        if confirmation is None:
+            return 'interrupted'
+        if not confirmation:
+            return 'cancelled'
+        if state == 0 and command('/bin/launchctl', 'bootout', 'system/io.fin-cli.broker').returncode != 0:
+            raise ResetError('Could not stop the Fin service; nothing was deleted.')
         for _ in range(30):
             status = command('/usr/bin/pgrep', '-f', '^' + str(root / 'runtime/fin-broker') + r'([[:space:]]|$)').returncode
             if status == 1:
@@ -149,12 +130,6 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
             time.sleep(0.1)
         else:
             raise ResetError('The broker has not stopped; installation retained.')
-        try:
-            empty_journal(root / 'private/operations.sqlite')
-        except (ResetError, OSError):
-            if state == 0 and command('/bin/launchctl', 'bootstrap', 'system', str(plist)).returncode != 0:
-                raise ResetError('Journal verification failed and the service could not restart. No files were deleted; inspect the installation before retrying.') from None
-            raise
         # This uses the UID installed in the already root-owned launchd plist,
         # not SUDO_UID (which identifies the person invoking this reset).
         completion_status = 'absent'
@@ -184,8 +159,8 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
                 if state == 0 and command('/bin/launchctl', 'bootstrap', 'system', str(plist)).returncode != 0:
                     raise ResetError('Shell completion cleanup failed and the service could not restart. Nothing was deleted; inspect the installation before retrying.')
                 raise ResetError('Could not remove shell completions; installation retained.')
-        # The exclusive maintenance lock prevents financial/configuration writes
-        # across journal inspection and daemon shutdown. No key files are opened.
+        # The exclusive maintenance lock prevents new financial/configuration
+        # writes while the service is stopped and Fin-owned state is removed.
         registration.unlink()
         plist.unlink()
         shutil.rmtree(root)
@@ -196,21 +171,36 @@ def uninstall(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.
         os.close(fd)
 
 
-def main():
+def main(root=ROOT, plist=PLIST, registration=REGISTRATION, run=subprocess.run,
+         input_stream=None, prompt_stream=None, result_stream=None):
+    sudo_uid = os.environ.get('SUDO_UID', '')
+    prompt_stream = sys.stderr if prompt_stream is None else prompt_stream
+    result_stream = sys.stdout if result_stream is None else result_stream
+    input_stream = sys.stdin if input_stream is None else input_stream
     if len(sys.argv) != 1 or sys.platform != 'darwin' or os.geteuid() != 0:
         raise ResetError('Run this reviewed reset with sudo from your own macOS Terminal.')
-    if not os.environ.get('SUDO_UID', '').isdigit() or int(os.environ['SUDO_UID']) < 501 or not all(os.isatty(fd) for fd in (0, 1, 2)):
+    if not sudo_uid.isdigit() or int(sudo_uid) < 501 or not all(os.isatty(fd) for fd in (0, 1, 2)):
         raise ResetError('Run through sudo in your own Terminal without redirection.')
-    completion_status = uninstall()
+    completion_status = uninstall(
+        root, plist, registration, run,
+        confirm=lambda: confirm_data_loss(input_stream, prompt_stream),
+    )
+    if completion_status == 'interrupted':
+        print('Uninstall cancelled; Fin and its saved data were not changed.', file=prompt_stream)
+        return 130
+    if completion_status == 'cancelled':
+        print('Uninstall cancelled; Fin and its saved data were not changed.', file=result_stream)
+        return 1
     if completion_status == 'partial':
-        print('Fin uninstalled. Some modified shell completion files were preserved.')
+        print('Fin uninstalled. Saved credentials, settings and financial history deleted. Some modified completion files were preserved.', file=result_stream)
     else:
-        print('Fin uninstalled. Saved credentials and configuration deleted; no credential backup created.')
+        print('Fin uninstalled. Saved credentials, settings and financial history deleted.', file=result_stream)
+    return 0
 
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except (ResetError, OSError, subprocess.SubprocessError) as error:
         # Never display arbitrary OS/database output or protected file contents.
         print(str(error) if isinstance(error, ResetError) else 'Reset failed. Inspect installation state before retrying.', file=sys.stderr)

@@ -251,9 +251,9 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                     "Binance funding uses SPOT accounts; wallet network/address belong to a separate wallet connection.",
                 ));
             }
-            if role == BinanceRole::Sub && (args.parent.is_none() || args.email.is_none()) {
+            if role == BinanceRole::Sub && args.parent.is_some() != args.email.is_some() {
                 return Err(FinError::validation(
-                    "A Binance subaccount requires --parent and --email.",
+                    "When supplying a Binance --parent, also supply its --email; both are optional for standalone subaccount credentials.",
                 ));
             }
             if role == BinanceRole::Main && args.parent.is_some() {
@@ -357,12 +357,13 @@ pub fn operation_definitions() -> Vec<Definition> {
             "fin connections add --provider binance --name main --role main --credential-type hmac",
             "fin connections add --provider binance --name main-rsa --role main --credential-type rsa",
             "fin connections add --provider binance --name main-ed25519 --role main --credential-type ed25519",
+            "fin connections add --provider binance --name savings --role sub --credential-type hmac",
             "fin connections add --provider binance --name savings --role sub --parent main --email subaccount@example.invalid --credential-type hmac",
             "fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo",
             "fin connections add --provider evm --name wallet --credential-type private_key",
             "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111"
         ],
-        "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"sub_requires":["parent main connection","subaccount email"],"checks":["read-only authentication","reported API restrictions","account identity and parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission for internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal."},
+        "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":"Optional read-only enrollment check; defaults to ethereum:1 and does not scope the wallet key.","networks":["ethereum:1","ethereum:42161","ethereum:4663"],"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap and Aave remain Ethereum mainnet only; other networks support wallet discovery and same-chain native/ERC-20 transfers."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
@@ -617,6 +618,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "properties":{"credential_type":{"enum":["hmac","rsa","ed25519"]}},
                 "oneOf":[
                     {"properties":{"role":{"const":"main"}},"not":{"anyOf":[{"required":["parent"]},{"required":["email"]}]}},
+                    {"properties":{"role":{"const":"sub"}},"not":{"anyOf":[{"required":["parent"]},{"required":["email"]}]}},
                     {"properties":{"role":{"const":"sub"}},"required":["parent","email"]}
                 ]
             }
@@ -699,6 +701,15 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT FOK scoped return plans", "ioc_partial_fills":"synthetic reconciliation only; scoped IOC return plans unavailable"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"fin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"fin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
+    });
+    value["fin"]["binance"]["deposits"] = serde_json::json!({
+        "operation": "binance.deposit",
+        "accounts": "main or subaccount, using the receiving account's own credential; master enrollment is optional",
+        "discovery": "binance.networks and binance.deposit-address resolve current coin/network availability, minimum and exact contract",
+        "source": "native ETH and standard ERC20 transfers on configured Fin EVM networks with a reviewed Binance network mapping",
+        "unsupported": "other source chains, memo/tag routes and non-unit denominations; Binance metadata availability alone does not establish Fin source-chain execution",
+        "approval": "fresh exact approval binds wallet, destination account, chain, asset, address, amount and fee cap",
+        "completion": "canonical chain evidence and matching usable Binance deposit credit with balance evidence; delayed credit retains the original submission"
     });
     for (venue, scope) in [
         ("kraken", "spot"),
@@ -813,6 +824,18 @@ mod tests {
             definition.semantics["binance"]["supported_credential_types"],
             json!(["hmac", "rsa", "ed25519"])
         );
+        assert_eq!(
+            definition.input_schema["allOf"][0]["then"]["oneOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3,
+            "main, standalone subaccount, and parent-linked subaccount are distinct schema cases"
+        );
+        assert_eq!(
+            definition.semantics["binance"]["subaccount_modes"]["standalone"]["hierarchy_authority"],
+            "none inferred"
+        );
     }
     #[test]
     fn binance_enrollment_examples_parse_and_keep_parent_identity_semantics() {
@@ -826,6 +849,7 @@ mod tests {
         let examples = add.semantics["command_line_examples"].as_array().unwrap();
         let mut credential_types = Vec::new();
         let mut found_subaccount = false;
+        let mut found_standalone_subaccount = false;
         for example in examples
             .iter()
             .filter_map(Value::as_str)
@@ -840,11 +864,16 @@ mod tests {
             validate_add(&parsed.add).unwrap();
             credential_types.push(parsed.add.credential_type.unwrap());
             if parsed.add.role == Some(BinanceRole::Sub) {
-                assert_eq!(parsed.add.parent.as_deref(), Some("main"));
-                assert_eq!(
-                    parsed.add.email.as_deref(),
-                    Some("subaccount@example.invalid")
-                );
+                if parsed.add.parent.is_some() {
+                    assert_eq!(parsed.add.parent.as_deref(), Some("main"));
+                    assert_eq!(
+                        parsed.add.email.as_deref(),
+                        Some("subaccount@example.invalid")
+                    );
+                } else {
+                    assert!(parsed.add.email.is_none());
+                    found_standalone_subaccount = true;
+                }
                 found_subaccount = true;
             } else {
                 assert_eq!(parsed.add.role, Some(BinanceRole::Main));
@@ -853,6 +882,7 @@ mod tests {
             }
         }
         assert!(found_subaccount);
+        assert!(found_standalone_subaccount);
         for kind in [
             CredentialType::Hmac,
             CredentialType::Rsa,
@@ -887,8 +917,12 @@ mod tests {
         assert!(validate_add(&args).is_err());
         args.email = None;
         args.role = Some(BinanceRole::Sub);
+        validate_add(&args).unwrap();
+        args.email = Some("synthetic@example.invalid".into());
         assert!(validate_add(&args).is_err());
+        args.email = None;
         args.parent = Some("main".into());
+        assert!(validate_add(&args).is_err());
         args.email = Some("synthetic@example.invalid".into());
         validate_add(&args).unwrap();
         args.provider = Provider::Evm;

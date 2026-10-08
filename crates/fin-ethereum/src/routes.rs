@@ -339,6 +339,72 @@ impl EthereumAdapter {
         )
         .await
     }
+
+    /// Internal broker composition for an exact native/ERC20 venue deposit.
+    /// The broker verifies the venue network, contract, denomination and memo;
+    /// this adapter independently checks the chain asset and transfer request.
+    #[doc(hidden)]
+    pub async fn preflight_deposit_transfer(
+        &self,
+        input: &Value,
+        context: &ReturnRouteContext,
+        target: &BrokerVerifiedNativeDepositTarget,
+        source_asset: &AssetId,
+    ) -> Result<ReturnRouteProof> {
+        let request = request::parse("wallet.transfer", input)?;
+        let clock = chrono::Utc::now();
+        let observed = chrono::DateTime::parse_from_rfc3339(&target.observed_at).map_err(|_| {
+            error(
+                "DEPOSIT_TARGET_INVALID",
+                "preflight",
+                "Deposit observation time is malformed.",
+            )
+        })?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&target.expires_at).map_err(|_| {
+            error(
+                "DEPOSIT_TARGET_INVALID",
+                "preflight",
+                "Deposit expiry is malformed.",
+            )
+        })?;
+        require(
+            observed <= clock + chrono::Duration::seconds(5)
+                && observed >= clock - chrono::Duration::seconds(90)
+                && expires > clock
+                && expires <= observed + chrono::Duration::seconds(120),
+            "DEPOSIT_TARGET_STALE",
+            "Deposit target must be freshly observed and unexpired on system UTC.",
+        )?;
+        require(
+            target.chain_id == self.config.chain_id
+                && target.asset.network == "binance"
+                && !target.asset.reference.is_empty()
+                && target.asset.decimals == 36
+                && !target.network.is_empty()
+                && target.evidence_digest.len() == 64
+                && target
+                    .evidence_digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "DEPOSIT_TARGET_INVALID",
+            "Deposit target must bind the configured chain, exact venue scale and canonical evidence digest.",
+        )?;
+        self.runtime.assert_chain().await?;
+        let token = self
+            .token(request.token.as_deref().expect("schema"), None)
+            .await?;
+        require(
+            token.asset(self) == *source_asset
+                && source_asset.decimals <= target.asset.decimals
+                && request.amount.as_deref() != Some("all")
+                && address(request.recipient.as_deref().expect("schema"))?
+                    == address(&target.address)?,
+            "DEPOSIT_TARGET_MISMATCH",
+            "Exact finite transfer must match the verified chain asset and deposit address.",
+        )?;
+        self.preflight_route_target("wallet.transfer", input, context, Some(target))
+            .await
+    }
     async fn preflight_route_target(
         &self,
         operation: &str,
@@ -500,7 +566,10 @@ impl EthereumAdapter {
                         "The verified venue account must be covered by the complete original snapshot.",
                     )?;
                     let _ = cash(context, &target.account_resource, &target.asset)?;
-                    let credit = mul(cap, pow10(18)?)?;
+                    let credit = u256(&Quantity::from_decimal(
+                        &quantity(cap).to_decimal(principal.decimals),
+                        target.asset.decimals,
+                    )?)?;
                     require(
                         quantity(credit) >= target.minimum_deposit,
                         "DEPOSIT_MINIMUM",

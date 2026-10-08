@@ -303,6 +303,14 @@ else: sys.exit('unexpected command: '+name)
         result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), 'anything'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
 
+    def test_uninstall_password_explanation_names_data_loss_and_external_effects(self):
+        source = (REPO / 'scripts/dev-macos.sh').read_text()
+        uninstall = source.split('if [ "$fin_action" = uninstall ]; then', 1)[1].split('\nfi', 1)[0]
+        self.assertIn('Mac login password', uninstall)
+        self.assertIn('financial history', uninstall)
+        self.assertIn('pending recovery records', uninstall)
+        self.assertIn('does not cancel existing transactions or orders on exchanges or chains', uninstall)
+
     def test_package_success_rows_share_full_line_color_and_plain_fallbacks(self):
         source = (REPO / 'scripts/package-rust-macos.sh').read_text()
         helper = source.split('fin_success() {', 1)[1].split("\nfin_active_pid=''", 1)[0]

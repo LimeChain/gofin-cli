@@ -574,7 +574,7 @@ async fn validate_connection(
                         .into(),
                 );
             }
-            if role == BinanceRole::Sub {
+            if role == BinanceRole::Sub && args.parent.is_some() {
                 let parent = config
                     .connections
                     .iter()
@@ -649,6 +649,8 @@ async fn validate_connection(
                 }
                 checks.push(json!({"name":"parent child email","status":"passed","email":email}));
                 checks.push(json!({"name":"child UID/email association","status":"human_confirmation_required","uid":uid,"email":email}));
+            } else if role == BinanceRole::Sub {
+                checks.push(json!({"name":"subaccount hierarchy","status":"not_checked","reason":"No parent connection was supplied; the authenticated account UID is verified independently."}));
             }
             let connection = ConnectionConfig::Binance {
                 name: args.name.clone(),

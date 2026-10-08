@@ -202,10 +202,17 @@ impl EthereumAdapter {
         maximum_amount: &str,
         confirmations: u32,
     ) -> Result<ExternalCredit> {
+        // Fin's external payout policy accepts canonical Arbitrum One and
+        // Robinhood Chain sequencer inclusion without waiting for the Ethereum
+        // L1 finalized tag. Wallet-originated operations retain
+        // EthereumConfig::require_finalized in reconcile_operation.
+        let sequencer_inclusion =
+            EthereumConfig::external_credit_uses_sequencer(self.config.chain_id);
         require(
-            u64::from(confirmations) >= self.config.confirmations && confirmations > 0,
+            confirmations > 0
+                && (sequencer_inclusion || u64::from(confirmations) >= self.config.confirmations),
             "FINALITY_LIMIT",
-            "External funding proof cannot weaken configured confirmations.",
+            "External funding proof cannot weaken the configured confirmation floor on this network.",
         )?;
         require(
             asset.network == format!("ethereum:{}", self.config.chain_id),
@@ -299,7 +306,7 @@ impl EthereumAdapter {
         if observed_confirmations < u64::from(confirmations) {
             return Ok(pending());
         }
-        if self.config.require_finalized {
+        if self.config.require_finalized && !sequencer_inclusion {
             let finalized = self
                 .runtime
                 .rpc
@@ -348,8 +355,19 @@ impl EthereumAdapter {
             "FUNDING_STATUS_INVALID",
             "Funding receipt status is not success or revert.",
         )?;
-        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true,"finality":if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
+        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true,"finality":if sequencer_inclusion {"sequencer-inclusion"} else if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
         if status == 0 {
+            if sequencer_inclusion
+                && !self
+                    .external_inclusion_is_canonical(block, block_hash)
+                    .await?
+            {
+                return Ok(ExternalCredit {
+                    status: Status::Pending,
+                    amount_atoms: None,
+                    evidence: json!({"original_hash":tx_hash,"canonical_confirmed":false,"finality":"inclusion-changed"}),
+                });
+            }
             return Ok(ExternalCredit {
                 status: Status::Failed,
                 amount_atoms: None,
@@ -401,6 +419,20 @@ impl EthereumAdapter {
             "FUNDING_HOLDING_MISMATCH",
             "Recipient inclusion-block holdings do not cover its proved net credit.",
         )?;
+        // Historical code and token-balance reads can take long enough for an
+        // L2 inclusion to be reorganized. Recheck the exact block after those
+        // reads before allowing the external payout to become terminal.
+        if sequencer_inclusion
+            && !self
+                .external_inclusion_is_canonical(block, block_hash)
+                .await?
+        {
+            return Ok(ExternalCredit {
+                status: Status::Pending,
+                amount_atoms: None,
+                evidence: json!({"original_hash":tx_hash,"canonical_confirmed":false,"finality":"inclusion-changed"}),
+            });
+        }
         let mut evidence = evidence;
         evidence["received_atoms"] = json!(quantity(credited));
         evidence["proof_method"] = json!(if asset.reference == "native" {
@@ -414,6 +446,25 @@ impl EthereumAdapter {
             evidence,
         })
     }
+
+    async fn external_inclusion_is_canonical(&self, block: u64, block_hash: B256) -> Result<bool> {
+        let header = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([fin_evm::block_tag(Some(block)), false]),
+            )
+            .await?;
+        if header.is_null() {
+            return Ok(false);
+        }
+        Ok(
+            fin_evm::hash(header["hash"].as_str().unwrap_or(""))? == block_hash
+                && fin_evm::rpc_u64(&header["number"])? == block,
+        )
+    }
+
     pub(crate) async fn reconcile_operation(
         &self,
         record: &OperationRecord,

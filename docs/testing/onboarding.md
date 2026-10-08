@@ -9,10 +9,14 @@ synthetic and historical non-biometric results do not establish the human bounda
 
 Initial setup preserves and refuses an existing installation or journal. Use
 `make update` for a compatible local update of an existing installation; do not
-delete financial
-state to bypass setup. `make uninstall` is a destructive local development reset
-that deletes installed credentials/configuration only when its journal checks
-establish no financial history. Run it in your own macOS Terminal, and follow the
+manually delete financial state to bypass setup. For an intentional fresh start,
+`make uninstall` explains and confirms permanent deletion of installed
+credentials, configuration and all financial history, including pending recovery
+records. History itself does not block uninstall. Verify that declining, EOF or
+Ctrl-C at the confirmation leaves the installation and service untouched; accepting deletes only
+Fin-owned installation data after safe service shutdown. Uninstall does not
+cancel transactions or orders already submitted. Run it in your own macOS
+Terminal, then `make setup` to reinstall and re-enroll connections. Follow the
 [bundle instructions](../../packaging/README.md).
 
 Verify readable help, concise enrollment results, hidden secret receipts,
@@ -131,6 +135,7 @@ Use actual help for the final version. Illustrative safe metadata commands are:
 
 ```sh
 fin connections add --provider binance --name main --role main --credential-type ed25519
+fin connections add binance --name standalone-child --role sub --credential-type ed25519
 fin connections add --provider binance --name child --role sub --parent main --email CHILD_EMAIL --credential-type ed25519
 fin connections add --provider ethereum --name wallet --network ethereum:1 --credential-type private_key
 fin connections list --json
@@ -142,9 +147,13 @@ protected hidden prompt. No real credential values go in this document, chat,
 arguments, JSON, shell environment, screen recordings, or agent terminals. The
 human reviews the independently resolved UID/address, permissions and warnings,
 then approves only the configuration change. Verify `connections list --json`.
-The child UID and email remain visible in the approval summary without a repeated
+Test standalone subaccount enrollment on an installation without main credentials.
+The approval summary must show the resolved UID and no linked main connection,
+then reach Touch ID and save successfully. Verify credential rotation and removal
+also reach approval without requiring a main account. For a linked subaccount,
+the child UID and email remain visible in the approval summary without a repeated
 association warning. Details retain the API limitation; it is not an independently
-verified UID/email association.
+verified UID/email association. Supplying only one of parent/email must fail.
 
 For RSA/Ed25519, verify the API-key receipt message, then paste the complete PEM
 with actual newlines or literal `\n` separators and press Enter. Check that Fin

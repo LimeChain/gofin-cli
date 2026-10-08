@@ -24,7 +24,7 @@ if [ "$fin_action" = setup ] || [ "$fin_action" = update ] || [ "$fin_action" = 
   trap 'exit 143' TERM HUP
 fi
 if [ "$fin_action" = uninstall ]; then
-  printf '%s\n' 'Fin needs your Mac login password to delete its installed credentials and configuration.' >&2
+  printf '%s\n' 'Fin needs your Mac login password to remove its files, credentials, settings and financial history, including pending recovery records. Uninstall does not cancel existing transactions or orders on exchanges or chains.' >&2
   /usr/bin/sudo -k -p 'Mac login password for %p: ' -- /usr/bin/python3 -I "$fin_source/scripts/uninstall-rust-macos.py"
   exit 0
 fi

@@ -90,8 +90,12 @@ runs as the invoking human with a clean environment and uses their account home.
 Only previously installed, unmodified Fin-managed copies are refreshed; missing,
 unmanaged or edited copies are preserved. Skill conflicts do not roll back the
 runtime update. Inspect them with `fin skill inspect --agent codex --json`.
-`make uninstall` is a destructive local reset: it deletes installed credentials
-and configuration, refusing financial history. Neither target runs implicitly.
+`make uninstall` is a destructive local reset: after human Terminal confirmation,
+it deletes installed credentials, configuration and all financial history,
+including unresolved-operation records. History, missing databases and damaged
+journal schemas do not block this explicit deletion. The maintenance lock and
+service-stop checks remain; deletion does not cancel external transactions or
+orders. Neither target runs implicitly.
 `make update` builds a new debug bundle and invokes the existing runtime updater
 with the installed public runtime as the verified old bundle. It includes helper
 and installer presentation updates, preserves private state and pending records,
