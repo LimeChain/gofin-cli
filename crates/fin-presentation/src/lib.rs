@@ -92,6 +92,74 @@ impl Ui {
         self.approval_review_to(preview, &mut io::stderr().lock())
     }
 
+    /// Review a development-only synthetic approval without implying a real
+    /// biometric prompt or remote financial action.
+    pub fn synthetic_review(&self, preview: &Value, boundary: bool) -> io::Result<()> {
+        self.synthetic_review_to(preview, boundary, &mut io::stderr().lock())
+    }
+
+    /// Review a live development write with an explicit notice that it reaches
+    /// real accounts/networks and is automatically approved without Touch ID.
+    pub fn live_development_review(&self, preview: &Value, boundary: bool) -> io::Result<()> {
+        self.live_development_review_to(preview, boundary, &mut io::stderr().lock())
+    }
+
+    fn live_development_review_to(
+        &self,
+        preview: &Value,
+        boundary: bool,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.machine {
+            return Ok(());
+        }
+        if let Some(summary) = preview["summary"].as_str() {
+            self.message_to(&format!("→ {summary}"), "36", output)?;
+        }
+        if let Some(warnings) = preview["warnings"].as_array() {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                self.message_to(&format!("Warning: {warning}"), "33", output)?;
+            }
+        }
+        if self.is_verbose() {
+            writeln!(output, "{}", safe_text(&preview.to_string()))?;
+        }
+        let message = if boundary {
+            "Live development mode uses real accounts and networks; these boundaries are automatically approved without Touch ID."
+        } else {
+            "Live development mode uses real accounts and networks; this write is automatically approved without Touch ID."
+        };
+        self.message_to(message, "33", output)
+    }
+
+    fn synthetic_review_to(
+        &self,
+        preview: &Value,
+        boundary: bool,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.machine {
+            return Ok(());
+        }
+        if let Some(summary) = preview["summary"].as_str() {
+            self.message_to(&format!("→ {summary}"), "36", output)?;
+        }
+        if let Some(warnings) = preview["warnings"].as_array() {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                self.message_to(&format!("Warning: {warning}"), "33", output)?;
+            }
+        }
+        if self.is_verbose() {
+            writeln!(output, "{}", safe_text(&preview.to_string()))?;
+        }
+        let message = if boundary {
+            "Synthetic local approval covers these boundaries; no Touch ID or remote write is used."
+        } else {
+            "Synthetic local approval only; no Touch ID or remote write is used."
+        };
+        self.message_to(message, "36", output)
+    }
+
     fn approval_review_to(&self, preview: &Value, output: &mut impl Write) -> io::Result<()> {
         if self.machine {
             return Ok(());
@@ -887,6 +955,49 @@ mod tests {
                 .unwrap()
                 .contains("SYNTHETIC-details")
         );
+    }
+
+    #[test]
+    fn synthetic_review_does_not_claim_biometric_or_remote_approval() {
+        let preview =
+            json!({"summary":"Run synthetic operation.","warnings":["Local fixture only."]});
+        let mut output = Vec::new();
+        ui(false, false, false, false, false, false)
+            .synthetic_review_to(&preview, false, &mut output)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Run synthetic operation."));
+        assert!(text.contains("Synthetic local approval only"));
+        assert!(text.contains("no Touch ID or remote write is used"));
+        assert!(!text.contains("Touch ID approves"));
+
+        let mut output = Vec::new();
+        ui(true, true, true, true, false, false)
+            .synthetic_review_to(&preview, true, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn live_development_review_discloses_real_funds_and_automatic_approval() {
+        let preview = json!({"summary":"Transfer 0.01 ETH to the selected address.",
+            "warnings":["Network fee may vary."],"binding":{"internal":"detail"}});
+        let mut output = Vec::new();
+        ui(false, false, false, false, false, false)
+            .live_development_review_to(&preview, false, &mut output)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Transfer 0.01 ETH"));
+        assert!(text.contains("real accounts and networks"));
+        assert!(text.contains("automatically approved without Touch ID"));
+        assert!(!text.contains("synthetic"));
+        assert!(!text.contains("detail"));
+
+        let mut output = Vec::new();
+        ui(true, false, true, true, false, false)
+            .live_development_review_to(&preview, true, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
     }
 
     #[test]

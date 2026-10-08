@@ -99,6 +99,108 @@ protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects
 of a test or build. Use temporary homes and databases for fixtures.
 
+Isolated worktree development uses separate Cargo example binaries, sharing the
+CLI parser, dispatch and presentation and the broker's injected composition,
+engine and SQLite journal. Synthetic adapters and approval stay in the examples;
+the installed transport and protected runtime have no development override.
+`make dev-env-start`, `make dev-env-cli`, `make dev-env-stop` and
+`make dev-env-reset` wrap `scripts/fin-dev.py`, select worktree-scoped state using
+`DEV_ENV` (default `local`) and snapshot the matching CLI/broker pair. Stop/start
+adopts source changes; CLI invocation uses the existing snapshot. `DEV_FLAGS=--json`
+selects lifecycle JSON, while CLI arguments use `ARGS`. `make test-dev-env` runs
+the synthetic suites; `make test-fork` explicitly invokes owned Anvil verification. Check build, environment and
+broker-session identities on the same connection before sending an operation.
+Build identity is suitable for later reuse, but coordinated installed-runtime
+updates are outside this change.
+
+Persistent broker state survives stop/restart; reset is explicit and refuses a
+running environment. Fork state is disposable per invocation. Both runners use
+the small `scripts/fin_dev_resources.py` ownership/lock/loopback helpers: process
+cleanup checks recorded start identity and command, and socket cleanup verifies
+ownership. Fork verification allocates a fresh local endpoint, checks its owning
+Anvil process and pins its instance ID, chain, block and hash. Tests never reset a
+shared node. See [commands and verification](testing/development-environments.md)
+and the [fork contract](testing/fork.md).
+
+Verification on 8 October 2026 passed all 781 default workspace tests, strict
+Clippy/format checks, development example tests and synthetic lifecycle/runtime/
+fork-runner suites. Two different source builds ran together and recovered an
+uncertain operation without replay. Concurrent Anvil instances were isolated,
+but both financial journeys failed at `aave.borrow` with
+`PRIOR_POSITION_ANCHOR_REQUIRED`; restoration and a full fork pass remain
+unverified. Human installation, credential isolation and Touch ID checks remain
+pending. Full outcomes are in the linked development verification record.
+
+### Live development with disposable credentials
+
+The explicit live-development mode uses dedicated, noncritical credentials
+supplied in a human-created dotenv file. The user intentionally permits agent
+access to those development keys and same-user execution without password or
+Touch ID prompts. This is a different trust model from installed Fin; it does not
+claim to protect these keys from the developing agent.
+
+`make dev-env-import DEV_CREDENTIALS_FILE=/absolute/path/to/.env.fin-dev` builds
+the worktree pair and imports the allowlisted file into the selected stopped
+environment. Import is local and does not establish venue permissions or account
+identity. `make dev-env-start DEV_MODE=live` selects real Binance/EVM adapters;
+normal `make dev-env-start` remains synthetic. CLI and stop derive mode from the
+selected environment. Mode joins build/session identity in the IPC handshake.
+No production CLI flag, environment override, credential-store path or approval
+fallback is introduced. The development example binaries are not packaged in
+Fin's normal release bundle.
+
+The import supports a Binance master and optional subaccount with HMAC, RSA
+or Ed25519 keys, plus up to two EVM wallets. Maintained crypto parsers validate
+PEM key types; documented dotenv aliases accept existing development files.
+Addresses derive from supplied wallet keys; optional declared addresses must
+match. Offline import requires public UIDs and child email. The explicit
+`DEV_IMPORT_FLAGS=--discover-identities` option performs read-only Binance
+identity queries through the existing transport. It discovers an email only
+from an exact venue-returned subaccount ID; otherwise a human supplies the
+association. Replacement must preserve the saved physical account identity. Input is bounded, parsed as literal data without shell
+execution, and never printed or passed as secret argv/environment values. Stored
+credential files use opaque references and private same-user permissions.
+Rebuilds and restarts reuse those files; the original dotenv file is not needed
+after import. Default automated tests use unmistakably synthetic keys only.
+
+The shared real-adapter constructor accepts an explicitly supplied price source
+so development does not touch the installed protected pricing cache. Installed
+startup continues selecting its protected source. Live development requests the
+same venue-identity check before account operations. Engine policy, exact
+valuation, durable submission identity, proof-based settlement, uncertainty and
+duplicate-prevention paths remain shared. Its injected approval provider records
+automatic development approval, never a biometric approval.
+
+Live development does not lock physical accounts/signers across environments.
+At the user's request, the human coordinates parallel feature work and tests;
+multiple brokers may load the same credentials concurrently. Journals, duplicate
+prevention and budgets are per environment. Environment lifecycle locks, process
+ownership checks and fork cleanup isolation remain in place. The revised real-binary
+fixture verified concurrent identical credentials and independent stop/restart;
+15 broker-example tests, both runtime scenarios, formatting and targeted strict
+Clippy passed without remote account calls.
+Stop preserves configuration, credentials and financial
+history. Import refuses running environments and rotation with unresolved
+operations; synthetic reset refuses live environments. Existing test allocation,
+baseline and restoration obligations remain applicable to authorized real-fund
+tests, including cleanup without biometric prompts in this explicit mode.
+
+Verification combines bounded dotenv and credential-provider fixtures, import/
+restart/mode-isolation tests using real binaries with synthetic keys, approval
+binding and policy tests, and existing broker/engine/adapter suites. Management
+checks do not submit remote transactions. Any live financial result must still
+name the selected account, route, amounts, outcome and restoration evidence;
+synthetic tests do not establish live settlement or native authorization. Automated verification passed 36
+Make environment/workflow tests, 83 development-example tests, the full workspace
+suite and strict Clippy/format checks. Disposable master/subaccount PEM and
+wallet credentials were then imported successfully through the Make workflow.
+Restart also retained the same connections and authenticated access, with no
+financial operation records. Seven live read-only checks passed: both Binance identities, permissions and
+SPOT balances, plus Ethereum wallet balances. The child email association was
+human-supplied and observed in the master listing, not proved by a venue-returned
+child UID. No remote financial write was submitted; funded trading/settlement
+requires its selected test scope. Human Touch ID acceptance remains pending.
+
 ## Optional Codex companion skill
 
 Fin embeds its companion skill so it can be installed offline without a checkout,

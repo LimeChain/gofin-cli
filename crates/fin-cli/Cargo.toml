@@ -8,6 +8,10 @@ rust-version.workspace = true
 name = "fin"
 path = "src/main.rs"
 
+[[example]]
+name = "fin-dev"
+path = "examples/fin-dev.rs"
+
 [dependencies]
 async-trait.workspace = true
 clap.workspace = true

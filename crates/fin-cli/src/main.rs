@@ -11,7 +11,6 @@ mod daemon;
 mod onboarding;
 mod shell_integration;
 use serde_json::{Value, json};
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tokio::io::AsyncWriteExt;
@@ -26,11 +25,8 @@ const SOCKET_PATH: &str = "/Library/Fin/run/broker.sock";
 const BROKER_PATH: &str = "/Library/Fin/runtime/fin-broker";
 #[cfg(target_os = "macos")]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(target_os = "macos")]
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
-#[cfg(target_os = "macos")]
 const FINANCIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(300);
-#[cfg(target_os = "macos")]
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Parser, Debug)]
@@ -288,8 +284,14 @@ enum ConnectionsCommand {
 }
 
 #[async_trait]
-trait Transport: Send + Sync {
+pub trait Transport: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
+    fn development_mode(&self) -> bool {
+        false
+    }
+    fn live_development_mode(&self) -> bool {
+        false
+    }
 }
 
 struct UnixTransport {
@@ -351,7 +353,7 @@ impl UnixTransport {
 }
 
 #[cfg(any(target_os = "macos", test))]
-async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinError> {
+pub async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinError> {
     let reader = BufReader::new(reader);
     let mut bytes = Vec::with_capacity(1024);
     let read = reader
@@ -552,8 +554,7 @@ fn broker_unavailable() -> FinError {
         "Start the installed Fin service and retry the same request ID.",
     )
 }
-#[cfg(any(target_os = "macos", test))]
-fn broker_response_timeout(request: &BrokerRequest) -> Duration {
+pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
         BrokerRequest::Execute { .. }
         | BrokerRequest::AuthorizeBoundary { .. }
@@ -674,6 +675,34 @@ fn schema(name: &str) -> Option<Value> {
     }))
 }
 
+async fn development_definition(client: &dyn Client, name: &str) -> Option<Value> {
+    if !client.development_mode() {
+        return None;
+    }
+    client
+        .call(BrokerRequest::Capabilities)
+        .await
+        .ok()?
+        .get("development")?
+        .get("operations")?
+        .as_array()?
+        .iter()
+        .find(|definition| definition.get("name").and_then(Value::as_str) == Some(name))
+        .cloned()
+}
+
+fn definition_schema(name: &str, definition: &Value) -> Value {
+    json!({
+        "name":name,
+        "input":definition.get("input_schema"),
+        "output":definition.get("output_schema"),
+        "error":definition.get("error_schema"),
+        "examples":definition.get("examples"),
+        "semantics":definition.get("semantics"),
+        "execution_actor":definition.get("execution_actor"),
+    })
+}
+
 fn discovery_help(name: &str) -> Value {
     let mut command = Cli::command();
     command.build();
@@ -686,9 +715,15 @@ fn discovery_help(name: &str) -> Value {
 }
 
 #[async_trait]
-trait Client: Send + Sync {
+pub trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError>;
+    fn development_mode(&self) -> bool {
+        false
+    }
+    fn live_development_mode(&self) -> bool {
+        false
+    }
     async fn execute_boundary(
         &self,
         authorization_id: String,
@@ -715,9 +750,15 @@ trait Client: Send + Sync {
     }
 }
 #[async_trait]
-impl Client for UnixTransport {
+impl<T: Transport> Client for T {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
         Transport::call(self, request).await
+    }
+    fn development_mode(&self) -> bool {
+        Transport::development_mode(self)
+    }
+    fn live_development_mode(&self) -> bool {
+        Transport::live_development_mode(self)
     }
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError> {
         execute_with_recovery(self, request).await
@@ -783,6 +824,20 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                 }
             }
         }
+        Command::Capabilities if client.development_mode() => {
+            let broker = client.call(BrokerRequest::Capabilities).await?;
+            let mut value = capabilities();
+            if let Some(development) = broker.get("development") {
+                value["development"] = development.clone();
+                if let Some(operations) = development.get("operations") {
+                    value["operations"] = operations.clone();
+                }
+            }
+            value["service_required"] = json!(true);
+            value["platforms"]["macos"]["protected_broker"] = json!(false);
+            value["platforms"]["macos"]["human_enrollment"] = json!(false);
+            Ok(value)
+        }
         Command::Capabilities => Ok(capabilities()),
         Command::Completions { shell } => {
             let shell = match shell {
@@ -798,22 +853,29 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
         }
         Command::Explain { name: None } => Ok(discovery_help("explain")),
         Command::Schema { name: None } => Ok(discovery_help("schema")),
-        Command::Explain { name: Some(name) } => find_definition(&name).ok_or_else(|| {
-            FinError::new(
-                "UNKNOWN_DEFINITION",
-                "discovery",
-                "No bundled definition has that name.",
-                "Inspect fin capabilities --json.",
-            )
-        }),
-        Command::Schema { name: Some(name) } => schema(&name).ok_or_else(|| {
-            FinError::new(
-                "UNKNOWN_DEFINITION",
-                "discovery",
-                "No bundled schema has that name.",
-                "Inspect fin capabilities --json.",
-            )
-        }),
+        Command::Explain { name: Some(name) } => {
+            match find_definition(&name).or(development_definition(client, &name).await) {
+                Some(definition) => Ok(definition),
+                None => Err(FinError::new(
+                    "UNKNOWN_DEFINITION",
+                    "discovery",
+                    "No bundled definition has that name.",
+                    "Inspect fin capabilities --json.",
+                )),
+            }
+        }
+        Command::Schema { name: Some(name) } => match schema(&name) {
+            Some(schema) => Ok(schema),
+            None => match development_definition(client, &name).await {
+                Some(definition) => Ok(definition_schema(&name, &definition)),
+                None => Err(FinError::new(
+                    "UNKNOWN_DEFINITION",
+                    "discovery",
+                    "No bundled definition has that name.",
+                    "Inspect fin capabilities --json.",
+                )),
+            },
+        },
         Command::Read(args) => {
             client
                 .call(BrokerRequest::Read {
@@ -957,7 +1019,14 @@ async fn review_human_execution(cli: &Cli, client: &dyn Client, ui: &Ui) -> Resu
             "Inspect the operation before executing it.",
         ));
     }
-    ui.approval_review(&preview).map_err(|_| {
+    let review_result = if client.live_development_mode() {
+        ui.live_development_review(&preview, false)
+    } else if client.development_mode() {
+        ui.synthetic_review(&preview, false)
+    } else {
+        ui.approval_review(&preview)
+    };
+    review_result.map_err(|_| {
         FinError::new(
             "REVIEW_OUTPUT_FAILED",
             "cli",
@@ -1010,7 +1079,14 @@ async fn review_boundary_authorization(
             "Inspect the operation and its bounds before requesting Touch ID.",
         ));
     }
-    ui.authorization_review(&preview).map_err(|_| {
+    let review_result = if client.live_development_mode() {
+        ui.live_development_review(&preview, true)
+    } else if client.development_mode() {
+        ui.synthetic_review(&preview, true)
+    } else {
+        ui.authorization_review(&preview)
+    };
+    review_result.map_err(|_| {
         FinError::new(
             "REVIEW_OUTPUT_FAILED",
             "cli",
@@ -1422,9 +1498,7 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let arguments: Vec<_> = std::env::args_os().collect();
+pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Client) -> i32 {
     let machine = requested_json(&arguments);
     let verbose = requested_flag(&arguments, "--verbose");
     let cli = match Cli::try_parse_from(arguments) {
@@ -1441,10 +1515,10 @@ async fn main() {
                 } else {
                     json!({"help":error.to_string()})
                 };
-                std::process::exit(emit(Ok(value), &Ui::new(true, false), "help"));
+                return emit(Ok(value), &Ui::new(true, false), "help");
             }
             let _ = error.print();
-            std::process::exit(0);
+            return 0;
         }
         Err(_) => {
             let error = FinError::new(
@@ -1453,11 +1527,20 @@ async fn main() {
                 "The command or arguments are invalid.",
                 "Run fin --help to inspect supported commands.",
             );
-            std::process::exit(emit(Err(error), &Ui::new(machine, verbose), "cli"));
+            return emit(Err(error), &Ui::new(machine, verbose), "cli");
         }
     };
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    if client.development_mode() && !development_command_allowed(&cli.command) {
+        let error = FinError::new(
+            "DEVELOPMENT_COMMAND_UNAVAILABLE",
+            "development",
+            "Protected setup and connection management are unavailable in development environments.",
+            "Use read-only discovery or a supported development operation in this environment.",
+        );
+        return emit(Err(error), &ui, name);
+    }
     // Privileged commands replace this process; never leave a spinner alive across exec.
     let offline = matches!(
         cli.command,
@@ -1505,16 +1588,45 @@ async fn main() {
     } else {
         None
     };
-    let client = UnixTransport::installed();
-    let result = match review_human_execution(&cli, &client, &ui).await {
-        Ok(()) => match review_boundary_authorization(&cli, &client, &ui).await {
-            Ok(()) => dispatch(cli, &client).await,
+    let result = match review_human_execution(&cli, client, &ui).await {
+        Ok(()) => match review_boundary_authorization(&cli, client, &ui).await {
+            Ok(()) => dispatch(cli, client).await,
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
     };
     drop(progress);
-    std::process::exit(emit(result, &ui, name));
+    emit(result, &ui, name)
+}
+
+fn development_command_allowed(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Capabilities
+            | Command::Explain { .. }
+            | Command::Schema { .. }
+            | Command::Completions { .. }
+            | Command::Read(_)
+            | Command::Preview(_)
+            | Command::Execute(_)
+            | Command::Authorizations { .. }
+            | Command::Status { .. }
+            | Command::Operations
+            | Command::Doctor
+            | Command::Snapshot
+            | Command::Policy {
+                command: PolicyCommand::Show
+            }
+            | Command::Connections {
+                command: None | Some(ConnectionsCommand::List)
+            }
+    )
+}
+
+#[tokio::main]
+async fn main() {
+    let arguments: Vec<_> = std::env::args_os().collect();
+    std::process::exit(run_with_client(arguments, &UnixTransport::installed()).await);
 }
 
 #[cfg(test)]
@@ -2375,6 +2487,14 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn installed_cli_does_not_expose_development_mode_flags() {
+        for mode in ["synthetic", "live"] {
+            assert!(Cli::try_parse_from(["fin", "--mode", mode, "capabilities"]).is_err());
+            assert!(Cli::try_parse_from(["fin", "capabilities", "--mode", mode]).is_err());
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn unsupported_platform_refuses_every_privileged_action_even_with_a_terminal() {
@@ -2988,10 +3108,22 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(status["attempts"].as_array().unwrap().len(), 3);
-        assert_eq!(status["attempts"][0]["status"], "failed");
-        assert_eq!(status["attempts"][1]["status"], "completed");
-        assert_eq!(status["attempts"][2]["status"], "completed");
+        let attempts = status["attempts"].as_array().unwrap();
+        assert_eq!(attempts.len(), 3);
+        // Several attempts can share one millisecond timestamp. Match durable
+        // identities instead of relying on the order of equal-time rows.
+        let attempt = |request_id: &str| {
+            attempts
+                .iter()
+                .find(|row| row["request_id"] == request_id)
+                .unwrap()
+        };
+        assert_eq!(
+            attempt("synthetic-attempt-out-of-bounds")["status"],
+            "failed"
+        );
+        assert_eq!(attempt("synthetic-attempt-one")["status"], "completed");
+        assert_eq!(attempt("synthetic-attempt-two")["status"], "completed");
         assert_eq!(
             status["authorization"]["remaining_debits"][0]["amount"]["atoms"],
             "0"
@@ -3002,7 +3134,7 @@ mod tests {
         // Replacement is allowed only for an unsubmitted active candidate.
         // The synthetic adapter has completed both prior attempts, so the CLI
         // route must preserve the engine's refusal and must not submit again.
-        let completed_attempt_id = status["attempts"][2]["id"].as_str().unwrap();
+        let completed_attempt_id = attempt("synthetic-attempt-two")["id"].as_str().unwrap();
         let replacement = Cli::try_parse_from([
             "fin",
             "execute",
