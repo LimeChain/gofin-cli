@@ -1,5 +1,11 @@
 # Working on Fin
 
+## Top three priorities
+
+1. **UX perfection.** Make interactions slick, responsive and frictionless for both human and LLM users.
+2. **Secrets and guardrails security.** Fin's main value proposition is protecting the human's secrets and intent from a misbehaving LLM while enabling the LLM to execute the human's authorized intents.
+3. **Codebase maintainability.** Fin has and will gain many integrations and use cases. Clear, simple and extensible architecture, abstractions and code style are paramount to adding them quickly and reliably.
+
 Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the implementation plan](docs/implementation-plan.md), and [the testing guide](docs/testing/README.md) before implementation. The linked Binance and Ethereum guides contain the first acceptance cases.
 
 Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). Retired TypeScript source and verification reports are available in Git history; historical evidence does not establish Rust verification.
