@@ -148,6 +148,9 @@ pub struct BrokerPolicy {
     pub max_movement_usd_micros: String,
     pub max_run_allocation_usd_micros: String,
     pub preview_ttl_seconds: u64,
+    /// Human-approved exception; absent legacy configuration remains disabled.
+    #[serde(default)]
+    pub allow_unpriced_exchange_assets: bool,
 }
 
 impl NetworkConfig {
@@ -212,6 +215,7 @@ impl BrokerPolicy {
             max_run_allocation_usd_micros: fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS
                 .to_string(),
             preview_ttl_seconds: 90,
+            allow_unpriced_exchange_assets: false,
         }
     }
 }
@@ -610,8 +614,10 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                         "pro" => fin_pricing::ApiPlan::Pro,
                         _ => return Err(FinError::validation("The CoinGecko plan is invalid.")),
                     };
-                    Ok(Arc::new(pricing_cache::attach(
-                        fin_pricing::CoinGeckoPrices::with_api_key(plan, api_key)?,
+                    Ok(Arc::new(fin_pricing::ExchangeSpotPrices::new(
+                        pricing_cache::attach(fin_pricing::CoinGeckoPrices::with_api_key(
+                            plan, api_key,
+                        )?)?,
                     )?)
                         as Arc<dyn fin_pricing::UsdPriceSource>)
                 }
@@ -763,7 +769,9 @@ pub fn build_protected_applications(
             api_plan,
         )?
     } else {
-        Arc::new(pricing_cache::attach(fin_pricing::CoinGeckoPrices::new()?)?)
+        Arc::new(fin_pricing::ExchangeSpotPrices::new(
+            pricing_cache::attach(fin_pricing::CoinGeckoPrices::new()?)?,
+        )?)
     };
     let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
     let wallet_prices = binance_prices.clone();
@@ -1191,6 +1199,7 @@ pub fn compose_runtime(
     let options = EngineOptions {
         max_movement_and_cost_usd_micros: config.policy.max_movement_usd_micros.clone(),
         max_run_allocation_usd_micros: config.policy.max_run_allocation_usd_micros.clone(),
+        allow_unpriced_exchange_assets: config.policy.allow_unpriced_exchange_assets,
     };
     if dependencies.adapters.iter().any(|adapter| {
         adapter
@@ -1334,7 +1343,7 @@ impl BrokerRuntime {
         }
         // Local management stays available during venue outages. All account
         // operations retain the identity gate that previously blocked startup.
-        if !matches!(
+        let local_management = matches!(
             &request,
             R::Capabilities
                 | R::PolicyShow
@@ -1343,7 +1352,12 @@ impl BrokerRuntime {
                 | R::Operations
                 | R::DaemonStart
                 | R::DaemonStop
-        ) {
+                | R::RevokeBoundary { .. }
+                | R::BoundaryStatus { .. }
+        );
+        let public_market_read = matches!(&request, R::Read { operation, .. }
+            if matches!(operation.as_str(), "exchange.order-book" | "exchange.markets" | "exchange.ticker"));
+        if !local_management && !public_market_read {
             self.verify_account_identities().await?;
         }
         match request {
@@ -1355,6 +1369,17 @@ impl BrokerRuntime {
                     &self.config.policy.max_movement_usd_micros,
                     &self.config.policy.max_run_allocation_usd_micros,
                 )?;
+                view.set_unpriced_policy(self.config.policy.allow_unpriced_exchange_assets);
+                match self.engine.allocation_unpriced_operations() {
+                    Ok(count) => {
+                        view.allocation_unpriced_operations = Some(count);
+                        if count > 0 {
+                            view.unpriced_assets_warning =
+                                Some(fin_domain::unpriced::WARNING.into());
+                        }
+                    }
+                    Err(error) => view.allocation_usage_error = Some(error),
+                }
                 match self.engine.allocation_used_usd_micros() {
                     Ok(value) => view.allocation_used_usd = Some(format_micros_total(&value)),
                     Err(error) => view.allocation_usage_error = Some(error),
@@ -1391,6 +1416,50 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.preview(&operation, &input).await?)
                     .map_err(|_| internal_error())
             }
+            R::PreviewBoundaryAuthorization { request } => {
+                self.engine.preview_boundary_authorization(request).await
+            }
+            R::AuthorizeBoundary { request } => {
+                serde_json::to_value(self.engine.authorize_boundary(request).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::BoundaryStatus { id } => {
+                serde_json::to_value(self.engine.boundary_status(&id).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::RevokeBoundary { id } => {
+                serde_json::to_value(self.engine.revoke_boundary(&id).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::PreviewBoundary {
+                id,
+                operation,
+                input,
+            } => serde_json::to_value(
+                self.engine
+                    .preview_boundary(&id, &operation, &input)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
+            R::ExecuteBoundary {
+                authorization_id,
+                request,
+            } => serde_json::to_value(
+                self.engine
+                    .execute_boundary(&authorization_id, request)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
+            R::ReplaceBoundaryCandidate {
+                authorization_id,
+                previous_attempt_id,
+                request,
+            } => serde_json::to_value(
+                self.engine
+                    .execute_boundary_replacing(&authorization_id, request, &previous_attempt_id)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
             R::Execute { request } => serde_json::to_value(self.engine.execute(request).await?)
                 .map_err(|_| internal_error()),
             R::Status { id } => serde_json::to_value(self.engine.status(&id, true).await?)
@@ -1895,7 +1964,14 @@ fn protocol_methods() -> Vec<&'static str> {
         "doctor",
         "read",
         "preview",
+        "preview_boundary_authorization",
+        "authorize_boundary",
+        "boundary_status",
+        "revoke_boundary",
+        "preview_boundary",
         "execute",
+        "execute_boundary",
+        "replace_boundary_candidate",
         "status",
         "operations",
         "snapshot",
@@ -2567,6 +2643,7 @@ fn record_reserves_resource(value: &Value, resource: &ResourceId) -> fin_domain:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fin_domain::boundaries::BoundaryAuthorizationRequest;
     use fin_domain::{
         Amount, OperationKind, PreparedOperation, Quantity, ResourceAmount, Submission,
     };
@@ -3225,6 +3302,7 @@ mod tests {
                 reference: "synthetic-original-submission".into(),
                 data: json!({}),
             }),
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -4272,6 +4350,7 @@ mod tests {
             preview: None,
             approval: None,
             submission: None,
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -4324,5 +4403,71 @@ mod tests {
             format_micros_total("20000000000000000000"),
             "20000000000000"
         );
+    }
+
+    #[tokio::test]
+    async fn boundary_methods_are_advertised_and_requests_reach_the_engine() {
+        let methods = protocol_methods();
+        for method in [
+            "preview_boundary_authorization",
+            "authorize_boundary",
+            "boundary_status",
+            "revoke_boundary",
+            "preview_boundary",
+            "execute_boundary",
+            "replace_boundary_candidate",
+        ] {
+            assert!(
+                methods.contains(&method),
+                "missing protocol method {method}"
+            );
+        }
+
+        let runtime = runtime();
+        let request = BoundaryAuthorizationRequest {
+            request_id: "synthetic-boundary-intent".into(),
+            operation: "fixture.write".into(),
+            input: json!({}),
+            bounds: json!({}),
+            valid_for_seconds: 600,
+            replaces: None,
+        };
+        let preview = runtime
+            .handle(BrokerRequest::PreviewBoundaryAuthorization {
+                request: request.clone(),
+            })
+            .await;
+        assert!(!preview.ok);
+        assert_ne!(preview.error.unwrap().code, "INVALID_PROTOCOL_FRAME");
+
+        for request in [
+            BrokerRequest::BoundaryStatus {
+                id: "synthetic-missing-authorization".into(),
+            },
+            BrokerRequest::RevokeBoundary {
+                id: "synthetic-missing-authorization".into(),
+            },
+            BrokerRequest::PreviewBoundary {
+                id: "synthetic-missing-authorization".into(),
+                operation: "fixture.write".into(),
+                input: json!({}),
+            },
+            BrokerRequest::ReplaceBoundaryCandidate {
+                authorization_id: "synthetic-missing-authorization".into(),
+                previous_attempt_id: "synthetic-old-attempt".into(),
+                request: fin_domain::OperationRequest {
+                    request_id: "synthetic-replacement-attempt".into(),
+                    operation: "fixture.write".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            },
+        ] {
+            let response = runtime.handle(request).await;
+            assert_eq!(
+                response.error.unwrap().code,
+                "BOUNDARY_AUTHORIZATION_NOT_FOUND"
+            );
+        }
     }
 }

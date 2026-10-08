@@ -14,7 +14,35 @@ fork script requires Anvil, fetches a fixed public Ethereum block, and uses only
 synthetic local keys behind loopback/chain/block guards. It does not load private
 configuration or broadcast to production. Node disposal after a failure does not
 establish financial restoration. Actual human checks are in the
-[Rust handoff checklist](rust-human-handoff.md).
+[Onboarding acceptance checklist](onboarding.md).
+
+## Exchange spot pricing regressions
+
+```sh
+cargo test --locked -p fin-pricing
+cargo test --locked -p fin-broker pricing --lib
+cargo test --locked -p fin-domain -p fin-engine --lib
+cargo test --locked -p fin-binance --test valuation_revalidation --test spot_portfolio --test trading_contract
+```
+
+These use exact synthetic venue books, stablecoin depegs, loopback HTTP and
+synthetic approvals. They cover direct-pair selection, batching/cache clocks,
+invalid/stale legs, unpriced policy exceptions, approved ceilings and duplicate
+prevention. No default test reads protected configuration or production credentials.
+
+## Binance transfer regressions
+
+```sh
+cargo test --locked -p fin-binance --test sub_to_master_contract --test subaccount_transfer_contract --test funding_contract
+cargo test --locked -p fin-binance transfer_rejection
+cargo test --locked -p fin-store dispatch_evidence
+cargo test --locked -p fin-engine dispatch_receipt
+cargo test --locked -p fin-exchange --features binance,kraken sub_to_master
+```
+
+Use synthetic keys and isolated journals. Human update, native approval,
+production transfer and destination credit are separate observations; automated
+passes do not establish them.
 
 ## Binance address-book regressions
 
@@ -24,9 +52,9 @@ cargo test --locked -p fin-exchange --features binance,kraken --lib deposit_addr
 cargo test --locked -p fin-cli --test offline_cli address_book_discovery
 ```
 
-These are offline/synthetic reads. The [address-book report](../reports/binance-address-book.md)
-records public API limitations and pending live observations; no whitelist edit or
-address creation is claimed by a successful lookup.
+These are offline/synthetic reads. A successful lookup does not establish
+whitelist editing or deposit-address creation support; inspect CLI discovery
+for the public API limitations.
 
 ## Binance trading regressions
 
@@ -38,13 +66,12 @@ cargo test --locked -p fin-cli --test offline_cli
 ```
 
 These use only synthetic accounts, prices, approvals, fills and temporary SQLite
-state. The [trading report](../reports/binance-trading.md) records exact coverage;
-[human trading acceptance](binance-trading.md) remains a separate joint session.
+state. Use [trading acceptance](binance-trading.md) for real venue and biometric checks.
 Tests include full/partial/no-fill, price/permission/mode/fee limits, funding,
 order/cancellation races, response loss, restart, duplicate submission, run caps
 and restoration. Synthetic approval never establishes native authorization.
 
-## EVM wallet extension
+## EVM wallet regressions
 
 Ethereum mainnet, Arbitrum One and Robinhood Chain share a reusable EVM connection.
 The [wallet guide](evm-wallets.md) covers offline regressions, partial token
@@ -116,9 +143,19 @@ No Make target supplies an authentication-disable flag or implicitly uninstalls,
 installs, loads production credentials, or performs a live test. Use public metadata
 only in `ARGS`; secret entry belongs to the protected human enrollment prompt.
 
-## Rust implementation and later human verification
+## Verification stages
 
-The agreed order is to finish the Rust implementation and reproducible verification first, then hand off the user's actual terminal onboarding and Touch ID session. Distinguish **implementation/automated readiness** from **complete human and production acceptance**. Unrun human checks must not become passes, but must not block independent engineering and automated verification.
+Boundary approval behavior is specified in the
+[architecture](../rust-architecture.md#operation-boundary-authorization).
+The synthetic Binance trading target exercises cumulative partial fills,
+authorization replacement/revocation, candidate supersession, duplicates and
+restart without production credentials. General on-chain operations retain
+their exact approval path; no bounded EVM coverage is implied.
+
+Run reproducible synthetic and fork checks before separately authorized human
+and production acceptance. Automated correctness, installed isolation, biometric
+authorization and live settlement establish different properties; verify each
+independently.
 
 ### Implementation-stage evidence
 
@@ -132,7 +169,7 @@ The agreed order is to finish the Rust implementation and reproducible verificat
 - Build the macOS helper and run non-authorizing availability diagnostics where supported. Simulated authorization can exercise failure paths only inside isolated test construction; there is no product authorization-disable flag.
 - Permitted production read-only observations may be reported separately. Any new live writes require their applicable explicit authorization, baseline, bounds, funded unwind, and live-test report; this documentation update grants none.
 
-Finish with code and reproducible tests committed/pushed as requested by the implementation goal, updated discoverability/companion instructions, a sanitized report, and a human checklist with the exact implemented commands, build/commit, access prerequisites, expected results, and recovery actions. Do not leave the human to infer installation or enrollment from this conversation. No invented download URL or unbuilt command may appear as a working instruction.
+Deliver reproducible tests, updated discovery and companion guidance, and reusable acceptance commands with prerequisites, expected results and recovery actions. Keep execution results in CI artifacts or ignored private records rather than maintained documentation. Do not leave the human to infer installation or enrollment from this conversation. No invented download URL or unbuilt command may appear as a working instruction.
 
 ### Later human session
 
@@ -142,7 +179,7 @@ Finish with code and reproducible tests committed/pushed as requested by the imp
 4. Verify real native authorization on the exact displayed operation, including acceptance, cancellation/decline, expiry, material changes, replay, and unavailable authentication. Enrollment approval and daemon startup must grant no financial authorization.
 5. Run the selected production Binance/Ethereum mainnet scenarios with a fresh baseline, funded unwind, and an approval for every write/cleanup. Retain the scoped cumulative budget/cost history; restarting or changing implementation does not silently replenish an existing test allocation. Restore the full financial state and reconcile costs before any live pass.
 
-Until observed, mark human installation/onboarding, actual biometric checks, credential-boundary verification, and associated live routes as **not run** or **blocked**, with the reason. The Rust implementation handoff can be ready while complete live acceptance remains pending. Use [the report template](report-template.md) to separate these outcomes and historical TS evidence.
+Until observed, mark human installation/onboarding, actual biometric checks, credential-boundary verification, and associated live routes as **not run** or **blocked**, with the reason. Use [the report template](report-template.md) to separate these outcomes and historical TS evidence.
 
 ## Live-test contract
 
@@ -261,4 +298,4 @@ The second command tests the shared profile without connectivity features.
 `cargo run --locked -p fin-exchange --example public_read --all-features -- hyperliquid okx coinbase bybit kraken` is a
 separate explicit public-only network smoke check, never part of default tests.
 Authenticated production, installation, onboarding and real Touch ID are not
-covered by it. See the [CCXT report](../reports/ccxt-exchange.md).
+covered by it.

@@ -18,27 +18,6 @@ struct Challenge: Decodable {
     let terminalReview: TerminalConfigurationReview?
 }
 
-final class ConfigurationDetails: NSObject {
-    let text: NSTextView
-    let summary: String
-    let details: String
-    var expanded = false
-
-    init(text: NSTextView, summary: String, details: String) {
-        self.text = text
-        self.summary = summary
-        self.details = details
-    }
-
-    @objc func toggle(_ sender: NSButton) {
-        expanded.toggle()
-        text.string = expanded ? details : summary
-        text.font = expanded ? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular) : NSFont.systemFont(ofSize: 13)
-        text.scrollRangeToVisible(NSRange(location: 0, length: 0))
-        sender.title = expanded ? "Hide details" : "Details"
-    }
-}
-
 func timestamp(_ date: Date) -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -49,17 +28,6 @@ func parseDate(_ text: String) -> Date? {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.date(from: text)
-}
-
-func displaySafe(_ text: String) -> String {
-    // A token name or account label must not visually reorder exact addresses/amounts.
-    return text.unicodeScalars.map { scalar -> String in
-        let value = scalar.value
-        if (value < 32 && value != 10 && value != 9) || value == 127 || value == 0x200E || value == 0x200F || (0x202A...0x202E).contains(value) || (0x2066...0x2069).contains(value) {
-            return String(format: "\\u%04x", value)
-        }
-        return String(scalar)
-    }.joined()
 }
 
 func emit(_ response: [String: Any]) -> Never {
@@ -122,7 +90,6 @@ guard actualHash == bindingHash,
       binding is [String: Any], operation.count <= 256, summary.count <= 4_096,
       expiry > Date(), expiry.timeIntervalSinceNow <= 91 else { finish("expired") }
 guard available else { finish("unavailable") }
-let configuration = (binding as? [String: Any]).flatMap(configurationPresentation)
 func brokerChannel(_ descriptor: Int32) -> Bool {
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0 else { return false }
@@ -135,64 +102,24 @@ let terminalReviewed = terminalConfigurationReviewed(challenge.terminalReview, b
 // A rejected terminal proof is an error, never a second custom review dialog.
 if challenge.terminalReview != nil && !terminalReviewed { finish("invalid") }
 
-// Present exact resolved execution details in a native modal before requesting Touch ID.
-// The text view scrolls rather than truncating amounts, addresses, or bounds.
+// No custom windows: terminal/agent previews present details, and the system's
+// biometric prompt identifies this one exact write. Configuration retains its
+// protected terminal proof; removing a window must not bypass that proof.
+let verifiedBinding = binding as? [String: Any] ?? [:]
+let approvalReason: String
+if let reason = boundaryAuthenticationReason(verifiedBinding, summary: summary)
+    ?? financialAuthenticationReason(verifiedBinding, summary: summary) {
+    guard challenge.terminalReview == nil else { finish("invalid") }
+    approvalReason = reason
+} else {
+    guard terminalReviewed, let reason = configurationAuthenticationReason(verifiedBinding) else { finish("invalid") }
+    approvalReason = reason
+}
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)
-let deadlineTimer = Timer(timeInterval: max(0, expiry.timeIntervalSinceNow), repeats: false) { _ in finish("expired") }
-RunLoop.main.add(deadlineTimer, forMode: .common)
-RunLoop.main.add(deadlineTimer, forMode: .modalPanel)
-if !terminalReviewed {
-    let alert = NSAlert()
-    alert.alertStyle = .warning
-    alert.messageText = configuration?.title ?? "Approve one Fin write"
-    alert.informativeText = configuration == nil
-        ? "\(displaySafe(operation))\n\(displaySafe(summary))\nInspect the exact accounts, network, assets, amounts, destination, and limits below. Touch ID approves only this operation."
-        : "Review this connection. Touch ID approves only this configuration change."
-    alert.addButton(withTitle: "Continue with Touch ID")
-    alert.addButton(withTitle: "Cancel")
-    let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 620, height: 360))
-    scroll.hasVerticalScroller = true
-    scroll.hasHorizontalScroller = false
-    scroll.borderType = .bezelBorder
-    let text = NSTextView(frame: scroll.bounds)
-    text.isEditable = false
-    text.isSelectable = true
-    text.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    text.textContainerInset = NSSize(width: 10, height: 10)
-    text.isVerticallyResizable = true
-    text.isHorizontallyResizable = false
-    text.autoresizingMask = [.width]
-    text.textContainer?.widthTracksTextView = true
-    let pretty = (try? JSONSerialization.data(withJSONObject: binding, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])).flatMap { String(data: $0, encoding: .utf8) } ?? canonicalBinding
-    let exactDetails = "Exact execution binding:\n\(displaySafe(pretty))\n\nRequest hash: \(bindingHash)\nExpires: \(expiryText)"
-    text.string = exactDetails
-    scroll.documentView = text
-    var detailsController: ConfigurationDetails?
-    if let configuration = configuration {
-        let summary = displaySafe(configuration.body)
-        text.string = summary
-        text.font = NSFont.systemFont(ofSize: 13)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 390))
-        scroll.frame.origin.y = 30
-        accessory.addSubview(scroll)
-        let controller = ConfigurationDetails(text: text, summary: summary, details: exactDetails)
-        let button = NSButton(title: "Details", target: controller, action: #selector(ConfigurationDetails.toggle(_:)))
-        button.frame = NSRect(x: 0, y: 0, width: 120, height: 26)
-        accessory.addSubview(button)
-        detailsController = controller
-        alert.accessoryView = accessory
-    } else {
-        alert.accessoryView = scroll
-    }
-    application.activate(ignoringOtherApps: true)
-    guard withExtendedLifetime(detailsController, { alert.runModal() }) == .alertFirstButtonReturn else { finish("cancelled") }
-}
 guard Date() < expiry else { finish("expired") }
 
 // A fresh context and biometric-only policy prevent password fallback and previous unlock reuse.
-let approvalReason = configurationAuthenticationReason(binding as? [String: Any] ?? [:])
-    ?? "authorize the financial action reviewed in Fin"
 context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: approvalReason) { success, error in
     DispatchQueue.main.async {
         guard Date() < expiry else { finish("expired") }

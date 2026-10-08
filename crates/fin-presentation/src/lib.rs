@@ -86,6 +86,61 @@ impl Ui {
         self.message_to(&format!("Warning: {text}"), "33", &mut io::stderr().lock())
     }
 
+    /// Human review stays in the terminal; machine callers present their own
+    /// dry-run result. This display cannot grant financial authorization.
+    pub fn approval_review(&self, preview: &Value) -> io::Result<()> {
+        self.approval_review_to(preview, &mut io::stderr().lock())
+    }
+
+    fn approval_review_to(&self, preview: &Value, output: &mut impl Write) -> io::Result<()> {
+        if self.machine {
+            return Ok(());
+        }
+        if let Some(summary) = preview["summary"].as_str() {
+            self.message_to(&format!("→ {summary}"), "36", output)?;
+        }
+        if let Some(warnings) = preview["warnings"].as_array() {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                self.message_to(&format!("Warning: {warning}"), "33", output)?;
+            }
+        }
+        if self.is_verbose() {
+            writeln!(output, "{}", safe_text(&preview.to_string()))?;
+        }
+        self.message_to("Touch ID approves this write only.", "36", output)
+    }
+
+    /// Review a bounded authorization grant before the protected Touch ID request.
+    pub fn authorization_review(&self, preview: &Value) -> io::Result<()> {
+        self.authorization_review_to(preview, &mut io::stderr().lock())
+    }
+
+    fn authorization_review_to(&self, preview: &Value, output: &mut impl Write) -> io::Result<()> {
+        if self.machine {
+            return Ok(());
+        }
+        if let Some(summary) = preview["summary"].as_str() {
+            self.message_to(&format!("→ {summary}"), "36", output)?;
+        }
+        if let Some(warnings) = preview["warnings"].as_array() {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                self.message_to(&format!("Warning: {warning}"), "33", output)?;
+            }
+        }
+        if self.is_verbose() {
+            writeln!(output, "{}", safe_text(&preview.to_string()))?;
+        }
+        let seconds = preview["valid_for_seconds"].as_u64().unwrap_or(600);
+        self.message_to(
+            &format!(
+                "Touch ID grants these boundaries for {}.",
+                duration_label(seconds)
+            ),
+            "36",
+            output,
+        )
+    }
+
     fn message_to(&self, text: &str, color: &str, output: &mut impl Write) -> io::Result<()> {
         if !self.machine {
             writeln!(output, "{}", self.styled(&safe_text(text), color))?;
@@ -113,6 +168,11 @@ impl Ui {
     ) -> io::Result<()> {
         if self.machine {
             write_json(value, output)
+        } else if command == "authorizations" && !self.is_verbose() {
+            for (text, color) in authorization_rows(value) {
+                writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
+            }
+            Ok(())
         } else {
             output.write_all(render_human(command, value, self.is_verbose()).as_bytes())
         }
@@ -149,6 +209,19 @@ impl Ui {
         }
         Ok(())
     }
+}
+
+fn duration_label(seconds: u64) -> String {
+    let (amount, unit) = if seconds.is_multiple_of(86_400) {
+        (seconds / 86_400, "day")
+    } else if seconds.is_multiple_of(3_600) {
+        (seconds / 3_600, "hour")
+    } else if seconds.is_multiple_of(60) {
+        (seconds / 60, "minute")
+    } else {
+        (seconds, "second")
+    };
+    format!("{amount} {unit}{}", if amount == 1 { "" } else { "s" })
 }
 
 fn write_json(value: &Value, output: &mut impl Write) -> io::Result<()> {
@@ -259,7 +332,11 @@ pub fn safe_text(text: &str) -> String {
 /// fields. Discovery has a shorter overview with its full metadata in verbose mode.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
-    if command == "policy" && !verbose {
+    if command == "authorizations" && !verbose {
+        for (text, _) in authorization_rows(value) {
+            line(&mut output, 0, &safe_text(&text));
+        }
+    } else if command == "policy" && !verbose {
         for (key, label) in [
             ("max_movement_usd", "Per movement"),
             ("max_run_allocation_usd", "Rolling 24-hour allocation"),
@@ -276,6 +353,31 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
                     }
                 ),
             );
+        }
+        if let Some(enabled) = value["allow_unpriced_exchange_assets"].as_bool() {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Unpriced exchange writes: {}",
+                    if enabled { "Allowed" } else { "Blocked" }
+                ),
+            );
+        }
+        if let Some(count) = value["allocation_unpriced_operations"]
+            .as_u64()
+            .filter(|count| *count > 0)
+        {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Allocation includes {count} operation(s) with unpriced assets excluded from USD totals."
+                ),
+            );
+        }
+        if let Some(warning) = value["unpriced_assets_warning"].as_str() {
+            line(&mut output, 0, &safe_text(warning));
         }
         if let Some(used) = value["allocation_used_usd"].as_str() {
             line(
@@ -370,6 +472,117 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         render_value(&mut output, value, 0);
     }
     output
+}
+
+fn authorization_rows(value: &Value) -> Vec<(String, &'static str)> {
+    let nested = value.get("authorization").is_some_and(Value::is_object);
+    let authorization = if nested {
+        &value["authorization"]
+    } else {
+        value
+    };
+    let id = authorization["id"].as_str().unwrap_or("unavailable");
+    let status = authorization["status"].as_str().unwrap_or("unknown");
+    let status_color = if status == "active" { "32" } else { "33" };
+    let mut rows = Vec::new();
+
+    let headline = match (nested, status) {
+        (false, "active") => (format!("Authorization granted: {id}"), "32"),
+        (false, "revoked") => (format!("Authorization cancelled: {id}"), "33"),
+        (_, status) => (
+            format!("Authorization status: {status} ({id})"),
+            status_color,
+        ),
+    };
+    rows.push(headline);
+    if let Some(operation) = authorization["operation"].as_str() {
+        rows.push((format!("Operation: {operation}"), "36"));
+    }
+    if let Some(expires_at) = authorization["expires_at"].as_str() {
+        rows.push((format!("Expires: {expires_at}"), "36"));
+    }
+    for (field, label) in [
+        ("spent_debits", "Spent debit"),
+        ("remaining_debits", "Remaining debit"),
+        ("spent_costs", "Spent fees"),
+        ("remaining_costs", "Remaining fee cap"),
+    ] {
+        if let Some(amounts) = authorization.get(field).and_then(Value::as_array) {
+            if amounts.is_empty() {
+                rows.push((format!("{label}: none"), "36"));
+            } else {
+                rows.extend(amounts.iter().filter_map(|amount| {
+                    concise_amount(amount).map(|text| (format!("{label}: {text}"), "36"))
+                }));
+            }
+        }
+    }
+    if nested {
+        let unresolved = value["attempts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|attempt| {
+                matches!(
+                    attempt["status"].as_str(),
+                    Some("submitted" | "pending" | "unknown")
+                )
+            })
+            .count();
+        rows.push((
+            if unresolved == 0 {
+                "Unresolved attempts: none".to_owned()
+            } else {
+                format!("Unresolved attempts: {unresolved}")
+            },
+            if unresolved == 0 { "32" } else { "33" },
+        ));
+    }
+    if !nested && status == "active" {
+        let operation = authorization["operation"].as_str().unwrap_or("OPERATION");
+        rows.push((
+            format!(
+                "Next: fin execute {operation} --input JSON --id ATTEMPT --authorization {id} --dry-run"
+            ),
+            "33",
+        ));
+    } else {
+        rows.push((format!("Next: fin authorizations status {id}"), "33"));
+    }
+    rows
+}
+
+fn concise_amount(value: &Value) -> Option<String> {
+    let amount = value.get("amount").unwrap_or(value);
+    let atoms = amount.get("atoms")?.as_str()?;
+    let asset = amount.get("asset")?;
+    let reference = asset.get("reference")?.as_str()?;
+    let network = asset.get("network")?.as_str()?;
+    let decimals = asset.get("decimals")?.as_u64()? as usize;
+    Some(format!(
+        "{} {reference} ({network})",
+        decimal_atoms(atoms, decimals)?
+    ))
+}
+
+fn decimal_atoms(atoms: &str, decimals: usize) -> Option<String> {
+    if atoms.is_empty() || !atoms.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if decimals == 0 {
+        return Some(atoms.to_owned());
+    }
+    let mut digits = atoms.to_owned();
+    if digits.len() <= decimals {
+        digits.insert_str(0, &"0".repeat(decimals + 1 - digits.len()));
+    }
+    let split = digits.len() - decimals;
+    let fraction = digits[split..].trim_end_matches('0');
+    Some(if fraction.is_empty() {
+        digits[..split].to_owned()
+    } else {
+        format!("{}.{}", &digits[..split], fraction)
+    })
 }
 
 fn render_interaction(output: &mut String, semantics: &Value) {
@@ -635,6 +848,164 @@ mod tests {
     }
 
     #[test]
+    fn approval_review_is_brief_full_row_colored_and_silent_for_agents() {
+        let preview = json!({"summary":"Send 1 SYNTHETIC to SYNTHETIC-wallet.",
+            "warnings":["Synthetic fee warning"],"binding":{"internal":"SYNTHETIC-details"}});
+        for (tty, dumb, no_color) in [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut output = Vec::new();
+            ui(false, false, tty, tty, dumb, no_color)
+                .approval_review_to(&preview, &mut output)
+                .unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains("→ Send 1 SYNTHETIC to SYNTHETIC-wallet."));
+            assert!(text.contains("Warning: Synthetic fee warning"));
+            assert!(text.contains("Touch ID approves this write only."));
+            assert!(!text.contains("SYNTHETIC-details"));
+            assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);
+            if tty && !dumb && !no_color {
+                assert!(
+                    text.starts_with("\x1b[36m→ Send 1 SYNTHETIC to SYNTHETIC-wallet.\x1b[0m\n")
+                );
+                assert!(text.contains("\x1b[33mWarning: Synthetic fee warning\x1b[0m\n"));
+            }
+        }
+        let mut output = Vec::new();
+        ui(true, true, true, true, false, false)
+            .approval_review_to(&preview, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+        ui(false, true, false, false, false, false)
+            .approval_review_to(&preview, &mut output)
+            .unwrap();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("SYNTHETIC-details")
+        );
+    }
+
+    #[test]
+    fn boundary_authorization_review_states_the_grant_and_duration() {
+        let preview = json!({
+            "summary":"Sell up to 1 SYNTHETIC at a minimum price of 10 USD.",
+            "warnings":["Synthetic coverage warning"],
+            "valid_for_seconds":600,
+            "spec":{"fixed":{"account":"synthetic"}}
+        });
+        let mut output = Vec::new();
+        ui(false, false, true, true, false, false)
+            .authorization_review_to(&preview, &mut output)
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("Sell up to 1 SYNTHETIC"));
+        assert!(text.contains("Warning: Synthetic coverage warning"));
+        assert!(text.contains("Touch ID grants these boundaries for 10 minutes."));
+        assert!(!text.contains("approves this write only"));
+
+        let mut output = Vec::new();
+        ui(true, false, true, true, false, false)
+            .authorization_review_to(&preview, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+
+        let mut output = Vec::new();
+        ui(false, false, true, true, false, false)
+            .authorization_review_to(
+                &json!({"summary":"Grant","valid_for_seconds":1}),
+                &mut output,
+            )
+            .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("for 1 second."));
+    }
+
+    #[test]
+    fn authorization_results_are_concise_exact_and_semantically_styled() {
+        let grant = json!({
+            "id":"synthetic-auth-id",
+            "intent_id":"synthetic-intent",
+            "operation":"synthetic.trade",
+            "status":"active",
+            "expires_at":"2030-01-01T00:00:00Z",
+            "remaining_debits":[{"resource":"synthetic-account","amount":{"asset":{"network":"synthetic:1","reference":"SYN","decimals":3},"atoms":"12345"}}],
+            "spent_debits":[{"resource":"synthetic-account","amount":{"asset":{"network":"synthetic:1","reference":"SYN","decimals":3},"atoms":"5"}}],
+            "remaining_costs":[{"location":{"cash":{"resource":"synthetic-account"}},"amount":{"asset":{"network":"synthetic:1","reference":"FEE","decimals":6},"atoms":"1250"},"treatment":"included_in_debit"}],
+            "spent_costs":[],
+            "bounds":{"internal":"SYNTHETIC-BOUND-DETAIL"},
+            "spec":{"summary":"SYNTHETIC-SPEC-DETAIL"}
+        });
+        let concise = render_human("authorizations", &grant, false);
+        for expected in [
+            "Authorization granted: synthetic-auth-id",
+            "Expires: 2030-01-01T00:00:00Z",
+            "Spent debit: 0.005 SYN (synthetic:1)",
+            "Remaining debit: 12.345 SYN (synthetic:1)",
+            "Remaining fee cap: 0.00125 FEE (synthetic:1)",
+            "Next: fin execute synthetic.trade --input JSON --id ATTEMPT --authorization synthetic-auth-id --dry-run",
+        ] {
+            assert!(concise.contains(expected), "missing {expected}: {concise}");
+        }
+        assert!(!concise.contains("SYNTHETIC-BOUND-DETAIL"));
+        assert!(!concise.contains("12345"));
+
+        let mut colored = Vec::new();
+        ui(false, false, true, true, false, false)
+            .write_result_to(&grant, "authorizations", &mut colored)
+            .unwrap();
+        let colored = String::from_utf8(colored).unwrap();
+        assert!(colored.contains("\x1b[32mAuthorization granted: synthetic-auth-id\x1b[0m"));
+        assert!(colored.contains("\x1b[36mRemaining debit: 12.345 SYN (synthetic:1)\x1b[0m"));
+        assert!(colored.contains("\x1b[33mNext: fin execute"));
+
+        let mut no_color = Vec::new();
+        ui(false, false, true, true, false, true)
+            .write_result_to(&grant, "authorizations", &mut no_color)
+            .unwrap();
+        assert!(!no_color.contains(&0x1b));
+        let mut redirected = Vec::new();
+        ui(false, false, false, false, false, false)
+            .write_result_to(&grant, "authorizations", &mut redirected)
+            .unwrap();
+        assert!(!redirected.contains(&0x1b));
+
+        let status = json!({
+            "authorization": {"id":"synthetic-auth-id","operation":"synthetic.trade","status":"active","expires_at":"2030-01-01T00:00:00Z","remaining_debits":[],"spent_debits":[],"remaining_costs":[],"spent_costs":[]},
+            "attempts":[{"id":"synthetic-operation","request_id":"synthetic-attempt","status":"unknown"}]
+        });
+        let status_text = render_human("authorizations", &status, false);
+        assert!(status_text.contains("Authorization status: active (synthetic-auth-id)"));
+        assert!(status_text.contains("Unresolved attempts: 1"));
+        assert!(status_text.contains("Next: fin authorizations status synthetic-auth-id"));
+
+        let cancelled =
+            json!({"id":"synthetic-auth-id","operation":"synthetic.trade","status":"revoked"});
+        assert!(
+            render_human("authorizations", &cancelled, false)
+                .contains("Authorization cancelled: synthetic-auth-id")
+        );
+        let expired =
+            json!({"id":"synthetic-auth-id","operation":"synthetic.trade","status":"expired"});
+        assert!(
+            render_human("authorizations", &expired, false)
+                .contains("Authorization status: expired (synthetic-auth-id)")
+        );
+
+        let mut machine = Vec::new();
+        ui(true, false, true, true, false, false)
+            .write_result_to(&grant, "authorizations", &mut machine)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), grant);
+        assert!(!machine.windows(b"Next:".len()).any(|w| w == b"Next:"));
+
+        let verbose = render_human("authorizations", &grant, true);
+        assert!(verbose.contains("SYNTHETIC-BOUND-DETAIL"));
+    }
+
+    #[test]
     fn exact_financial_values_unknown_fields_and_empty_shapes_survive() {
         let value = json!({"amount":"123456789012345678901234567890.000000000000000001", "atoms":"115792089237316195423570985008687907853269984665640564039457584007913129639935", "network":"ethereum:1", "unit":"USDC", "status":"unknown", "new_provider_field":{"held":"0.0000000000000000009"}, "missing":null, "positions":[], "metadata":{}, "note":""});
         let text = render_human("read", &value, false);
@@ -892,5 +1263,14 @@ mod tests {
             assert!(!text.contains('\x1b'));
             assert_eq!(text.contains("detail"), verbose);
         }
+    }
+    #[test]
+    fn policy_unpriced_exception_and_usage_disclose_excluded_usd() {
+        let value = json!({"max_movement_usd":"100","max_run_allocation_usd":"100","allow_unpriced_exchange_assets":true,"allocation_used_usd":"0","allocation_unpriced_operations":1,"unpriced_assets_warning":"USD limits exclude unpriced assets; $0 is an estimate, not verified worth."});
+        let text = render_human("policy", &value, false);
+        assert!(text.contains("Unpriced exchange writes: Allowed"));
+        assert!(text.contains("unpriced assets excluded from USD totals"));
+        assert!(text.contains("$0 is an estimate, not verified worth"));
+        assert!(!text.contains('\u{1b}'));
     }
 }

@@ -23,6 +23,10 @@ use std::{
 const SCALE: i128 = 1_000_000_000_000_000_000;
 const SPOT: &str = "binance:uid:1001:SPOT";
 const ACCOUNT: &str = "synthetic-main";
+#[path = "trading_contract/boundary_lifecycle.rs"]
+mod boundary_lifecycle_tests;
+#[path = "trading_contract/boundaries.rs"]
+mod boundary_tests;
 fn units(value: &str) -> i128 {
     let negative = value.starts_with('-');
     let value = value.strip_prefix('-').unwrap_or(value);
@@ -1044,6 +1048,7 @@ async fn ordinary_policy_blocks_allocation_over_100_usd_before_approval() {
         EngineOptions {
             max_movement_and_cost_usd_micros: "0".into(),
             max_run_allocation_usd_micros: "100000000".into(),
+            allow_unpriced_exchange_assets: false,
         },
     )
     .unwrap()

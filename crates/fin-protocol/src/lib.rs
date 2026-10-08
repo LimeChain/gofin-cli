@@ -4,6 +4,7 @@
 
 pub mod daemon;
 
+use fin_domain::boundaries::BoundaryAuthorizationRequest;
 use fin_domain::{FinError, OperationRequest, PlanStep, ResourceAmount};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,39 @@ pub enum BrokerRequest {
     Preview {
         operation: String,
         input: Value,
+    },
+    /// Read-only human review of the summary that a boundary grant would authorize.
+    PreviewBoundaryAuthorization {
+        request: BoundaryAuthorizationRequest,
+    },
+    /// Grant bounded authority for a logical financial intent after fresh human approval.
+    AuthorizeBoundary {
+        request: BoundaryAuthorizationRequest,
+    },
+    /// Check and reconcile one bounded authorization and its attempts.
+    BoundaryStatus {
+        id: String,
+    },
+    /// Revoke future dispatch under one bounded authorization.
+    RevokeBoundary {
+        id: String,
+    },
+    /// Evaluate a candidate against current evidence and remaining authorization.
+    PreviewBoundary {
+        id: String,
+        operation: String,
+        input: Value,
+    },
+    /// Execute one exact attempt under an existing bounded authorization.
+    ExecuteBoundary {
+        authorization_id: String,
+        request: OperationRequest,
+    },
+    /// Replace a durable candidate only while the prior attempt is unsubmitted.
+    ReplaceBoundaryCandidate {
+        authorization_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
     },
     Execute {
         request: OperationRequest,
@@ -160,6 +194,49 @@ mod tests {
         assert!(matches!(
             read_request(&mut input).await.unwrap(),
             Some(BrokerRequest::Status { .. })
+        ));
+
+        let mut boundary = BufReader::new(
+            &b"{\"method\":\"authorize_boundary\",\"request\":{\"request_id\":\"synthetic-intent\",\"operation\":\"binance.spot-order\",\"input\":{},\"bounds\":{}}}\n"[..],
+        );
+        assert!(matches!(
+            read_request(&mut boundary).await.unwrap(),
+            Some(BrokerRequest::AuthorizeBoundary { request })
+                if request.request_id == "synthetic-intent" && request.valid_for_seconds == 600
+        ));
+
+        let attempt = serde_json::json!({
+            "method":"execute_boundary",
+            "authorization_id":"synthetic-authorization",
+            "request":{"request_id":"synthetic-attempt","operation":"binance.spot-order","input":{},"run_id":null}
+        });
+        let attempt_frame = format!("{attempt}\n");
+        assert!(matches!(
+            read_request(&mut BufReader::new(attempt_frame.as_bytes()))
+                .await
+                .unwrap(),
+            Some(BrokerRequest::ExecuteBoundary { authorization_id, request })
+                if authorization_id == "synthetic-authorization" && request.request_id == "synthetic-attempt"
+        ));
+
+        let replacement = serde_json::json!({
+            "method":"replace_boundary_candidate",
+            "authorization_id":"synthetic-authorization",
+            "previous_attempt_id":"synthetic-old-attempt",
+            "request":{"request_id":"synthetic-replacement","operation":"binance.spot-order","input":{},"run_id":null}
+        });
+        let replacement_frame = format!("{replacement}\n");
+        assert!(matches!(
+            read_request(&mut BufReader::new(replacement_frame.as_bytes()))
+                .await
+                .unwrap(),
+            Some(BrokerRequest::ReplaceBoundaryCandidate {
+                authorization_id,
+                previous_attempt_id,
+                request,
+            }) if authorization_id == "synthetic-authorization"
+                && previous_attempt_id == "synthetic-old-attempt"
+                && request.request_id == "synthetic-replacement"
         ));
 
         let mut unknown = BufReader::new(&b"{\"method\":\"signed_venue_call\"}\n"[..]);

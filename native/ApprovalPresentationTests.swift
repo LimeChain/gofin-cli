@@ -119,7 +119,7 @@ struct ApprovalPresentationTests {
         let setup: [String: Any] = ["action":"initialize", "financial_movement":false, "future_financial_authority":false]
         assert(configurationAuthenticationReason(setup) == "finish setup for your Mac account")
         let policy: [String: Any] = ["action":"policy_set", "financial_movement":false, "future_financial_authority":false]
-        assert(configurationAuthenticationReason(policy) == "change your financial limits")
+        assert(configurationAuthenticationReason(policy) == "change your financial policy")
         assert(reviewed(policy))
         assert(!reviewed(policy, "changed"))
         for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
@@ -146,6 +146,62 @@ struct ApprovalPresentationTests {
         badName["connection"] = badConnection
         assert(configurationAuthenticationReason(badName) == nil)
         assert(configurationAuthenticationReason([:]) == nil)
-        print("Approval presentation: 17 summary, 22 terminal-proof/channel and 14 authentication-reason cases passed; no UI or authentication requested.")
+        let write: [String: Any] = ["version": 1, "operation": "synthetic.transfer",
+                                   "execution": ["amount": "1", "destination": "SYNTHETIC-wallet"],
+                                   "financial_intent": [:] as [String: Any]]
+        let writeSummary = "Send 1 SYNTHETIC to SYNTHETIC-wallet; fee cap 0.01 SYNTHETIC."
+        assert(financialAuthenticationReason(write, summary: writeSummary) == "approve this action: \(writeSummary)")
+        assert(financialAuthenticationReason(write, summary: "") == nil)
+        assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: 4097)) == nil)
+        assert(financialAuthenticationReason(setup, summary: writeSummary) == nil)
+        var incompleteWrite = write; incompleteWrite.removeValue(forKey: "execution")
+        assert(financialAuthenticationReason(incompleteWrite, summary: writeSummary) == nil)
+        incompleteWrite = write; incompleteWrite["version"] = 2
+        assert(financialAuthenticationReason(incompleteWrite, summary: writeSummary) == nil)
+        assert(financialAuthenticationReason(write, summary: "Sell 1\n\u{202e}hidden") == "approve this action: Sell 1\\u000a\\u202ehidden")
+        let boundary: [String: Any] = ["version":1, "kind":"operation_boundaries", "operation":"binance.spot.order-place",
+                                      "intent_id":"SYNTHETIC-intent", "fixed":["side":"SELL"],
+                                      "parameters":["maximum_quantity":"2", "minimum_price":"10"],
+                                      "maximum_debits":[["amount":"2"]], "maximum_costs":[[String:Any]](), "valid_for_seconds":600]
+        let boundarySummary = "Sell up to 2 SYNTHETIC; minimum price 10 USD; repricing allowed; valid for 10 minutes."
+        assert(boundaryAuthenticationReason(boundary, summary:boundarySummary) == "approve these boundaries: \(boundarySummary)")
+        assert(financialAuthenticationReason(boundary, summary:boundarySummary) == nil)
+        for operation in ["configuration:initialize", "policy.set", "connections.add"] {
+            var administrative = boundary; administrative["operation"] = operation
+            assert(boundaryAuthenticationReason(administrative, summary:boundarySummary) == nil)
+        }
+        for field in ["kind","fixed","parameters","maximum_debits","valid_for_seconds"] {
+            var incomplete = boundary; incomplete.removeValue(forKey:field)
+            assert(boundaryAuthenticationReason(incomplete, summary:boundarySummary) == nil)
+        }
+        var noLifetime = boundary; noLifetime["valid_for_seconds"] = true
+        assert(boundaryAuthenticationReason(noLifetime, summary:boundarySummary) == nil)
+        assert(boundaryAuthenticationReason(boundary, summary:"Sell\n\u{202e}hidden") == "approve these boundaries: Sell\\u000a\\u202ehidden")
+        let address = "0x1111111111111111111111111111111111111111"
+        let withdrawal = "Withdraw API quantity 0.00765 ETH from SYNTHETIC-main SPOT to SYNTHETIC-wallet (\(address)) on ARBITRUM; published fee 0.00005, approved maximum fee 0.00005, maximum gross debit 0.0077, minimum net receipt 0.0076. USD ceilings: $19.67 movement, $0.13 fees."
+        let withdrawalReason = financialAuthenticationReason(write, summary: withdrawal)!
+        assert(withdrawalReason.count <= authenticationReasonMaximumCharacters)
+        assert(withdrawalReason.contains("0x1111…1111") && !withdrawalReason.contains(address))
+        assert(withdrawalReason.contains("0.00765 ETH") && withdrawalReason.contains("ARBITRUM"))
+        assert(withdrawalReason.contains("full details") || withdrawalReason.contains("min receipt 0.0076"))
+        let shortAddress = financialAuthenticationReason(write, summary: "Send 1 ETH to \(address); fee cap 0.01 ETH.")!
+        assert(shortAddress.contains("Send 1 ETH to 0x1111…1111; fee cap 0.01 ETH."))
+        // Do not abbreviate an embedded identifier or an overlong hex string.
+        for identifier in ["id\(address)", "\(address)a"] {
+            assert(financialAuthenticationReason(write, summary: identifier)!.contains(identifier))
+        }
+        let longSummaries = [String(repeating: "x", count: 4096), String(repeating: "\u{202e}", count: 4096),
+                             String(repeating: "🧑🏽‍💻", count: 1000), "Sell 2 SYNTHETIC; " + String(repeating: "limits ", count: 500)]
+        for summary in longSummaries {
+            for reason in [financialAuthenticationReason(write, summary: summary)!, boundaryAuthenticationReason(boundary, summary: summary)!] {
+                assert(reason.count <= authenticationReasonMaximumCharacters)
+                assert(reason.contains("See terminal review for full details."))
+            }
+        }
+        let budget = authenticationReasonMaximumCharacters - "approve this action: ".count
+        assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: budget))!.count == authenticationReasonMaximumCharacters)
+        assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: budget + 1))!.contains("full details"))
+        assert(write["execution"] as? [String: String] == ["amount": "1", "destination": "SYNTHETIC-wallet"])
+        print("Approval presentation, terminal-proof/channel and authentication-reason cases passed; no UI or authentication requested.")
     }
 }

@@ -877,6 +877,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -1789,6 +1790,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -1890,6 +1892,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -2837,6 +2840,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -2948,6 +2952,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -3857,6 +3862,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -4813,6 +4819,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -4895,6 +4902,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -4958,6 +4966,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5031,6 +5040,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5098,6 +5108,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5239,6 +5250,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5339,6 +5351,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5510,6 +5523,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5662,6 +5676,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -5817,6 +5832,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6056,6 +6072,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6159,6 +6176,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6303,6 +6321,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6533,6 +6552,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6736,6 +6756,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6932,6 +6953,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -6997,6 +7019,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7060,6 +7083,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7117,6 +7141,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7205,6 +7230,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7363,6 +7389,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7596,6 +7623,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7699,6 +7727,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7731,7 +7760,7 @@
   },
   {
     "name": "binance.spot.order-place",
-    "description": "Place a price-bounded SPOT LIMIT FOK order in a tracked return plan. IOC fill reconciliation is available in synthetic tests; scoped IOC plans are not supported.",
+    "description": "Place a SPOT LIMIT IOC/FOK order with exact standalone approval or an operation-boundary authorization. IOC may fill partially.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -7843,6 +7872,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -7879,7 +7909,170 @@
     "coverage": "Synthetic only; production trading and real per-write Touch ID pending. Examples are illustrative bounds, not live quotes.",
     "completion": "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.",
     "semantics": {
-      "approval": "fresh per write",
+      "approval": "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant.",
+      "boundary_authorization": {
+        "bounds_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "allowed_order_types": {
+              "default": [
+                "LIMIT"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "allowed_time_in_force": {
+              "default": [
+                "IOC",
+                "FOK"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "maximum_fees": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Total fee caps across all attempts, in each named asset's units.",
+              "type": "object"
+            },
+            "maximum_price": {
+              "default": null,
+              "description": "BUY limit-price ceiling, in quote units per base unit.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "maximum_quantity": {
+              "default": null,
+              "description": "Cumulative base quantity cap; required for SELL, unavailable for BUY.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "maximum_spend": {
+              "default": null,
+              "description": "Cumulative quote spend cap; required for BUY, unavailable for SELL.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "minimum_price": {
+              "default": null,
+              "description": "SELL limit-price floor, in quote units per base unit.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "maximum_fees"
+          ],
+          "title": "SpotBounds",
+          "type": "object"
+        },
+        "cancellation": "Authorization revocation prevents future submissions without Touch ID; existing venue orders still require reconciliation.",
+        "cumulative_scope": "Bounds are total caps for the lifetime logical intent, including prior verified effects and costs after authorization replacement; status exposes the remaining amounts.",
+        "default_consent_seconds": 600,
+        "examples": [
+          {
+            "maximum_fees": {
+              "USDT": "0.1"
+            },
+            "maximum_quantity": "1",
+            "minimum_price": "1000"
+          },
+          {
+            "maximum_fees": {
+              "ETH": "0.00002"
+            },
+            "maximum_price": "2000",
+            "maximum_spend": "20"
+          }
+        ],
+        "fixed_fields": [
+          "account",
+          "physical resource",
+          "symbol",
+          "side",
+          "base asset",
+          "quote asset",
+          "order type LIMIT"
+        ],
+        "permitted_variations": {
+          "limit_price": "SELL >= minimum_price; BUY <= maximum_price.",
+          "maximum_fees": "Per-attempt caps no greater than remaining cumulative per-asset caps.",
+          "quantity": "No greater than remaining cumulative quantity/spend authority.",
+          "time_in_force": "Only explicitly allowed IOC/FOK choices."
+        },
+        "pricing": "Fresh USD estimates enforce protected policy; no incidental cent-rounded approval ceiling.",
+        "replacement": "Changed authorization boundaries require fresh Touch ID; in-bounds execution replacements do not.",
+        "requirements_by_side": {
+          "BUY": [
+            "maximum_spend",
+            "maximum_price",
+            "maximum_fees"
+          ],
+          "SELL": [
+            "maximum_quantity",
+            "minimum_price",
+            "maximum_fees"
+          ]
+        },
+        "scope": "spot LIMIT IOC/FOK order placement",
+        "structured_violations": {
+          "path": "error.details.boundary_violation",
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "approved_bound": true,
+              "candidate_value": true,
+              "constraint": {
+                "type": "string"
+              },
+              "evidence_time": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reauthorization_required": {
+                "description": "Accepting this candidate as proposed requires changed human-approved\nboundaries; revising the candidate to existing bounds may still work.",
+                "type": "boolean"
+              },
+              "reconciliation_required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "constraint",
+              "approved_bound",
+              "candidate_value",
+              "reauthorization_required",
+              "reconciliation_required"
+            ],
+            "title": "BoundaryViolation",
+            "type": "object"
+          }
+        },
+        "supported": true,
+        "unsupported": [
+          "MARKET",
+          "standing orders",
+          "futures boundary authorization",
+          "multi-step approval"
+        ]
+      },
       "concurrentPositions": null,
       "orderType": "LIMIT",
       "quantity": "exact base decimal; all only for scoped cleanup",
@@ -8061,6 +8254,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8258,6 +8452,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8296,7 +8491,7 @@
   },
   {
     "name": "binance.transfer",
-    "description": "Main-authorized SPOT transfer between a configured main account and one configured subaccount, with persistent clientTranId.",
+    "description": "SPOT transfer between a configured main account and one configured subaccount. Main authority uses universalTransfer with clientTranId; a source-child authority can return SPOT to its configured parent through subToMaster, whose receipt is persisted by Fin.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -8307,6 +8502,7 @@
           "type": "string"
         },
         "authority": {
+          "description": "Use a configured main connection for existing universal transfers; for\nchild-to-parent, select the source child to sign Binance subToMaster.",
           "type": "string"
         },
         "coin": {
@@ -8351,6 +8547,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8370,12 +8567,35 @@
       "title": "FinError",
       "type": "object"
     },
-    "examples": [],
+    "examples": [
+      {
+        "amount": "0.01",
+        "authority": "binance-child",
+        "coin": "ETH",
+        "from": "binance-child",
+        "fromWallet": "SPOT",
+        "requestId": "return-eth-to-master",
+        "to": "binance-main",
+        "toWallet": "SPOT"
+      },
+      {
+        "amount": "0.01",
+        "authority": "binance-main",
+        "coin": "ETH",
+        "from": "binance-main",
+        "fromWallet": "SPOT",
+        "requestId": "fund-child",
+        "to": "binance-child",
+        "toWallet": "SPOT"
+      }
+    ],
     "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
     "completion": "One matching successful history row plus observed source debit and destination credit.",
     "semantics": {
       "amount": "exact decimal string",
+      "authority": "For main→child or legacy main-authorized child→main, select the main account. For source-child→parent only, select the child as authority; Fin uses subToMaster and sends no clientTranId or recipient parameter.",
       "credentialValues": "never exposed",
+      "subToMasterReceipt": "Fin persists Binance txnId against the immutable local submission before returning. If the response is lost before the receipt is persisted, the result remains unknown and history is not inferred from amount or time.",
       "walletType": "SPOT"
     }
   },
@@ -8612,6 +8832,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8749,6 +8970,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8867,6 +9089,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -8951,6 +9174,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -9005,6 +9229,276 @@
         "okx": "spot"
       },
       "verification": "offline_synthetic; see verification report for public network checks",
+      "writes": false
+    }
+  },
+  {
+    "name": "exchange.order-book",
+    "description": "Read exact public bid and ask levels for one verified exchange market.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "exchange": {
+              "const": "binance"
+            },
+            "market_type": {
+              "enum": [
+                "spot",
+                "perpetual"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "const": "hyperliquid"
+            },
+            "market_type": {
+              "const": "perpetual"
+            }
+          }
+        },
+        {
+          "properties": {
+            "exchange": {
+              "enum": [
+                "kraken",
+                "okx",
+                "coinbase",
+                "bybit"
+              ]
+            },
+            "market_type": {
+              "const": "spot"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "depth": {
+          "description": "Maximum number of levels per side.",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "exchange": {
+          "enum": [
+            "binance",
+            "kraken",
+            "hyperliquid",
+            "okx",
+            "coinbase",
+            "bybit"
+          ],
+          "type": "string"
+        },
+        "market_type": {
+          "description": "Must match the venue's supported market scope.",
+          "enum": [
+            "spot",
+            "perpetual"
+          ],
+          "type": "string"
+        },
+        "pair": {
+          "description": "Exact native market identifier from exchange.markets, binance.spot.markets, or binance.futures.markets as applicable.",
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "exchange",
+        "market_type",
+        "pair",
+        "depth"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "level": {
+          "additionalProperties": false,
+          "properties": {
+            "price": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "price",
+            "quantity"
+          ],
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "asks": {
+          "items": {
+            "$ref": "#/$defs/level"
+          },
+          "type": "array"
+        },
+        "bids": {
+          "items": {
+            "$ref": "#/$defs/level"
+          },
+          "type": "array"
+        },
+        "exchange": {
+          "type": "string"
+        },
+        "market": {
+          "additionalProperties": false,
+          "properties": {
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "quote": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "spot",
+                "perpetual"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "base",
+            "quote"
+          ],
+          "type": "object"
+        },
+        "market_type": {
+          "enum": [
+            "spot",
+            "perpetual"
+          ]
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "venue_timestamp": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "exchange",
+        "market_type",
+        "market",
+        "bids",
+        "asks",
+        "observed_at",
+        "venue_timestamp",
+        "source"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "depth": 20,
+        "exchange": "binance",
+        "market_type": "spot",
+        "pair": "BTCUSDT"
+      },
+      {
+        "depth": 20,
+        "exchange": "hyperliquid",
+        "market_type": "perpetual",
+        "pair": "BTC"
+      },
+      {
+        "depth": 20,
+        "exchange": "okx",
+        "market_type": "spot",
+        "pair": "BTC-USDT"
+      }
+    ],
+    "coverage": "Fixture-tested public order books: Binance spot and USDⓈ-M perpetual, Kraken spot, Hyperliquid primary perpetual, OKX spot, Coinbase Advanced spot, and Bybit spot. Each request first verifies the exact native identifier and market scope against venue metadata. No credentials or writes.",
+    "completion": "Returns a timestamped public depth snapshot; it is not an execution guarantee or authoritative financial accounting.",
+    "semantics": {
+      "credentials": false,
+      "exactness": "Raw response decimals are emitted as strings. Observed time is request start. Venue timestamp is null unless the venue supplied a valid timestamp.",
+      "finImplemented": [
+        "exchange.order-book"
+      ],
+      "library": "ccxt-rust 4.5.85 implicit public endpoints",
+      "marketScopes": {
+        "binance": [
+          "spot",
+          "perpetual"
+        ],
+        "bybit": [
+          "spot"
+        ],
+        "coinbase": [
+          "spot"
+        ],
+        "hyperliquid": [
+          "perpetual; primary dex"
+        ],
+        "kraken": [
+          "spot"
+        ],
+        "okx": [
+          "spot"
+        ]
+      },
       "writes": false
     }
   },
@@ -9122,6 +9616,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -9295,6 +9790,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -10274,6 +10770,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -10403,6 +10900,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -11319,6 +11817,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -11421,6 +11920,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -11514,6 +12014,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -11615,6 +12116,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -12530,6 +13032,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -13470,6 +13973,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },
@@ -14379,6 +14883,7 @@
         "code": {
           "type": "string"
         },
+        "details": true,
         "message": {
           "type": "string"
         },

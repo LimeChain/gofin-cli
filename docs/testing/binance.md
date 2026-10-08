@@ -14,7 +14,7 @@ Live acceptance uses **production Binance and Ethereum mainnet** under the [$100
 
 Use named connections such as `binance-main`, `binance-sub-a`, `binance-sub-b`, and `hot-wallet`. These are placeholders, not real accounts. Start with an explicitly selected account/wallet type such as spot; support for other types must be discovered and tested separately. Use two subaccounts when verifying partial consolidation.
 
-For Rust onboarding, first apply [C12–C19](README.md#common-acceptance-cases) and the [terminal enrollment contract](../onboarding.md). A fresh LLM must discover how to guide the human through Binance connection creation and later credential changes before a broker or credentials exist. The human enters secrets in their own terminal; the agent checks only safe metadata and reported capabilities. Enrollment validates access with reads and must never test authority by moving funds. Actual human onboarding/Touch ID verification follows the implementation-stage automated/fork handoff.
+For Rust onboarding, first apply [C12–C19](README.md#common-acceptance-cases) and the [terminal enrollment contract](../onboarding.md). A fresh LLM must discover how to guide the human through Binance connection creation and later credential changes before a broker or credentials exist. The human enters secrets in their own terminal; the agent checks only safe metadata and reported capabilities. Enrollment validates access with reads and must never test authority by moving funds. Check actual onboarding, isolation and Touch ID independently of automated/fork fixtures.
 
 Before a live run, record privately:
 
@@ -35,6 +35,20 @@ The operator selects amounts that fit the available balances, minimums, and fees
 Binance separates main/subaccount transfers from wallet transfers inside a single account. The main-account universal-transfer API uses explicit account types and optional sender/recipient subaccount identifiers; it requires internal-transfer permission. It provides a client transfer identifier and a history query. Fin should map its stable request identity to these identifiers where supported. [Binance subaccount funding API](https://developers.binance.com/en/docs/catalog/vip-and-institutional-sub-account/api/rest-api/asset-management)
 
 Useful endpoint families to map through the pinned CCXT version:
+
+`binance.transfer` selects the main-authorized universal endpoint when `authority`
+names the main connection. For a subaccount→its configured parent transfer,
+`authority` may name the source subaccount; this selects `subToMaster` and requires
+Spot & Margin Trading permission. No automatic signer fallback occurs. Verify
+the returned `txnId` is durably saved, survives restart, matches child transfer
+history and correlates with exact source debit/master credit. Losing that receipt
+before persistence must remain unknown and block duplicate movement. The old
+universal-transfer `clientTranId` and historical recovery path remain intact.
+
+Recorded signature rejection recovery additionally requires exact
+submission-stage HTTP 400/`-1022` evidence, complete history without a matching
+transfer, and unchanged balances. Test timeouts, incomplete history, different
+error codes, changed balances and accepted receipts as nonqualifying cases.
 
 | Intent                                               | Binance API reference                                                              |
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -118,7 +132,7 @@ duplicate deposit addresses, unknown/nonboolean whitelist flags, missing asset/
 network/memo metadata, conflicting entries, exact memo matching, Ethereum address
 case, oversized lists, secret/unknown input rejection and GET-only routing.
 A reported enabled entry is not proof of account-wide enforcement or cooldown
-expiry. Authenticated live observations remain pending for these new reads.
+expiry. Check authenticated venue behavior separately from synthetic fixtures.
 
 ## Generic withdrawal regression checks
 
@@ -146,8 +160,8 @@ Live verification must first select priced allocation within the existing $100
 limits, capture the baseline and preflight a complete return path. Routes without
 independent receipt/restoration coverage remain blocked for live acceptance.
 No successful venue status or raw tx ID alone passes destination receipt or
-cleanup. Production withdrawals and the native Touch ID path for this increment
-remain pending until observed together with the human.
+cleanup. Verify production withdrawals and native Touch ID separately from
+synthetic adapter tests.
 
 ## Synthetic permanent portfolio regression
 

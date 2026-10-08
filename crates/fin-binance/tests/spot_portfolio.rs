@@ -322,6 +322,7 @@ fn engine(store: Store, a: Arc<BinanceAdapter>, auth: Arc<Approval>, limit: &str
         EngineOptions {
             max_movement_and_cost_usd_micros: limit.into(),
             max_run_allocation_usd_micros: limit.into(),
+            allow_unpriced_exchange_assets: false,
         },
     )
     .unwrap()

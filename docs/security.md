@@ -1,8 +1,8 @@
 # Protected execution and Touch ID
 
-## Current Rust implementation and evidence limits
+## Protected runtime and threat model
 
-The Rust workspace now implements the fixed root broker, native authorization,
+The Rust workspace separates the fixed root broker, native authorization,
 protected credential storage, offline discovery, and terminal-driven enrollment.
 Build the reviewed local bundle with `sh scripts/package-rust-macos.sh` and follow
 [its human setup instructions](../packaging/README.md). The installer enables
@@ -30,10 +30,9 @@ They do **not** establish actual terminal isolation, native Touch ID, root
 installation, or mainnet settlement. Existing agent-readable credentials remain
 outside the protected boundary until the human removes all such copies. Terminal
 checks do not revoke old disclosures or protect a session where an agent has
-GUI automation, keylogging, root, or control of the human terminal. Those human
-checks remain separate from the human-confirmed installation and historical evidence.
+GUI automation, keylogging, root, or control of the human terminal. Verify those human checks independently of synthetic rejection tests.
 
-## Agreed Rust setup and authorization contract
+## Setup and authorization contract
 
 The [Rust architecture](rust-architecture.md) and [terminal onboarding contract](onboarding.md) define the implemented foundation contract. They are requirements, not evidence that the real human path has passed. Setup is bundled with Fin; the human runs initial installation and later credential enrollment in their own terminal. No custom credential-entry windows or signed `.pkg` release are required for the beta. The agent can discover safe setup instructions before a broker exists, but cannot collect credentials through its PTY, supply secret-bearing normal JSON requests, or authorize itself.
 
@@ -41,7 +40,7 @@ The Rust authorization boundary belongs in `fin-authorization`: broker-generated
 
 Protected installation may use a reviewed administrator setup script and OS service management. Running an ordinary same-user daemon or hiding input alone does not prove isolation. Service startup grants no spending authority. Evaluate least-privilege service ownership during the port and verify the actual terminal input, private channel, code/library integrity, credential access, and agent privilege boundary. Human-terminal provisioning must deliver secrets directly to the protected component, never through the untrusted client, its logs, or its environment.
 
-The current implementation stage finishes automated/fork verification, then hands off real onboarding, credential-bypass, and biometric checks to the human. Until run, report those checks as pending/not run. Existing TS availability probes and financial tests do not establish Rust acceptance. Production/mainnet verification and complete cleanup still follow the [live-test contract](testing/README.md#live-test-contract).
+Verify actual enrollment, credential isolation and biometric behavior separately from automated/fork checks. Production/mainnet acceptance follows the [live-test contract](testing/README.md#live-test-contract), including complete cleanup.
 
 ## Installation and trust boundary
 
@@ -49,7 +48,7 @@ Use `make setup` in your own macOS Terminal, or review a compiled bundle and run
 `./fin setup`. Fin explains the Mac login password and then requests independent
 Touch ID configuration approval. Setup and connection changes use sudo; ordinary
 reads and financial commands use the protected service. See the
-[bundle instructions](../packaging/README.md) and [human checklist](testing/rust-human-handoff.md).
+[bundle instructions](../packaging/README.md) and [human checklist](testing/onboarding.md).
 
 The threat model is an erroneous or prompt-injected agent with normal-user shell
 and file access. Root access, compromised OS, control of the human terminal, and
@@ -88,7 +87,7 @@ reset, migrated or replayed.
 ## Verification limits
 
 Installation, credential isolation, biometric financial writes and production/mainnet
-settlement require separate observed results in the [human checklist](testing/rust-human-handoff.md).
+settlement require separate observed results in the [human checklist](testing/onboarding.md).
 Synthetic tests and native availability probes do not establish those cases. Live tests retain the
 [$100 allocation/movement and complete restoration contract](testing/README.md#live-test-contract).
 

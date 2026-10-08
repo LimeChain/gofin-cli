@@ -355,6 +355,7 @@ impl BinanceProfile {
         Ok(PlannedSubmission {
             submission,
             request: BinanceDispatch {
+                receipt_submission: None,
                 authority: binding.account,
                 request: binding.params,
                 noop: None,

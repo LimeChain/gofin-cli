@@ -2523,7 +2523,7 @@ mod tests {
     fn policy_configuration_review_is_exact_expiring_and_human_bound() {
         let mut challenge = configuration();
         challenge.binding["action"] = "policy_set".into();
-        challenge.binding["policy"] = serde_json::json!({"max_movement_usd_micros":"1000000000","max_run_allocation_usd_micros":"5000000000"});
+        challenge.binding["policy"] = serde_json::json!({"max_movement_usd_micros":"1000000000","max_run_allocation_usd_micros":"5000000000","allow_unpriced_exchange_assets":true});
         challenge.binding_hash = binding_hash(&challenge.binding).unwrap();
         let proof = ConfigurationReview {
             uid: 501,
@@ -2538,6 +2538,10 @@ mod tests {
         tampered.binding["policy"]["max_movement_usd_micros"] = "2000000000".into();
         tampered.binding_hash = binding_hash(&tampered.binding).unwrap();
         assert!(proof.validate_for(&tampered, 501).is_err());
+        let mut exception_changed = challenge.clone();
+        exception_changed.binding["policy"]["allow_unpriced_exchange_assets"] = false.into();
+        exception_changed.binding_hash = binding_hash(&exception_changed.binding).unwrap();
+        assert!(proof.validate_for(&exception_changed, 501).is_err());
         challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
         let expired = configuration_challenge(&challenge).unwrap_err();
         assert_eq!(expired.code, "AUTHORIZATION_EXPIRED");

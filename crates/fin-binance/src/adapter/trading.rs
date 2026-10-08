@@ -54,7 +54,7 @@ pub(super) fn is_write(operation: &str) -> bool {
 pub(super) fn definitions() -> Vec<Definition> {
     let mut result:Vec<_> = [false,true].into_iter().map(|futures| Definition {
         name: order_name(futures).into(),
-        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way isolated margin, leverage 1; closing requires reduce_only. No configuration changes." } else { "Place a price-bounded SPOT LIMIT FOK order in a tracked return plan. IOC fill reconciliation is available in synthetic tests; scoped IOC plans are not supported." }.into(),
+        description: if futures { "Place a bounded USD-M perpetual LIMIT IOC/FOK order. One-way isolated margin, leverage 1; closing requires reduce_only. No configuration changes." } else { "Place a SPOT LIMIT IOC/FOK order with exact standalone approval or an operation-boundary authorization. IOC may fill partially." }.into(),
         kind: OperationKind::Write, execution_actor: ExecutionActor::AgentInvocable,
         input_schema: schema_for!(OrderInput).into(), output_schema: json!({"type":"object"}), error_schema: schema_for!(FinError).into(),
         examples: vec![if futures {
@@ -65,6 +65,15 @@ pub(super) fn definitions() -> Vec<Definition> {
         completion: "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.".into(),
         semantics: json!({"walletType":if futures {"USD_M"} else {"SPOT"},"quantity":"exact base decimal; all only for scoped cleanup","orderType":"LIMIT","timeInForce":["IOC","FOK"],"approval":"fresh per write","standingOrders":false,"scopedTimeInForce":if futures {vec!["IOC","FOK"]} else {vec!["FOK"]},"concurrentPositions":if futures {json!(1)} else {Value::Null}}),
     }).collect();
+    if let Some(spot) = result
+        .iter_mut()
+        .find(|definition| definition.name == order_name(false))
+    {
+        spot.semantics["approval"] = json!(
+            "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant."
+        );
+        spot.semantics["boundary_authorization"] = super::boundaries::discovery();
+    }
     result.extend(cancellation::definitions());
     result
 }
@@ -1618,6 +1627,7 @@ impl BinanceProfile {
                 } else {
                     None
                 },
+                receipt_submission: None,
                 request: params,
             },
         })

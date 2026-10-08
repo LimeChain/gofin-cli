@@ -3,6 +3,7 @@
 use crate::ExchangeProfile;
 #[cfg(feature = "ccxt")]
 use crate::ccxt::{CcxtClient, ExchangeId, Method};
+use crate::order_book::{normalize_order_book, order_book_definition};
 use async_trait::async_trait;
 use fin_domain::{
     Definition, ExecutionActor, FinError, FinancialState, OperationKind, StateSnapshot, now,
@@ -16,6 +17,13 @@ use std::sync::Arc;
 pub trait PublicExchangeData: Send + Sync {
     async fn markets(&self, exchange: &str) -> Result<Value, FinError>;
     async fn ticker(&self, exchange: &str, pair: &str) -> Result<Value, FinError>;
+    async fn order_book(
+        &self,
+        exchange: &str,
+        market_type: &str,
+        pair: &str,
+        depth: u16,
+    ) -> Result<(Value, Value, String), FinError>;
 }
 
 const VENUES: [(&str, &str, &str); 5] = [
@@ -102,6 +110,121 @@ impl PublicExchangeData for CcxtClient {
         )
         .await
         .map_err(unavailable)
+    }
+    async fn order_book(
+        &self,
+        exchange: &str,
+        market_type: &str,
+        pair: &str,
+        depth: u16,
+    ) -> Result<(Value, Value, String), FinError> {
+        let (venue, metadata_method, metadata_params, book_method, book_params) = match (
+            exchange,
+            market_type,
+        ) {
+            ("binance", "spot") => (
+                ExchangeId::Binance,
+                Method::BinanceSpotExchangeInfo,
+                vec![("symbol", pair)],
+                Method::BinanceOrderBookSpot,
+                vec![
+                    ("symbol", pair.to_owned()),
+                    (
+                        "limit",
+                        crate::order_book::venue_depth("binance", depth).to_string(),
+                    ),
+                ],
+            ),
+            ("binance", "perpetual") => (
+                ExchangeId::Binance,
+                Method::BinanceFuturesExchangeInfo,
+                vec![("symbol", pair)],
+                Method::BinanceOrderBookPerpetual,
+                vec![
+                    ("symbol", pair.to_owned()),
+                    (
+                        "limit",
+                        crate::order_book::venue_depth("binance", depth).to_string(),
+                    ),
+                ],
+            ),
+            ("kraken", "spot") => (
+                ExchangeId::Kraken,
+                Method::KrakenAssetPairs,
+                vec![("pair", pair)],
+                Method::KrakenOrderBook,
+                vec![("pair", pair.to_owned()), ("count", depth.to_string())],
+            ),
+            ("hyperliquid", "perpetual") => (
+                ExchangeId::Hyperliquid,
+                Method::HyperliquidMetaAndAssetContexts,
+                vec![("type", "metaAndAssetCtxs")],
+                Method::HyperliquidOrderBook,
+                vec![("type", "l2Book".into()), ("coin", pair.to_owned())],
+            ),
+            ("okx", "spot") => (
+                ExchangeId::Okx,
+                Method::OkxInstruments,
+                vec![("instType", "SPOT"), ("instId", pair)],
+                Method::OkxOrderBook,
+                vec![("instId", pair.to_owned()), ("sz", depth.to_string())],
+            ),
+            ("coinbase", "spot") => (
+                ExchangeId::Coinbase,
+                Method::CoinbaseProduct,
+                vec![("product_id", pair)],
+                Method::CoinbaseOrderBook,
+                vec![
+                    ("product_id", pair.to_owned()),
+                    ("limit", depth.to_string()),
+                ],
+            ),
+            ("bybit", "spot") => (
+                ExchangeId::Bybit,
+                Method::BybitInstruments,
+                vec![("category", "spot"), ("symbol", pair)],
+                Method::BybitOrderBook,
+                vec![
+                    ("category", "spot".into()),
+                    ("symbol", pair.to_owned()),
+                    (
+                        "limit",
+                        crate::order_book::venue_depth("bybit", depth).to_string(),
+                    ),
+                ],
+            ),
+            _ => {
+                return Err(FinError::validation(
+                    "This exchange does not support the requested market type for order-book reads.",
+                ));
+            }
+        };
+        let metadata = self
+            .request(
+                venue,
+                metadata_method,
+                None,
+                metadata_params
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect(),
+            )
+            .await
+            .map_err(unavailable)?;
+        let started = now();
+        let book = self
+            .request(
+                venue,
+                book_method,
+                None,
+                book_params
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v))
+                    .collect(),
+            )
+            .await
+            .map_err(unavailable)?;
+        Ok((metadata, book, started))
     }
 }
 #[cfg(feature = "ccxt")]
@@ -280,7 +403,9 @@ impl DefaultExchangeProfile {
         Self { data }
     }
     pub fn definitions() -> Vec<Definition> {
-        definitions()
+        let mut values = definitions();
+        values.push(order_book_definition());
+        values
     }
 }
 
@@ -322,7 +447,9 @@ fn definitions() -> Vec<Definition> {
 impl ExchangeProfile for DefaultExchangeProfile {
     type Request = ();
     fn definitions(&self) -> Vec<Definition> {
-        definitions()
+        let mut values = definitions();
+        values.push(order_book_definition());
+        values
     }
     fn submission_kind(&self) -> &str {
         "public-exchange"
@@ -363,6 +490,34 @@ impl ExchangeProfile for DefaultExchangeProfile {
                 let data = self.data.ticker(&input.exchange, &input.pair).await?;
                 (input.exchange, Some(input.pair), data)
             }
+            "exchange.order-book" => {
+                let input: crate::order_book::OrderBookInput =
+                    serde_json::from_value(input.clone()).map_err(|_| {
+                        FinError::validation(
+                            "Expected exchange, market_type, exact pair, and bounded depth.",
+                        )
+                    })?;
+                crate::order_book::validate_order_book_input(&input)?;
+                let (metadata, book, started) = self
+                    .data
+                    .order_book(
+                        &input.exchange,
+                        &input.market_type,
+                        &input.pair,
+                        input.depth,
+                    )
+                    .await?;
+                let data = normalize_order_book(
+                    &input.exchange,
+                    &input.market_type,
+                    &input.pair,
+                    input.depth,
+                    metadata,
+                    book,
+                    started,
+                )?;
+                return Ok(data);
+            }
             _ => {
                 return Err(FinError::new(
                     "UNSUPPORTED_OPERATION",
@@ -399,6 +554,15 @@ mod tests {
             Ok(
                 json!({"error":[],"result":{"XXBTZUSD":{"c":["123456789.123456789123456789","0.000000000000000001"]}}}),
             )
+        }
+        async fn order_book(
+            &self,
+            _exchange: &str,
+            _market_type: &str,
+            _pair: &str,
+            _depth: u16,
+        ) -> Result<(Value, Value, String), FinError> {
+            Err(FinError::validation("not used"))
         }
     }
     #[tokio::test]
@@ -442,7 +606,7 @@ mod tests {
         let fixture = Arc::new(Fixture(AtomicUsize::new(0)));
         let adapter = ExchangeAdapter::new(DefaultExchangeProfile::new(fixture.clone()));
         for input in [
-            json!({"exchange":"binance"}),
+            json!({"exchange":"bitstamp"}),
             json!({"exchange":"kraken","params":{"method":"withdraw"}}),
         ] {
             assert!(adapter.read("exchange.markets", &input).await.is_err());

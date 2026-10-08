@@ -112,7 +112,7 @@ pub fn evm_network_profiles() -> Value {
 
 /// Machine execution policy shared by offline discovery and callers.
 pub fn machine_contract() -> Value {
-    json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable; retain out-of-band trusted review and fresh Touch ID for the exact write. No terminal prompts or approval bypass; client wait bounded to 300 seconds, then reconcile the same request ID."})
+    json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact per-write approval or an existing bounded authorization. Granting bounded authority still requires fresh macOS Touch ID; the OS approval UI may appear, but --json never prompts in the terminal. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"fin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"fin authorizations cancel ID prevents future dispatch without Touch ID","status":"fin authorizations status ID reconciles durable attempts"}})
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -132,6 +132,39 @@ pub struct ExecuteInput {
     /// Required for execution; previews do not consume an identity.
     pub request_id: Option<String>,
     /// Same read-only preparation as `fin preview`, without approval/submission.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryAuthorizationInput {
+    pub operation: String,
+    /// Stable logical intent identity, mapped to the protocol request_id.
+    pub id: String,
+    pub input: Value,
+    /// Operation-specific cumulative limits and permitted variations.
+    pub bounds: Value,
+    /// Human-readable duration such as 10m; defaults to 10m.
+    #[serde(default = "default_boundary_duration")]
+    pub valid_for: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+}
+
+fn default_boundary_duration() -> String {
+    "10m".into()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BoundaryExecuteInput {
+    pub operation: String,
+    pub input: Value,
+    pub authorization: String,
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_attempt: Option<String>,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -404,6 +437,59 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
+        definition::<BoundaryAuthorizationInput>(
+            "authorizations.authorize",
+            "Grant time-limited cumulative authority for a supported financial intent after fresh human approval.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation":"binance.spot-order","id":"synthetic-intent-001","input":{"side":"SELL","symbol":"BTCUSDT","quantity":"0.01"},"bounds":{"target_quantity":"0.01","max_quantity":"0.01","min_price":"60000","max_fees":{"USDT":"1"}},"valid_for":"10m"}),
+            json!({
+                "command_line_template":"fin authorizations authorize OPERATION --id INTENT_ID --input JSON --bounds JSON [--valid-for 10m] [--replaces AUTHORIZATION_ID]",
+                "requires_fresh_human_approval":true,
+                "approval_popup":"The protected broker requests fresh macOS Touch ID and displays the operation, permitted variations, cumulative limits and consent duration.",
+                "human_terminal_review":true,
+                "machine_output":"Structured authorization result; no terminal prompts, animation, color or chatter. Required macOS Touch ID approval still applies.",
+                "default_valid_for_seconds":600,
+                "valid_for":"Starts after successful approval; separate from biometric challenge timeout and quote freshness.",
+                "identity":"--id is the stable logical intent identity; replacing authority retains the intent and achieved effects.",
+                "bounds":"Operation-specific fixed identity fields, allowed candidate variations, cumulative debit and fee caps; inspect the operation definition for actual supported coverage.",
+                "replacement":"Changing bounds or expiry requires fresh approval and --replaces; remaining authority is preserved, spent effects cannot be reset.",
+                "administrative_operations":"Financial authorizations cannot authorize connection management or policy changes."
+            }),
+        ),
+        definition::<BoundaryExecuteInput>(
+            "execute.boundary",
+            "Evaluate or execute one candidate under existing time-limited cumulative authorization.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation":"binance.spot-order","input":{"side":"SELL","symbol":"BTCUSDT","quantity":"0.01"},"authorization":"opaque-authorization-id","id":"synthetic-attempt-001"}),
+            json!({
+                "command_line_template":"fin execute OPERATION --input JSON --id ATTEMPT_ID --authorization AUTHORIZATION_ID [--dry-run]",
+                "dry_run":"With --dry-run, evaluates fresh evidence and remaining authority without submission or consumption; --id is optional and unused.",
+                "execution":"--id identifies one exact attempt; duplicate retries recover that attempt. No automatic resubmission occurs.",
+                "approval":"Uses the existing authorization. No second Touch ID challenge is requested for an in-bounds candidate.",
+                "fresh_evidence":"Pricing and venue evidence retain their independent freshness rules; refreshing evidence does not renew consent.",
+                "recovery":"On response loss, reconcile with fin authorizations status AUTHORIZATION_ID before creating another attempt.",
+                "candidate_replacement":"Pass --replaces-attempt OLD_OPERATION_UUID with --authorization to atomically cancel and replace only an unsubmitted active candidate. Submitted or uncertain attempts cannot be replaced. This does not change authorization bounds or expiry; use authorizations authorize --replaces for fresh approval when those change. With --dry-run it only previews and does not replace.",
+                "out_of_bounds":"Structured violation identifies the bound, approved value, candidate value and whether replacement approval or reconciliation is needed."
+            }),
+        ),
+        definition::<IdInput>(
+            "authorizations.status",
+            "Read and reconcile durable progress, remaining authority and attempts for one bounded authorization.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"id":"opaque-authorization-id"}),
+            json!({"command_line_example":"fin authorizations status opaque-authorization-id --json","reconciliation":"Observes attempts and never creates a new financial action.","expiry":"Expiry or revocation blocks future dispatch but allows observation and reconciliation."}),
+        ),
+        definition::<IdInput>(
+            "authorizations.cancel",
+            "Revoke future dispatch under one bounded authorization without Touch ID.",
+            OperationKind::Configuration,
+            ExecutionActor::AgentInvocable,
+            json!({"id":"opaque-authorization-id"}),
+            json!({"command_line_example":"fin authorizations cancel opaque-authorization-id --json","touch_id":false,"submitted_attempts":"Cancellation does not cancel an already submitted venue order; reconcile it with authorizations status."}),
+        ),
         definition::<IdInput>(
             "status",
             "Read and reconcile the durable status for one original operation record.",
@@ -470,7 +556,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<EmptyArgs>(
             "policy.show",
-            "Show human-owned financial limits, included costs and durable allocation scope.",
+            "Show human-owned financial limits, the unpriced exchange setting, included costs and durable allocation scope.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({}),
@@ -478,11 +564,11 @@ pub fn operation_definitions() -> Vec<Definition> {
         ),
         definition::<PolicySetArgs>(
             "policy.set",
-            "Atomically change both financial limits after protected human review and fresh Touch ID.",
+            "Atomically change financial limits and an optional unpriced exchange exception after protected human review and fresh Touch ID.",
             OperationKind::Configuration,
             ExecutionActor::HumanInteractive,
             json!({"max_movement_usd":"1000","max_run_allocation_usd":"5000"}),
-            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":true,"financial_movement":false,"future_financial_authority":false,"secret_input":"none","amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000"],"next_check":"fin policy show --json"}),
+            json!({"requires_human_terminal":true,"requires_administrator":true,"requires_fresh_touch_id":true,"financial_movement":false,"future_financial_authority":false,"secret_input":"none","unpriced_exchange_exception":{"field":"allow_unpriced_exchange_assets","default":false,"omission":"Preserves current policy","authorization":"Protected human Terminal review and fresh Touch ID","warning":fin_domain::unpriced::WARNING},"amounts":"Nonnegative exact USD decimals; 0 means no personal limit, at most six fractional digits, bounded by 18446744073709.551615 USD; no floating-point conversion.","pending_work":"Refuse every nonterminal operation; historical unrestored runs do not block changes. No reservation changes or replays.","reload":"Existing configuration-change detection stops the stale broker; launchd reloads on the next request. Never retry a financial write automatically.","command_line_examples":["fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000", "fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true"],"next_check":"fin policy show --json"}),
         ),
         definition::<EmptyArgs>(
             "connections.list",
@@ -582,7 +668,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
         "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
-        "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "spot":{"execution":"LIMIT FOK scoped return plans", "ioc_partial_fills":"synthetic reconciliation only; scoped IOC return plans unavailable"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
+        "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT FOK scoped return plans", "ioc_partial_fills":"synthetic reconciliation only; scoped IOC return plans unavailable"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"fin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"fin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
     });
@@ -596,7 +682,12 @@ pub fn exchange_capabilities() -> serde_json::Value {
         ),
         ("bybit", "spot"),
     ] {
-        value["fin"][venue] = serde_json::json!({"operations":["exchange.markets","exchange.ticker"],"scope":scope,"public_only":true,"account_enrollment":false,"writes":false});
+        let market_type = if venue == "hyperliquid" {
+            "perpetual"
+        } else {
+            "spot"
+        };
+        value["fin"][venue] = serde_json::json!({"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":[market_type],"maximum_order_book_depth":100,"scope":scope,"public_only":true,"account_enrollment":false,"writes":false});
     }
     value
 }

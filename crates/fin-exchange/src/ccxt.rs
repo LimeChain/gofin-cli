@@ -68,9 +68,12 @@ pub enum Method {
     BinanceUniversalTransferHistory,
     BinanceSubAccountTransferHistory,
     BinanceUniversalTransfer,
+    BinanceSubToMasterTransfer,
     BinanceStandardWithdrawal,
     BinanceTravelRuleRequirements,
     BinanceTickerPrice,
+    BinanceOrderBookSpot,
+    BinanceOrderBookPerpetual,
     BinanceSpotExchangeInfo,
     BinanceSpotCommission,
     BinanceSpotOpenOrders,
@@ -99,22 +102,35 @@ pub enum Method {
 
     KrakenTicker,
     KrakenAssetPairs,
+    KrakenOrderBook,
     HyperliquidMetaAndAssetContexts,
+    HyperliquidOrderBook,
     OkxInstruments,
     OkxTicker,
+    OkxOrderBook,
     CoinbaseProducts,
+    CoinbaseProduct,
     CoinbaseTicker,
+    CoinbaseOrderBook,
     BybitInstruments,
     BybitTicker,
+    BybitOrderBook,
 }
 impl Method {
     fn exchange(self) -> ExchangeId {
         match self {
-            Self::KrakenTicker | Self::KrakenAssetPairs => ExchangeId::Kraken,
-            Self::HyperliquidMetaAndAssetContexts => ExchangeId::Hyperliquid,
-            Self::OkxInstruments | Self::OkxTicker => ExchangeId::Okx,
-            Self::CoinbaseProducts | Self::CoinbaseTicker => ExchangeId::Coinbase,
-            Self::BybitInstruments | Self::BybitTicker => ExchangeId::Bybit,
+            Self::KrakenTicker | Self::KrakenAssetPairs | Self::KrakenOrderBook => {
+                ExchangeId::Kraken
+            }
+            Self::HyperliquidMetaAndAssetContexts | Self::HyperliquidOrderBook => {
+                ExchangeId::Hyperliquid
+            }
+            Self::OkxInstruments | Self::OkxTicker | Self::OkxOrderBook => ExchangeId::Okx,
+            Self::CoinbaseProducts
+            | Self::CoinbaseProduct
+            | Self::CoinbaseTicker
+            | Self::CoinbaseOrderBook => ExchangeId::Coinbase,
+            Self::BybitInstruments | Self::BybitTicker | Self::BybitOrderBook => ExchangeId::Bybit,
             _ => ExchangeId::Binance,
         }
     }
@@ -143,11 +159,14 @@ impl Method {
                 "sapi_get_sub_account_transfer_sub_user_history"
             }
             Self::BinanceUniversalTransfer => "sapi_post_sub_account_universal_transfer",
+            Self::BinanceSubToMasterTransfer => "sapi_post_sub_account_transfer_sub_to_master",
             Self::BinanceStandardWithdrawal => "sapi_post_capital_withdraw_apply",
             Self::BinanceTravelRuleRequirements => {
                 "sapi_get_localentity_questionnaire_requirements"
             }
             Self::BinanceTickerPrice => "public_get_ticker_price",
+            Self::BinanceOrderBookSpot => "public_get_depth",
+            Self::BinanceOrderBookPerpetual => "fapi_public_get_depth",
             Self::BinanceSpotExchangeInfo => "public_get_exchange_info",
             Self::BinanceSpotCommission => "private_get_account_commission",
             Self::BinanceSpotOpenOrders => "private_get_open_orders",
@@ -176,13 +195,19 @@ impl Method {
 
             Self::KrakenTicker => "public_get_ticker",
             Self::KrakenAssetPairs => "public_get_asset_pairs",
+            Self::KrakenOrderBook => "public_get_depth",
             Self::HyperliquidMetaAndAssetContexts => "public_post_info",
+            Self::HyperliquidOrderBook => "public_post_info",
             Self::OkxInstruments => "public_get_public_instruments",
             Self::OkxTicker => "public_get_market_ticker",
+            Self::OkxOrderBook => "public_get_market_books",
             Self::CoinbaseProducts => "v3_public_get_brokerage_market_products",
+            Self::CoinbaseProduct => "v3_public_get_brokerage_market_products_product_id",
             Self::CoinbaseTicker => "v3_public_get_brokerage_market_products_product_id_ticker",
+            Self::CoinbaseOrderBook => "v3_public_get_brokerage_market_product_book",
             Self::BybitInstruments => "public_get_v5_market_instruments_info",
             Self::BybitTicker => "public_get_v5_market_tickers",
+            Self::BybitOrderBook => "public_get_v5_market_orderbook",
         }
     }
     #[cfg(any(
@@ -201,6 +226,7 @@ impl Method {
                 | Self::BinanceUniversalTransferHistory
                 | Self::BinanceSubAccountTransferHistory
                 | Self::BinanceUniversalTransfer
+                | Self::BinanceSubToMasterTransfer
                 | Self::BinanceStandardWithdrawal
                 | Self::BybitInstruments
                 | Self::BybitTicker
@@ -210,6 +236,7 @@ impl Method {
         matches!(
             self,
             Self::BinanceSpotPlaceOrder
+                | Self::BinanceSubToMasterTransfer
                 | Self::BinanceSpotCancelOrder
                 | Self::BinanceFuturesPlaceOrder
                 | Self::BinanceFuturesCancelOrder
@@ -223,15 +250,23 @@ impl Method {
                 | Self::BinanceSpotExchangeInfo
                 | Self::BinanceFuturesExchangeInfo
                 | Self::BinanceFuturesMarkPrice
+                | Self::BinanceOrderBookSpot
+                | Self::BinanceOrderBookPerpetual
                 | Self::KrakenTicker
                 | Self::KrakenAssetPairs
+                | Self::KrakenOrderBook
                 | Self::HyperliquidMetaAndAssetContexts
+                | Self::HyperliquidOrderBook
                 | Self::OkxInstruments
                 | Self::OkxTicker
+                | Self::OkxOrderBook
                 | Self::CoinbaseProducts
+                | Self::CoinbaseProduct
                 | Self::CoinbaseTicker
+                | Self::CoinbaseOrderBook
                 | Self::BybitInstruments
                 | Self::BybitTicker
+                | Self::BybitOrderBook
         )
     }
 }
@@ -705,6 +740,10 @@ impl CcxtClient {
             || (!method.private() && credentials.is_some())
             || (method == Method::HyperliquidMetaAndAssetContexts
                 && params != [("type".to_owned(), "metaAndAssetCtxs".to_owned())])
+            || (method == Method::HyperliquidOrderBook
+                && (params.len() != 2
+                    || !params.iter().any(|(k, v)| k == "type" && v == "l2Book")
+                    || !params.iter().any(|(k, v)| k == "coin" && !v.is_empty())))
         {
             return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
         }

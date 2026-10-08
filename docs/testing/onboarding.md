@@ -36,7 +36,7 @@ no animation. These checks require their own observed results.
    key-rotation commands. It must supply safe metadata flags, select the proper
    credential category, and direct secret entry to the human's own Terminal.
    Record its actual discovery inputs and advice; incorrect commands fail this
-   case. A text-mediated Ogi rehearsal is separate from installed-agent evidence.
+   case. A text-only rehearsal is separate from installed-agent evidence.
 3. In a fresh macOS Terminal window, the human runs `./fin setup`. Before any OS
    authentication prompt, Fin must explain why administrator access is needed,
    identify the Mac login password and hidden typing, and explain cancellation.
@@ -63,10 +63,9 @@ For lifecycle acceptance, stop an idle broker and run status repeatedly: it must
 remain stopped. An ordinary Doctor/read request must return `DAEMON_STOPPED` and
 leave it stopped. Explicit start must then report observed running state. Default
 lifecycle output is one short line; `--json` contains structured state, and Doctor
-retains readiness details. These installed checks are pending until observed.
+retains readiness details. Record installed checks separately from synthetic lifecycle fixtures.
 
-Run these in the human's own fresh macOS Terminal after the lead identifies the
-final reviewed bundle path:
+Run these in the human's own fresh macOS Terminal using the reviewed bundle path:
 
 ```sh
 cd /absolute/path/to/reviewed/fin-bundle
@@ -168,7 +167,7 @@ parent with children must fail. Configuration approvals must never authorize a
 financial operation.
 
 Before claiming isolation, remove every agent-readable key copy, including the
-old `.context/.ai.env` and `.context/rust-live-harness/provision.json`, and rotate
+environment files, provisioning fixtures and backups, and rotate
 previously disclosed keys where appropriate. Preserve the financial journals and
 reconciliation evidence when removing those secret files.
 An agent that knew the old key cannot be shown to have forgotten it. Use fresh
@@ -188,8 +187,8 @@ key that was previously accessible to the agent.
 
 ## Native financial authorization and recovery
 
-Before each operation the lead presents its concrete preview, current USD bounds
-and funded return path. Native Fin independently displays the exact binding.
+Before each acceptance-test operation, present its concrete preview, current USD
+bounds and funded return path. Native Fin independently displays the exact binding.
 Test rejection/cancellation, then acceptance on a separately prepared action;
 repeated requests must reuse the original operation without a second signature
 or dispatch. Changed parameters under the same request identity conflict. Expired
@@ -215,8 +214,8 @@ Do not replay an uncertain request, discard its journal, or use installation or
 enrollment to forget it. Carry unresolved records and outstanding cleanup into
 the private human-session report; a previous approval never authorizes a new run.
 
-Follow the [live-test contract](README.md#live-test-contract), carrying forward the
-historical selected allocation and actual consumed costs. Snapshot current
+Follow the [live-test contract](README.md#live-test-contract), preserving actual
+consumed costs and any unresolved work within the selected test allocation. Snapshot current
 production accounts and mainnet positions privately. Every movement and the
 total allocation, including borrowed proceeds and complete unwind/recovery costs,
 must remain at most $100. Confirm Binance destination/return minimums and usable
@@ -239,11 +238,9 @@ as separate evidence in the [report format](report-template.md).
 
 ## Financial policy checks
 
-**Pending / not run:** actual policy Terminal isolation, Touch ID acceptance,
-decline, cancellation, expiry and installed launchd reload. Synthetic evidence
-cannot establish these cases. This change did not install or perform live reads
-or writes. Use the reviewed human build/update workflow separately; these checks
-need no financial movement.
+Verify policy Terminal isolation, Touch ID acceptance, decline, cancellation,
+expiry and installed configuration reload independently of synthetic tests.
+These configuration checks need no financial movement.
 
 1. During a separately authorized fresh setup, verify both limit prompts, Enter
    preserving $100, and zero shown explicitly as “No limit” in the trusted review.
@@ -270,4 +267,4 @@ need no financial movement.
    $100 total allocation and per-movement contract, a baseline, a complete funded
    return plan, observed restoration, and fresh Touch ID for every write.
    Ordinary permanent portfolio changes do not require these test artifacts.
-   No runtime verification classification exists. No live acceptance is claimed here.
+   No runtime verification classification exists.

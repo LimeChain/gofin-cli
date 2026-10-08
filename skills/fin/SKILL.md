@@ -15,7 +15,47 @@ Read venue-specific balances and positions before planning. Resolve exact accoun
 
 Invoke one operation per write. Prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass.
 
+For operations advertising `semantics.boundary_authorization.supported`, use
+`fin schema OPERATION --json` and `fin schema authorizations.authorize --json`
+to discover fixed fields and allowed variations. Explain the intended outcome,
+cumulative asset-unit limits, price guardrail, fee caps and consent duration,
+then invoke `fin authorizations authorize OPERATION --id INTENT_REQUEST_ID
+--input JSON --bounds JSON --valid-for 10m --json`. The default lifetime is 10m
+from approval; request another duration only when justified by the user's intent.
+The returned ID references protected state; do not fabricate approval receipts.
+
+Prepare candidates with `fin execute OPERATION --authorization AUTHORIZATION_ID
+--input JSON --dry-run --json`, then use a stable per-attempt `--id` for execution.
+In-bounds attempts reuse consent without another Touch ID prompt. Track cumulative
+completion through `fin authorizations status AUTHORIZATION_ID --json`; partial
+fills and paid fees reduce remaining authority. Never retry the original full
+quantity after a partial fill or create new IDs to bypass an uncertain submission.
+Use `exchange.order-book` for exact current bid/ask evidence and operation order
+reads for fills. Status alone does not detect market drift. Respect structured
+constraint violations and freshness errors; do not describe stale observations
+as current or assume stablecoins equal USD.
+
+When the remainder is outside approved boundaries, present verified progress and
+ask whether to stop or review new bounds. `fin authorizations cancel ID` revokes
+future dispatch without Touch ID but cannot cancel an existing venue order.
+Changing bounds/expiry uses a new authorization request with `--replaces ID` and
+fresh Touch ID; its limits are total caps for the same intent including earlier
+consumption. `--replaces-attempt OLD_OPERATION_ID` only supersedes an unsubmitted
+candidate inside existing consent. Reconcile submitted/uncertain attempts first.
+Fin does not schedule a limit-to-market switch: suggest it to the user, verify
+implemented order types and seek new approval when outside the authorized choices.
+The initial bounded execution scope is Binance spot LIMIT IOC/FOK only; other
+financial writes retain the exact approval path. Enrollment/policy are separate.
+
 Keep one `--id` for a logical action and follow the operation schema for any venue request identifier. After interruption, use `fin operations --json` and `fin status OPERATION_ID --json`; status reconciles the original submission. A venue acceptance or transaction hash is not completion. Preserve successful steps. Never create a fresh identity to bypass an uncertain original outcome. A deliberate new action requires a fresh identity and approval.
+
+For `binance.transfer`, choose the signing authority explicitly. A main authority
+uses universal transfer; a source subaccount authority uses transfer-to-master
+only for its configured parent and requires Spot & Margin Trading permission.
+Present that signer in the preview. Do not switch routes to bypass an unresolved
+transfer. The subaccount endpoint has no client transaction ID: losing its
+response before Fin saves the receipt leaves unknown state, not permission to
+resend. Let `fin status` establish terminal proof before any replacement.
 
 Ordinary operations support permanent portfolio changes: sell available existing holdings, retain purchases, and transfer/withdraw to enrolled destinations. No run creation, verification classification, unwind plan or restoration is required. Read `fin policy show --json` for personal limits and current installation-wide rolling 24-hour gross allocation usage. The legacy-named `max-run-allocation-usd` counts gross movement, maximum costs and additional borrowed allocation across commands; unresolved submissions keep consuming reserved budget after the window. Never change request identities to evade a limit. Setup collects human limits; later `fin policy set` belongs to the protected human Terminal with fresh Touch ID. Zero means no personal ceiling, never skipped approval or unbounded operation parameters. Use `fin operations --json` to find original records and `fin status OPERATION_ID --json` for recovery; there is no run command or execute run argument.
 

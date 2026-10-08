@@ -35,6 +35,28 @@ pub trait ExchangeProfile: Send + Sync {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
     }
+    fn prepare_boundaries(
+        &self,
+        _prepared: &PreparedOperation,
+        _bounds: &Value,
+    ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
+        Err(error(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "This exchange profile has no implemented boundary authorization.",
+        ))
+    }
+    fn validate_boundary_candidate(
+        &self,
+        _spec: &fin_domain::boundaries::BoundarySpec,
+        _prepared: &PreparedOperation,
+    ) -> Result<(), FinError> {
+        Err(error(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "This exchange profile has no implemented boundary authorization.",
+        ))
+    }
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         Err(error(
             "SNAPSHOT_UNAVAILABLE",
@@ -187,6 +209,21 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.profile.connections()
     }
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
+        self.require_kind(&prepared.operation, OperationKind::Write, "authorization")?;
+        self.profile.prepare_boundaries(prepared, bounds)
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &fin_domain::boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> Result<(), FinError> {
+        self.profile.validate_boundary_candidate(spec, prepared)
+    }
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         self.profile.snapshot().await
     }
@@ -240,6 +277,15 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             )
         })?;
         if expires.with_timezone(&Utc) <= Utc::now() {
+            if let Some(metadata) = prepared
+                .binding
+                .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            {
+                return Err(FinError::new("PREVIEW_EXPIRED", "submission",
+                    "The candidate preview expired; the financial authorization has its own lifetime.",
+                    "Prepare a fresh candidate under the same authorization if it is still active; nothing was submitted.")
+                    .with_details(json!({"constraint":"candidate_freshness","authorization_id":metadata["authorization_id"],"reauthorization_required":false,"reconciliation_required":false})));
+            }
             return Err(error(
                 "PREVIEW_EXPIRED",
                 "submission",
@@ -251,6 +297,15 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             || current.binding != prepared.binding
             || !self.profile.valuation_matches(prepared, &current)
         {
+            if let Some(metadata) = prepared
+                .binding
+                .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            {
+                return Err(FinError::new("PREVIEW_CHANGED", "submission",
+                    "Revalidation changed this candidate's exact execution or evidence.",
+                    "Prepare a new candidate under the same authorization; fresh Touch ID is needed only if its boundaries must change.")
+                    .with_details(json!({"constraint":"candidate_binding","authorization_id":metadata["authorization_id"],"reauthorization_required":false,"reconciliation_required":false})));
+            }
             return Err(error(
                 "PREVIEW_CHANGED",
                 "submission",
@@ -265,7 +320,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission, FinError> {
         let current = self.revalidate(prepared).await?;
-        journal.assert_authorized()?;
+        journal.assert_candidate(&current)?;
         let plan = self.profile.plan_submission(&current).await?;
         if plan.submission.kind != self.profile.submission_kind()
             || plan.submission.reference.is_empty()
@@ -579,6 +634,7 @@ mod tests {
             preview: Some(preview()),
             approval: None,
             submission: Some(original.clone()),
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,

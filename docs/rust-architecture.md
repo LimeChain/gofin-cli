@@ -2,14 +2,6 @@
 
 The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, and Ethereum mainnet Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
-## Delivery objective and sequence
-
-Build a compiled Rust Fin with the existing Binance funding, EVM wallet and Ethereum mainnet Uniswap/Aave behavior, discoverable terminal onboarding, protected execution, per-write authorization, recovery, duplicate prevention, and exact financial reconciliation. Preserve the wider integration inventory in discovery without claiming it is implemented.
-
-The implementation goal delivers working code, reproducible automated and fixed-fork verification, updated documentation, a sanitized results report, and a concrete [human test handoff](testing/rust-human-handoff.md). The human subsequently runs onboarding and the real Touch ID path. Human-only checks remain explicitly pending until performed; they must not prevent unrelated implementation and automated verification from finishing. Production/mainnet acceptance still requires the [live-test contract](testing/README.md#live-test-contract), including full restoration.
-
-This document authorizes no new financial activity. Default build/test/fork commands must not load production secrets or broadcast to mainnet. Any separately authorized live phase must record its own mechanism, identities, budget, baseline, unwind, and results. Earlier TS results and temporary non-biometric testing are not Rust approval or credential-isolation evidence. There must be no shipped flag or environment variable that disables write authorization.
-
 ## One CLI and a protected execution role
 
 The human and agent use one public CLI, `fin`. A local broker owns execution credentials, policy, authorization, signing, submission, and durable records. The broker is an internal service, not a second application-specific CLI. Both roles may share one Rust executable with separate client/service entry points or use two binaries; this packaging choice must preserve the same protected process boundary.
@@ -94,7 +86,7 @@ finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
 compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Uniswap/Aave remain mainnet-only, and bridging is outside this increment.
+Uniswap/Aave are mainnet-only; general bridging is a separate capability.
 
 A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
 Protected human-approved `connections update --provider evm` broadens it
@@ -110,22 +102,18 @@ failure/cache warnings. A financial baseline tracks native plus configured token
 scope; successful observation of that scope does not establish all wallet/dapp
 positions. A complete claim must name its scope.
 
-Shared `fin-pricing` valuation serves Binance and every EVM network through
-`UsdPriceSource`, with CoinGecko as the default. ERC-20 lookups use a verified
-chain/platform and exact contract, allowing listed tokens without a per-token
-allowlist. Native ETH uses its verified coin ID. Exchange assets resolve by
-`ExchangeAssetKey { exchange, asset }`: provider exchange tickers supply coin IDs,
-while `ExchangeMarketSource` supplies exact venue market/base/quote identifiers.
-Full pagination, exact provider exchange identity and matching active venue pairs
-are required; conflicting IDs or missing evidence fail closed. No symbol registry,
-name search or first-result choice supplies financial identity. Binance is the
-built-in venue reader; `with_exchange_market_source` registers additional venue
-integrations and their provider exchange IDs, never per-asset mappings.
-`ExchangeAssetResolver` and the existing `UsdPriceSource` keep identity and pricing
-provider boundaries extensible. Legacy `binance` asset identities remain intact;
-additional integration keys can use `exchange:<venue>`. Unknown or unquoted assets
-may be observed but cannot bypass write/allocation limits. Aave collateral and
-health-factor oracles remain protocol checks, separate from shared USD pricing. Fee preparation freezes the RPC-estimated envelope;
+Shared `fin-pricing` valuation serves Binance and EVM networks through
+`UsdPriceSource`. `ExchangeSpotPrices` composes a `SpotMarketSource` and a
+`StablecoinUsdSource`, delegating on-chain quotes unchanged to CoinGecko.
+Binance exact market/base/quote metadata selects an active direct USDC pair,
+then USDT; best ask times the corresponding USD rate supplies policy valuation.
+Pair identity stays exchange-local; no global coin ID or symbol search is used.
+The same derived source serves previews, fees, allocation and execution checks.
+Legacy `binance` financial identities are unchanged; additional integrations can
+use `exchange:<venue>` with explicitly registered market readers.
+CoinGecko remains responsible for verified EVM platform/contract and native ETH
+identity. Aave health/collateral oracles remain protocol-specific checks.
+Fee preparation freezes the RPC-estimated envelope;
 L2 terminal reconciliation additionally checks finalized inclusion. A receipt
 before the RPC finalized block remains pending with its original identity.
 The finalized marker is not independent proof of the rollup challenge period.
@@ -170,14 +158,71 @@ rendering. The protected human terminal produces a consumed challenge-bound
 review proof only after confirmation and successful terminal restoration.
 The macOS authorizer accepts that proof for configuration only; the helper also
 checks a root-owned, mode-0600, unlinked regular-file input inherited read-only
-and an anonymous response pipe before omitting its duplicate Fin dialog.
-Darwin pipe metadata reports the inspecting process's UID, so it cannot prove
-the creating broker's identity. Invalid terminal proofs fail instead of opening
-a second custom review dialog.
-Financial requests keep native exact review. This division keeps a pleasant
-client presentation from becoming an approval mechanism.
+and an anonymous response pipe. Darwin pipe metadata reports the inspecting
+process's UID, so it cannot prove the creating broker's identity. Invalid or
+missing configuration review proofs fail; no custom dialog supplies a fallback.
+
+Human financial execution prints a read-only preview in the terminal before
+calling the existing execution/recovery path. `--verbose` exposes its exact
+technical details. Agent execution with `--json` adds no presentation or extra
+preview request: the agent obtains a dry-run and presents it before execution.
+The helper opens only the system Touch ID prompt, with the protected broker's
+operation summary as its authentication reason. It still checks the canonical
+binding hash, nonce and deadline and grants no reusable authority. The engine
+revalidates the complete approved binding before submission. Client previews
+are informative and may be refreshed; they cannot authorize a write.
+
+### Pricing evidence and approved USD ceilings
+
+This subsection describes legacy and standalone exact-operation approval.
+Operation-boundary attempts use fresh USD evidence for protected policy but do
+not inherit these incidental cent-rounded consent ceilings.
+
+Binance preparation attaches versioned `_fin_usd_ceiling_v1` metadata using the
+shared domain helper. Movement, fee and extra-allocation maxima round upward to
+cents before initial policy checks/reservation and appear in the review summary.
+The immutable approval binds these ceilings and exact priced asset/unit/provider
+identities along with execution and financial intent. Actual unit prices and
+observation timestamps remain factual valuation evidence, outside that ceiling's
+hash; named valid observation timestamps in source descriptions are metadata.
+
+Revalidation refreshes the venue and pricing, checks every USD total against the
+original ceiling, and verifies source/asset/unit identity and freshness. It keeps
+the original monetary reservation maxima while retaining the actual fresh quote
+evidence. Changed execution terms, increased ceilings, incompatible identities,
+stale quotes and unavailable providers still fail. Final submission revalidation
+uses the same contract. Historical bindings without this metadata retain the
+legacy exact-quote hash and pending records are never replayed or rebound.
 
 ## Write lifecycle and authorization
+
+### Operation-boundary authorization
+
+The engine separates a logical intent, its versioned human authorization and
+immutable concrete attempts. Domain boundary contracts and adapter hooks define
+fixed identities and operation-specific permitted variations. The first adapter
+scope is Binance spot LIMIT IOC/FOK placement. Financial authority stays in the
+protected broker; public authorization IDs only reference durable state.
+
+Consent defaults to 600 seconds from successful approval; requesters may choose
+a representable positive duration. Native challenge expiry remains at most 90
+seconds and does not limit grant lifetime. Fresh quote requirements remain
+independent. Approval binds scope, cumulative debit/cost bounds and duration;
+each attempt binds its exact parameters, expected effects and submission ID.
+The journal independently checks current grant ownership, expiry/revocation,
+remaining authority and protected policy before dispatch.
+
+Verified partial effects and fees consume cumulative authority atomically with
+ledger settlement; unresolved attempts retain reservations. Candidate
+supersession atomically invalidates an unsubmitted predecessor, while submitted
+or uncertain attempts require original-identity reconciliation. Authorization
+revocation needs no Touch ID; boundary/expiry replacement needs fresh approval
+and retains intent consumption. Existing records are never broadened. Durable
+grants may survive restart with original expiry, but restart cannot auto-submit.
+Administration retains its separate protected human path. See the
+[CLI workflow](../README.md#operation-boundary-authorization).
+
+### Standalone exact-operation authorization
 
 1. Persist the logical request ID and canonical fingerprint; resolve aliases to exact resource identities.
 2. Prepare the actual execution payload, preview checks, effect expectations, observation times, expiry, and bounds.
@@ -207,6 +252,15 @@ Credential enrollment/replacement/removal and trusted configuration changes use 
 Use SQLite through `rusqlite`, durable journaling, unique request IDs, and atomic transactions. Persist normalized inputs, canonicalization version, operation/application/evidence version, preparation binding, approval audit metadata, submission identity, and reconciled results. Never persist raw signed transactions or unrestricted spending signatures.
 
 Request identity distinguishes a retry from a deliberately new action. Changed parameters under the same request ID conflict. After timeout or restart, reconcile the original venue identifier or transaction hash before considering any new write. Do not promise universal exactly-once execution.
+
+Endpoints without a client correlation ID can append immutable dispatch evidence
+through `SubmissionJournal::persist_dispatch_evidence`. The broker checks the
+exact already-persisted submission; SQLite atomically saves the receipt without
+changing that identity, status, reservations or consumed authority. Saving a
+response does not require consent to remain fresh after dispatch. Receipt
+identity and application-specific history still need verification before typed
+financial effects settle. A crash before receipt persistence leaves unknown
+authority; a matching amount/time alone cannot recover a lost transaction ID.
 
 Begin with one serialized broker write/settlement queue; bounded concurrent reads are useful. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
 
@@ -238,48 +292,36 @@ records remain available to accounting and recovery; no journal data is deleted.
 An effect bundle is a claim from trusted reviewed adapter code, not a substitute for proof. Preserve versioned protocol-specific evidence alongside the shared effect vocabulary. New financial behaviors may require a reviewed vocabulary extension; do not disguise unsupported behavior as a generic balance adjustment.
 
 Shared USD valuation is injectable through `fin-pricing::UsdPriceSource`.
-CoinGecko supplies direct positive USD quotes for Binance and EVM assets; there
-is no Binance, Coinbase or Kraken price fallback or assumed stablecoin parity.
-Raw JSON numeric lexemes normalize to exact decimal text without floating-point
-conversion. `updated_at` is RFC3339 derived from provider `last_updated_at`,
-separate from retrieval `observed_at`. Quotes older than 120 seconds, future,
-missing, zero or malformed quotes, and rate limits/outages block writes.
+Binance uses exact string bookTicker data, with live-request start time because
+REST does not expose an event timestamp. Best ask is a conservative value measure,
+not a liquidity guarantee. Metadata caches for 30 seconds, books for 10 seconds;
+spot age must remain below 30 seconds. A coalesced CoinGecko request fetches
+`usd-coin,tether` together; both rates cache for 30 seconds and retain provider
+and retrieval times, each below five minutes. Multiplication uses exact integer
+coefficients; unsupported result precision errors rather than rounds a price.
+Effective source time is the oldest leg. Attribution binds pair, currency and
+provider identities; cached observations never receive a new timestamp.
 
-A separate coalesced exchange identity cache retains complete snapshots for at
-most 24 hours from initial venue observation. Missing/conflicting mappings
-refresh automatically after 30 seconds. Rate-limited scans retain bounded
-pagination progress for later reads after `Retry-After`; incomplete snapshots
-never become accepted identities or quote authority, and expired/error snapshots
-cannot fall back to an old mapping. Quote cache entries contain provider coin or
-network/contract identities; caller-specific exchange evidence is appended only
-to the returned quote, avoiding cross-venue cache attribution.
+Batch reads deduplicate exact markets, at most 16 books per request. Concurrent
+requests share caches. A missing preferred book does not switch to another pair;
+invalid identity, stale legs and rate limits remain explicit errors. Existing
+CoinGecko scheduling, protected key routing and bounded public-read retry apply
+to conversion/on-chain calls. No Binance price request receives the pricing key.
+The previous catalog resolver and persisted identity cache remain compatible
+historical utilities but are not consulted for normal exchange pricing.
 
-The shared price source supports action-scoped batches. Binance trading warms
-movement/commission/loss assets through that API before the existing exact
-valuation calculations. Coin IDs deduplicate into batches of 16; contracts batch
-only within one provider platform. Each result retains its own source timestamp
-and exchange binding; any missing/invalid member rejects its response batch.
-
-A common request scheduler starts anonymous calls six seconds apart (one second
-for protected authenticated access), doubling the interval after 429 up to 60
-seconds. One automatic retry is limited to public reads and cooldowns up to 60
-seconds. No financial submission or authorization uses that mechanism. A scan
-attempt is bounded to 240 seconds, and pending scans expire after 15 minutes.
-The protected caller supplies IdentityStore; the macOS broker stores only public
-identity metadata, scan checkpoints, pacing and cooldown in a bounded root-owned
-0600 file. Invalid/version-mismatched metadata refreshes from the provider. Price
-values, keys, operation identities, financial journals and approvals are never
-persisted in this performance cache. Auth-mode changes retain valid public
-identities but do not inherit the previous mode's throttle state. Preview IPC
-allows at most 300 seconds for cold preparation, without changing approval expiry.
-
-A shared/coalesced price cache retains responses for at most 30 seconds and rechecks
-source freshness; it never serves stale quotes after an outage. The 120-second
-source-age bound accommodates the public provider's roughly 60-second update
-cycle without changing the 90-second preview/approval expiry or financial caps.
-Price nonzero holdings/positions, selected assets and configured route assets,
-without requiring a restoration baseline. Historical allocation identities remain
-part of retained evidence for compatible recovery.
+`SharedUsdValuator` translates only confirmed absence of a Binance direct pair
+into an explicitly marked unpriced estimate. Zero requires exact source/asset
+identity and whole-unit scale; on-chain, corrupt, stale and outage quotes cannot
+use it. Previews disclose unknown value. Protected policy
+`allow_unpriced_exchange_assets` defaults false and binds the exact setting to
+configuration approval. If enabled, ordinary USD ceilings count only priced
+amounts; the warning appears in preview/approval and policy output. Quantities,
+cost caps, reservations, per-write approval and original-request recovery remain
+mandatory. Priced-to-unpriced or source/pair changes require a new approval.
+Previously excluded amounts remain honestly excluded in retained records;
+disabling the exception does not disable reconciliation. Historical scoped runs
+reject estimates, preserving the acceptance-test budget/restoration contract.
 
 Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
@@ -388,9 +430,9 @@ Compatibility shims are deliberately limited to demonstrated 4.5.85 gaps:
 - Suppress only CCXT-thread panic logging because upstream uses panic-based
   exceptions containing request data; return safe categories and numeric codes.
 
-Alloy remains the Ethereum runtime, and `rusqlite` owns durable state. These
-changes do not add trading, derivatives, broad exchange enrollment or a sidecar.
-See the [CCXT refactor report](reports/ccxt-exchange.md) for verification and limits.
+Alloy supplies the Ethereum runtime, and `rusqlite` owns durable state. Exchange
+connectivity does not by itself grant financial authority or establish support
+for every operation exposed by a venue SDK.
 
 ## Installation and daemon lifecycle
 
@@ -408,19 +450,6 @@ socket registration; no new privilege rule or financial authorization exists.
 Start/stop report observed process state rather than submission acknowledgement.
 
 Prefer service-manager/on-demand activation where practical. Start invokes the fixed installed service, never client-selected privileged code or configuration. Stop preserves the journal and unresolved reservations and must not erase or declare pending financial work complete. Source/development execution cannot become a production write bypass. Signing/notarization can improve public distribution later, but is not an additional beta implementation gate.
-
-## Implementation order and handoff
-
-| Stage                          | Deliver and verify before human testing                                                                                                                                                               |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Contract/library foundation | Typed domain, command/onboarding definitions, exact CCXT request spike, frozen Alloy payload spike, versioned local protocol.                                                                         |
-| 2. Protected engine            | Journal and migrations, policy/effect ledger, private credential interface, authorization crate/macOS helper build, recovery and duplicate regressions.                                               |
-| 3. Financial ports             | Binance and wallet operations, followed by Uniswap/Aave, with protocol evidence and restoration behavior preserved.                                                                                   |
-| 4. Distribution/onboarding     | Compiled release/build procedure, bootstrap/setup, repeatable connection management, lifecycle/diagnostics, discovery before broker installation.                                                     |
-| 5. Verification and delivery   | Automated financial/security/CLI tests, recorded fixed-fork run with synthetic restoration, parity/migration checks, allowed read-only production observations, sanitized report and human checklist. |
-
-The report must distinguish implementation readiness from complete live acceptance. The later human session exercises fresh-agent onboarding, actual protected installation and credential denial, real biometric acceptance/cancellation/binding, and approved production/mainnet flows with full unwind. Follow [onboarding acceptance](onboarding.md#acceptance-and-handoff) and [testing stages](testing/README.md#rust-implementation-and-later-human-verification).
-
 
 ## Trading profiles and typed settlement
 

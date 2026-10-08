@@ -1,6 +1,6 @@
 # Fin verification run
 
-Copy this template for a real run. Store private raw reports under the ignored `.context/test-runs/` directory or another private location. Commit only intentionally sanitized reports. No test result is supplied by this template.
+Copy this template for a real run. Store private raw reports under the ignored `.context/test-runs/` directory or another private location. Keep run-specific results in private records or sanitized CI artifacts, not maintained documentation. No test result is supplied by this template.
 
 ## Run identity
 
@@ -43,7 +43,7 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Real biometric checks versus build/probe/fake-provider tests:
 - Human checklist still outstanding, prerequisites, expected results, and recovery instructions:
 
-No secret values belong in this section. A passed synthetic wizard or agent rehearsal does not establish human installation, protected input/storage, or actual native approval. Human cases can remain pending at the implementation handoff; complete acceptance cannot be claimed from that handoff alone.
+No secret values belong in this section. A passed synthetic wizard or agent rehearsal does not establish human installation, protected input/storage, or actual native approval. Unobserved human cases do not count as acceptance evidence.
 
 Do not include API keys, private keys, seed phrases, auth headers, spending signatures, raw signed transactions, or credential-bearing RPC URLs. Redact private account identifiers and unrelated holdings from any shared copy.
 

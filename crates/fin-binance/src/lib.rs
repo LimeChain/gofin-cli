@@ -195,6 +195,7 @@ pub enum BinanceEndpoint {
     UniversalTransferHistory,
     SubAccountTransferHistory,
     UniversalTransfer,
+    SubToMasterTransfer,
     StandardWithdrawal,
     TravelRuleRequirements,
     SpotExchangeInfo,
@@ -270,6 +271,7 @@ impl BinanceEndpoint {
                 ("GET", "/sapi/v1/sub-account/transfer/subUserHistory")
             }
             Self::UniversalTransfer => ("POST", "/sapi/v1/sub-account/universalTransfer"),
+            Self::SubToMasterTransfer => ("POST", "/sapi/v1/sub-account/transfer/subToMaster"),
             Self::StandardWithdrawal => ("POST", "/sapi/v1/capital/withdraw/apply"),
             Self::TravelRuleRequirements => {
                 ("GET", "/sapi/v1/localentity/questionnaire-requirements")
@@ -515,6 +517,9 @@ impl BinanceRequest {
                     "recvWindow",
                 ],
             ),
+            BinanceEndpoint::SubToMasterTransfer => {
+                (&["asset", "amount"], &["asset", "amount", "recvWindow"])
+            }
         };
         if required.iter().any(|key| self.get(key).is_none()) {
             return Err(BinanceError::MissingParameter);
@@ -656,6 +661,17 @@ impl BinanceRequest {
             if self.get("fromEmail").is_none() == self.get("toEmail").is_none() {
                 return Err(BinanceError::InvalidRequest);
             }
+        }
+        if self.endpoint == BinanceEndpoint::SubToMasterTransfer
+            && (ExactDecimal::parse(self.get("amount").unwrap())?.is_zero()
+                || self.get("asset").is_none_or(|asset| {
+                    asset.is_empty()
+                        || asset.len() > 40
+                        || asset.trim() != asset
+                        || asset.chars().any(char::is_control)
+                }))
+        {
+            return Err(BinanceError::InvalidRequest);
         }
         if matches!(self.endpoint, BinanceEndpoint::StandardWithdrawal) {
             let safe_text = |value: &str, max_bytes: usize| {
@@ -823,6 +839,24 @@ impl CredentialHandle {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubToMasterTransferIntent {
+    pub asset: String,
+    pub amount: ExactDecimal,
+}
+
+impl SubToMasterTransferIntent {
+    /// Binance derives the recipient from the signing child's parent. This
+    /// endpoint accepts no client transaction identifier or arbitrary recipient.
+    pub fn request(&self) -> Result<BinanceRequest, BinanceError> {
+        let request = BinanceRequest::new(BinanceEndpoint::SubToMasterTransfer)
+            .push("asset", self.asset.clone())
+            .push("amount", self.amount.canonical());
+        request.validate()?;
+        Ok(request)
     }
 }
 
@@ -1480,6 +1514,7 @@ impl BinanceCcxtTransport {
             BinanceEndpoint::UniversalTransferHistory => Method::BinanceUniversalTransferHistory,
             BinanceEndpoint::SubAccountTransferHistory => Method::BinanceSubAccountTransferHistory,
             BinanceEndpoint::UniversalTransfer => Method::BinanceUniversalTransfer,
+            BinanceEndpoint::SubToMasterTransfer => Method::BinanceSubToMasterTransfer,
             BinanceEndpoint::StandardWithdrawal => Method::BinanceStandardWithdrawal,
             BinanceEndpoint::TravelRuleRequirements => Method::BinanceTravelRuleRequirements,
         };

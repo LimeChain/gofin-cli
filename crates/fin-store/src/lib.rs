@@ -9,9 +9,11 @@ use serde_json::{Value, json};
 use std::path::Path;
 use thiserror::Error;
 
+#[cfg(test)]
+mod boundary_migration_tests;
 pub mod legacy;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -19,6 +21,8 @@ pub enum StoreError {
     RequestConflict,
     #[error("submission identity cannot be changed")]
     SubmissionConflict,
+    #[error("dispatch evidence cannot be changed or lacks its exact durable submission")]
+    DispatchEvidenceConflict,
     #[error("resource reservation cannot be changed")]
     ReservationConflict,
     #[error("operation state changed or another operation already holds a resource reservation")]
@@ -176,8 +180,8 @@ impl Store {
         if version == 0 && object_count != 0 {
             return Err(StoreError::ForeignDatabase);
         }
-        if version == SCHEMA_VERSION {
-            let expected = [
+        if (1..=SCHEMA_VERSION).contains(&version) {
+            let mut expected = vec![
                 (
                     "effect_ledger",
                     ["operation_id", "effect_index", "effect_json"].as_slice(),
@@ -211,6 +215,40 @@ impl Store {
                     ["operation_id", "kind", "reference", "data_json"].as_slice(),
                 ),
             ];
+            if version >= 2 {
+                expected.extend([
+                    (
+                        "boundary_authorizations",
+                        [
+                            "id",
+                            "request_id",
+                            "intent_id",
+                            "record_json",
+                            "created_at",
+                            "updated_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "boundary_attempts",
+                        ["authorization_id", "operation_id", "created_at"].as_slice(),
+                    ),
+                ]);
+            }
+            if version >= 3 {
+                expected.push((
+                    "boundary_authorization_requests",
+                    [
+                        "request_id",
+                        "fingerprint",
+                        "status",
+                        "authorization_id",
+                        "created_at",
+                        "updated_at",
+                    ]
+                    .as_slice(),
+                ));
+            }
             if names.len() != expected.len()
                 || expected.iter().any(|(table, columns)| {
                     if !names.iter().any(|name| name == table) {
@@ -294,6 +332,47 @@ impl Store {
                     updated_at TEXT NOT NULL
                  );
                  PRAGMA user_version = 1;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 1 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE boundary_authorizations (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    intent_id TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX boundary_authorizations_intent_idx ON boundary_authorizations(intent_id);
+                 CREATE TABLE boundary_attempts (
+                    authorization_id TEXT NOT NULL REFERENCES boundary_authorizations(id),
+                    operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(authorization_id, operation_id)
+                 );
+                 PRAGMA user_version = 2;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 2 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE boundary_authorization_requests (
+                    request_id TEXT PRIMARY KEY NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    authorization_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 3;",
             )?;
             tx.commit()?;
         }
@@ -613,7 +692,27 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<SubmissionRow> = tx
+        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Append immutable response evidence to the operation record after its
+    /// exact submission has been durably recorded. This transaction changes
+    /// no submission, reservation, approval, status, or settlement data.
+    pub fn persist_dispatch_evidence(
+        &mut self,
+        operation_id: &str,
+        submission: &SubmissionRow,
+        evidence: &Value,
+    ) -> Result<()> {
+        if evidence.is_null() {
+            return Err(StoreError::DispatchEvidenceConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let durable: Option<SubmissionRow> = tx
             .query_row(
                 "SELECT kind, reference, data_json FROM submissions WHERE operation_id=?1",
                 [operation_id],
@@ -621,47 +720,78 @@ impl Store {
                     Ok(SubmissionRow {
                         kind: r.get(0)?,
                         reference: r.get(1)?,
-                        data: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
+                        data: serde_json::from_str(&r.get::<_, String>(2)?).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     })
                 },
             )
             .optional()?;
-        if let Some(old) = existing {
-            if old != *submission {
-                return Err(StoreError::SubmissionConflict);
-            }
-            tx.commit()?;
-            return Ok(());
+        if durable.as_ref() != Some(submission) {
+            return Err(StoreError::DispatchEvidenceConflict);
         }
-        let status: Option<String> = tx
+        let mut record = get_record_tx(&tx, operation_id)?.ok_or(StoreError::OperationNotFound)?;
+        let record_submission = record
+            .get("submission")
+            .cloned()
+            .ok_or(StoreError::DispatchEvidenceConflict)?;
+        let expected_submission = json!({
+            "kind": submission.kind,
+            "reference": submission.reference,
+            "data": submission.data,
+        });
+        if record_submission != expected_submission {
+            return Err(StoreError::DispatchEvidenceConflict);
+        }
+        match record.get("dispatch_evidence") {
+            Some(existing) if existing == evidence => {
+                tx.commit()?;
+                return Ok(());
+            }
+            Some(_) => return Err(StoreError::DispatchEvidenceConflict),
+            None => {}
+        }
+        if json_string(&record, "status").is_some_and(is_terminal) {
+            return Err(StoreError::AlreadySettled);
+        }
+        record["dispatch_evidence"] = evidence.clone();
+        tx.execute(
+            "UPDATE operations SET record_json=?1 WHERE id=?2",
+            params![record.to_string(), operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn persist_boundary_submission(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        operation_id: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
             .query_row(
-                "SELECT status FROM operations WHERE id=?1",
-                [operation_id],
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [authorization_id],
                 |r| r.get(0),
             )
             .optional()?;
-        let Some(status) = status else {
+        let Some(current) = current else {
             return Err(StoreError::OperationNotFound);
         };
-        if is_terminal(&status) {
-            return Err(StoreError::AlreadySettled);
+        if serde_json::from_str::<Value>(&current)? != *expected_authorization {
+            return Err(StoreError::ConcurrentReservation);
         }
-        let mut record = get_record_tx(&tx, operation_id)?.ok_or(StoreError::OperationNotFound)?;
-        record["submission"] = json!({
-            "kind": submission.kind.as_str(),
-            "reference": submission.reference.as_str(),
-            "data": &submission.data,
-        });
-        record["status"] = Value::String("submitted".into());
-        record["updated_at"] = Value::String(timestamp.to_owned());
-        tx.execute(
-            "INSERT INTO submissions(operation_id, kind, reference, data_json) VALUES (?1, ?2, ?3, ?4)",
-            params![operation_id, submission.kind, submission.reference, submission.data.to_string()],
-        )?;
-        tx.execute(
-            "UPDATE operations SET status='submitted', record_json=?1, updated_at=?2 WHERE id=?3",
-            params![record.to_string(), timestamp, operation_id],
-        )?;
+        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
         tx.commit()?;
         Ok(())
     }
@@ -670,6 +800,7 @@ impl Store {
     /// have crossed the external boundary uncertain. Submission rows and their
     /// reservations are retained for original-identity reconciliation.
     pub fn recover_interrupted(&mut self) -> Result<RecoveryReport> {
+        self.recover_boundary_authorization_requests(&chrono::Utc::now().to_rfc3339())?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -731,57 +862,47 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        commit_settlement_tx(&tx, settlement, timestamp)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Commit an attempt's proof, terminal operation, released reservations,
+    /// and updated boundary consumption in one SQLite transaction. The grant
+    /// compare-and-swap prevents revocation or another update from being lost.
+    pub fn commit_boundary_settlement(
+        &mut self,
+        settlement: &Settlement,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        updated_authorization: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<String> = tx
             .query_row(
-                "SELECT status FROM operations WHERE id=?1",
-                [&settlement.operation_id],
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [authorization_id],
                 |r| r.get(0),
             )
             .optional()?;
         let Some(current) = current else {
             return Err(StoreError::OperationNotFound);
         };
-        if is_terminal(&current) {
-            return Err(StoreError::AlreadySettled);
+        if serde_json::from_str::<Value>(&current)? != *expected_authorization {
+            return Err(StoreError::ConcurrentReservation);
         }
-        let status = json_string(&settlement.terminal_record, "status").unwrap_or("unknown");
-        if !is_terminal(status) {
-            return Err(StoreError::AlreadySettled);
-        }
-        let record_json = settlement.terminal_record.to_string();
+        commit_settlement_tx(&tx, settlement, timestamp)?;
         tx.execute(
-            "UPDATE operations SET status=?1, record_json=?2, updated_at=?3 WHERE id=?4",
-            params![status, record_json, timestamp, settlement.operation_id],
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![
+                updated_authorization.to_string(),
+                timestamp,
+                authorization_id
+            ],
         )?;
-        tx.execute(
-            "INSERT INTO proof_records(operation_id, proof_json) VALUES (?1, ?2)
-             ON CONFLICT(operation_id) DO UPDATE SET proof_json=excluded.proof_json",
-            params![settlement.operation_id, settlement.proof.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM effect_ledger WHERE operation_id=?1",
-            [&settlement.operation_id],
-        )?;
-        if let Some(effects) = settlement.effects.as_array() {
-            for (index, effect) in effects.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO effect_ledger(operation_id, effect_index, effect_json) VALUES (?1, ?2, ?3)",
-                    params![settlement.operation_id, index as i64, effect.to_string()],
-                )?;
-            }
-        }
-        tx.execute(
-            "DELETE FROM reservations WHERE operation_id=?1",
-            [&settlement.operation_id],
-        )?;
-        if let (Some(run_id), Some(run)) = (&settlement.run_id, &settlement.run_record) {
-            let run_status = json_string(run, "status").unwrap_or("active");
-            tx.execute(
-                "INSERT INTO runs(id, status, record_json, updated_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(id) DO UPDATE SET status=excluded.status, record_json=excluded.record_json, updated_at=excluded.updated_at",
-                params![run_id, run_status, run.to_string(), timestamp],
-            )?;
-        }
         tx.commit()?;
         Ok(())
     }
@@ -814,6 +935,584 @@ impl Store {
         list_records_conn(&self.conn)
     }
 
+    /// Persist a bounded authorization as opaque protected broker state. A
+    /// repeated request identity returns the original row only when its
+    /// fingerprint matches exactly.
+    ///
+    /// `Ok(true)` reserves the request identity for one authorization challenge;
+    /// a retry must not ask Touch ID again while this row is pending. Once the
+    /// resulting grant is durable, complete the row with its authorization ID.
+    pub fn begin_boundary_authorization_request(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        timestamp: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT fingerprint, status FROM boundary_authorization_requests WHERE request_id=?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((existing_fingerprint, _status)) = existing {
+            if existing_fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO boundary_authorization_requests(request_id, fingerprint, status, authorization_id, created_at, updated_at) VALUES (?1, ?2, 'awaiting_approval', NULL, ?3, ?3)",
+            params![request_id, fingerprint, timestamp],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn complete_boundary_authorization_request(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        authorization_id: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count = tx.execute(
+            "UPDATE boundary_authorization_requests SET status='approved', authorization_id=?1, updated_at=?2 WHERE request_id=?3 AND fingerprint=?4 AND status='awaiting_approval'",
+            params![authorization_id, timestamp, request_id, fingerprint],
+        )?;
+        if count == 0 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_boundary_authorization_request(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let count = self.conn.execute(
+            "UPDATE boundary_authorization_requests SET status='declined', updated_at=?1 WHERE request_id=?2 AND fingerprint=?3 AND status='awaiting_approval'",
+            params![timestamp, request_id, fingerprint],
+        )?;
+        if count == 0 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        Ok(())
+    }
+
+    pub fn boundary_authorization_request_status(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row(
+                "SELECT fingerprint, status FROM boundary_authorization_requests WHERE request_id=?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Reconcile approval requests left awaiting by a previous broker process.
+    /// A linked durable grant is successful; an orphan challenge is terminally
+    /// interrupted and requires a new request identity for another prompt.
+    pub fn recover_boundary_authorization_requests(&mut self, timestamp: &str) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE boundary_authorization_requests
+             SET status='approved', authorization_id=(
+                 SELECT id FROM boundary_authorizations b
+                 WHERE b.request_id=boundary_authorization_requests.request_id
+             ), updated_at=?1
+             WHERE status='awaiting_approval' AND EXISTS (
+                 SELECT 1 FROM boundary_authorizations b
+                 WHERE b.request_id=boundary_authorization_requests.request_id
+             )",
+            [timestamp],
+        )?;
+        tx.execute(
+            "UPDATE boundary_authorization_requests SET status='interrupted', updated_at=?1
+             WHERE status='awaiting_approval' AND authorization_id IS NULL",
+            [timestamp],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn create_boundary_authorization(
+        &mut self,
+        id: &str,
+        request_id: &str,
+        intent_id: &str,
+        fingerprint: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<(Value, bool)> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String, String)> = tx.query_row(
+            "SELECT request_id, record_json, id FROM boundary_authorizations WHERE request_id=?1",
+            [request_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        if let Some((_request, raw, _id)) = existing {
+            let value: Value = serde_json::from_str(&raw)?;
+            if value.get("request_fingerprint").and_then(Value::as_str) != Some(fingerprint) {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok((value, false));
+        }
+        tx.execute(
+            "INSERT INTO boundary_authorizations(id, request_id, intent_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, request_id, intent_id, record.to_string(), timestamp],
+        )?;
+        tx.commit()?;
+        Ok((record.clone(), true))
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub fn replace_boundary_authorization(
+        &mut self,
+        replaced_id: &str,
+        expected_replaced: &Value,
+        updated_replaced: &Value,
+        id: &str,
+        request_id: &str,
+        intent_id: &str,
+        fingerprint: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<(Value, bool)> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE request_id=?1",
+                [request_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = existing {
+            let value: Value = serde_json::from_str(&raw)?;
+            if value.get("request_fingerprint").and_then(Value::as_str) != Some(fingerprint) {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok((value, false));
+        }
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [replaced_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if serde_json::from_str::<Value>(&current)? != *expected_replaced {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let competing: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM boundary_authorizations WHERE intent_id=?1 AND id!=?2 AND json_extract(record_json, '$.authorization.status')='active'",
+            params![intent_id, replaced_id],
+            |r| r.get(0),
+        )?;
+        if competing != 0 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.execute(
+            "INSERT INTO boundary_authorizations(id, request_id, intent_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, request_id, intent_id, record.to_string(), timestamp],
+        )?;
+        tx.execute(
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![updated_replaced.to_string(), timestamp, replaced_id],
+        )?;
+        tx.commit()?;
+        Ok((record.clone(), true))
+    }
+
+    pub fn boundary_authorization(&self, id: &str) -> Result<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [id],
+                |r| {
+                    let raw: String = r.get(0)?;
+                    serde_json::from_str(&raw).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn boundary_authorization_by_request(&self, request_id: &str) -> Result<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE request_id=?1",
+                [request_id],
+                |r| {
+                    let raw: String = r.get(0)?;
+                    serde_json::from_str(&raw).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn update_boundary_authorization(
+        &mut self,
+        id: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count = tx.execute(
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![record.to_string(), timestamp, id],
+        )?;
+        if count == 0 {
+            return Err(StoreError::OperationNotFound);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn compare_update_boundary_authorization(
+        &mut self,
+        id: &str,
+        expected: &Value,
+        updated: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count = tx.execute(
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3 AND record_json=?4",
+            params![updated.to_string(), timestamp, id, expected.to_string()],
+        )?;
+        if count == 0 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Update a bounded attempt's final fresh candidate without allowing a
+    /// superseded, submitted, or revoked attempt to be resurrected. The grant
+    /// ownership CAS and operation-record update share one transaction.
+    pub fn update_boundary_candidate_preview(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        operation_id: &str,
+        updated_record: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_authorization: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [authorization_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(current_authorization) = current_authorization else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if serde_json::from_str::<Value>(&current_authorization)? != *expected_authorization
+            || expected_authorization
+                .get("active_attempt")
+                .and_then(Value::as_str)
+                != Some(operation_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_operation: Option<(String, String)> = tx
+            .query_row(
+                "SELECT status, record_json FROM operations WHERE id=?1",
+                [operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((status, raw_record)) = current_operation else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if status != "awaiting_approval"
+            || updated_record.get("status").and_then(Value::as_str) != Some("awaiting_approval")
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_record: Value = serde_json::from_str(&raw_record)?;
+        for key in ["id", "request_id", "fingerprint", "operation", "run_id"] {
+            if current_record.get(key) != updated_record.get(key) {
+                return Err(StoreError::RequestConflict);
+            }
+        }
+        let has_submission: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM submissions WHERE operation_id=?1",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        if has_submission != 0 {
+            return Err(StoreError::SubmissionConflict);
+        }
+        tx.execute(
+            "UPDATE operations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![updated_record.to_string(), timestamp, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Attach an ordinary immutable operation record to its authorization in
+    /// the same transaction that serializes authorization state changes.
+    pub fn attach_boundary_attempt(
+        &mut self,
+        authorization_id: &str,
+        operation_id: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM boundary_authorizations WHERE id=?1",
+            [authorization_id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err(StoreError::OperationNotFound);
+        }
+        tx.execute(
+            "INSERT INTO boundary_attempts(authorization_id, operation_id, created_at) VALUES (?1, ?2, ?3)",
+            params![authorization_id, operation_id, timestamp],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically claim the one active attempt for an authorization, create its
+    /// ordinary operation record, and append the durable history link. The
+    /// authorization JSON remains opaque; the engine supplies a compare-and-
+    /// swap copy to prevent concurrent broker instances from racing.
+    #[expect(clippy::too_many_arguments)]
+    pub fn create_boundary_attempt(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        updated_authorization: &Value,
+        operation_id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<RequestRow> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if expected_authorization
+            .get("active_attempt")
+            .is_some_and(|value| !value.is_null())
+            || updated_authorization
+                .get("active_attempt")
+                .and_then(Value::as_str)
+                != Some(operation_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [authorization_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if serde_json::from_str::<Value>(&current)? != *expected_authorization {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if let Some(existing) = get_request_tx(&tx, request_id)? {
+            if existing.fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok(RequestRow {
+                created: false,
+                ..existing
+            });
+        }
+        let run_id = record.get("run_id").and_then(Value::as_str);
+        let status = record
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("awaiting_approval");
+        tx.execute(
+            "INSERT INTO operations(id, request_id, fingerprint, operation, status, run_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![operation_id, request_id, fingerprint, operation, status, run_id, record.to_string(), timestamp],
+        )?;
+        tx.execute(
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![
+                updated_authorization.to_string(),
+                timestamp,
+                authorization_id
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO boundary_attempts(authorization_id, operation_id, created_at) VALUES (?1, ?2, ?3)",
+            params![authorization_id, operation_id, timestamp],
+        )?;
+        tx.commit()?;
+        Ok(RequestRow {
+            operation_id: operation_id.to_owned(),
+            request_id: request_id.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            operation: operation.to_owned(),
+            record: record.clone(),
+            created: true,
+        })
+    }
+
+    pub fn cancel_boundary_candidate(
+        &mut self,
+        authorization_id: &str,
+        expected_authorization: &Value,
+        updated_authorization: &Value,
+        operation_id: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_authorization: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM boundary_authorizations WHERE id=?1",
+                [authorization_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(current_authorization) = current_authorization else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if serde_json::from_str::<Value>(&current_authorization)? != *expected_authorization {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if expected_authorization
+            .get("active_attempt")
+            .and_then(Value::as_str)
+            != Some(operation_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_operation: Option<(String, String)> = tx
+            .query_row(
+                "SELECT status, record_json FROM operations WHERE id=?1",
+                [operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((status, raw_record)) = current_operation else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if status != "awaiting_approval" {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let has_submission: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM submissions WHERE operation_id=?1",
+            [operation_id],
+            |r| r.get(0),
+        )?;
+        if has_submission != 0 {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let mut record: Value = serde_json::from_str(&raw_record)?;
+        record["status"] = Value::String("cancelled".into());
+        record["updated_at"] = Value::String(timestamp.to_owned());
+        record["error"] = json!({
+            "code":"BOUNDARY_CANDIDATE_SUPERSEDED",
+            "stage":"authorization",
+            "message":"This unsubmitted candidate was superseded by a replacement candidate.",
+            "next_action":"Inspect the replacement candidate; a submitted or uncertain attempt requires reconciliation."
+        });
+        tx.execute(
+            "UPDATE operations SET status='cancelled', record_json=?1, updated_at=?2 WHERE id=?3",
+            params![record.to_string(), timestamp, operation_id],
+        )?;
+        tx.execute(
+            "DELETE FROM reservations WHERE operation_id=?1",
+            [operation_id],
+        )?;
+        tx.execute(
+            "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![
+                updated_authorization.to_string(),
+                timestamp,
+                authorization_id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn boundary_attempts(&self, authorization_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare("SELECT operation_id FROM boundary_attempts WHERE authorization_id=?1 ORDER BY created_at, operation_id")?;
+        let rows = statement.query_map([authorization_id], |r| r.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Return every attempt associated with the same durable intent, including
+    /// attempts linked to grants that were later replaced. This keeps status
+    /// and achieved-effect history cumulative across authorization renewal.
+    pub fn boundary_intent_attempts(&self, intent_id: &str) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT a.operation_id FROM boundary_attempts a
+             JOIN boundary_authorizations b ON b.id=a.authorization_id
+             WHERE b.intent_id=?1 ORDER BY a.created_at, a.operation_id",
+        )?;
+        let rows = statement.query_map([intent_id], |r| r.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Persist a lifecycle update without changing its durable request identity
     /// or an already-recorded external submission.
     pub fn update_record(
@@ -829,19 +1528,25 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let durable: Option<(String, String)> = tx
+        let durable: Option<(String, String, String, String)> = tx
             .query_row(
-                "SELECT request_id, fingerprint FROM operations WHERE id=?1",
+                "SELECT request_id, fingerprint, status, record_json FROM operations WHERE id=?1",
                 [operation_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((durable_request, durable_fingerprint)) = durable else {
+        let Some((durable_request, durable_fingerprint, durable_status, durable_record)) = durable
+        else {
             return Err(StoreError::OperationNotFound);
         };
         if request_id != durable_request || fingerprint != durable_fingerprint {
             return Err(StoreError::RequestConflict);
         }
+        if is_terminal(&durable_status) && durable_status != status {
+            return Err(StoreError::AlreadySettled);
+        }
+        let durable_record: Value = serde_json::from_str(&durable_record)?;
+        validate_dispatch_evidence_transition(&durable_record, record)?;
         let old_submission: Option<SubmissionRow> = tx
             .query_row(
                 "SELECT kind, reference, data_json FROM submissions WHERE operation_id=?1",
@@ -980,6 +1685,133 @@ impl Store {
     }
 }
 
+fn persist_submission_tx(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    submission: &SubmissionRow,
+    timestamp: &str,
+) -> Result<()> {
+    let existing: Option<SubmissionRow> = tx
+        .query_row(
+            "SELECT kind, reference, data_json FROM submissions WHERE operation_id=?1",
+            [operation_id],
+            |r| {
+                Ok(SubmissionRow {
+                    kind: r.get(0)?,
+                    reference: r.get(1)?,
+                    data: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
+                })
+            },
+        )
+        .optional()?;
+    if let Some(old) = existing {
+        if old != *submission {
+            return Err(StoreError::SubmissionConflict);
+        }
+        return Ok(());
+    }
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM operations WHERE id=?1",
+            [operation_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(status) = status else {
+        return Err(StoreError::OperationNotFound);
+    };
+    if is_terminal(&status) {
+        return Err(StoreError::AlreadySettled);
+    }
+    let mut record = get_record_tx(tx, operation_id)?.ok_or(StoreError::OperationNotFound)?;
+    record["submission"] = json!({
+        "kind": submission.kind.as_str(),
+        "reference": submission.reference.as_str(),
+        "data": &submission.data,
+    });
+    record["status"] = Value::String("submitted".into());
+    record["updated_at"] = Value::String(timestamp.to_owned());
+    tx.execute(
+        "INSERT INTO submissions(operation_id, kind, reference, data_json) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            operation_id,
+            submission.kind,
+            submission.reference,
+            submission.data.to_string()
+        ],
+    )?;
+    tx.execute(
+        "UPDATE operations SET status='submitted', record_json=?1, updated_at=?2 WHERE id=?3",
+        params![record.to_string(), timestamp, operation_id],
+    )?;
+    Ok(())
+}
+
+fn commit_settlement_tx(
+    tx: &Transaction<'_>,
+    settlement: &Settlement,
+    timestamp: &str,
+) -> Result<()> {
+    let current: Option<(String, String)> = tx
+        .query_row(
+            "SELECT status, record_json FROM operations WHERE id=?1",
+            [&settlement.operation_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((current, current_record)) = current else {
+        return Err(StoreError::OperationNotFound);
+    };
+    if is_terminal(&current) {
+        return Err(StoreError::AlreadySettled);
+    }
+    let current_record: Value = serde_json::from_str(&current_record)?;
+    validate_dispatch_evidence_transition(&current_record, &settlement.terminal_record)?;
+    let status = json_string(&settlement.terminal_record, "status").unwrap_or("unknown");
+    if !is_terminal(status) {
+        return Err(StoreError::AlreadySettled);
+    }
+    tx.execute(
+        "UPDATE operations SET status=?1, record_json=?2, updated_at=?3 WHERE id=?4",
+        params![
+            status,
+            settlement.terminal_record.to_string(),
+            timestamp,
+            settlement.operation_id
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO proof_records(operation_id, proof_json) VALUES (?1, ?2)
+         ON CONFLICT(operation_id) DO UPDATE SET proof_json=excluded.proof_json",
+        params![settlement.operation_id, settlement.proof.to_string()],
+    )?;
+    tx.execute(
+        "DELETE FROM effect_ledger WHERE operation_id=?1",
+        [&settlement.operation_id],
+    )?;
+    if let Some(effects) = settlement.effects.as_array() {
+        for (index, effect) in effects.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO effect_ledger(operation_id, effect_index, effect_json) VALUES (?1, ?2, ?3)",
+                params![settlement.operation_id, index as i64, effect.to_string()],
+            )?;
+        }
+    }
+    tx.execute(
+        "DELETE FROM reservations WHERE operation_id=?1",
+        [&settlement.operation_id],
+    )?;
+    if let (Some(run_id), Some(run)) = (&settlement.run_id, &settlement.run_record) {
+        let run_status = json_string(run, "status").unwrap_or("active");
+        tx.execute(
+            "INSERT INTO runs(id, status, record_json, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET status=excluded.status, record_json=excluded.record_json, updated_at=excluded.updated_at",
+            params![run_id, run_status, run.to_string(), timestamp],
+        )?;
+    }
+    Ok(())
+}
+
 fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
     let mut statement =
         conn.prepare("SELECT record_json FROM operations ORDER BY created_at DESC, id DESC")?;
@@ -998,6 +1830,14 @@ fn is_terminal(status: &str) -> bool {
         status,
         "completed" | "failed" | "rejected" | "cancelled" | "expired"
     )
+}
+
+fn validate_dispatch_evidence_transition(current: &Value, updated: &Value) -> Result<()> {
+    if current.get("dispatch_evidence") == updated.get("dispatch_evidence") {
+        Ok(())
+    } else {
+        Err(StoreError::DispatchEvidenceConflict)
+    }
 }
 
 fn json_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -1086,6 +1926,133 @@ mod tests {
             units: "1000000000000000001".into(),
             fee_units: "123".into(),
         }
+    }
+
+    #[test]
+    fn dispatch_evidence_requires_exact_submission_and_survives_recovery() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("dispatch-evidence.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let mut initial = ordinary_request(&mut store, "dispatch");
+        initial["approval"] = json!({"mechanism":"synthetic","expires_at":"already-expired"});
+        store.update_record("dispatch", &initial, "t0").unwrap();
+        let submission = SubmissionRow {
+            kind: "synthetic_tx".into(),
+            reference: "synthetic-dispatch-001".into(),
+            data: json!({"nonce":"synthetic-7"}),
+        };
+        let evidence = json!({"txn_id":"synthetic-txn-42","response":"accepted"});
+        assert!(matches!(
+            store.persist_dispatch_evidence("dispatch", &submission, &evidence),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        assert_eq!(store.get_record("dispatch").unwrap(), Some(initial.clone()));
+
+        store
+            .persist_submission("dispatch", &submission, "t1")
+            .unwrap();
+        let wrong_submission = SubmissionRow {
+            reference: "synthetic-dispatch-other".into(),
+            ..submission.clone()
+        };
+        assert!(matches!(
+            store.persist_dispatch_evidence("dispatch", &wrong_submission, &evidence),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        let submitted = store.get_record("dispatch").unwrap().unwrap();
+        assert!(matches!(
+            store.persist_dispatch_evidence("dispatch", &submission, &Value::Null),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        store
+            .persist_dispatch_evidence("dispatch", &submission, &evidence)
+            .unwrap();
+        store
+            .persist_dispatch_evidence("dispatch", &submission, &evidence)
+            .unwrap();
+        assert!(matches!(
+            store.persist_dispatch_evidence(
+                "dispatch",
+                &submission,
+                &json!({"txn_id":"synthetic-txn-different"})
+            ),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        let recorded = store.get_record("dispatch").unwrap().unwrap();
+        assert_eq!(recorded["dispatch_evidence"], evidence);
+        assert_eq!(recorded["submission"], submitted["submission"]);
+        assert_eq!(recorded["status"], submitted["status"]);
+        assert_eq!(recorded["approval"], submitted["approval"]);
+        store.close().unwrap();
+
+        let mut reopened = Store::open(&path).unwrap();
+        let recovery = reopened.recover_interrupted().unwrap();
+        assert_eq!(recovery.uncertain_submissions, vec!["dispatch"]);
+        let recovered = reopened.get_record("dispatch").unwrap().unwrap();
+        assert_eq!(recovered["dispatch_evidence"], evidence);
+        assert_eq!(recovered["submission"], submitted["submission"]);
+
+        assert!(matches!(
+            reopened.update_record("dispatch", &submitted, "t2"),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        let mut changed = recovered.clone();
+        changed["dispatch_evidence"] = json!({"txn_id":"synthetic-txn-replaced"});
+        assert!(matches!(
+            reopened.update_record("dispatch", &changed, "t3"),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        let mut same_evidence_with_status_update = recovered.clone();
+        same_evidence_with_status_update["status"] = json!("failed");
+        reopened
+            .update_record("dispatch", &same_evidence_with_status_update, "t4")
+            .unwrap();
+        let saved = reopened.get_record("dispatch").unwrap().unwrap();
+        assert_eq!(saved["status"], "failed");
+        assert_eq!(saved["dispatch_evidence"], evidence);
+    }
+
+    #[test]
+    fn terminal_settlement_must_preserve_dispatch_evidence() {
+        let mut store = Store::in_memory().unwrap();
+        ordinary_request(&mut store, "settlement-evidence");
+        let submission = SubmissionRow {
+            kind: "synthetic_tx".into(),
+            reference: "synthetic-settlement-001".into(),
+            data: json!({"nonce":"synthetic-9"}),
+        };
+        store
+            .persist_submission("settlement-evidence", &submission, "t1")
+            .unwrap();
+        let evidence = json!({"txn_id":"synthetic-settlement-receipt"});
+        store
+            .persist_dispatch_evidence("settlement-evidence", &submission, &evidence)
+            .unwrap();
+        let mut terminal_record = store.get_record("settlement-evidence").unwrap().unwrap();
+        terminal_record["status"] = json!("completed");
+        let mut stale_terminal = terminal_record.clone();
+        stale_terminal
+            .as_object_mut()
+            .unwrap()
+            .remove("dispatch_evidence");
+        let settlement = |terminal_record| Settlement {
+            operation_id: "settlement-evidence".into(),
+            terminal_record,
+            proof: json!({"synthetic":"verified"}),
+            effects: json!([]),
+            run_id: None,
+            run_record: None,
+        };
+        assert!(matches!(
+            store.commit_settlement(&settlement(stale_terminal), "t2"),
+            Err(StoreError::DispatchEvidenceConflict)
+        ));
+        store
+            .commit_settlement(&settlement(terminal_record), "t3")
+            .unwrap();
+        let settled = store.get_record("settlement-evidence").unwrap().unwrap();
+        assert_eq!(settled["status"], "completed");
+        assert_eq!(settled["dispatch_evidence"], evidence);
     }
 
     #[test]
@@ -1631,5 +2598,471 @@ mod tests {
             store.update_record("op-1", &update, "t3"),
             Err(StoreError::SubmissionConflict)
         ));
+    }
+
+    #[test]
+    fn boundary_authorization_and_attempt_claim_survive_restart_and_are_atomic() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("boundary.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let grant = json!({
+            "request_fingerprint":"grant-fingerprint",
+            "authorization":{"id":"grant-1","intent_id":"intent-1","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .create_boundary_authorization(
+                "grant-1",
+                "grant-request",
+                "intent-1",
+                "grant-fingerprint",
+                &grant,
+                "t0",
+            )
+            .unwrap();
+        store.close().unwrap();
+
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.boundary_authorization("grant-1").unwrap(),
+            Some(grant.clone())
+        );
+        let mut claimed = grant.clone();
+        claimed["attempts"] = json!(["op-1"]);
+        claimed["active_attempt"] = json!("op-1");
+        let operation = json!({"id":"op-1","request_id":"attempt-1","fingerprint":"attempt-fingerprint","operation":"synthetic.order","status":"awaiting_approval"});
+        let row = store
+            .create_boundary_attempt(
+                "grant-1",
+                &grant,
+                &claimed,
+                "op-1",
+                "attempt-1",
+                "attempt-fingerprint",
+                "synthetic.order",
+                &operation,
+                "t1",
+            )
+            .unwrap();
+        assert!(row.created);
+        assert_eq!(store.boundary_attempts("grant-1").unwrap(), vec!["op-1"]);
+        assert!(matches!(
+            store.create_boundary_attempt(
+                "grant-1",
+                &grant,
+                &claimed,
+                "op-2",
+                "attempt-2",
+                "other",
+                "synthetic.order",
+                &operation,
+                "t2"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        let submission = SubmissionRow {
+            kind: "client_order_id".into(),
+            reference: "client-1".into(),
+            data: json!({"stable":true}),
+        };
+        store
+            .persist_boundary_submission("grant-1", &claimed, "op-1", &submission, "t2")
+            .unwrap();
+        let mut settled_grant = claimed.clone();
+        settled_grant["active_attempt"] = Value::Null;
+        settled_grant["authorization"]["remaining_debits"] = json!([]);
+        settled_grant["authorization"]["spent_debits"] = json!([{"atoms":"7"}]);
+        let settlement = Settlement {
+            operation_id: "op-1".into(),
+            terminal_record: json!({"status":"completed","submission":{"kind":"client_order_id","reference":"client-1","data":{"stable":true}}}),
+            proof: json!({"verified":true}),
+            effects: json!([{"cost":"7"}]),
+            run_id: None,
+            run_record: None,
+        };
+        store
+            .commit_boundary_settlement(&settlement, "grant-1", &claimed, &settled_grant, "t3")
+            .unwrap();
+        assert_eq!(
+            store.boundary_authorization("grant-1").unwrap(),
+            Some(settled_grant.clone())
+        );
+        assert_eq!(
+            store.get_record("op-1").unwrap().unwrap()["status"],
+            json!("completed")
+        );
+        store.close().unwrap();
+        let store = Store::open(&path).unwrap();
+        let recovered_grant = store.boundary_authorization("grant-1").unwrap().unwrap();
+        assert_eq!(recovered_grant, settled_grant);
+        assert_eq!(
+            store.get_record("op-1").unwrap().unwrap()["status"],
+            json!("completed")
+        );
+        let effects: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM effect_ledger WHERE operation_id='op-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            effects, 1,
+            "verified consumption remains exactly once after restart"
+        );
+    }
+
+    #[test]
+    fn boundary_candidate_supersede_and_dispatch_are_mutually_exclusive() {
+        let mut store = Store::in_memory().unwrap();
+        let grant = json!({
+            "request_fingerprint":"grant-fingerprint",
+            "authorization":{"id":"grant-1","intent_id":"intent-1","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .create_boundary_authorization(
+                "grant-1",
+                "grant-request",
+                "intent-1",
+                "grant-fingerprint",
+                &grant,
+                "t0",
+            )
+            .unwrap();
+        let mut claimed = grant.clone();
+        claimed["attempts"] = json!(["candidate-1"]);
+        claimed["active_attempt"] = json!("candidate-1");
+        let record = json!({
+            "id":"candidate-1","request_id":"candidate-request",
+            "fingerprint":"candidate-fingerprint","operation":"synthetic.order",
+            "status":"awaiting_approval"
+        });
+        store
+            .create_boundary_attempt(
+                "grant-1",
+                &grant,
+                &claimed,
+                "candidate-1",
+                "candidate-request",
+                "candidate-fingerprint",
+                "synthetic.order",
+                &record,
+                "t1",
+            )
+            .unwrap();
+
+        let mut released = claimed.clone();
+        released["active_attempt"] = Value::Null;
+        store
+            .cancel_boundary_candidate("grant-1", &claimed, &released, "candidate-1", "t2")
+            .unwrap();
+        let submission = SubmissionRow {
+            kind: "client_order_id".into(),
+            reference: "synthetic-never-dispatched".into(),
+            data: json!({"synthetic":true}),
+        };
+        assert!(matches!(
+            store.persist_boundary_submission(
+                "grant-1",
+                &claimed,
+                "candidate-1",
+                &submission,
+                "t3"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(
+            store.get_record("candidate-1").unwrap().unwrap()["status"],
+            "cancelled"
+        );
+        let mut stale_preview = record.clone();
+        stale_preview["preview"] = json!({"fresh":true});
+        stale_preview["updated_at"] = json!("t3");
+        assert!(matches!(
+            store.update_boundary_candidate_preview(
+                "grant-1",
+                &claimed,
+                "candidate-1",
+                &stale_preview,
+                "t3"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(
+            store.get_record("candidate-1").unwrap().unwrap()["status"],
+            "cancelled"
+        );
+        let dispatched_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM submissions WHERE operation_id='candidate-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatched_count, 0);
+
+        let grant_two = json!({
+            "request_fingerprint":"grant-two-fingerprint",
+            "authorization":{"id":"grant-2","intent_id":"intent-2","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .create_boundary_authorization(
+                "grant-2",
+                "grant-two-request",
+                "intent-2",
+                "grant-two-fingerprint",
+                &grant_two,
+                "t4",
+            )
+            .unwrap();
+        let mut claimed_two = grant_two.clone();
+        claimed_two["attempts"] = json!(["candidate-2"]);
+        claimed_two["active_attempt"] = json!("candidate-2");
+        let record_two = json!({
+            "id":"candidate-2","request_id":"candidate-request-2",
+            "fingerprint":"candidate-fingerprint-2","operation":"synthetic.order",
+            "status":"awaiting_approval"
+        });
+        store
+            .create_boundary_attempt(
+                "grant-2",
+                &grant_two,
+                &claimed_two,
+                "candidate-2",
+                "candidate-request-2",
+                "candidate-fingerprint-2",
+                "synthetic.order",
+                &record_two,
+                "t5",
+            )
+            .unwrap();
+        store
+            .persist_boundary_submission(
+                "grant-2",
+                &claimed_two,
+                "candidate-2",
+                &SubmissionRow {
+                    kind: "client_order_id".into(),
+                    reference: "synthetic-dispatched-once".into(),
+                    data: json!({"synthetic":true}),
+                },
+                "t6",
+            )
+            .unwrap();
+        let mut released_two = claimed_two.clone();
+        released_two["active_attempt"] = Value::Null;
+        assert!(matches!(
+            store.cancel_boundary_candidate(
+                "grant-2",
+                &claimed_two,
+                &released_two,
+                "candidate-2",
+                "t7"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(
+            store.get_record("candidate-2").unwrap().unwrap()["status"],
+            "submitted"
+        );
+        let dispatched_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM submissions WHERE operation_id='candidate-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dispatched_count, 1);
+    }
+
+    #[test]
+    fn boundary_replacement_and_revoke_cas_cannot_resurrect_or_branch_grants() {
+        let mut store = Store::in_memory().unwrap();
+        let original = json!({
+            "request_fingerprint":"original-fingerprint",
+            "authorization":{"id":"original","intent_id":"intent","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .create_boundary_authorization(
+                "original",
+                "original-request",
+                "intent",
+                "original-fingerprint",
+                &original,
+                "t0",
+            )
+            .unwrap();
+
+        // Revocation wins: an approval computed from the prior snapshot cannot
+        // supersede it or create a second active grant.
+        let mut revoked = original.clone();
+        revoked["authorization"]["status"] = json!("revoked");
+        store
+            .compare_update_boundary_authorization("original", &original, &revoked, "t1")
+            .unwrap();
+        let replacement = json!({
+            "request_fingerprint":"replacement-fingerprint",
+            "authorization":{"id":"replacement","intent_id":"intent","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        let mut superseded = original.clone();
+        superseded["authorization"]["status"] = json!("superseded");
+        assert!(matches!(
+            store.replace_boundary_authorization(
+                "original",
+                &original,
+                &superseded,
+                "replacement",
+                "replacement-request",
+                "intent",
+                "replacement-fingerprint",
+                &replacement,
+                "t2"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(
+            store.boundary_authorization("original").unwrap(),
+            Some(revoked.clone())
+        );
+        assert_eq!(store.boundary_authorization("replacement").unwrap(), None);
+
+        // Replacement wins: the stale revoker cannot mutate the old row back
+        // to an active grant, and a second replacement cannot branch it.
+        let second_original = json!({
+            "request_fingerprint":"second-original-fingerprint",
+            "authorization":{"id":"second-original","intent_id":"second-intent","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .create_boundary_authorization(
+                "second-original",
+                "second-original-request",
+                "second-intent",
+                "second-original-fingerprint",
+                &second_original,
+                "t3",
+            )
+            .unwrap();
+        let mut second_superseded = second_original.clone();
+        second_superseded["authorization"]["status"] = json!("superseded");
+        let second_replacement = json!({
+            "request_fingerprint":"second-replacement-fingerprint",
+            "authorization":{"id":"second-replacement","intent_id":"second-intent","status":"active"},
+            "attempts":[],"active_attempt":null
+        });
+        store
+            .replace_boundary_authorization(
+                "second-original",
+                &second_original,
+                &second_superseded,
+                "second-replacement",
+                "second-replacement-request",
+                "second-intent",
+                "second-replacement-fingerprint",
+                &second_replacement,
+                "t4",
+            )
+            .unwrap();
+        let mut stale_revoked = second_original.clone();
+        stale_revoked["authorization"]["status"] = json!("revoked");
+        assert!(matches!(
+            store.compare_update_boundary_authorization(
+                "second-original",
+                &second_original,
+                &stale_revoked,
+                "t5"
+            ),
+            Err(StoreError::ConcurrentReservation)
+        ));
+        assert_eq!(
+            store.boundary_authorization("second-original").unwrap(),
+            Some(second_superseded)
+        );
+        assert_eq!(
+            store.boundary_authorization("second-replacement").unwrap(),
+            Some(second_replacement)
+        );
+    }
+
+    #[test]
+    fn boundary_authorization_challenge_request_is_durable_and_idempotent() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("boundary-request.sqlite");
+        {
+            let mut store = Store::open(&path).unwrap();
+            assert!(
+                store
+                    .begin_boundary_authorization_request("request-1", "fingerprint-1", "t0")
+                    .unwrap()
+            );
+        }
+        let mut store = Store::open(&path).unwrap();
+        assert!(
+            !store
+                .begin_boundary_authorization_request("request-1", "fingerprint-1", "t1")
+                .unwrap()
+        );
+        assert!(matches!(
+            store.begin_boundary_authorization_request("request-1", "different", "t2"),
+            Err(StoreError::RequestConflict)
+        ));
+        store.recover_boundary_authorization_requests("t3").unwrap();
+        assert!(
+            !store
+                .begin_boundary_authorization_request("request-1", "fingerprint-1", "t4")
+                .unwrap()
+        );
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM boundary_authorization_requests WHERE request_id='request-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "interrupted");
+
+        assert!(
+            store
+                .begin_boundary_authorization_request("request-2", "fingerprint-2", "t5")
+                .unwrap()
+        );
+        store
+            .fail_boundary_authorization_request("request-2", "fingerprint-2", "t6")
+            .unwrap();
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM boundary_authorization_requests WHERE request_id='request-2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "declined");
+
+        assert!(
+            store
+                .begin_boundary_authorization_request("request-3", "fingerprint-3", "t7")
+                .unwrap()
+        );
+        store
+            .complete_boundary_authorization_request("request-3", "fingerprint-3", "grant-3", "t8")
+            .unwrap();
+        let status: (String, Option<String>) = store
+            .conn
+            .query_row(
+                "SELECT status, authorization_id FROM boundary_authorization_requests WHERE request_id='request-3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, ("approved".into(), Some("grant-3".into())));
     }
 }

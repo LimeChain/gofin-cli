@@ -1,0 +1,376 @@
+//! Immutable approval ceilings, separate from refreshed pricing evidence.
+use crate::{AssetId, FinError, PreparedOperation, Quantity, Result};
+#[cfg(test)]
+use chrono::Duration;
+use chrono::{DateTime, Utc};
+use num_bigint::BigUint;
+use serde::{Deserialize, Serialize};
+
+pub const KEY: &str = "_fin_usd_ceiling_v1";
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PriceIdentity {
+    asset: AssetId,
+    unit_atoms: Quantity,
+    source: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Ceiling {
+    movement_usd_micros: Quantity,
+    maximum_fee_usd_micros: Quantity,
+    additional_allocation_usd_micros: Quantity,
+    prices: Vec<PriceIdentity>,
+}
+
+fn identity(source: &str) -> String {
+    source
+        .split(';')
+        .filter(|part| {
+            let part = part.trim();
+            let timestamp = part
+                .strip_prefix("updated:")
+                .or_else(|| part.strip_prefix("identity_observed_at="));
+            !timestamp.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok())
+        })
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn cents_up(value: &Quantity) -> Quantity {
+    let cent = BigUint::from(10_000u32);
+    let rounded = ((value.integer() + &cent - BigUint::from(1u8)) / &cent) * cent;
+    Quantity::new(rounded.to_string()).unwrap_or_else(|_| value.clone())
+}
+
+fn usd(value: &Quantity) -> String {
+    let micros = value.integer();
+    let scale = BigUint::from(1_000_000u32);
+    format!("{}.{:06}", &micros / &scale, &micros % scale)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+pub fn bind(prepared: &mut PreparedOperation) {
+    let (Some(value), Some(binding)) = (
+        prepared.valuation.as_mut(),
+        prepared.binding.as_object_mut(),
+    ) else {
+        return;
+    };
+    let bounds = Ceiling {
+        movement_usd_micros: cents_up(&value.movement_usd_micros),
+        maximum_fee_usd_micros: cents_up(&value.maximum_fee_usd_micros),
+        additional_allocation_usd_micros: cents_up(&value.additional_allocation_usd_micros),
+        prices: value
+            .prices
+            .iter()
+            .map(|price| PriceIdentity {
+                asset: price.asset.clone(),
+                unit_atoms: price.unit_atoms.clone(),
+                source: identity(&price.source),
+            })
+            .collect(),
+    };
+    prepared.summary.push_str(&format!(
+        " USD ceilings: ${} movement, ${} fees.",
+        usd(&bounds.movement_usd_micros),
+        usd(&bounds.maximum_fee_usd_micros)
+    ));
+    value.movement_usd_micros = bounds.movement_usd_micros.clone();
+    value.maximum_fee_usd_micros = bounds.maximum_fee_usd_micros.clone();
+    value.additional_allocation_usd_micros = bounds.additional_allocation_usd_micros.clone();
+    binding.insert(KEY.into(), serde_json::json!(bounds));
+}
+
+fn invalid() -> FinError {
+    FinError::new(
+        "VALUE_BOUND_EXCEEDED",
+        "valuation",
+        "Fresh valuation exceeds the approved USD ceiling or changes a priced asset identity.",
+        "Refresh the preview and obtain fresh approval; nothing was submitted.",
+    )
+}
+
+pub fn validate(prepared: &PreparedOperation) -> Result<()> {
+    check(prepared, true)
+}
+
+fn check(prepared: &PreparedOperation, fresh: bool) -> Result<()> {
+    let Some(raw) = prepared.binding.get(KEY) else {
+        return Ok(());
+    };
+    let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
+    let value = prepared.valuation.as_ref().ok_or_else(invalid)?;
+    if value.movement_usd_micros.integer() > bounds.movement_usd_micros.integer()
+        || value.maximum_fee_usd_micros.integer() > bounds.maximum_fee_usd_micros.integer()
+        || value.additional_allocation_usd_micros.integer()
+            > bounds.additional_allocation_usd_micros.integer()
+        || bounds.prices.is_empty()
+    {
+        return Err(invalid());
+    }
+    for expected in &bounds.prices {
+        if bounds
+            .prices
+            .iter()
+            .filter(|price| price.asset == expected.asset)
+            .count()
+            != 1
+        {
+            return Err(invalid());
+        }
+        let rows: Vec<_> = value
+            .prices
+            .iter()
+            .filter(|price| price.asset == expected.asset)
+            .collect();
+        let [price] = rows.as_slice() else {
+            return Err(invalid());
+        };
+        if price.unit_atoms != expected.unit_atoms || identity(&price.source) != expected.source {
+            return Err(invalid());
+        }
+    }
+    for price in value.prices.iter().filter(|_| fresh) {
+        if !crate::price_freshness::is_fresh(&price.observed_at, &price.source, Utc::now())
+            || price.source.is_empty()
+            || (price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_estimate(price))
+        {
+            return Err(FinError::new(
+                "STALE_VALUATION",
+                "valuation",
+                "USD pricing evidence is invalid or expired.",
+                "Obtain fresh pricing and a new preview before approval.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Retain approved ceilings/reservations and actual fresh quotes separately.
+pub fn carry(approved: &PreparedOperation, refreshed: &mut PreparedOperation) -> Result<()> {
+    let Some(raw) = approved.binding.get(KEY) else {
+        return Ok(());
+    };
+    // Original quote times can expire while consent is pending; their shape and
+    // identities must still be intact. Only the refreshed evidence may settle.
+    check(approved, false)?;
+    refreshed.binding[KEY] = raw.clone();
+    validate(refreshed)?;
+    let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
+    let value = refreshed.valuation.as_mut().ok_or_else(invalid)?;
+    value.movement_usd_micros = bounds.movement_usd_micros;
+    value.maximum_fee_usd_micros = bounds.maximum_fee_usd_micros;
+    value.additional_allocation_usd_micros = bounds.additional_allocation_usd_micros;
+    refreshed.summary = approved.summary.clone();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AssetPrice, FinancialIntent, Valuation, authorization_binding, binding_hash, now};
+    use serde_json::json;
+
+    fn fixture(micros: &str) -> PreparedOperation {
+        PreparedOperation {
+            operation: "synthetic.transfer".into(),
+            operation_version: 1,
+            input: json!({"amount":"1"}),
+            binding: json!({"amount":"1","destination":"SYNTHETIC-wallet"}),
+            summary: "Send 1 SYNTHETIC to SYNTHETIC-wallet.".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: now(),
+            expires_at: (Utc::now() + Duration::seconds(60)).to_rfc3339(),
+            intent: FinancialIntent {
+                debits: vec![],
+                maximum_costs: vec![],
+                expected: vec![],
+                locks: vec![],
+            },
+            valuation: Some(Valuation {
+                movement_usd_micros: Quantity::new(micros).unwrap(),
+                maximum_fee_usd_micros: Quantity::new("1001").unwrap(),
+                additional_allocation_usd_micros: Quantity::zero(),
+                observed_at: now(),
+                source: "synthetic feed".into(),
+                prices: vec![AssetPrice {
+                    asset: AssetId {
+                        network: "ethereum:1".into(),
+                        reference: "0x1111111111111111111111111111111111111111".into(),
+                        decimals: 18,
+                    },
+                    unit_atoms: Quantity::from_decimal("1", 18).unwrap(),
+                    usd_micros_per_unit: Quantity::new(micros).unwrap(),
+                    observed_at: now(),
+                    source: "synthetic provider; coin_id=SYNTHETIC; updated:2026-01-01T00:00:00Z"
+                        .into(),
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn refreshed_evidence_within_explicit_ceiling_keeps_binding_and_reservation() {
+        let mut approved = fixture("1000001");
+        bind(&mut approved);
+        assert_eq!(
+            approved
+                .valuation
+                .as_ref()
+                .unwrap()
+                .movement_usd_micros
+                .as_str(),
+            "1010000"
+        );
+        assert!(
+            approved
+                .summary
+                .ends_with("USD ceilings: $1.01 movement, $0.01 fees.")
+        );
+        let hash = binding_hash(&authorization_binding(&approved)).unwrap();
+        // Original evidence can age out while approval is pending. Do not reset
+        // its timestamp; retain fresh replacement evidence and the old ceiling.
+        approved.valuation.as_mut().unwrap().prices[0].observed_at = "2000-01-01T00:00:00Z".into();
+        let mut refreshed = fixture("1005000");
+        bind(&mut refreshed);
+        refreshed.valuation.as_mut().unwrap().prices[0].source =
+            "synthetic provider; coin_id=SYNTHETIC; updated:2026-01-01T00:01:00Z".into();
+        carry(&approved, &mut refreshed).unwrap();
+        assert_eq!(
+            hash,
+            binding_hash(&authorization_binding(&refreshed)).unwrap()
+        );
+        assert_eq!(
+            approved.valuation.as_ref().unwrap().movement_usd_micros,
+            refreshed.valuation.as_ref().unwrap().movement_usd_micros
+        );
+        assert_eq!(
+            refreshed.valuation.as_ref().unwrap().prices[0]
+                .usd_micros_per_unit
+                .as_str(),
+            "1005000"
+        );
+        assert_ne!(
+            refreshed.valuation.as_ref().unwrap().prices[0].observed_at,
+            "2000-01-01T00:00:00Z"
+        );
+        refreshed.binding["destination"] = json!("SYNTHETIC-other");
+        assert_ne!(
+            hash,
+            binding_hash(&authorization_binding(&refreshed)).unwrap()
+        );
+    }
+
+    #[test]
+    fn higher_costs_identity_changes_duplicate_and_expired_evidence_are_rejected() {
+        let mut approved = fixture("1000001");
+        bind(&mut approved);
+        for change in [
+            "movement",
+            "fee",
+            "allocation",
+            "contract",
+            "network",
+            "unit",
+            "source",
+            "duplicate",
+            "stale",
+            "future",
+        ] {
+            let mut refreshed = fixture("1005000");
+            let value = refreshed.valuation.as_mut().unwrap();
+            match change {
+                "movement" => value.movement_usd_micros = Quantity::new("1010001").unwrap(),
+                "fee" => value.maximum_fee_usd_micros = Quantity::new("10001").unwrap(),
+                "allocation" => {
+                    value.additional_allocation_usd_micros = Quantity::new("1").unwrap()
+                }
+                "contract" => {
+                    value.prices[0].asset.reference =
+                        "0x2222222222222222222222222222222222222222".into()
+                }
+                "network" => value.prices[0].asset.network = "ethereum:42161".into(),
+                "unit" => value.prices[0].unit_atoms = Quantity::new("1").unwrap(),
+                "source" => value.prices[0].source = "synthetic provider; coin_id=OTHER".into(),
+                "duplicate" => value.prices.push(value.prices[0].clone()),
+                "stale" => value.prices[0].observed_at = "2000-01-01T00:00:00Z".into(),
+                _ => value.prices[0].observed_at = (Utc::now() + Duration::seconds(1)).to_rfc3339(),
+            }
+            assert!(carry(&approved, &mut refreshed).is_err(), "{change}");
+        }
+        let mut corrupted = approved.clone();
+        corrupted.binding[KEY]["unexpected"] = json!(true);
+        assert!(validate(&corrupted).is_err());
+    }
+
+    #[test]
+    fn legacy_exact_quote_binding_is_unchanged_and_cent_rounding_never_rounds_down() {
+        for (input, expected) in [
+            ("0", "0"),
+            ("1", "10000"),
+            ("9999", "10000"),
+            ("10000", "10000"),
+            ("10001", "20000"),
+        ] {
+            assert_eq!(cents_up(&Quantity::new(input).unwrap()).as_str(), expected);
+        }
+        let prepared = fixture("1000001");
+        assert_eq!(
+            authorization_binding(&prepared)["value_bounds"]["movement_usd_micros"],
+            json!("1000001")
+        );
+        assert!(
+            authorization_binding(&prepared)["value_bounds"]["prices"][0]
+                .get("usd_micros_per_unit")
+                .is_some()
+        );
+        assert_eq!(
+            identity("synthetic; coin_id=X; updated:invalid"),
+            "synthetic; coin_id=X; updated:invalid"
+        );
+    }
+    #[test]
+    fn explicit_unknown_estimate_keeps_exact_bound_and_cannot_change_price_status() {
+        let mut unknown = fixture("0");
+        let value = unknown.valuation.as_mut().unwrap();
+        let row = &mut value.prices[0];
+        row.asset.network = "binance".into();
+        row.asset.reference = "APT".into();
+        row.source = crate::unpriced::source(&row.asset);
+        bind(&mut unknown);
+        validate(&unknown).unwrap();
+        let mut refreshed = unknown.clone();
+        refreshed.binding.as_object_mut().unwrap().remove(KEY);
+        carry(&unknown, &mut refreshed).unwrap();
+        for field in ["price", "source", "unit", "network"] {
+            let mut changed = unknown.clone();
+            changed.binding.as_object_mut().unwrap().remove(KEY);
+            let row = &mut changed.valuation.as_mut().unwrap().prices[0];
+            match field {
+                "price" => {
+                    row.usd_micros_per_unit = Quantity::from_u64(1);
+                    row.source = "verified synthetic price".into();
+                }
+                "source" => row.source.push_str("; different"),
+                "unit" => row.unit_atoms = Quantity::from_u64(1),
+                _ => row.asset.network = "ethereum:1".into(),
+            }
+            assert!(carry(&unknown, &mut changed).is_err(), "{field}");
+        }
+        let mut priced = unknown.clone();
+        priced.binding.as_object_mut().unwrap().remove(KEY);
+        let row = &mut priced.valuation.as_mut().unwrap().prices[0];
+        row.usd_micros_per_unit = Quantity::from_u64(1);
+        row.source = "verified synthetic price".into();
+        bind(&mut priced);
+        let mut refreshed_unknown = unknown.clone();
+        assert!(carry(&priced, &mut refreshed_unknown).is_err());
+    }
+}

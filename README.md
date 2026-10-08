@@ -21,7 +21,7 @@ later. Fin is open source; license selection is pending.
 | `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
 | Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
 | `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
-| `fin-authorization` | Rust library | Enforce OS authorization and verify single-use approval bound to the exact operation. Invoke the internal native helper. |
+| `fin-authorization` | Rust library | Enforce OS authorization and verify exact approvals or finite operation-boundary consent. Invoke the internal native helper. |
 | `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
 | Native Touch ID helper | Compiled Swift binary: `fin-touch-id`; human display name **Fin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
 | `fin-domain`, `fin-discovery`, `fin-protocol`, `fin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
@@ -51,8 +51,8 @@ verifies their checksum manifest and starts protected setup on supported macOS
 hardware. Publishing a GitHub release starts CI; the installer and bundles
 become downloadable when its builds and asset uploads finish.
 
-**The first beta is pending publication.** After `v0.2.0-beta.1` is published
-and CI finishes, run this version-pinned command in your own macOS Terminal:
+Choose a published release with completed asset uploads. This version-pinned
+example must use an available release tag; run it in your own macOS Terminal:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 \
@@ -60,8 +60,8 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | sh -s -- --version v0.2.0-beta.1
 ```
 
-Until that release is published, use the source build below. To select other
-published releases or download without setup, run the installer from a checkout:
+For a source build, use the development commands below. To select a published
+release or download without setup, run the installer from a checkout:
 
 ```sh
 sh scripts/install.sh                         # latest stable release
@@ -132,6 +132,17 @@ during venue authentication failures; account operations retain identity checks.
 For RSA/Ed25519, hidden input accepts complete multiline PEM or literal `\n`
 separators; press Enter after its END line.
 
+Financial execution shows its human preview in the terminal; `--verbose` includes
+technical details. Agents use `--dry-run --json` and present the result before
+invoking execution. The only approval popup is the system Touch ID prompt,
+which identifies the specific write. Binance previews display immutable USD
+ceilings rounded up to cents. Fin refreshes pricing before submission and accepts
+it only within those ceilings, with the same asset identities, amounts, limit
+price, fees and destination. Stale or invalid pricing still blocks execution;
+unpriced exchange assets require the protected policy exception described below.
+Every replacement needs a fresh preview and approval; reconcile the original
+operation before creating a replacement.
+
 Use `fin --help` for command descriptions, bare `fin explain` or `fin schema` for usage and examples,
 and `fin capabilities` to list all command and operation names. For a specific
 operation, run `fin explain wallet.balances`.
@@ -149,43 +160,45 @@ Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use nati
 ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
 native/ERC-20 transfers. Dapps and bridging on those networks are later work.
 Automatic token discovery is partial; candidates are verified against RPC and
-explicit token addresses remain available. Shared CoinGecko USD pricing serves
-Binance and every EVM network: exact contract lookups for ERC-20s, dynamic
-exchange-local identity resolution and the reviewed native ETH identity. Binance
-coin IDs come from fully paginated CoinGecko exchange tickers cross-checked
-against exact active Binance base/quote markets; names or symbols alone never
-select a coin. New covered listings need no asset enrollment or Fin release.
-Missing, conflicting or stale evidence blocks valuation; stablecoins are priced
-from the provider rather than assumed equal to $1.
+explicit token addresses remain available. EVM pricing keeps the existing
+CoinGecko native-ETH and exact network/contract token path.
 
-Anonymous access requires no CoinGecko setup. Complete identity mappings are
-cached separately for up to 24 hours in protected storage; missing/conflicting
-mappings refresh on later reads after 30 seconds. Prices keep their 30-second
-cache and strict provider age below 120 seconds. Trading requests batch only the
-movement and fee assets needed by that action, deduplicated by exact identity.
-Anonymous requests start six seconds apart and slow further after a 429.
-`Retry-After` is honored, with one automatic public-read retry for cooldowns up
-to 60 seconds; financial submissions never use that retry.
+Binance assets use exact active spot-market metadata: choose a direct **USDC**
+pair first, otherwise **USDT**. Fin values one unit at the **best ask × quote/USD**,
+a conservative movement/fee estimate, not an executable trade price or depth
+guarantee. USDC/USD and USDT/USD come together in one CoinGecko request per
+refresh; stablecoin holdings use their actual USD rate, never assumed parity.
+No exchange-catalog scan or per-coin CoinGecko price is needed for this path.
+New Binance listings work after metadata refresh without enrollment or a release.
+No cross-exchange, inverse, USD or multi-hop routes are included.
 
-The first uncached venue identity scan can take minutes. Rate-limited or timed-out
-scans checkpoint their progress without accepting partial identities. The
-protected broker retains mappings, pagination and provider cooldown across
-configuration reloads/restarts. A preview/dry-run waits at most 300 seconds;
-incomplete discovery returns an error and a later read resumes it. No approval
-or financial movement happens during discovery.
+Market metadata is cached for 30 seconds, books for 10 seconds and the shared
+conversion batch for 30 seconds. Spot snapshots must be less than 30 seconds old;
+both stablecoin rates must be less than five minutes old. Sources include the
+exact pair and both leg times. Binance's REST book has no event timestamp, so
+its time is the start of the live request, retained through cache hits.
+Stale, malformed, conflicting or missing quote data and provider failures remain
+errors; a fresh leg cannot validate an expired one.
 
-An explicit public probe exercises this path without accounts, credentials or
-financial writes. Its optional cache file is public verification state, separate
-from the broker's root-owned identity cache:
+Assets without an active direct pair produce a warning and a **$0 estimate**,
+meaning unknown USD value. Writes involving them are disabled by default;
+a human can enable the protected exception described under policy below.
+USD limits then cover only priced amounts, while exact quantities, fee caps,
+per-write Touch ID and recovery still apply. This never substitutes a zero for
+an outage or stale rate. Scoped acceptance-test accounting remains fully priced.
+
+Anonymous CoinGecko access needs no setup. Its existing pacing and rate-limit
+handling remain; a cold Binance action requests only the two conversion rates.
+The existing catalog resolver/cache is retained for compatibility, but the
+broker's exchange pricing no longer invokes it. An optional read-only public
+probe uses no accounts or credentials:
 
 ```sh
-cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only --identity-cache work/public-pricing-identities.json
+cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [anonymous pricing verification](docs/reports/anonymous-coingecko-pricing.md)
-and [dynamic identity verification](docs/reports/dynamic-exchange-pricing.md).
-Missing or stale quotes block writes;
-anonymous public access is best effort. To use your Demo/Pro plan, enroll its
+See [pricing contracts](docs/implementation-plan.md#pricing-contracts).
+Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
 ```sh
@@ -259,6 +272,31 @@ approval requirements still apply. `NO_COLOR` disables human color.
 The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. Copy
 `skills/fin/` into your agent's skill directory and ensure `fin` is on its PATH.
 
+## Binance account transfers
+
+`binance.transfer` supports two explicit signing routes for SPOT wallets. Set
+`authority` to the main account for universal transfers in either direction, or
+to the source subaccount to send funds to its configured parent. Fin never
+changes the signer or endpoint automatically after a failure.
+
+```sh
+fin explain binance.transfer --json
+fin execute binance.transfer --dry-run --input '{"requestId":"transfer-001","authority":"binance-sub","from":"binance-sub","to":"binance-main","coin":"ETH","amount":"0.0077","fromWallet":"SPOT","toWallet":"SPOT"}' --json
+# Review the preview, then execute with the same input and --id transfer-001.
+```
+
+Subaccount signing requires Binance's Spot & Margin Trading permission. The main
+connection supplies independent hierarchy and recipient reads. This endpoint
+accepts no client transaction ID: Fin saves its local submission identity before
+dispatch and the returned `txnId` afterward. Exact history and balance evidence
+establish completion. If the response is lost before its receipt is saved, Fin
+keeps the operation unknown and blocks conflicting transfers; it never resends.
+
+A recorded submission-stage HTTP 400/`-1022` signature rejection can settle as a
+proved failure only with complete matching history absent and unchanged source
+and destination balances. Other uncertain failures remain reserved. Always check
+the original `fin status OPERATION_ID --json` before creating another request.
+
 ## Financial limits
 
 ```sh
@@ -274,6 +312,20 @@ keeps the exact string `"0"`. Fin requests the Mac
 login password for protected configuration access, then fresh Touch ID for the
 exact old/new limits. No funds move; each subsequent write still needs its own
 Touch ID. `--json` on `policy set` returns a structured human-terminal handoff.
+
+The optional `--allow-unpriced-exchange-assets true|false` setting defaults to
+false; omission preserves it. To enable it, run the following yourself, replacing
+both limits with your intended policy values:
+
+```sh
+fin policy set --max-movement-usd 1000 --max-run-allocation-usd 5000 --allow-unpriced-exchange-assets true
+```
+
+The protected review explains the excluded USD coverage. `policy show` reports
+the setting and counts unpriced operations included in allocation usage. This is
+configuration approval; each write still requires separate fresh Touch ID.
+Disabling the exception blocks new unpriced writes without preventing recovery
+of previously submitted operations.
 
 The movement limit includes each gross movement plus maximum execution costs.
 The legacy-named `max-run-allocation-usd` setting now limits **installation-wide
@@ -360,7 +412,7 @@ logs. Historical TypeScript source and reports remain in Git history and do not
 establish Rust verification.
 
 Human installation, credential isolation, real Touch ID and live settlement need
-separate observed results; use the [human checklist](docs/testing/rust-human-handoff.md).
+separate observed results; use the [human checklist](docs/testing/onboarding.md).
 Live acceptance requires explicit authorization, production accounts and Ethereum
 mainnet. Each movement and the total allocation are capped at **$100 equivalent**,
 including costs; capture the baseline and fund the complete return path before
@@ -373,7 +425,7 @@ Fin uses official **CCXT Rust 4.5.85** through `fin-exchange`, with Binance,
 Kraken, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
 compatible. Shared lifecycle checks, journaling and recovery stay in Fin; CCXT
 handles exchange connectivity and signing. Exact wire responses bypass floating
-point convenience types. [Architecture and limitations](docs/reports/ccxt-exchange.md).
+point convenience types. See [exchange connectivity](docs/rust-architecture.md#exchange-connectivity-and-extension).
 
 The shared default profile exposes public market and ticker reads:
 
@@ -394,7 +446,6 @@ OKX/Bybit use spot, Coinbase uses Advanced public products (market discovery is
 one page of up to 1000 spot products), and Hyperliquid covers its primary perpetual
 market. Returned prices retain venue meanings such as mark price versus last trade;
 these reads do not claim to value holdings or enumerate an entire venue catalog.
-[Public read verification](docs/reports/public-exchange-reads.md).
 
 ```sh
 # Offline, synthetic: no credentials, production API calls or installation
@@ -404,8 +455,64 @@ cargo run --locked -p fin-exchange --example public_read --all-features -- hyper
 ```
 
 Dev/test builds omit debug symbols to limit generated SDK disk use, while retaining
-incremental compilation. Release optimization is unchanged. Human onboarding and
-Touch ID remain pending the joint session.
+incremental compilation. Release optimization is unchanged.
+
+## Operation-boundary authorization
+
+Binance spot LIMIT IOC/FOK placement supports approval of one financial intent:
+fixed account, physical resource, asset pair and side, with cumulative quantity
+or spend, price and fee bounds. Repricing and partial-fill completion inside
+these boundaries reuse consent. Other writes retain exact per-write approval.
+Consent defaults to 10 minutes from successful approval; `--valid-for` chooses
+another duration. Quote freshness is independent, and personal USD policy is
+checked against fresh evidence before submission. There is no automatic
+percentage buffer or incidental cent-rounded approval ceiling on this path.
+
+Discover the actual inputs and supported variations before preparing an intent:
+
+```sh
+fin authorizations authorize --help
+fin schema authorizations.authorize --json
+fin schema binance.spot.order-place --json
+fin schema exchange.order-book --json
+fin read exchange.order-book --input '{"exchange":"binance","market_type":"spot","pair":"ETHUSDT","depth":1}' --json
+```
+
+SELL boundaries require `maximum_quantity`, `minimum_price` and `maximum_fees`.
+BUY boundaries require `maximum_spend`, `maximum_price` and `maximum_fees`.
+Quantities, spend and fees use exact asset units, not assumed stablecoin USD
+parity. `allowed_time_in_force` defaults to IOC/FOK and `allowed_order_types`
+to LIMIT; these choices are displayed for approval. MARKET and standing orders
+are not implemented. Fin does not schedule order-type changes; the agent proposes
+them to the human, and unsupported execution remains unavailable.
+
+`fin authorizations authorize OPERATION --id INTENT_REQUEST_ID --input JSON
+--bounds JSON [--valid-for 10m]` reviews and grants authority without submitting
+an order. Its returned authorization ID references protected broker state.
+Use `fin execute OPERATION --id ATTEMPT_REQUEST_ID --input JSON --authorization
+AUTHORIZATION_ID --dry-run --json` to check a candidate, then remove `--dry-run`
+to execute it. This execution does not ask for another Touch ID prompt.
+
+Inspect progress with `fin authorizations status AUTHORIZATION_ID --json`.
+Verified partial fills and costs consume the cumulative allowance; unresolved
+attempts retain reservations and block potentially duplicating work. Reuse an
+attempt's request ID for recovery. A deliberately changed candidate gets a new
+attempt ID. `--replaces-attempt OPERATION_ID` supersedes an unsubmitted candidate;
+it cannot replace an order already submitted or uncertain.
+
+`fin authorizations cancel AUTHORIZATION_ID` revokes future submissions without
+Touch ID. It cannot undo a submitted exchange order. To change boundaries or
+expiry, authorize again with a new request ID and `--replaces AUTHORIZATION_ID`;
+fresh Touch ID is required. Replacement limits are cumulative totals for the
+same intent, including already spent quantities and fees. Status and review
+show the remaining authority. Restart preserves original expiry and consumption
+but never automatically dispatches an attempt. Historical approvals are not
+broadened, and financial authority cannot change credentials or protected policy.
+
+The shared `exchange.order-book` read supports Binance spot and
+USDⓈ-M perpetual, Kraken spot, Hyperliquid primary perpetual, and OKX, Coinbase
+Advanced and Bybit spot. It returns exact bid/ask levels, verified market
+identity and separate request/venue timestamps.
 
 ## Binance spot and USDⓈ-M trading
 
@@ -426,15 +533,15 @@ fin read binance.futures.positions --input '{"account":"master","symbol":"ETHUSD
 fin read binance.permissions --input '{"account":"master"}' --json
 ```
 
-The trading increment supports LIMIT **FOK** spot orders in tracked return plans,
+The trading increment supports standalone LIMIT **IOC/FOK** spot orders,
 and LIMIT **IOC/FOK** USDT perpetual orders with isolated margin, leverage 1,
 one-way positions and automatic margin additions disabled. Opening requires no
 other futures exposure on the account. Fin does not change those settings or fund
-the futures wallet automatically. Spot IOC reconciliation is covered by synthetic
-tests; scoped spot IOC execution remains unsupported. COIN-M, delivery futures,
+the futures wallet automatically. Historical scoped spot IOC return plans remain unsupported. COIN-M, delivery futures,
 market/standing orders and leverage changes remain follow-ups.
 
-Each placement, cancellation and cleanup requires fresh Touch ID. Fin records
+Standalone placement, cancellation and cleanup require fresh Touch ID; bounded
+spot placements reuse only their explicitly approved remaining authority. Fin records
 the client order ID before submission, verifies fills/commissions and reconciles
 original requests after uncertain responses. Cancellation does not release the
 original order's reservation until its fills reconcile. Actual partial cleanup
@@ -451,11 +558,6 @@ Named reusable EVM wallets select their chain using the Binance network identifi
 reviewed EVM chains and standard native/ERC-20 assets; other routes explicitly
 remain pending after Binance reports completion. Observer routing is separate
 from exchange submission support.
-
-The current execution engine still requires priced, bounded tracked runs with
-observable holdings and a complete return plan. Generic exchange submission does
-not relax these requirements or provide permanent payout mode. A route without
-receipt/restoration coverage can be previewed but cannot pass a tracked run.
 
 Inspect the exact withdrawal contract before preparing a real amount:
 
@@ -479,21 +581,17 @@ fin read binance.whitelist --input '{"account":"master","coin":"ETH","network":"
 The address in the last example is synthetic; replace it with your actual public
 destination. A whitelist check returns `enabled`, `disabled`, `absent` or
 `unknown` for that exact destination. It does not prove account-wide whitelist
-enforcement or expiry of Binance's activation cooldown. See the
-[address-book report](docs/reports/binance-address-book.md).
+enforcement or expiry of Binance's activation cooldown.
 
-[Generic withdrawal verification](docs/reports/binance-generic-withdrawal.md),
-[trading verification and limitations](docs/reports/binance-trading.md) and the
-[human trading checklist](docs/testing/binance-trading.md) separate synthetic
-readiness from pending production/Touch ID acceptance. Reproduce the focused suite:
+Use the [trading acceptance checklist](docs/testing/binance-trading.md) for
+protected live checks. Run the focused synthetic suite:
 
 ```sh
 cargo test --locked -p fin-binance --test trading_reads --test trading_contract
 ```
 
-Binance read compatibility and an explicit authenticated read audit are documented
-in the [read audit report](docs/reports/binance-read-audit.md). Native Han market
-identifiers no longer break discovery or unrelated futures reads:
+Binance read compatibility includes native Han market identifiers. Run the
+synthetic checks or an explicitly authorized read-only account audit:
 
 ```sh
 cargo test --locked -p fin-binance --test trading_reads

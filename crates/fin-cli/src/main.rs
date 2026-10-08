@@ -85,8 +85,13 @@ enum Command {
     Read(OperationArgs),
     /// Review a financial operation without moving funds.
     Preview(OperationArgs),
-    /// Execute with fresh Touch ID; --dry-run previews without submitting.
+    /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
     Execute(ExecuteArgs),
+    /// Manage bounded financial authorizations.
+    Authorizations {
+        #[command(subcommand)]
+        command: AuthorizationsCommand,
+    },
     /// Check and reconcile an existing operation.
     Status { id: String },
     /// List recorded operations and unresolved submissions.
@@ -105,7 +110,7 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
-    /// Show or change protected human-owned financial limits.
+    /// Show or change protected human-owned financial policy.
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
@@ -192,6 +197,43 @@ struct ExecuteArgs {
     /// Preview without approval or submission; --id is not consumed.
     #[arg(long)]
     dry_run: bool,
+    /// Existing bounded authorization created by `fin authorizations authorize`.
+    #[arg(long)]
+    authorization: Option<String>,
+    /// Atomically replace a prior unsubmitted candidate under the same authorization.
+    #[arg(long, requires = "authorization")]
+    replaces_attempt: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct BoundaryAuthorizationArgs {
+    /// Supported write operation to authorize.
+    operation: String,
+    /// Stable logical intent identity; retries must reuse it.
+    #[arg(long)]
+    id: String,
+    /// Operation-specific candidate input JSON.
+    #[arg(long)]
+    input: String,
+    /// Operation-specific permitted variations and cumulative limits as JSON.
+    #[arg(long)]
+    bounds: String,
+    /// Consent lifetime from successful approval (for example 10m, default 10m).
+    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
+    valid_for: u64,
+    /// Replace an existing authorization for the same logical intent.
+    #[arg(long)]
+    replaces: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthorizationsCommand {
+    /// Review and grant bounded authority for one logical intent.
+    Authorize(BoundaryAuthorizationArgs),
+    /// Check and reconcile a bounded authorization and its attempts.
+    Status { id: String },
+    /// Revoke future dispatch under a bounded authorization.
+    Cancel { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -208,7 +250,7 @@ enum DaemonCommand {
 enum PolicyCommand {
     /// Show personal limits, included costs and allocation usage.
     Show,
-    /// Change both limits in your own Terminal with fresh Touch ID; refuses unresolved work.
+    /// Change financial limits and an optional unpriced exchange exception in your own Terminal with fresh Touch ID; refuses unresolved work.
     Set(fin_discovery::PolicySetArgs),
 }
 
@@ -347,6 +389,95 @@ async fn execute_with_recovery(
     }
 }
 
+async fn execute_boundary_with_recovery(
+    transport: &dyn Transport,
+    authorization_id: String,
+    request: OperationRequest,
+) -> Result<Value, FinError> {
+    match transport
+        .call(BrokerRequest::ExecuteBoundary {
+            authorization_id: authorization_id.clone(),
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            // Reconciliation observes the durable attempt; it never resubmits it.
+            if let Ok(status) = transport
+                .call(BrokerRequest::BoundaryStatus {
+                    id: authorization_id,
+                })
+                .await
+                && let Some(attempt) =
+                    status
+                        .get("attempts")
+                        .and_then(Value::as_array)
+                        .and_then(|attempts| {
+                            attempts.iter().find(|attempt| {
+                                attempt.get("request_id").and_then(Value::as_str)
+                                    == Some(request.request_id.as_str())
+                            })
+                        })
+            {
+                return Ok(attempt.clone());
+            }
+            Err(FinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; Fin did not submit the attempt again.",
+                "Run fin authorizations status with the same authorization ID and reconcile before creating another attempt.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn replace_boundary_candidate_with_recovery(
+    transport: &dyn Transport,
+    authorization_id: String,
+    previous_attempt_id: String,
+    request: OperationRequest,
+) -> Result<Value, FinError> {
+    match transport
+        .call(BrokerRequest::ReplaceBoundaryCandidate {
+            authorization_id: authorization_id.clone(),
+            previous_attempt_id,
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            if let Ok(status) = transport
+                .call(BrokerRequest::BoundaryStatus {
+                    id: authorization_id,
+                })
+                .await
+                && let Some(attempt) =
+                    status
+                        .get("attempts")
+                        .and_then(Value::as_array)
+                        .and_then(|attempts| {
+                            attempts.iter().find(|attempt| {
+                                attempt.get("request_id").and_then(Value::as_str)
+                                    == Some(request.request_id.as_str())
+                            })
+                        })
+            {
+                return Ok(attempt.clone());
+            }
+            Err(FinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; Fin did not submit the replacement again.",
+                "Run fin authorizations status with the same authorization ID and reconcile before creating another attempt.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn find_original_operation(records: &Value, request_id: &str) -> Option<String> {
     let records = records
         .as_array()
@@ -403,18 +534,30 @@ fn broker_unavailable() -> FinError {
 #[cfg(any(target_os = "macos", test))]
 fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
-        BrokerRequest::Execute { .. } => FINANCIAL_WRITE_TIMEOUT,
+        BrokerRequest::Execute { .. }
+        | BrokerRequest::AuthorizeBoundary { .. }
+        | BrokerRequest::ExecuteBoundary { .. }
+        | BrokerRequest::ReplaceBoundaryCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
         BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot => OBSERVER_TIMEOUT,
-        BrokerRequest::Preview { .. } => FINANCIAL_WRITE_TIMEOUT,
+        BrokerRequest::Preview { .. }
+        | BrokerRequest::PreviewBoundaryAuthorization { .. }
+        | BrokerRequest::PreviewBoundary { .. } => FINANCIAL_WRITE_TIMEOUT,
         _ => BROKER_TIMEOUT,
     }
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn broker_timeout(request: &BrokerRequest) -> FinError {
-    let next_action = if matches!(request, BrokerRequest::Execute { .. }) {
+    let next_action = if matches!(request, BrokerRequest::AuthorizeBoundary { .. }) {
+        "Repeat authorization with the same request ID and parameters to recover its result; do not create another grant."
+    } else if matches!(
+        request,
+        BrokerRequest::Execute { .. }
+            | BrokerRequest::ExecuteBoundary { .. }
+            | BrokerRequest::ReplaceBoundaryCandidate { .. }
+    ) {
         "Check status with the same request ID; do not create another financial request."
     } else {
         "Run fin daemon status --json to check the service; if startup is failing, inspect the broker error log in your own Terminal."
@@ -437,6 +580,25 @@ fn generic_input_error() -> FinError {
 }
 fn parse_input(input: &str) -> Result<Value, FinError> {
     serde_json::from_str(input).map_err(|_| generic_input_error())
+}
+
+fn parse_duration_seconds(value: &str) -> Result<u64, String> {
+    let (digits, multiplier) = match value.chars().last() {
+        Some('s') => (&value[..value.len() - 1], 1u64),
+        Some('m') => (&value[..value.len() - 1], 60),
+        Some('h') => (&value[..value.len() - 1], 60 * 60),
+        Some('d') => (&value[..value.len() - 1], 24 * 60 * 60),
+        Some(last) if last.is_ascii_digit() => (value, 1),
+        _ => return Err("Use a positive duration such as 600s, 10m, 2h or 1d.".into()),
+    };
+    let amount = digits
+        .parse::<u64>()
+        .ok()
+        .filter(|amount| *amount > 0)
+        .ok_or_else(|| "Use a positive duration such as 600s, 10m, 2h or 1d.".to_owned())?;
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| "The requested duration is too large.".to_owned())
 }
 
 fn definitions() -> Vec<fin_domain::Definition> {
@@ -502,9 +664,33 @@ fn discovery_help(name: &str) -> Value {
 }
 
 #[async_trait]
-trait Client {
+trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError>;
+    async fn execute_boundary(
+        &self,
+        authorization_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        self.call(BrokerRequest::ExecuteBoundary {
+            authorization_id,
+            request,
+        })
+        .await
+    }
+    async fn replace_boundary_candidate(
+        &self,
+        authorization_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        self.call(BrokerRequest::ReplaceBoundaryCandidate {
+            authorization_id,
+            previous_attempt_id,
+            request,
+        })
+        .await
+    }
 }
 #[async_trait]
 impl Client for UnixTransport {
@@ -513,6 +699,27 @@ impl Client for UnixTransport {
     }
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError> {
         execute_with_recovery(self, request).await
+    }
+    async fn execute_boundary(
+        &self,
+        authorization_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        execute_boundary_with_recovery(self, authorization_id, request).await
+    }
+    async fn replace_boundary_candidate(
+        &self,
+        authorization_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        replace_boundary_candidate_with_recovery(
+            self,
+            authorization_id,
+            previous_attempt_id,
+            request,
+        )
+        .await
     }
 }
 
@@ -526,10 +733,12 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
     // Keep execution identities/run flags on reusable commands, but do not
     // consume them, reserve funds or enter write recovery for a preview.
     let command = match cli.command {
-        Command::Execute(args) if args.dry_run => Command::Preview(OperationArgs {
-            operation: args.operation,
-            input: args.input,
-        }),
+        Command::Execute(args) if args.dry_run && args.authorization.is_none() => {
+            Command::Preview(OperationArgs {
+                operation: args.operation,
+                input: args.input,
+            })
+        }
         command => command,
     };
     match command {
@@ -582,15 +791,60 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                 .await
         }
         Command::Execute(args) => {
-            client
-                .execute(OperationRequest {
-                    request_id: args.id.ok_or_else(generic_input_error)?,
-                    operation: args.operation,
-                    input: parse_input(&args.input)?,
-                    run_id: None,
-                })
-                .await
+            let input = parse_input(&args.input)?;
+            if let Some(authorization_id) = args.authorization {
+                if args.dry_run {
+                    client
+                        .call(BrokerRequest::PreviewBoundary {
+                            id: authorization_id,
+                            operation: args.operation,
+                            input,
+                        })
+                        .await
+                } else {
+                    let request = OperationRequest {
+                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        operation: args.operation,
+                        input,
+                        run_id: None,
+                    };
+                    if let Some(previous_attempt_id) = args.replaces_attempt {
+                        client
+                            .replace_boundary_candidate(
+                                authorization_id,
+                                previous_attempt_id,
+                                request,
+                            )
+                            .await
+                    } else {
+                        client.execute_boundary(authorization_id, request).await
+                    }
+                }
+            } else {
+                client
+                    .execute(OperationRequest {
+                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        operation: args.operation,
+                        input,
+                        run_id: None,
+                    })
+                    .await
+            }
         }
+        Command::Authorizations { command } => match command {
+            AuthorizationsCommand::Authorize(args) => {
+                let request = boundary_authorization_request(&args)?;
+                client
+                    .call(BrokerRequest::AuthorizeBoundary { request })
+                    .await
+            }
+            AuthorizationsCommand::Status { id } => {
+                client.call(BrokerRequest::BoundaryStatus { id }).await
+            }
+            AuthorizationsCommand::Cancel { id } => {
+                client.call(BrokerRequest::RevokeBoundary { id }).await
+            }
+        },
         Command::Status { id } => client.call(BrokerRequest::Status { id }).await,
         Command::Operations => client.call(BrokerRequest::Operations).await,
         Command::Doctor => client.call(BrokerRequest::Doctor).await,
@@ -626,6 +880,104 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
             }
         },
     }
+}
+
+async fn review_human_execution(cli: &Cli, client: &dyn Client, ui: &Ui) -> Result<(), FinError> {
+    let Command::Execute(args) = &cli.command else {
+        return Ok(());
+    };
+    if cli.json || args.dry_run || args.authorization.is_some() {
+        return Ok(());
+    }
+    // Reject missing execution identity before any service work. Preview is
+    // read-only; execution/recovery and its fresh bound approval remain separate.
+    let request_id = args.id.as_ref().ok_or_else(generic_input_error)?;
+    let progress = ui.progress("Preparing preview...");
+    let records = client.call(BrokerRequest::Operations).await?;
+    if find_original_operation(&records, request_id).is_some() {
+        // An existing request must retain its normal duplicate/recovery path.
+        // A fresh preview could fail against holdings already spent by that
+        // request, preventing the user from obtaining its original result.
+        drop(progress);
+        return Ok(());
+    }
+    let result = client
+        .call(BrokerRequest::Preview {
+            operation: args.operation.clone(),
+            input: parse_input(&args.input)?,
+        })
+        .await;
+    drop(progress);
+    let preview = result?;
+    if preview["summary"].as_str().is_none_or(str::is_empty) {
+        return Err(FinError::new(
+            "PREVIEW_INVALID",
+            "preview",
+            "The operation preview has no approval summary.",
+            "Inspect the operation before executing it.",
+        ));
+    }
+    ui.approval_review(&preview).map_err(|_| {
+        FinError::new(
+            "REVIEW_OUTPUT_FAILED",
+            "cli",
+            "The operation summary could not be displayed. Nothing was submitted.",
+            "Restore terminal output before retrying.",
+        )
+    })
+}
+
+fn boundary_authorization_request(
+    args: &BoundaryAuthorizationArgs,
+) -> Result<fin_domain::boundaries::BoundaryAuthorizationRequest, FinError> {
+    Ok(fin_domain::boundaries::BoundaryAuthorizationRequest {
+        request_id: args.id.clone(),
+        operation: args.operation.clone(),
+        input: parse_input(&args.input)?,
+        bounds: parse_input(&args.bounds)?,
+        valid_for_seconds: args.valid_for,
+        replaces: args.replaces.clone(),
+    })
+}
+
+async fn review_boundary_authorization(
+    cli: &Cli,
+    client: &dyn Client,
+    ui: &Ui,
+) -> Result<(), FinError> {
+    let Command::Authorizations {
+        command: AuthorizationsCommand::Authorize(args),
+    } = &cli.command
+    else {
+        return Ok(());
+    };
+    if cli.json {
+        return Ok(());
+    }
+    let progress = ui.progress("Preparing authorization review...");
+    let result = client
+        .call(BrokerRequest::PreviewBoundaryAuthorization {
+            request: boundary_authorization_request(args)?,
+        })
+        .await;
+    drop(progress);
+    let preview = result?;
+    if preview["summary"].as_str().is_none_or(str::is_empty) {
+        return Err(FinError::new(
+            "PREVIEW_INVALID",
+            "authorization",
+            "The boundary authorization review has no human-readable summary.",
+            "Inspect the operation and its bounds before requesting Touch ID.",
+        ));
+    }
+    ui.authorization_review(&preview).map_err(|_| {
+        FinError::new(
+            "REVIEW_OUTPUT_FAILED",
+            "cli",
+            "The authorization summary could not be displayed. No authorization was requested.",
+            "Restore terminal output before retrying.",
+        )
+    })
 }
 
 // clap_complete includes hidden subcommands in some generated shells. Keep
@@ -814,7 +1166,7 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
             "Fin needs administrator access to securely update this connection."
         }
         PrivilegedAction::PolicySet(_) => {
-            "Fin needs administrator access to change protected financial limits. Touch ID separately approves the exact limits."
+            "Fin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
         }
         PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
@@ -914,6 +1266,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Preview(_) => "preview",
         Command::Execute(args) if args.dry_run => "preview",
         Command::Execute(_) => "execute",
+        Command::Authorizations { .. } => "authorizations",
         Command::Status { .. } => "status",
         Command::Operations => "operations",
         Command::Doctor => "doctor",
@@ -947,6 +1300,11 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
             argument.to_str(),
             Some(
                 "--input"
+                    | "--bounds"
+                    | "--valid-for"
+                    | "--replaces"
+                    | "--authorization"
+                    | "--replaces-attempt"
                     | "--id"
                     | "--provider"
                     | "--name"
@@ -1044,7 +1402,15 @@ async fn main() {
             | Command::Completions { .. }
             | Command::InternalCompletions { .. }
     );
-    let progress = if !offline && !human_only(&cli.command) {
+    let human_execution = !cli.json
+        && (matches!(&cli.command, Command::Execute(args) if !args.dry_run && args.authorization.is_none())
+            || matches!(
+                &cli.command,
+                Command::Authorizations {
+                    command: AuthorizationsCommand::Authorize(_)
+                }
+            ));
+    let progress = if !offline && !human_only(&cli.command) && !human_execution {
         Some(ui.progress(match &cli.command {
             Command::Daemon {
                 command: DaemonCommand::Start,
@@ -1056,15 +1422,30 @@ async fn main() {
                 command: DaemonCommand::Status,
             } => "Checking daemon status...",
             Command::Execute(args) if args.dry_run => "Preparing preview...",
+            Command::Execute(args) if args.authorization.is_some() => {
+                "Executing authorized attempt..."
+            }
             Command::Preview(_) => "Preparing preview...",
-            Command::Execute(_) => "Waiting for review, Touch ID and execution...",
+            Command::Execute(_) => "Waiting for Touch ID and execution...",
+            Command::Authorizations {
+                command: AuthorizationsCommand::Authorize(_),
+            } if !cli.json => "Preparing authorization review...",
+            Command::Authorizations {
+                command: AuthorizationsCommand::Authorize(_),
+            } => "Requesting boundary authorization...",
             _ => "Checking Fin...",
         }))
     } else {
         None
     };
     let client = UnixTransport::installed();
-    let result = dispatch(cli, &client).await;
+    let result = match review_human_execution(&cli, &client, &ui).await {
+        Ok(()) => match review_boundary_authorization(&cli, &client, &ui).await {
+            Ok(()) => dispatch(cli, &client).await,
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
     drop(progress);
     std::process::exit(emit(result, &ui, name));
 }
@@ -1076,6 +1457,144 @@ mod tests {
     use serde_json::json;
     #[cfg(target_os = "macos")]
     use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn terminal_execution_reviews_without_writing_and_machine_dry_runs_do_not() {
+        struct ReviewClient {
+            calls: std::sync::Mutex<Vec<Value>>,
+            fail: bool,
+        }
+        #[async_trait]
+        impl Client for ReviewClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                if matches!(request, BrokerRequest::Operations) {
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push(json!({"operation":"operations"}));
+                    return Ok(json!([]));
+                }
+                let BrokerRequest::Preview { operation, input } = request else {
+                    panic!("review must only look up existing requests and preview");
+                };
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(json!({"operation":operation,"input":input}));
+                if self.fail {
+                    Err(FinError::validation("Synthetic failed preview"))
+                } else {
+                    Ok(json!({"summary":"Send 1 SYNTHETIC to SYNTHETIC-wallet.","warnings":[]}))
+                }
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("review must not execute or authorize");
+            }
+        }
+        for extra in [None, Some("--json"), Some("--dry-run")] {
+            let mut args = vec![
+                "fin",
+                "execute",
+                "wallet.transfer",
+                "--input",
+                "{\"amount\":\"1\"}",
+                "--id",
+                "synthetic-id",
+            ];
+            if let Some(extra) = extra {
+                args.push(extra);
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            let client = ReviewClient {
+                calls: Default::default(),
+                fail: false,
+            };
+            review_human_execution(&cli, &client, &Ui::new(cli.json, false))
+                .await
+                .unwrap();
+            assert_eq!(
+                client.calls.lock().unwrap().len(),
+                2 * usize::from(extra.is_none())
+            );
+        }
+        let cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "synthetic-id",
+        ])
+        .unwrap();
+        let client = ReviewClient {
+            calls: Default::default(),
+            fail: true,
+        };
+        assert!(
+            review_human_execution(&cli, &client, &Ui::new(false, false))
+                .await
+                .is_err()
+        );
+        let mut cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "synthetic-id",
+        ])
+        .unwrap();
+        if let Command::Execute(args) = &mut cli.command {
+            args.id = None;
+        }
+        let client = ReviewClient {
+            calls: Default::default(),
+            fail: false,
+        };
+        assert!(
+            review_human_execution(&cli, &client, &Ui::new(false, false))
+                .await
+                .is_err()
+        );
+        assert!(client.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_request_skips_new_preview_and_retains_execution_recovery() {
+        struct ExistingClient;
+        #[async_trait]
+        impl Client for ExistingClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                assert!(matches!(request, BrokerRequest::Operations));
+                Ok(
+                    json!([{"id":"synthetic-record","request_id":"synthetic-id","status":"unknown"}]),
+                )
+            }
+            async fn execute(&self, request: OperationRequest) -> Result<Value, FinError> {
+                assert_eq!(request.request_id, "synthetic-id");
+                Ok(json!({"id":"synthetic-record","status":"unknown"}))
+            }
+        }
+        let cli = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "synthetic-id",
+        ])
+        .unwrap();
+        review_human_execution(&cli, &ExistingClient, &Ui::new(false, false))
+            .await
+            .unwrap();
+        assert_eq!(
+            dispatch(cli, &ExistingClient).await.unwrap()["id"],
+            "synthetic-record"
+        );
+    }
 
     struct PreviewOnlyClient {
         calls: std::sync::Mutex<Vec<Value>>,
@@ -1279,6 +1798,27 @@ mod tests {
     }
 
     #[test]
+    fn boundary_grant_waits_for_human_approval_and_preserves_retry_identity() {
+        let request = BrokerRequest::AuthorizeBoundary {
+            request: fin_domain::boundaries::BoundaryAuthorizationRequest {
+                request_id: "synthetic-grant-timeout".into(),
+                operation: "binance.spot.order-place".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            },
+        };
+        assert_eq!(broker_response_timeout(&request), FINANCIAL_WRITE_TIMEOUT);
+        assert!(broker_response_timeout(&request) > Duration::from_secs(90));
+        let error = broker_timeout(&request);
+        assert!(error.next_action.contains("same request ID and parameters"));
+        assert!(error.next_action.contains("do not create another grant"));
+        assert!(!error.next_action.contains("daemon status"));
+        assert!(!error.next_action.contains("synthetic-grant-timeout"));
+    }
+
+    #[test]
     fn timeout_guidance_distinguishes_service_requests_from_uncertain_writes() {
         for request in [
             BrokerRequest::Connections,
@@ -1361,7 +1901,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 49);
+        assert_eq!(financial_catalog().len(), 50);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 
@@ -1444,6 +1984,7 @@ mod tests {
             let action = PrivilegedAction::PolicySet(fin_discovery::PolicySetArgs {
                 max_movement_usd: "1000".into(),
                 max_run_allocation_usd: "5000".into(),
+                allow_unpriced_exchange_assets: None,
             });
             let result = launch_human_privileged_with_terminal(action, tty, true, true);
             assert_eq!(result.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
@@ -1735,5 +2276,621 @@ mod tests {
             assert_eq!(error.code, "PROTECTED_PROVIDER_UNAVAILABLE");
             assert_eq!(error.stage, "transport");
         }
+    }
+
+    #[tokio::test]
+    async fn boundary_commands_route_grants_candidate_previews_and_attempts() {
+        struct BoundaryClient(std::sync::Mutex<Vec<String>>);
+        #[async_trait]
+        impl Client for BoundaryClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                let value = match request {
+                    BrokerRequest::AuthorizeBoundary { request } => {
+                        assert_eq!(request.request_id, "synthetic-intent");
+                        assert_eq!(request.valid_for_seconds, 600);
+                        self.0.lock().unwrap().push("authorize".into());
+                        json!({"id":"synthetic-authorization"})
+                    }
+                    BrokerRequest::BoundaryStatus { id } => {
+                        assert_eq!(id, "synthetic-authorization");
+                        self.0.lock().unwrap().push("status".into());
+                        json!({"authorization":{"id":id,"status":"active"},"attempts":[]})
+                    }
+                    BrokerRequest::RevokeBoundary { id } => {
+                        assert_eq!(id, "synthetic-authorization");
+                        self.0.lock().unwrap().push("cancel".into());
+                        json!({"id":id,"status":"revoked"})
+                    }
+                    BrokerRequest::PreviewBoundary {
+                        id,
+                        operation,
+                        input,
+                    } => {
+                        assert_eq!(id, "synthetic-authorization");
+                        assert_eq!(operation, "binance.spot-order");
+                        assert_eq!(input["side"], "SELL");
+                        self.0.lock().unwrap().push("preview".into());
+                        json!({"authorization_id":id,"input":input})
+                    }
+                    BrokerRequest::ExecuteBoundary {
+                        authorization_id,
+                        request,
+                    } => {
+                        assert_eq!(authorization_id, "synthetic-authorization");
+                        assert_eq!(request.request_id, "synthetic-attempt");
+                        self.0.lock().unwrap().push("execute".into());
+                        json!({"id":"synthetic-operation"})
+                    }
+                    BrokerRequest::ReplaceBoundaryCandidate {
+                        authorization_id,
+                        previous_attempt_id,
+                        request,
+                    } => {
+                        assert_eq!(authorization_id, "synthetic-authorization");
+                        assert_eq!(previous_attempt_id, "synthetic-old-candidate");
+                        assert_eq!(request.request_id, "synthetic-attempt-replacement");
+                        self.0.lock().unwrap().push("replace".into());
+                        json!({"id":"synthetic-replacement-operation"})
+                    }
+                    _ => panic!("unexpected boundary CLI request"),
+                };
+                Ok(value)
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("boundary command used legacy execution")
+            }
+        }
+
+        assert_eq!(parse_duration_seconds("10m").unwrap(), 600);
+        assert_eq!(parse_duration_seconds("2h").unwrap(), 7200);
+        assert!(parse_duration_seconds("0m").is_err());
+        let client = BoundaryClient(Default::default());
+
+        let grant = Cli::try_parse_from([
+            "fin",
+            "authorizations",
+            "authorize",
+            "binance.spot-order",
+            "--id",
+            "synthetic-intent",
+            "--input",
+            r#"{"side":"SELL"}"#,
+            "--bounds",
+            r#"{"max_quantity":"1"}"#,
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(
+            dispatch(grant, &client).await.unwrap()["id"],
+            "synthetic-authorization"
+        );
+
+        for (command, expected) in [("status", "status"), ("cancel", "cancel")] {
+            let cli = Cli::try_parse_from([
+                "fin",
+                "authorizations",
+                command,
+                "synthetic-authorization",
+                "--json",
+            ])
+            .unwrap();
+            dispatch(cli, &client).await.unwrap();
+            assert_eq!(client.0.lock().unwrap().last().unwrap(), expected);
+        }
+
+        for (id_args, expected) in [
+            (vec!["--dry-run"], "preview"),
+            (vec!["--id", "synthetic-attempt"], "execute"),
+            (
+                vec![
+                    "--id",
+                    "synthetic-attempt-replacement",
+                    "--replaces-attempt",
+                    "synthetic-old-candidate",
+                ],
+                "replace",
+            ),
+        ] {
+            let mut args = vec![
+                "fin",
+                "execute",
+                "binance.spot-order",
+                "--input",
+                r#"{"side":"SELL"}"#,
+                "--authorization",
+                "synthetic-authorization",
+            ];
+            args.extend(id_args);
+            args.push("--json");
+            let cli = Cli::try_parse_from(args).unwrap();
+            dispatch(cli, &client).await.unwrap();
+            assert_eq!(client.0.lock().unwrap().last().unwrap(), expected);
+        }
+        assert_eq!(
+            *client.0.lock().unwrap(),
+            vec![
+                "authorize",
+                "status",
+                "cancel",
+                "preview",
+                "execute",
+                "replace"
+            ]
+        );
+        assert!(
+            Cli::try_parse_from([
+                "fin",
+                "execute",
+                "binance.spot-order",
+                "--input",
+                "{}",
+                "--id",
+                "synthetic-attempt",
+                "--replaces-attempt",
+                "synthetic-old-candidate",
+            ])
+            .is_err()
+        );
+    }
+
+    struct BoundaryEngineClient(std::sync::Arc<fin_engine::Engine>);
+
+    #[async_trait]
+    impl Client for BoundaryEngineClient {
+        async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+            // Exercise the same typed JSON envelope crossing the Unix socket.
+            let bytes = serde_json::to_vec(&request).unwrap();
+            let request: BrokerRequest = serde_json::from_slice(&bytes).unwrap();
+            match request {
+                BrokerRequest::PreviewBoundaryAuthorization { request } => {
+                    self.0.preview_boundary_authorization(request).await
+                }
+                BrokerRequest::AuthorizeBoundary { request } => {
+                    serde_json::to_value(self.0.authorize_boundary(request).await?)
+                        .map_err(|_| generic_input_error())
+                }
+                BrokerRequest::BoundaryStatus { id } => {
+                    serde_json::to_value(self.0.boundary_status(&id).await?)
+                        .map_err(|_| generic_input_error())
+                }
+                BrokerRequest::RevokeBoundary { id } => {
+                    serde_json::to_value(self.0.revoke_boundary(&id).await?)
+                        .map_err(|_| generic_input_error())
+                }
+                BrokerRequest::PreviewBoundary {
+                    id,
+                    operation,
+                    input,
+                } => serde_json::to_value(self.0.preview_boundary(&id, &operation, &input).await?)
+                    .map_err(|_| generic_input_error()),
+                BrokerRequest::ExecuteBoundary {
+                    authorization_id,
+                    request,
+                } => {
+                    serde_json::to_value(self.0.execute_boundary(&authorization_id, request).await?)
+                        .map_err(|_| generic_input_error())
+                }
+                BrokerRequest::ReplaceBoundaryCandidate {
+                    authorization_id,
+                    previous_attempt_id,
+                    request,
+                } => serde_json::to_value(
+                    self.0
+                        .execute_boundary_replacing(
+                            &authorization_id,
+                            request,
+                            &previous_attempt_id,
+                        )
+                        .await?,
+                )
+                .map_err(|_| generic_input_error()),
+                _ => panic!("unexpected request in synthetic boundary test"),
+            }
+        }
+
+        async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+            panic!("boundary test must not enter legacy exact approval")
+        }
+    }
+
+    #[derive(Default)]
+    struct SyntheticBoundaryAdapter {
+        submissions: std::sync::atomic::AtomicUsize,
+    }
+
+    fn synthetic_boundary_definition() -> fin_domain::Definition {
+        fin_domain::Definition {
+            name: "synthetic.trade".into(),
+            description: "Synthetic boundary test operation".into(),
+            kind: fin_domain::OperationKind::Write,
+            execution_actor: fin_domain::ExecutionActor::AgentInvocable,
+            input_schema: json!({"type":"object"}),
+            output_schema: json!({"type":"object"}),
+            error_schema: json!({"type":"object"}),
+            examples: vec![],
+            coverage: "synthetic fixture".into(),
+            completion: "verified synthetic receipt".into(),
+            semantics: json!({}),
+        }
+    }
+
+    #[async_trait]
+    impl fin_domain::Adapter for SyntheticBoundaryAdapter {
+        fn definitions(&self) -> Vec<fin_domain::Definition> {
+            vec![synthetic_boundary_definition()]
+        }
+
+        async fn read(&self, _: &str, _: &Value) -> Result<Value, FinError> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(
+            &self,
+            operation: &str,
+            input: &Value,
+        ) -> Result<fin_domain::PreparedOperation, FinError> {
+            let units = input["units"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    FinError::validation("Synthetic units must be a whole decimal string.")
+                })?;
+            let amount = fin_domain::Quantity::new((units * 1_000_000).to_string())?;
+            let resource = fin_domain::ResourceId("synthetic:cash".into());
+            let asset = fin_domain::AssetId {
+                network: "synthetic".into(),
+                reference: "USD".into(),
+                decimals: 6,
+            };
+            let now = chrono::Utc::now();
+            Ok(fin_domain::PreparedOperation {
+                operation: operation.into(),
+                input: input.clone(),
+                binding: json!({"account":input["account"],"units":input["units"]}),
+                summary: format!("Execute {units} synthetic units."),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: now.to_rfc3339(),
+                expires_at: (now + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: amount.clone(),
+                    maximum_fee_usd_micros: fin_domain::Quantity::new("0")?,
+                    additional_allocation_usd_micros: fin_domain::Quantity::new("0")?,
+                    observed_at: now.to_rfc3339(),
+                    source: "synthetic fixture".into(),
+                    prices: vec![fin_domain::AssetPrice {
+                        asset: asset.clone(),
+                        usd_micros_per_unit: fin_domain::Quantity::new("1000000")?,
+                        unit_atoms: fin_domain::Quantity::new("1000000")?,
+                        observed_at: now.to_rfc3339(),
+                        source: "synthetic fixture".into(),
+                    }],
+                }),
+                intent: fin_domain::FinancialIntent {
+                    debits: vec![fin_domain::ResourceAmount {
+                        resource: resource.clone(),
+                        amount: fin_domain::Amount {
+                            asset: asset.clone(),
+                            atoms: amount.clone(),
+                        },
+                    }],
+                    maximum_costs: vec![],
+                    expected: vec![fin_domain::EffectConstraint::Debit {
+                        resource,
+                        asset,
+                        maximum_debit: amount,
+                    }],
+                    locks: vec![],
+                },
+                operation_version: 1,
+            })
+        }
+
+        fn prepare_boundaries(
+            &self,
+            prepared: &fin_domain::PreparedOperation,
+            bounds: &Value,
+        ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
+            let requested = prepared.input["units"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| FinError::validation("Synthetic requested units are invalid."))?;
+            let maximum = bounds["max_units"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| FinError::validation("Synthetic max_units bound is invalid."))?;
+            if maximum > requested {
+                return Err(FinError::validation(
+                    "Synthetic maximum cannot exceed the requested target.",
+                ));
+            }
+            Ok(fin_domain::boundaries::BoundarySpec {
+                fixed: json!({"account":prepared.input["account"]}),
+                parameters: bounds.clone(),
+                maximum_debits: prepared.intent.debits.clone(),
+                maximum_costs: vec![],
+                summary: format!(
+                    "Authorize up to {maximum} synthetic units for account {}.",
+                    prepared.input["account"]
+                ),
+            })
+        }
+
+        fn validate_boundary_candidate(
+            &self,
+            spec: &fin_domain::boundaries::BoundarySpec,
+            prepared: &fin_domain::PreparedOperation,
+        ) -> Result<(), FinError> {
+            let maximum = spec.parameters["max_units"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| FinError::validation("Synthetic max_units bound is invalid."))?;
+            let candidate = prepared.input["units"]
+                .as_str()
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| FinError::validation("Synthetic units are invalid."))?;
+            if spec.fixed["account"] != prepared.input["account"] || candidate > maximum {
+                let constraint = if spec.fixed["account"] != prepared.input["account"] {
+                    "account"
+                } else {
+                    "max_units"
+                };
+                let (approved_bound, candidate_value) = if constraint == "account" {
+                    (
+                        spec.fixed["account"].clone(),
+                        prepared.input["account"].clone(),
+                    )
+                } else {
+                    (json!(maximum.to_string()), json!(candidate.to_string()))
+                };
+                return Err(fin_domain::boundaries::violation_error(
+                    "Synthetic candidate exceeds its approved scope.",
+                    fin_domain::boundaries::BoundaryViolation {
+                        constraint: constraint.into(),
+                        approved_bound,
+                        candidate_value,
+                        evidence_time: Some(chrono::Utc::now().to_rfc3339()),
+                        reauthorization_required: constraint == "account",
+                        reconciliation_required: false,
+                    },
+                ));
+            }
+            Ok(())
+        }
+
+        async fn revalidate(
+            &self,
+            prepared: &fin_domain::PreparedOperation,
+        ) -> Result<fin_domain::PreparedOperation, FinError> {
+            self.prepare(&prepared.operation, &prepared.input).await
+        }
+
+        async fn submit(
+            &self,
+            prepared: &fin_domain::PreparedOperation,
+            journal: std::sync::Arc<dyn fin_domain::SubmissionJournal>,
+        ) -> Result<fin_domain::Submission, FinError> {
+            journal.assert_candidate(prepared)?;
+            let number = self
+                .submissions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let submission = fin_domain::Submission {
+                kind: "synthetic".into(),
+                reference: format!("synthetic-submission-{number}"),
+                data: json!({"sequence":number}),
+            };
+            journal.persist_submission(&submission)?;
+            Ok(submission)
+        }
+
+        async fn reconcile(
+            &self,
+            record: &fin_domain::OperationRecord,
+        ) -> Result<fin_domain::Reconciliation, FinError> {
+            let submission = record
+                .submission
+                .clone()
+                .ok_or_else(|| FinError::validation("Synthetic submission missing."))?;
+            let debit = record.preview.as_ref().unwrap().intent.debits[0].clone();
+            let mut effects = fin_domain::VerifiedEffects {
+                evidence_version: 1,
+                submission,
+                effects: vec![fin_domain::FinancialEffect::CashDebit {
+                    resource: debit.resource,
+                    amount: debit.amount,
+                }],
+                evidence: json!({"receipt":"synthetic"}),
+                observed_at: chrono::Utc::now().to_rfc3339(),
+                proof_digest: String::new(),
+            };
+            effects.proof_digest = fin_domain::verified_effect_digest(&effects)?;
+            Ok(fin_domain::Reconciliation {
+                status: fin_domain::Status::Completed,
+                evidence: effects.evidence.clone(),
+                verified: Some(effects),
+            })
+        }
+    }
+
+    struct SyntheticBoundaryAuthorizer(std::sync::atomic::AtomicUsize);
+
+    #[async_trait]
+    impl fin_domain::Authorizer for SyntheticBoundaryAuthorizer {
+        async fn authorize(
+            &self,
+            challenge: &fin_domain::AuthorizationChallenge,
+        ) -> Result<fin_domain::ApprovalAudit, FinError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(fin_domain::ApprovalAudit {
+                mechanism: "synthetic-test-only".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_wire_and_engine_allow_two_attempts_under_one_synthetic_grant() {
+        use std::sync::atomic::Ordering;
+        let authorizer = std::sync::Arc::new(SyntheticBoundaryAuthorizer(
+            std::sync::atomic::AtomicUsize::new(0),
+        ));
+        let adapter = std::sync::Arc::new(SyntheticBoundaryAdapter::default());
+        let engine = std::sync::Arc::new(
+            fin_engine::Engine::new(
+                fin_store::Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer.clone(),
+                fin_engine::EngineOptions::default(),
+            )
+            .unwrap(),
+        );
+        let client = BoundaryEngineClient(engine.clone());
+        let grant = Cli::try_parse_from([
+            "fin",
+            "authorizations",
+            "authorize",
+            "synthetic.trade",
+            "--id",
+            "synthetic-intent-cli",
+            "--input",
+            r#"{"account":"synthetic-account","units":"2"}"#,
+            "--bounds",
+            r#"{"max_units":"2"}"#,
+            "--json",
+        ])
+        .unwrap();
+        let authorization = dispatch(grant, &client).await.unwrap();
+        let authorization_id = authorization["id"].as_str().unwrap().to_owned();
+
+        let out_of_bounds = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "synthetic.trade",
+            "--input",
+            r#"{"account":"synthetic-account","units":"3"}"#,
+            "--authorization",
+            &authorization_id,
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+        let error = dispatch(out_of_bounds, &client).await.unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_VIOLATION");
+        let details = error.details.unwrap()["boundary_violation"].clone();
+        assert_eq!(details["constraint"], "max_units");
+        assert_eq!(details["approved_bound"], "2");
+        assert_eq!(details["candidate_value"], "3");
+        assert_eq!(details["reauthorization_required"], false);
+        assert_eq!(details["reconciliation_required"], false);
+
+        let rejected_attempt = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "synthetic.trade",
+            "--input",
+            r#"{"account":"synthetic-account","units":"3"}"#,
+            "--id",
+            "synthetic-attempt-out-of-bounds",
+            "--authorization",
+            &authorization_id,
+            "--json",
+        ])
+        .unwrap();
+        let rejected = dispatch(rejected_attempt, &client).await.unwrap();
+        assert_eq!(rejected["status"], "failed");
+        assert_eq!(rejected["error"]["code"], "BOUNDARY_VIOLATION");
+        assert_eq!(
+            rejected["error"]["details"]["boundary_violation"]["candidate_value"],
+            "3"
+        );
+        for (attempt_id, units) in [
+            ("synthetic-attempt-one", "1"),
+            ("synthetic-attempt-two", "1"),
+        ] {
+            let execute = Cli::try_parse_from([
+                "fin",
+                "execute",
+                "synthetic.trade",
+                "--input",
+                &format!(r#"{{"account":"synthetic-account","units":"{units}"}}"#),
+                "--id",
+                attempt_id,
+                "--authorization",
+                &authorization_id,
+                "--json",
+            ])
+            .unwrap();
+            let result = dispatch(execute, &client).await.unwrap();
+            assert_eq!(result["status"], "completed", "attempt result: {result}");
+        }
+
+        let status = dispatch(
+            Cli::try_parse_from([
+                "fin",
+                "authorizations",
+                "status",
+                &authorization_id,
+                "--json",
+            ])
+            .unwrap(),
+            &client,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status["attempts"].as_array().unwrap().len(), 3);
+        assert_eq!(status["attempts"][0]["status"], "failed");
+        assert_eq!(status["attempts"][1]["status"], "completed");
+        assert_eq!(status["attempts"][2]["status"], "completed");
+        assert_eq!(
+            status["authorization"]["remaining_debits"][0]["amount"]["atoms"],
+            "0"
+        );
+        assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+
+        // Replacement is allowed only for an unsubmitted active candidate.
+        // The synthetic adapter has completed both prior attempts, so the CLI
+        // route must preserve the engine's refusal and must not submit again.
+        let completed_attempt_id = status["attempts"][2]["id"].as_str().unwrap();
+        let replacement = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "synthetic.trade",
+            "--input",
+            r#"{"account":"synthetic-account","units":"1"}"#,
+            "--id",
+            "synthetic-attempt-replacement",
+            "--authorization",
+            &authorization_id,
+            "--replaces-attempt",
+            completed_attempt_id,
+            "--json",
+        ])
+        .unwrap();
+        let error = dispatch(replacement, &client).await.unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_AUTHORIZATION_INVALID");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+
+        let untrusted = Cli::try_parse_from([
+            "fin",
+            "authorizations",
+            "authorize",
+            "synthetic.trade",
+            "--id",
+            "synthetic-intent-untrusted",
+            "--input",
+            r#"{"account":"synthetic-account","units":"1"}"#,
+            "--bounds",
+            r#"{"max_units":"2"}"#,
+            "--json",
+        ])
+        .unwrap();
+        let error = dispatch(untrusted, &client).await.unwrap_err();
+        assert_eq!(error.code, "INVALID_INPUT");
+        assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     }
 }

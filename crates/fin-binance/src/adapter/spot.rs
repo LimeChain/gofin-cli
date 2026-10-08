@@ -412,6 +412,7 @@ impl BinanceProfile {
                 authority: account.name.clone(),
                 request,
                 noop: None,
+                receipt_submission: None,
             },
         })
     }

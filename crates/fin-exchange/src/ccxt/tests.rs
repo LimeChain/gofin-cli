@@ -127,12 +127,14 @@ async fn official_binance_hmac_preserves_long_amount_and_large_identifiers() {
         Duration::ZERO,
     );
     let client = CcxtClient::for_test(&server.url).unwrap();
+    let mut transfer_params = params();
+    transfer_params.push(("fromEmail".into(), "synthetic+tag%&ü@unit.invalid".into()));
     let value = client
         .request(
             ExchangeId::Binance,
             Method::BinanceUniversalTransfer,
             credentials("SYNTHETIC-HMAC-SECRET".into()),
-            params(),
+            transfer_params,
         )
         .await
         .unwrap();
@@ -141,10 +143,139 @@ async fn official_binance_hmac_preserves_long_amount_and_large_identifiers() {
     assert!(request.starts_with("POST /sapi/v1/sub-account/universalTransfer "));
     let (payload, signature) = signed_body(&request);
     assert!(payload.contains("amount=12345678901234567890.123456789012345678"));
+    assert!(payload.contains("fromEmail=synthetic%2Btag%25%26%C3%BC%40unit.invalid"));
+    assert!(!payload.contains("%2540"));
     let mut mac = Hmac::<Sha256>::new_from_slice(b"SYNTHETIC-HMAC-SECRET").unwrap();
     mac.update(payload.as_bytes());
     mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
     assert_eq!(server.finish(), 1);
+}
+
+#[tokio::test]
+async fn sub_to_master_requires_guard_and_ed25519_signs_exact_wire_payload() {
+    use ed25519_dalek::{Verifier, pkcs8::EncodePrivateKey};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);
+    let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+    let server = Server::new(200, r#"{"txnId":"12345678901234567890"}"#, Duration::ZERO);
+    let client = CcxtClient::for_test(&server.url).unwrap();
+    let method = Method::BinanceSubToMasterTransfer;
+    let params = vec![
+        ("asset".into(), "ETH".into()),
+        ("amount".into(), "0.12345678901234567890123456789".into()),
+    ];
+    for guarded in [false, true] {
+        let result = if guarded {
+            client
+                .request_guarded(
+                    ExchangeId::Binance,
+                    method,
+                    credentials(pem.to_string()),
+                    params.clone(),
+                    Arc::new(|| false),
+                )
+                .await
+        } else {
+            client
+                .request(
+                    ExchangeId::Binance,
+                    method,
+                    credentials(pem.to_string()),
+                    params.clone(),
+                )
+                .await
+        };
+        assert_eq!(result.unwrap_err().kind, CcxtErrorKind::PermissionDenied);
+        assert_eq!(server.count.load(Ordering::SeqCst), 0);
+    }
+    client
+        .request_guarded(
+            ExchangeId::Binance,
+            method,
+            credentials(pem.to_string()),
+            params,
+            Arc::new(|| true),
+        )
+        .await
+        .unwrap();
+    let request = server.request();
+    assert!(request.starts_with("POST /sapi/v1/sub-account/transfer/subToMaster "));
+    let (payload, signature) = signed_body(&request);
+    assert!(payload.contains("amount=0.12345678901234567890123456789"));
+    assert!(!payload.contains("Email="));
+    assert!(!payload.contains("clientTranId="));
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .unwrap();
+    key.verifying_key()
+        .verify(
+            payload.as_bytes(),
+            &ed25519_dalek::Signature::from_slice(&bytes).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(server.finish(), 1);
+}
+
+#[tokio::test]
+async fn ed25519_transfer_signatures_preserve_route_email_in_post_and_history_get() {
+    use ed25519_dalek::{Verifier, pkcs8::EncodePrivateKey};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[23; 32]);
+    let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+    let email = "synthetic+tag%&ü@unit.invalid";
+    for (method, field) in [
+        (Method::BinanceUniversalTransfer, "fromEmail"),
+        (Method::BinanceUniversalTransfer, "toEmail"),
+        (Method::BinanceUniversalTransferHistory, "fromEmail"),
+        (Method::BinanceUniversalTransferHistory, "toEmail"),
+    ] {
+        let server = Server::new(200, r#"{"tranId":1}"#, Duration::ZERO);
+        let mut route_params = params();
+        route_params.push((field.into(), email.into()));
+        CcxtClient::for_test(&server.url)
+            .unwrap()
+            .request(
+                ExchangeId::Binance,
+                method,
+                credentials(pem.to_string()),
+                route_params,
+            )
+            .await
+            .unwrap();
+        let request = server.request();
+        let (payload, signature) = signed_payload(&request);
+        assert!(payload.contains(&format!(
+            "{field}=synthetic%2Btag%25%26%C3%BC%40unit.invalid"
+        )));
+        assert!(!payload.contains("%2540"));
+        let decoded = reqwest::Url::parse(&format!("http://127.0.0.1/?{payload}"))
+            .unwrap()
+            .query_pairs()
+            .find(|(name, _)| name == field)
+            .unwrap()
+            .1
+            .into_owned();
+        assert_eq!(decoded, email);
+        let signature = if method == Method::BinanceUniversalTransferHistory {
+            reqwest::Url::parse(&format!("http://127.0.0.1/?sig={signature}"))
+                .unwrap()
+                .query_pairs()
+                .next()
+                .unwrap()
+                .1
+                .into_owned()
+        } else {
+            signature
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .unwrap();
+        key.verifying_key()
+            .verify(
+                payload.as_bytes(),
+                &ed25519_dalek::Signature::from_slice(&bytes).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(server.finish(), 1);
+    }
 }
 #[tokio::test]
 async fn official_binance_ed25519_signs_exact_wire_payload() {

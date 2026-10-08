@@ -921,6 +921,10 @@ struct DiagnosticTransferTransport {
     posts: std::sync::atomic::AtomicUsize,
     history_reads: std::sync::atomic::AtomicUsize,
     client_id: std::sync::Mutex<Option<String>>,
+    binance_code: i64,
+    timeout: bool,
+    change_balances: bool,
+    empty_history: bool,
 }
 
 impl RouteAwareTransferTransport {
@@ -1325,6 +1329,7 @@ async fn submit_and_reconcile_default_master_transfer(
         preview: Some(preview),
         approval: None,
         submission: Some(original.clone()),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,
@@ -1346,9 +1351,12 @@ impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
         if request.endpoint == BinanceEndpoint::UniversalTransfer {
             self.posts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.client_id.lock().unwrap() = request.get("clientTranId").map(str::to_owned);
+            if self.timeout {
+                return Err(fin_binance::TransportError::Timeout);
+            }
             return Err(fin_binance::TransportError::HttpFailure {
                 status: 400,
-                binance_code: Some(-2010),
+                binance_code: Some(self.binance_code),
                 kind: fin_binance::HttpFailureKind::Rejected,
             });
         }
@@ -1360,6 +1368,12 @@ impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
             let read = self
                 .history_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.empty_history {
+                return Ok(json!({"totalCount":0,"result":[]}));
+            }
+            if self.binance_code == -1022 {
+                return Ok(json!({"totalCount":0,"result":[]}));
+            }
             if read == 0 {
                 return Ok(json!({"totalCount":1,"result":[{
                     "tranId":123456789,
@@ -1370,6 +1384,15 @@ impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
                 }]}));
             }
             return Ok(json!({"totalCount":0,"result":[]}));
+        }
+        if self.change_balances
+            && self.posts.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && request.endpoint == BinanceEndpoint::Account
+            && !credential.as_str().ends_with("child")
+        {
+            return Ok(
+                json!({"accountType":"SPOT","uid":"1001","balances":[{"asset":"ETH","free":"0.25","locked":"0"}]}),
+            );
         }
         fin_binance::BinanceTransport::request(&self.inner, credential, request).await
     }
@@ -1603,6 +1626,7 @@ async fn accepted_or_timed_out_write_reconciles_same_identity_without_replay() {
         preview: Some(preview),
         approval: None,
         submission: Some(original.clone()),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,
@@ -1701,6 +1725,7 @@ async fn transfer_history_uses_persisted_single_route_selector_after_restart() {
             preview: Some(preview),
             approval: None,
             submission: Some(original.clone()),
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -2030,6 +2055,10 @@ async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_rep
         posts: std::sync::atomic::AtomicUsize::new(0),
         history_reads: std::sync::atomic::AtomicUsize::new(0),
         client_id: std::sync::Mutex::new(None),
+        binance_code: -2010,
+        timeout: false,
+        change_balances: false,
+        empty_history: false,
     });
     let adapter = std::sync::Arc::new(
         fin_binance::BinanceAdapter::new(
@@ -2085,6 +2114,110 @@ async fn engine_persists_safe_http_diagnostic_through_unknown_status_without_rep
     assert_eq!(duplicate.submission, Some(original_submission));
     assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(authorizer.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn exact_signature_rejection_releases_zero_effect_transfer_but_timeout_and_balance_changes_stay_unknown()
+ {
+    use fin_domain::Adapter;
+    let make = |binance_code, timeout, change_balances, empty_history| {
+        std::sync::Arc::new(DiagnosticTransferTransport {
+            inner: RouteAwareTransferTransport::new(TransferDirection::ChildToMain),
+            posts: std::sync::atomic::AtomicUsize::new(0),
+            history_reads: std::sync::atomic::AtomicUsize::new(0),
+            client_id: std::sync::Mutex::new(None),
+            binance_code,
+            timeout,
+            change_balances,
+            empty_history,
+        })
+    };
+    let request = fin_domain::OperationRequest {
+        request_id: "synthetic-signature-rejection".into(),
+        operation: "binance.transfer".into(),
+        input: json!({
+            "requestId":"synthetic-signature-rejection", "authority":"main-fixture",
+            "from":"child-fixture", "to":"main-fixture", "coin":"ETH",
+            "amount":"0.25", "fromWallet":"SPOT", "toWallet":"SPOT"
+        }),
+        run_id: None,
+    };
+    let transport = make(-1022, false, false, true);
+    let adapter = std::sync::Arc::new(
+        fin_binance::BinanceAdapter::new(
+            main_and_child_config(),
+            transport.clone(),
+            Some(std::sync::Arc::new(DiagnosticPrices)),
+            None,
+        )
+        .unwrap(),
+    );
+    let engine = fin_engine::Engine::new(
+        fin_store::Store::in_memory().unwrap(),
+        vec![adapter.clone()],
+        std::sync::Arc::new(SyntheticApproval(std::sync::atomic::AtomicUsize::new(0))),
+        fin_engine::EngineOptions::default(),
+    )
+    .unwrap();
+    let initial = engine.execute(request.clone()).await.unwrap();
+    assert_eq!(initial.status, fin_domain::Status::Unknown);
+    assert!(initial.error.as_ref().unwrap().details.is_some());
+    let failed = engine.status(&initial.id, true).await.unwrap();
+    assert_eq!(failed.status, fin_domain::Status::Failed);
+    assert!(
+        failed
+            .effects
+            .as_ref()
+            .is_some_and(|effects| effects.effects.is_empty())
+    );
+    assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let duplicate = engine.execute(request.clone()).await.unwrap();
+    assert_eq!(duplicate.status, fin_domain::Status::Failed);
+    assert_eq!(transport.posts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Pre-structured durable errors used the exact sanitized broker message.
+    // Reconciliation retains compatibility with that immutable representation.
+    let mut legacy = initial.clone();
+    legacy.error.as_mut().unwrap().details = None;
+    let legacy_result = adapter.reconcile(&legacy).await.unwrap();
+    assert_eq!(legacy_result.status, fin_domain::Status::Failed);
+    assert!(legacy_result.verified.unwrap().effects.is_empty());
+
+    for (suffix, code, timeout, changed, empty_history) in [
+        ("timeout", -1007, true, false, true),
+        ("non-signature", -2010, false, false, true),
+        ("changed-balances", -1022, false, true, true),
+    ] {
+        let transport = make(code, timeout, changed, empty_history);
+        let adapter = std::sync::Arc::new(
+            fin_binance::BinanceAdapter::new(
+                main_and_child_config(),
+                transport.clone(),
+                Some(std::sync::Arc::new(DiagnosticPrices)),
+                None,
+            )
+            .unwrap(),
+        );
+        let engine = fin_engine::Engine::new(
+            fin_store::Store::in_memory().unwrap(),
+            vec![adapter],
+            std::sync::Arc::new(SyntheticApproval(std::sync::atomic::AtomicUsize::new(0))),
+            fin_engine::EngineOptions::default(),
+        )
+        .unwrap();
+        let mut request = request.clone();
+        request.request_id = format!("synthetic-signature-{suffix}");
+        request.input["requestId"] = json!(request.request_id);
+        let initial = engine.execute(request).await.unwrap();
+        let result = engine.status(&initial.id, true).await.unwrap();
+        assert_eq!(result.status, fin_domain::Status::Unknown, "{suffix}");
+        assert!(result.effects.is_none(), "{suffix}");
+        assert_eq!(
+            transport.posts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "{suffix}"
+        );
+    }
 }
 
 struct EmptyHistorySnapshotTransport {
@@ -2345,7 +2478,7 @@ async fn universal_transfer_snapshot_paginates_each_source_and_marks_page_cap_in
 }
 
 #[tokio::test]
-async fn child_authority_transfer_is_explicitly_rejected_without_main_credential_substitution() {
+async fn child_authority_cannot_sign_master_to_child_without_main_credential_substitution() {
     use fin_domain::Adapter;
     let transport = std::sync::Arc::new(RecordingTransport::default());
     let adapter =
@@ -2357,7 +2490,7 @@ async fn child_authority_transfer_is_explicitly_rejected_without_main_credential
             &json!({
                 "requestId":"synthetic-child-authorized-transfer",
                 "authority":"child-fixture",
-                "from":"child-fixture","to":"main-fixture","coin":"ETH",
+                "from":"main-fixture","to":"child-fixture","coin":"ETH",
                 "amount":"0.01","fromWallet":"SPOT","toWallet":"SPOT"
             }),
         )
@@ -3259,6 +3392,7 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
         preview: Some(preview),
         approval: None,
         submission: Some(submission.clone()),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,
@@ -3483,6 +3617,7 @@ async fn duplicate_withdrawal_history_records_never_settle_terminally() {
         preview: Some(preview),
         approval: None,
         submission: Some(submission.clone()),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,
@@ -3558,6 +3693,7 @@ async fn withdrawal_timeout_recovers_from_original_withdraw_order_id_without_rep
         preview: Some(preview),
         approval: None,
         submission: Some(original.clone()),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,

@@ -177,6 +177,59 @@ fn withdrawal_input() -> Value {
 }
 
 #[tokio::test]
+async fn fresh_quote_updates_within_approved_ceiling_keep_one_approval_and_submission() {
+    let prices = Arc::new(ScriptedPrices::new(&["1.0003", "1.0002", "1.0001"]));
+    let transport = Arc::new(RecordingTransport::default());
+    let adapter = Arc::new(
+        BinanceAdapter::new(
+            config(),
+            transport.clone(),
+            Some(prices.clone()),
+            Some(Arc::new(PendingRecipientVerifier)),
+        )
+        .unwrap(),
+    );
+    let authorizer = Arc::new(CountingAuthorizer::default());
+    let directory = tempfile::tempdir().unwrap();
+    let engine = Engine::new(
+        Store::open(directory.path().join("journal.sqlite")).unwrap(),
+        vec![adapter],
+        authorizer.clone(),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    let request = OperationRequest {
+        request_id: "synthetic-within-ceiling".into(),
+        operation: "binance.withdraw".into(),
+        input: withdrawal_input(),
+        run_id: None,
+    };
+    let record = engine.execute(request.clone()).await.unwrap();
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+    assert!(record.submission.is_some(), "{record:?}");
+    assert_eq!(prices.calls.load(Ordering::SeqCst), 3);
+    let prepared = record.preview.as_ref().unwrap();
+    assert_eq!(
+        prepared
+            .valuation
+            .as_ref()
+            .unwrap()
+            .movement_usd_micros
+            .as_str(),
+        "20000"
+    );
+    assert_eq!(
+        record.approval.as_ref().unwrap().binding_hash,
+        fin_domain::binding_hash(&fin_domain::authorization_binding(prepared)).unwrap()
+    );
+    // Retrying the same logical request cannot authorize or submit another write.
+    assert_eq!(engine.execute(request).await.unwrap().id, record.id);
+    assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn engine_rejects_third_quote_movement_before_any_binance_post() {
     // This synthetic price feed values a selected 99-unit withdrawal at $99
     // for prepare and engine revalidation, then $100.98 at Binance's final

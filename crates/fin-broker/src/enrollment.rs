@@ -94,7 +94,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             &journal,
             &args,
             |binding| async move {
-                approve_and_audit(config.approver_uid, &binding, "Change financial limits", ui)
+                approve_and_audit(config.approver_uid, &binding, "Change financial policy", ui)
                     .await
             },
             save_protected_config,
@@ -261,6 +261,7 @@ fn collect_setup_policy(mut read: impl FnMut(&str) -> Result<String>) -> Result<
         } else {
             allocation
         },
+        allow_unpriced_exchange_assets: None,
     };
     let (movement, allocation) = args.micros()?;
     let mut policy = BrokerPolicy::beta();

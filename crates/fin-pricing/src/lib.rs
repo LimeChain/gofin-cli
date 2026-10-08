@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize, de};
 use serde_json::value::RawValue;
 use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
+pub mod exchange_spot;
 pub mod resolution;
+pub use exchange_spot::{
+    ExchangeSpotPrices, SpotBook, SpotMarketSource, StablecoinRates, StablecoinUsdSource,
+};
 pub use resolution::{
     ExchangeAssetKey, ExchangeAssetResolver, ExchangeMarket, ExchangeMarketSource, IdentityStore,
     ResolvedExchangeAsset,
@@ -64,11 +68,45 @@ fn valid_api_key(key: &str) -> bool {
 pub struct UsdQuote {
     /// Exact positive USD per whole asset unit, canonical plain decimal text.
     pub usd_per_unit: String,
-    /// Provider's last_updated_at, never replaced by the retrieval time.
+    /// Provider time, or the oldest source-leg time for a derived price.
     pub updated_at: String,
     /// Time this response was retrieved; cache hits retain the original value.
     pub observed_at: String,
     pub source: String,
+}
+
+#[async_trait]
+impl StablecoinUsdSource for CoinGeckoPrices {
+    async fn stablecoin_rates(&self) -> Result<StablecoinRates> {
+        // Reviewed identities for the two supported USD-conversion currencies.
+        // This is never a per-exchange symbol search or exchange-catalog lookup.
+        let lookups = [
+            Lookup::Coin("usd-coin".into()),
+            Lookup::Coin("tether".into()),
+        ];
+        let bytes = self.bounded_request(&batch_path(&lookups)).await?;
+        let observed = self.now();
+        let leg_error = |currency: &str, mut error: FinError| {
+            error.message = format!("{currency}/USD conversion leg: {}", error.message);
+            error
+        };
+        Ok(StablecoinRates {
+            usdc: parse_quote_with_age(
+                &bytes,
+                &lookups[0],
+                observed,
+                fin_domain::price_freshness::STABLECOIN_USD_MAX_AGE_SECONDS,
+            )
+            .map_err(|error| leg_error("USDC", error))?,
+            usdt: parse_quote_with_age(
+                &bytes,
+                &lookups[1],
+                observed,
+                fin_domain::price_freshness::STABLECOIN_USD_MAX_AGE_SECONDS,
+            )
+            .map_err(|error| leg_error("USDT", error))?,
+        })
+    }
 }
 
 #[async_trait]
@@ -278,6 +316,13 @@ impl<'de> Deserialize<'de> for PriceResponse {
 }
 
 fn provider_time(timestamp: i64, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    provider_time_with_age(timestamp, now, MAX_PROVIDER_AGE_SECONDS)
+}
+fn provider_time_with_age(
+    timestamp: i64,
+    now: DateTime<Utc>,
+    max_age: i64,
+) -> Result<DateTime<Utc>> {
     let updated = DateTime::from_timestamp(timestamp, 0)
         .filter(|_| timestamp > 0)
         .ok_or_else(|| {
@@ -286,16 +331,24 @@ fn provider_time(timestamp: i64, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
                 "Provider observation time is invalid.",
             )
         })?;
-    if updated > now || now - updated >= chrono::Duration::seconds(MAX_PROVIDER_AGE_SECONDS) {
+    if updated > now || now - updated >= chrono::Duration::seconds(max_age) {
         return Err(failure(
             "PRICE_STALE",
-            "CoinGecko quote is future-dated or at least 120 seconds old.",
+            &format!("CoinGecko quote is future-dated or at least {max_age} seconds old."),
         ));
     }
     Ok(updated)
 }
 
 fn parse_quote(bytes: &[u8], lookup: &Lookup, now: DateTime<Utc>) -> Result<UsdQuote> {
+    parse_quote_with_age(bytes, lookup, now, MAX_PROVIDER_AGE_SECONDS)
+}
+fn parse_quote_with_age(
+    bytes: &[u8],
+    lookup: &Lookup,
+    now: DateTime<Utc>,
+    max_age: i64,
+) -> Result<UsdQuote> {
     let response = serde_json::from_slice::<PriceResponse>(bytes)
         .map_err(|_| failure("PRICE_DATA_INVALID", "Public quote response is malformed."))?;
     let raw = response.0.get(lookup.response_key()).ok_or_else(|| {
@@ -311,7 +364,7 @@ fn parse_quote(bytes: &[u8], lookup: &Lookup, now: DateTime<Utc>) -> Result<UsdQ
         )
     })?;
     let usd_per_unit = exact_decimal(fields.usd.get())?;
-    let updated = provider_time(fields.last_updated_at, now)?;
+    let updated = provider_time_with_age(fields.last_updated_at, now, max_age)?;
     Ok(UsdQuote {
         usd_per_unit,
         updated_at: updated.to_rfc3339(),
@@ -797,6 +850,155 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
     const CONTRACT: &str = "0x1111111111111111111111111111111111111111";
+
+    #[tokio::test]
+    async fn spot_http_path_batches_only_stablecoin_ids_and_never_sends_keys_to_binance() {
+        let updated = Utc::now().timestamp();
+        let rates = format!(
+            "{{\"usd-coin\":{{\"usd\":0.99,\"last_updated_at\":{updated}}},\"tether\":{{\"usd\":1.02,\"last_updated_at\":{updated}}}}}"
+        );
+        let fx = Server::new(vec![(http(200, &rates), Duration::ZERO)]).await;
+        let metadata = r#"{"symbols":[{"symbol":"SEIUSDT","baseAsset":"SEI","quoteAsset":"USDT","status":"TRADING","isSpotTradingAllowed":true},{"symbol":"APTUSDC","baseAsset":"APT","quoteAsset":"USDC","status":"TRADING","isSpotTradingAllowed":true},{"symbol":"BNBUSDT","baseAsset":"BNB","quoteAsset":"USDT","status":"TRADING","isSpotTradingAllowed":true}]}"#;
+        let books = r#"[{"symbol":"SEIUSDT","bidPrice":"0.49","askPrice":"0.5","bidQty":"100","askQty":"100"},{"symbol":"APTUSDC","bidPrice":"9","askPrice":"10","bidQty":"100","askQty":"100"},{"symbol":"BNBUSDT","bidPrice":"19","askPrice":"20","bidQty":"100","askQty":"100"}]"#;
+        let venue = Server::new(vec![
+            (http(200, metadata), Duration::ZERO),
+            (http(200, books), Duration::ZERO),
+        ])
+        .await;
+        let mut cg = CoinGeckoPrices::with_api_key(ApiPlan::Demo, "SYNTHETIC-DEMO-KEY").unwrap();
+        cg.test_base_url = Some(fx.base.clone());
+        cg.test_pacing = Some(Duration::ZERO);
+        cg.exchanges.clear(); // Accidental legacy resolution must fail, not reach production.
+        let cg = Arc::new(cg);
+        let spot = exchange_spot::BinanceSpot::new().unwrap().test_urls(
+            format!("{}/exchangeInfo", venue.base),
+            format!("{}/bookTicker", venue.base),
+        );
+        let provider = ExchangeSpotPrices::with_sources(cg.clone(), cg, Arc::new(spot));
+        let assets = [
+            asset("binance", "APT", 36),
+            asset("binance", "BNB", 36),
+            asset("binance", "SEI", 36),
+            asset("binance", "USDC", 36),
+            asset("binance", "USDT", 36),
+        ];
+        let quotes = provider.quotes(&assets).await.unwrap();
+        assert_eq!(
+            quotes
+                .iter()
+                .map(|q| q.usd_per_unit.as_str())
+                .collect::<Vec<_>>(),
+            ["9.9", "20.4", "0.51", "0.99", "1.02"]
+        );
+        provider.quotes(&assets).await.unwrap();
+        assert_eq!(fx.count(), 1);
+        assert_eq!(venue.count(), 2);
+        let requests = fx.requests.lock().unwrap();
+        let request = &requests[0];
+        assert!(request.starts_with("GET /simple/price?"));
+        assert!(request.contains("ids=usd-coin%2Ctether"));
+        assert!(request.contains("x-cg-demo-api-key: SYNTHETIC-DEMO-KEY"));
+        assert!(!request.contains("/exchanges/"));
+        assert!(!request.contains("aptos"));
+        assert!(!request.contains("binancecoin"));
+        let requests = venue.requests.lock().unwrap();
+        assert!(requests[1].contains("symbols="));
+        assert!(requests[1].contains("symbolStatus=TRADING"));
+        for request in requests.iter() {
+            assert!(!request.to_ascii_lowercase().contains("api-key"));
+            assert!(!request.contains("SYNTHETIC-DEMO-KEY"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stablecoin_http_batch_rejects_missing_member_and_preserves_raw_decimals() {
+        let timestamp = Utc::now().timestamp();
+        let missing = format!("{{\"usd-coin\":{{\"usd\":0.99,\"last_updated_at\":{timestamp}}}}}");
+        let valid = format!(
+            "{{\"usd-coin\":{{\"usd\":0.99000000000000000001,\"last_updated_at\":{timestamp}}},\"tether\":{{\"usd\":1.02000000000000000001,\"last_updated_at\":{timestamp}}}}}"
+        );
+        let server = Server::new(vec![
+            (http(200, &missing), Duration::ZERO),
+            (http(200, &valid), Duration::ZERO),
+        ])
+        .await;
+        let mut provider = CoinGeckoPrices::new().unwrap();
+        provider.test_base_url = Some(server.base.clone());
+        provider.test_pacing = Some(Duration::ZERO);
+        provider.exchanges.clear();
+        let error = provider.stablecoin_rates().await.unwrap_err();
+        assert!(error.message.contains("USDT/USD"));
+        let rates = provider.stablecoin_rates().await.unwrap();
+        assert_eq!(rates.usdc.usd_per_unit, "0.99000000000000000001");
+        assert_eq!(rates.usdt.usd_per_unit, "1.02000000000000000001");
+        assert_eq!(server.count(), 2);
+        for request in server.requests.lock().unwrap().iter() {
+            assert!(request.contains("ids=usd-coin%2Ctether"));
+        }
+    }
+
+    #[tokio::test]
+    async fn spot_http_rejects_numeric_prices_and_honors_venue_cooldown() {
+        let malformed =
+            r#"[{"symbol":"APTUSDC","bidPrice":9,"askPrice":"10","bidQty":"100","askQty":"100"}]"#;
+        let server = Server::new(vec![
+            (http(200, malformed), Duration::ZERO),
+            (b"HTTP/1.1 429 Fixture\r\nContent-Length: 0\r\nRetry-After: 60\r\nConnection: close\r\n\r\n".to_vec(), Duration::ZERO),
+        ]).await;
+        let source = exchange_spot::BinanceSpot::new().unwrap().test_urls(
+            format!("{}/exchangeInfo", server.base),
+            format!("{}/bookTicker", server.base),
+        );
+        let markets = vec!["APTUSDC".to_owned()];
+        assert_eq!(
+            source.books("binance", &markets).await.unwrap_err().code,
+            "PRICE_SPOT_DATA_INVALID"
+        );
+        assert_eq!(
+            source.books("binance", &markets).await.unwrap_err().code,
+            "PRICE_VENUE_RATE_LIMITED"
+        );
+        assert_eq!(
+            source.books("binance", &markets).await.unwrap_err().code,
+            "PRICE_VENUE_RATE_LIMITED"
+        );
+        assert_eq!(server.count(), 2, "cooldown must not issue another request");
+    }
+
+    #[tokio::test]
+    async fn conversion_parser_accepts_older_rate_but_onchain_and_expired_rates_stay_strict() {
+        let timestamp = Utc::now().timestamp() - 150;
+        let response = format!(
+            "{{\"usd-coin\":{{\"usd\":0.99,\"last_updated_at\":{timestamp}}},\"tether\":{{\"usd\":1.02,\"last_updated_at\":{timestamp}}}}}"
+        );
+        let server = Server::new(vec![(http(200, &response), Duration::ZERO)]).await;
+        let mut provider = CoinGeckoPrices::new().unwrap();
+        provider.test_base_url = Some(server.base.clone());
+        provider.test_pacing = Some(Duration::ZERO);
+        let rates = provider.stablecoin_rates().await.unwrap();
+        assert_eq!(
+            rates.usdc.updated_at,
+            DateTime::from_timestamp(timestamp, 0).unwrap().to_rfc3339()
+        );
+        assert_eq!(rates.usdc.usd_per_unit, "0.99");
+        assert!(
+            parse_quote(
+                &body("ethereum", "1", NOW - 150).into_bytes(),
+                &Lookup::Coin("ethereum".into()),
+                at(NOW)
+            )
+            .is_err()
+        );
+        assert!(
+            parse_quote_with_age(
+                &body("usd-coin", "0.99", NOW - 300).into_bytes(),
+                &Lookup::Coin("usd-coin".into()),
+                at(NOW),
+                300
+            )
+            .is_err()
+        );
+    }
 
     fn at(seconds: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(seconds, 0).unwrap()

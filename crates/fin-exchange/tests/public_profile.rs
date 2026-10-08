@@ -79,6 +79,16 @@ impl PublicExchangeData for Fixture {
             .push(("ticker".into(), pair.into()));
         Ok(self.ticker_response.clone())
     }
+    async fn order_book(
+        &self,
+        exchange: &str,
+        _: &str,
+        _: &str,
+        _: u16,
+    ) -> Result<(Value, Value, String), FinError> {
+        assert_eq!(exchange, self.exchange);
+        Err(FinError::validation("order book not used by this test"))
+    }
 }
 fn fixture(
     exchange: &'static str,
@@ -128,7 +138,7 @@ async fn five_venues_preserve_exact_public_data_and_pagination_envelopes() {
                 ("ticker".into(), pair.into())
             ]
         );
-        assert_eq!(adapter.definitions().len(), 2);
+        assert_eq!(adapter.definitions().len(), 3);
         assert!(
             adapter
                 .definitions()
@@ -368,22 +378,34 @@ async fn invalid_symbols_extra_parameters_and_write_paths_make_no_data_calls() {
 }
 
 #[tokio::test]
-async fn all_discovery_examples_are_valid_supported_runtime_reads() {
+async fn all_discovery_examples_match_the_supported_read_contracts() {
     let definitions = DefaultExchangeProfile::definitions();
-    assert_eq!(definitions.len(), 2);
+    assert_eq!(definitions.len(), 3);
     for definition in definitions {
         assert_eq!(definition.kind, OperationKind::Read);
         assert_eq!(definition.input_schema["additionalProperties"], false);
-        assert_eq!(definition.examples.len(), VENUES.len());
+        assert_eq!(
+            definition.examples.len(),
+            if definition.name == "exchange.order-book" {
+                3
+            } else {
+                VENUES.len()
+            }
+        );
         for example in &definition.examples {
             let venue = example["exchange"].as_str().unwrap();
-            let (known, pair) = VENUES.iter().find(|(v, _)| *v == venue).unwrap();
             assert!(
                 definition.input_schema["properties"]["exchange"]["enum"]
                     .as_array()
                     .unwrap()
                     .contains(&json!(venue))
             );
+            if definition.name == "exchange.order-book" {
+                assert!(example["market_type"].is_string());
+                assert!((1..=100).contains(&example["depth"].as_u64().unwrap()));
+                continue;
+            }
+            let (known, pair) = VENUES.iter().find(|(v, _)| *v == venue).unwrap();
             if definition.name == "exchange.ticker" {
                 assert_eq!(example["pair"], *pair);
                 let variants = definition.input_schema["oneOf"].as_array().unwrap();

@@ -15,6 +15,9 @@ pub struct PolicySetArgs {
     /// Decimal USD (0 means no personal limit): rolling 24-hour gross movement, maximum costs and additional borrowed allocation.
     #[arg(long)]
     pub max_run_allocation_usd: String,
+    /// Protected exception for unpriced exchange assets (true/false); omission preserves the current policy. USD limits exclude these assets; $0 is an estimate, not verified worth.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub allow_unpriced_exchange_assets: Option<bool>,
 }
 impl PolicySetArgs {
     pub fn micros(&self) -> Result<(String, String)> {
@@ -32,6 +35,10 @@ pub struct PolicyView {
     pub max_movement_usd: String,
     /// Exact decimal USD; "0" means no personal rolling-allocation ceiling.
     pub max_run_allocation_usd: String,
+    pub allow_unpriced_exchange_assets: bool,
+    /// Count of operations included in allocation usage with unpriced exchange estimates.
+    pub allocation_unpriced_operations: Option<u64>,
+    pub unpriced_assets_warning: Option<String>,
     pub movement_includes: String,
     pub allocation_includes: String,
     pub allocation_scope: String,
@@ -43,10 +50,19 @@ pub struct PolicyView {
     pub next_action: String,
 }
 impl PolicyView {
+    pub fn set_unpriced_policy(&mut self, enabled: bool) {
+        self.allow_unpriced_exchange_assets = enabled;
+        if enabled {
+            self.unpriced_assets_warning = Some(fin_domain::unpriced::WARNING.into());
+        }
+    }
     pub fn new(movement: &str, allocation: &str) -> Result<Self> {
         Ok(Self {
             max_movement_usd: format_usd(movement)?,
             max_run_allocation_usd: format_usd(allocation)?,
+            allow_unpriced_exchange_assets: false,
+            allocation_unpriced_operations: None,
+            unpriced_assets_warning: None,
             movement_includes: MOVEMENT_INCLUDES.into(), allocation_includes: ALLOCATION_INCLUDES.into(),
             allocation_scope: "Installation-wide rolling 24-hour gross allocation across commands. Unresolved submissions count beyond the window until reconciled. Zero removes only the corresponding personal ceiling.".into(),
             allocation_used_usd: None,

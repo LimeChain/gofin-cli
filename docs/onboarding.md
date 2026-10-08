@@ -1,6 +1,8 @@
 # Terminal onboarding and agent discovery
 
-**Agreed direction: 2 October 2026. Status: Rust implementation and human acceptance contract.** The compiled Rust CLI now advertises setup, daemon management and repeatable protected terminal enrollment. Automated/offline evidence and actual human installation/Touch ID results are reported separately. The historical TS foundation does not establish Rust onboarding or credential isolation.
+This contract defines terminal setup, daemon management, protected connection
+enrollment and discovery for humans and agents. Validate real enrollment,
+credential isolation and biometric behavior separately from synthetic tests.
 
 ## Required experience
 
@@ -197,6 +199,31 @@ Structural schemas describe safe arguments and responses. Secret requirements ar
 
 ## Machine execution contract
 
+Financial boundary commands are discoverable before enrollment through
+`fin authorizations --help`, `fin schema authorizations.authorize --json` and the
+operation's `semantics.boundary_authorization`. The first supported family is
+Binance spot LIMIT IOC/FOK placement. The requester supplies typed financial
+boundaries and optional duration (`--valid-for`, default 10m); fresh Touch ID
+creates or replaces consent. JSON contains no terminal review, animation or
+confirmation prompt; the agent presents the scope and permitted variations
+before invoking the grant command. The OS biometric prompt remains required.
+
+Execute/dry-run candidates reference `--authorization`; only execution consumes
+verified authority, and a dry-run does not reserve or submit. Status reports
+spent/remaining quantities and costs, achieved effects, attempts and expiry.
+Constraint failures include optional structured `error.details`; old errors
+omit that field. The agent may monitor `exchange.order-book`, using exact market
+identities and supported market types. Ordinary durable status is not a claim
+about freshly evaluated market conditions.
+
+Cancelling authorization requires no biometric approval and stops future
+dispatch, not already submitted venue orders. `--replaces-attempt` supersedes an
+unsubmitted candidate; changed grant boundaries use `authorizations authorize
+--replaces` with fresh Touch ID. Replacement caps are cumulative totals for the
+same intent, preserving prior effects/costs. Expiry never resets consumption.
+Other operations retain standalone exact approval, and financial grants cannot
+authorize enrollment or protected policy changes.
+
 **Implemented locally 6 October 2026.** `--json` selects the agent-facing
 execution contract. It controls interaction, output, errors, and compatibility,
 not just serialization after an interactive command has finished.
@@ -288,11 +315,11 @@ The companion skill teaches this discovery sequence and the boundary between hum
 
 ## Acceptance and handoff
 
-The implementation stage must verify help/schema/example consistency, discovery with no broker/configuration, human-interaction errors, strict rejection of secret arguments, redacted output/errors, cancellation, permission failures, connection updates and outstanding-operation behavior. Use unmistakably synthetic credentials and test-native providers in isolated harnesses only.
+Verify help/schema/example consistency, discovery with no broker/configuration, human-interaction errors, strict rejection of secret arguments, redacted output/errors, cancellation, permission failures, connection updates and outstanding-operation behavior. Use unmistakably synthetic credentials and test-native providers in isolated harnesses only.
 
 A fresh-agent rehearsal must start from CLI discovery alone and produce correct instructions for human Binance enrollment, including later credential changes and safe verification. Record its actual inputs/tools and outcome; do not call a hard-coded script a fresh-agent pass. The companion skill may be tested separately and must not be necessary for the CLI-only rehearsal.
 
-The later human session uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
+Human acceptance uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
 
 Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).
 

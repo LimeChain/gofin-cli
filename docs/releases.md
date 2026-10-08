@@ -23,7 +23,7 @@ they do not establish independent publisher provenance or notarization.
    `Cargo.toml`, refresh the workspace package versions in `Cargo.lock`, and run
    `make check`, `make test`, and `make test-delivery`.
 2. In GitHub Releases, draft a release using `v<workspace-version>` at that exact
-   commit. For the first beta, use `v0.2.0-beta.1` and mark it as a prerelease.
+   commit. Mark beta versions as prereleases.
    An existing annotated tag is also supported. Never move a release tag.
 3. Click **Publish release**. The `release: published` event starts CI for both
    stable releases and prereleases. Creating a draft or pushing a tag alone does
@@ -97,5 +97,5 @@ fixed archive paths/types, tampering, duplicate entries, preserved existing path
 curl-pipe terminal handoff, cancellation, machine/no-color behavior, provenance,
 published-release identity, upload retries and preview separation. It uses no
 network, real credentials, sudo or installed service. CI provides the actual native builds; an installed human Touch ID flow
-requires its own [checklist](testing/rust-human-handoff.md). Artifact success alone
+requires its own [checklist](testing/onboarding.md). Artifact success alone
 does not establish financial settlement or cleanup.

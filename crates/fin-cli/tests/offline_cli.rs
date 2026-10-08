@@ -1,6 +1,35 @@
 use serde_json::Value;
 use std::process::Command;
 
+#[test]
+fn transfer_discovery_exposes_explicit_signer_routes_and_lost_receipt_recovery() {
+    let result = run(&["explain", "binance.transfer", "--json"]);
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    let definition: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let authority = definition["semantics"]["authority"].as_str().unwrap();
+    assert!(authority.contains("subToMaster"));
+    assert!(authority.contains("main"));
+    let receipt = definition["semantics"]["subToMasterReceipt"]
+        .as_str()
+        .unwrap();
+    assert!(receipt.contains("txnId") && receipt.contains("unknown"));
+    assert!(
+        definition["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|example| {
+                example["authority"] == example["from"] && example["from"] != example["to"]
+            })
+    );
+    let schema = run(&["schema", "binance.transfer", "--json"]);
+    assert!(schema.status.success());
+    assert!(schema.stderr.is_empty());
+    let schema: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema["input"]["properties"]["authority"]["type"], "string");
+}
+
 fn run(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_fin"))
         .args(args)
@@ -63,6 +92,7 @@ fn offline_discovery_commands_work_without_service() {
     let help_text = String::from_utf8(help.stdout).unwrap();
     assert!(help_text.contains("capabilities"));
     assert!(help_text.contains("connections"));
+    assert!(help_text.contains("authorizations"));
 
     let capabilities = run(&["capabilities", "--json"]);
     assert!(capabilities.status.success());
@@ -71,7 +101,7 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 49);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 50);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
@@ -88,6 +118,32 @@ fn offline_discovery_commands_work_without_service() {
         capabilities["exchanges"]["verification"]["touch_id"],
         "pending"
     );
+    assert_eq!(
+        capabilities["exchanges"]["fin"]["binance"]["market_data"]["operations"],
+        serde_json::json!(["exchange.markets", "exchange.ticker", "exchange.order-book"])
+    );
+    assert_eq!(
+        capabilities["exchanges"]["fin"]["binance"]["market_data"]["market_types"],
+        serde_json::json!(["spot", "perpetual"])
+    );
+    for (venue, market_type) in [
+        ("kraken", "spot"),
+        ("hyperliquid", "perpetual"),
+        ("okx", "spot"),
+        ("coinbase", "spot"),
+        ("bybit", "spot"),
+    ] {
+        assert!(
+            capabilities["exchanges"]["fin"][venue]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("exchange.order-book"))
+        );
+        assert_eq!(
+            capabilities["exchanges"]["fin"][venue]["market_types"][0],
+            market_type
+        );
+    }
     for name in ["exchange.markets", "exchange.ticker"] {
         let schema = run(&["schema", name, "--json"]);
         assert!(schema.status.success());
@@ -120,6 +176,81 @@ fn offline_discovery_commands_work_without_service() {
     let operation: Value = serde_json::from_slice(&operation.stdout).unwrap();
     assert_eq!(operation["name"], "aave.borrow");
     assert_eq!(operation["execution_actor"], "agent_invocable");
+
+    for (name, actor) in [
+        ("authorizations.authorize", "agent_invocable"),
+        ("execute.boundary", "agent_invocable"),
+        ("authorizations.status", "agent_readable"),
+        ("authorizations.cancel", "agent_invocable"),
+    ] {
+        let explanation = run(&["explain", name, "--json"]);
+        assert!(
+            explanation.status.success(),
+            "{name}: {:?}",
+            explanation.stderr
+        );
+        let explanation: Value = serde_json::from_slice(&explanation.stdout).unwrap();
+        assert_eq!(explanation["execution_actor"], actor);
+        assert!(explanation["semantics"].is_object());
+    }
+    let capabilities = run(&["capabilities", "--json"]);
+    let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
+    let authorization = capabilities["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|definition| definition["name"] == "authorizations.authorize")
+        .unwrap();
+    assert_eq!(authorization["semantics"]["default_valid_for_seconds"], 600);
+    assert_eq!(
+        authorization["semantics"]["requires_fresh_human_approval"],
+        true
+    );
+    assert_eq!(authorization["semantics"]["human_terminal_review"], true);
+
+    let authorization_schema = run(&["schema", "authorizations.authorize", "--json"]);
+    assert!(authorization_schema.status.success());
+    let authorization_schema: Value = serde_json::from_slice(&authorization_schema.stdout).unwrap();
+    for field in [
+        "operation",
+        "id",
+        "input",
+        "bounds",
+        "valid_for",
+        "replaces",
+    ] {
+        assert!(
+            authorization_schema["input"]["properties"]
+                .get(field)
+                .is_some(),
+            "authorization schema omitted {field}"
+        );
+    }
+    let boundary_execute_schema = run(&["schema", "execute.boundary", "--json"]);
+    assert!(boundary_execute_schema.status.success());
+    let boundary_execute_schema: Value =
+        serde_json::from_slice(&boundary_execute_schema.stdout).unwrap();
+    for field in [
+        "operation",
+        "input",
+        "authorization",
+        "id",
+        "replaces_attempt",
+        "dry_run",
+    ] {
+        assert!(
+            boundary_execute_schema["input"]["properties"]
+                .get(field)
+                .is_some(),
+            "boundary execute schema omitted {field}"
+        );
+    }
+    assert!(
+        boundary_execute_schema["semantics"]["candidate_replacement"]
+            .as_str()
+            .unwrap()
+            .contains("unsubmitted")
+    );
 }
 
 #[test]
@@ -666,7 +797,14 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
         definition["semantics"]["scopedTimeInForce"],
         serde_json::json!(["FOK"])
     );
-    assert_eq!(definition["semantics"]["approval"], "fresh per write");
+    assert_eq!(
+        definition["semantics"]["approval"],
+        "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant."
+    );
+    assert_eq!(
+        definition["semantics"]["boundary_authorization"]["default_consent_seconds"],
+        600
+    );
     for name in [
         "binance.spot.markets",
         "binance.spot.orders",
@@ -762,13 +900,23 @@ fn policy_discovery_and_machine_handoff_are_offline_and_noninteractive() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--max-movement-usd") && help.contains("--max-run-allocation-usd"));
+    assert!(help.contains("--allow-unpriced-exchange-assets"));
     for name in ["policy.show", "policy.set"] {
         let output = run(&["schema", name, "--json"]);
         assert!(output.status.success());
         let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert!(schema["output"]["properties"]["max_movement_usd"].is_object());
+        assert!(schema["output"]["properties"]["allow_unpriced_exchange_assets"].is_object());
+        if name == "policy.set" {
+            assert!(schema["input"]["properties"]["allow_unpriced_exchange_assets"].is_object());
+        }
     }
-    for extra in [vec![], vec!["--verbose"]] {
+    for extra in [
+        vec![],
+        vec!["--verbose"],
+        vec!["--allow-unpriced-exchange-assets", "true"],
+        vec!["--allow-unpriced-exchange-assets", "false"],
+    ] {
         let mut args = vec![
             "policy",
             "set",

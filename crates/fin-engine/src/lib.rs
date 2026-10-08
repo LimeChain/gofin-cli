@@ -6,6 +6,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use fin_domain::boundaries::{
+    self, BoundaryAttemptSummary, BoundaryAuthorization, BoundaryAuthorizationRecord,
+    BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundarySpec,
+    BoundaryStatus,
+};
 use fin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
     CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, FinError,
@@ -27,8 +32,12 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+mod boundary_authorizations;
+#[cfg(test)]
+mod boundary_dispatch_tests;
 mod cash_reservation_sources;
 mod ordinary_policy;
+use ordinary_policy::reject_unpriced_run;
 mod projected_provenance;
 mod projected_shares;
 
@@ -44,6 +53,8 @@ pub struct EngineOptions {
     pub max_movement_and_cost_usd_micros: String,
     /// Installation-wide rolling 24-hour gross allocation, including maximum costs and additional borrowing.
     pub max_run_allocation_usd_micros: String,
+    /// Protected human-approved exception for explicit unpriced exchange estimates.
+    pub allow_unpriced_exchange_assets: bool,
 }
 
 impl Default for EngineOptions {
@@ -51,6 +62,7 @@ impl Default for EngineOptions {
         Self {
             max_movement_and_cost_usd_micros: DEFAULT_LIMIT_MICROS.to_string(),
             max_run_allocation_usd_micros: DEFAULT_LIMIT_MICROS.to_string(),
+            allow_unpriced_exchange_assets: false,
         }
     }
 }
@@ -253,7 +265,7 @@ pub trait TrustedAssetPriceProvider: Send + Sync {
 
 impl Engine {
     pub fn new(
-        store: Store,
+        mut store: Store,
         adapters: Vec<Arc<dyn Adapter>>,
         authorizer: Arc<dyn fin_domain::Authorizer>,
         options: EngineOptions,
@@ -277,6 +289,9 @@ impl Engine {
                 }
             }
         }
+        store
+            .recover_boundary_authorization_requests(&now())
+            .map_err(map_store)?;
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             adapters: RwLock::new(registry),
@@ -646,6 +661,17 @@ impl Engine {
         if replacement_steps.is_empty() {
             return Err(route_proof_error());
         }
+        if trusted_asset_prices
+            .iter()
+            .any(fin_domain::unpriced::is_estimate)
+        {
+            return Err(FinError::new(
+                "UNPRICED_ASSET",
+                "budget",
+                "A scoped acceptance return plan requires verified USD prices.",
+                "Preserve the run and use a fully priced return plan.",
+            ));
+        }
         let mut run = self.load_run(run_id)?;
         if run.status == RunStatus::Restored || !run.reservations.is_empty() {
             return Err(FinError::new(
@@ -991,6 +1017,7 @@ impl Engine {
             preview: None,
             approval: None,
             submission: None,
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -1037,7 +1064,7 @@ impl Engine {
             self.update_record(&record)?;
             return Ok(record);
         }
-        let result = self.execute_new(adapter, &request, &mut record).await;
+        let result = self.execute_new(adapter, &request, &mut record, None).await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -1111,11 +1138,22 @@ impl Engine {
         adapter: Arc<dyn Adapter>,
         request: &OperationRequest,
         record: &mut OperationRecord,
+        boundary: Option<BoundaryAuthorizationRecord>,
     ) -> Result<OperationRecord> {
         let context = self.preparation_context(request.run_id.as_deref())?;
         let mut prepared = adapter
             .prepare_with_context(&request.operation, &request.input, &context)
             .await?;
+        let boundary_attempt_hash = if let Some(boundary) = &boundary {
+            adapter.validate_boundary_candidate(&boundary.authorization.spec, &prepared)?;
+            validate_candidate_caps(&boundary.authorization, &prepared)?;
+            prepared.summary = boundary.authorization.spec.summary.clone();
+            let attempt_hash = binding_hash(&boundaries::attempt_binding(&prepared))?;
+            inject_boundary_marker(&mut prepared, &boundary.authorization, attempt_hash.clone())?;
+            Some(attempt_hash)
+        } else {
+            None
+        };
         let required_cost_origins =
             self.cost_origin_assets(&prepared, request.run_id.as_deref())?;
         self.complete_cost_origin_prices(&mut prepared, &required_cost_origins)
@@ -1158,21 +1196,34 @@ impl Engine {
 
         let approved_binding = authorization_binding(&prepared);
         let approved_binding_hash = binding_hash(&approved_binding)?;
-        let challenge_expiry = std::cmp::min(
-            parse_time(&prepared.expires_at)?,
-            parse_time(&now())? + chrono::Duration::seconds(90),
-        );
-        let challenge = AuthorizationChallenge {
-            purpose: "financial_write".into(),
-            operation_id: record.id.clone(),
-            binding: approved_binding,
-            binding_hash: approved_binding_hash.clone(),
-            summary: prepared.summary.clone(),
-            nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: challenge_expiry.to_rfc3339(),
+        let (audit, challenge) = if let Some(boundary) = &boundary {
+            if boundary.authorization.status != BoundaryAuthorizationStatus::Active
+                || parse_time(&boundary.authorization.expires_at)? <= Utc::now()
+            {
+                return Err(boundary_error(
+                    "Boundary authorization expired or was revoked before dispatch.",
+                ));
+            }
+            ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
+            (boundary.approval.clone(), None)
+        } else {
+            let challenge_expiry = std::cmp::min(
+                parse_time(&prepared.expires_at)?,
+                parse_time(&now())? + chrono::Duration::seconds(90),
+            );
+            let challenge = AuthorizationChallenge {
+                purpose: "financial_write".into(),
+                operation_id: record.id.clone(),
+                binding: approved_binding,
+                binding_hash: approved_binding_hash.clone(),
+                summary: prepared.summary.clone(),
+                nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+                expires_at: challenge_expiry.to_rfc3339(),
+            };
+            let audit = self.authorizer.authorize(&challenge).await?;
+            validate_approval(&audit, &challenge, Utc::now())?;
+            (audit, Some(challenge))
         };
-        let audit = self.authorizer.authorize(&challenge).await?;
-        validate_approval(&audit, &challenge, Utc::now())?;
         record.approval = Some(audit.clone());
         record.updated_at = now();
         self.update_record(record)?;
@@ -1181,7 +1232,32 @@ impl Engine {
         self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
             .await?;
         validate_prepared(&refreshed, &request.operation, Utc::now())?;
-        if binding_hash(&authorization_binding(&refreshed))? != approved_binding_hash {
+        if let Some(boundary) = &boundary {
+            let marker = refreshed
+                .binding
+                .as_object_mut()
+                .and_then(|object| object.remove(boundaries::BOUNDARY_METADATA_KEY));
+            let refreshed_candidate_hash = binding_hash(&boundaries::attempt_binding(&refreshed))?;
+            if Some(refreshed_candidate_hash.as_str()) != boundary_attempt_hash.as_deref() {
+                return Err(FinError::new(
+                    "REQUEST_CHANGED",
+                    "approval",
+                    "Execution parameters changed after boundary authorization.",
+                    "Refresh the candidate and verify it remains within the approved limits.",
+                ));
+            }
+            adapter.validate_boundary_candidate(&boundary.authorization.spec, &refreshed)?;
+            validate_candidate_caps(&boundary.authorization, &refreshed)?;
+            inject_boundary_marker(
+                &mut refreshed,
+                &boundary.authorization,
+                boundary_attempt_hash.clone().unwrap_or_default(),
+            )?;
+            let _ = marker;
+        }
+        if boundary.is_none()
+            && binding_hash(&authorization_binding(&refreshed))? != approved_binding_hash
+        {
             return Err(FinError::new(
                 "REQUEST_CHANGED",
                 "approval",
@@ -1189,7 +1265,20 @@ impl Engine {
                 "Refresh the preview and authorize the changed operation.",
             ));
         }
-        ensure_approval_fresh(&audit, &challenge, Utc::now())?;
+        if let Some(challenge) = &challenge {
+            ensure_approval_fresh(&audit, challenge, Utc::now())?;
+        }
+        if let Some(boundary) = &boundary {
+            let current = self.load_boundary_record(&boundary.authorization.id)?;
+            if current.authorization.status != BoundaryAuthorizationStatus::Active
+                || parse_time(&current.authorization.expires_at)? <= Utc::now()
+                || current.active_attempt.as_deref() != Some(record.id.as_str())
+            {
+                return Err(boundary_error(
+                    "Boundary authorization was revoked, expired, or replaced before dispatch.",
+                ));
+            }
+        }
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
@@ -1220,6 +1309,9 @@ impl Engine {
             operation_id: record.id.clone(),
             expected_binding_hash: approved_binding_hash,
             approval: audit,
+            boundary_authorization_id: boundary.as_ref().map(|b| b.authorization.id.clone()),
+            boundary_authorization_snapshot: boundary.clone(),
+            options: self.options.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
             record: Mutex::new(record.clone()),
@@ -1811,6 +1903,69 @@ impl Engine {
         from_value(value)
     }
 
+    fn load_boundary_record(&self, id: &str) -> Result<BoundaryAuthorizationRecord> {
+        let value = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .boundary_authorization(id)
+            .map_err(map_store)?
+            .ok_or_else(|| {
+                FinError::new(
+                    "BOUNDARY_AUTHORIZATION_NOT_FOUND",
+                    "authorization",
+                    "Boundary authorization does not exist.",
+                    "Inspect authorized operations and use the original authorization ID.",
+                )
+            })?;
+        from_value(value)
+    }
+
+    fn save_boundary_record(
+        &self,
+        expected: &BoundaryAuthorizationRecord,
+        record: &BoundaryAuthorizationRecord,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .compare_update_boundary_authorization(
+                &record.authorization.id,
+                &to_value(expected)?,
+                &to_value(record)?,
+                &now(),
+            )
+            .map_err(map_store)
+    }
+
+    fn require_active_boundary(&self, id: &str) -> Result<BoundaryAuthorization> {
+        let mut record = self.load_boundary_record(id)?;
+        if record.authorization.status == BoundaryAuthorizationStatus::Active
+            && parse_time(&record.authorization.expires_at)? <= Utc::now()
+        {
+            let before = record.clone();
+            record.authorization.status = BoundaryAuthorizationStatus::Expired;
+            self.save_boundary_record(&before, &record)?;
+        }
+        if record.authorization.status != BoundaryAuthorizationStatus::Active {
+            return Err(FinError::new(
+                "BOUNDARY_AUTHORIZATION_INACTIVE",
+                "authorization",
+                "Boundary authorization is expired, revoked, superseded, or exhausted.",
+                "Review the authorization status; new or changed boundaries require fresh approval.",
+            ));
+        }
+        if record.active_attempt.is_some() {
+            return Err(FinError::new(
+                "BOUNDARY_ATTEMPT_UNRESOLVED",
+                "authorization",
+                "An earlier attempt is unresolved and may still consume this intent.",
+                "Reconcile that original attempt before proposing another candidate.",
+            ));
+        }
+        Ok(record.authorization)
+    }
+
     fn update_record(&self, record: &OperationRecord) -> Result<()> {
         self.store
             .lock()
@@ -1826,21 +1981,45 @@ impl Engine {
         effects: Value,
         run: Option<&RunLedger>,
     ) -> Result<()> {
-        self.store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .commit_settlement(
-                &Settlement {
-                    operation_id: record.id.clone(),
-                    terminal_record: to_value(&record)?,
-                    proof,
-                    effects,
-                    run_id: run.map(|r| r.id.clone()),
-                    run_record: run.map(to_value).transpose()?,
-                },
-                &record.updated_at,
-            )
-            .map_err(map_store)
+        let settlement = Settlement {
+            operation_id: record.id.clone(),
+            terminal_record: to_value(&record)?,
+            proof,
+            effects,
+            run_id: run.map(|r| r.id.clone()),
+            run_record: run.map(to_value).transpose()?,
+        };
+        let boundary_id = record
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.binding.get(boundaries::BOUNDARY_METADATA_KEY))
+            .and_then(|metadata| metadata.get("authorization_id"))
+            .and_then(Value::as_str);
+        if let Some(boundary_id) = boundary_id {
+            let mut boundary = self.load_boundary_record(boundary_id)?;
+            let expected = boundary.clone();
+            if boundary.active_attempt.as_deref() == Some(record.id.as_str()) {
+                boundary.active_attempt = None;
+                account_boundary_effects(&mut boundary.authorization, record.effects.as_ref())?;
+            }
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .commit_boundary_settlement(
+                    &settlement,
+                    boundary_id,
+                    &to_value(&expected)?,
+                    &to_value(&boundary)?,
+                    &record.updated_at,
+                )
+                .map_err(map_store)
+        } else {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .commit_settlement(&settlement, &record.updated_at)
+                .map_err(map_store)
+        }
     }
 
     fn save_run(&self, run: &RunLedger) -> Result<()> {
@@ -1901,6 +2080,7 @@ impl Engine {
             ));
         }
         validate_prepared(prepared, &record.operation, Utc::now())?;
+        reject_unpriced_run(prepared)?;
         let route_step_index =
             u32::try_from(run.settled_route_steps.len()).map_err(|_| route_proof_error())?;
         let route_step = run
@@ -1935,7 +2115,12 @@ impl Engine {
                 "Refresh asset and fee valuations.",
             )
         })?;
-        validate_observation(&valuation.observed_at, Utc::now(), "VALUATION_UNAVAILABLE")?;
+        validate_price_observation(
+            &valuation.observed_at,
+            &valuation.source,
+            Utc::now(),
+            "VALUATION_UNAVAILABLE",
+        )?;
         let movement = parse_uint(valuation.movement_usd_micros.as_str())?;
         let fee_usd = parse_uint(valuation.maximum_fee_usd_micros.as_str())?;
         if fee_usd > parse_uint(&planned_step.maximum_fee_usd_micros)? {
@@ -2232,6 +2417,9 @@ struct OperationSubmissionJournal {
     operation_id: String,
     expected_binding_hash: String,
     approval: ApprovalAudit,
+    boundary_authorization_id: Option<String>,
+    boundary_authorization_snapshot: Option<BoundaryAuthorizationRecord>,
+    options: EngineOptions,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
     record: Mutex<OperationRecord>,
@@ -2240,10 +2428,158 @@ struct OperationSubmissionJournal {
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
-        validate_future_expiry(&self.approval.expires_at, Utc::now(), "APPROVAL_EXPIRED")
+        if let Some(id) = &self.boundary_authorization_id {
+            let grant = self.active_boundary_grant(id)?;
+            let prepared = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .preview
+                .clone()
+                .ok_or_else(|| {
+                    boundary_error("Boundary attempt has no durable candidate preview.")
+                })?;
+            self.validate_boundary_candidate(&grant, &prepared)?;
+            Ok(())
+        } else {
+            validate_future_expiry(&self.approval.expires_at, Utc::now(), "APPROVAL_EXPIRED")
+        }
+    }
+
+    fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
+        let Some(grant_id) = self.boundary_authorization_id.as_deref() else {
+            return self.assert_authorized();
+        };
+        ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
+        let grant = self.active_boundary_grant(grant_id)?;
+        self.validate_boundary_candidate(&grant, prepared)?;
+        let record = {
+            let mut current = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?;
+            current.preview = Some(prepared.clone());
+            current.updated_at = now();
+            current.clone()
+        };
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .update_boundary_candidate_preview(
+                grant_id,
+                &to_value(&grant)?,
+                &self.operation_id,
+                &to_value(&record)?,
+                &record.updated_at,
+            )
+            .map_err(map_store)?;
+        Ok(())
     }
 
     fn persist_submission(&self, submission: &Submission) -> Result<()> {
+        self.persist_submission_internal(submission)
+    }
+
+    fn persist_dispatch_evidence(&self, submission: &Submission, evidence: &Value) -> Result<()> {
+        let mut record = self
+            .record
+            .lock()
+            .map_err(|_| internal("journal record lock poisoned"))?;
+        if record.id != self.operation_id || record.submission.as_ref() != Some(submission) {
+            return Err(FinError::new(
+                "DISPATCH_EVIDENCE_SUBMISSION_MISMATCH",
+                "reconciliation",
+                "Dispatch evidence does not match this operation's durable submission.",
+                "Keep the operation unresolved and reconcile its original submission.",
+            ));
+        }
+        match record.dispatch_evidence.as_ref() {
+            Some(existing) if existing == evidence => return Ok(()),
+            Some(_) => {
+                return Err(FinError::new(
+                    "DISPATCH_EVIDENCE_CONFLICT",
+                    "reconciliation",
+                    "Different response evidence is already recorded for this submission.",
+                    "Keep the operation unresolved and inspect its existing evidence.",
+                ));
+            }
+            None => {}
+        }
+        let submission_row = SubmissionRow {
+            kind: submission.kind.clone(),
+            reference: submission.reference.clone(),
+            data: submission.data.clone(),
+        };
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .persist_dispatch_evidence(&self.operation_id, &submission_row, evidence)
+            .map_err(map_store)?;
+        record.dispatch_evidence = Some(evidence.clone());
+        Ok(())
+    }
+}
+
+impl OperationSubmissionJournal {
+    fn active_boundary_grant(&self, id: &str) -> Result<BoundaryAuthorizationRecord> {
+        let raw = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .boundary_authorization(id)
+            .map_err(map_store)?
+            .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
+        let record: BoundaryAuthorizationRecord = from_value(raw)?;
+        if record.authorization.status != BoundaryAuthorizationStatus::Active
+            || parse_time(&record.authorization.expires_at)? <= Utc::now()
+            || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
+        {
+            return Err(boundary_error(
+                "Boundary authorization is revoked, expired, or no longer owns this attempt.",
+            ));
+        }
+        Ok(record)
+    }
+
+    fn validate_boundary_candidate(
+        &self,
+        grant: &BoundaryAuthorizationRecord,
+        prepared: &PreparedOperation,
+    ) -> Result<()> {
+        let metadata = prepared
+            .binding
+            .get(boundaries::BOUNDARY_METADATA_KEY)
+            .ok_or_else(|| {
+                boundary_error("Prepared candidate lost its boundary authorization marker.")
+            })?;
+        let expected = metadata
+            .get("attempt_binding_hash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                boundary_error("Prepared candidate has no immutable attempt binding.")
+            })?;
+        if binding_hash(&boundaries::attempt_binding(prepared))? != expected {
+            return Err(FinError::new(
+                "REQUEST_CHANGED",
+                "approval",
+                "Revalidated candidate differs from its immutable attempt binding.",
+                "Prepare and review the changed candidate.",
+            ));
+        }
+        validate_candidate_caps(&grant.authorization, prepared)?;
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        ordinary_policy::validate_boundary_candidate_policy(
+            prepared,
+            &self.operation_id,
+            &self.options,
+            &store,
+        )
+    }
+
+    fn persist_submission_internal(&self, submission: &Submission) -> Result<()> {
         self.assert_authorized()?;
         if self
             .consumed
@@ -2269,19 +2605,33 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 "Reconcile the existing submission.",
             ));
         }
-        self.store
+        let submission_row = SubmissionRow {
+            kind: submission.kind.clone(),
+            reference: submission.reference.clone(),
+            data: submission.data.clone(),
+        };
+        let mut store = self
+            .store
             .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .persist_submission(
-                &self.operation_id,
-                &SubmissionRow {
-                    kind: submission.kind.clone(),
-                    reference: submission.reference.clone(),
-                    data: submission.data.clone(),
-                },
-                &now(),
-            )
-            .map_err(map_store)?;
+            .map_err(|_| internal("store lock poisoned"))?;
+        if let (Some(id), Some(snapshot)) = (
+            &self.boundary_authorization_id,
+            &self.boundary_authorization_snapshot,
+        ) {
+            store
+                .persist_boundary_submission(
+                    id,
+                    &to_value(snapshot)?,
+                    &self.operation_id,
+                    &submission_row,
+                    &now(),
+                )
+                .map_err(map_store)?;
+        } else {
+            store
+                .persist_submission(&self.operation_id, &submission_row, &now())
+                .map_err(map_store)?;
+        }
         record.submission = Some(submission.clone());
         record.status = Status::Submitted;
         record.updated_at = now();
@@ -3578,6 +3928,18 @@ fn receipt_position_delta(
 }
 
 fn validate_route_plan(plan: &RunPlan, now_instant: DateTime<Utc>) -> Result<()> {
+    if plan
+        .asset_prices
+        .iter()
+        .any(fin_domain::unpriced::is_estimate)
+    {
+        return Err(FinError::new(
+            "UNPRICED_ASSET",
+            "budget",
+            "A scoped acceptance run requires verified USD prices for every asset.",
+            "Capture a fully priced allocation and return plan.",
+        ));
+    }
     validate_price_rows(
         &plan.asset_prices,
         &plan
@@ -7282,15 +7644,20 @@ fn validate_price_rows(
             ));
         }
         let price = matching[0];
-        validate_observation(&price.observed_at, instant, "COST_VALUATION_STALE")?;
+        validate_price_observation(
+            &price.observed_at,
+            &price.source,
+            instant,
+            "COST_VALUATION_STALE",
+        )?;
         if price.source.trim().is_empty()
             || price.unit_atoms.is_zero()
-            || price.usd_micros_per_unit.is_zero()
+            || (price.usd_micros_per_unit.is_zero() && !fin_domain::unpriced::is_estimate(price))
         {
             return Err(FinError::new(
                 "COST_VALUATION_INVALID",
                 "budget",
-                "Cost valuation must have positive exact units, positive price and a named source.",
+                "Cost valuation requires positive exact units and a positive named price or an explicitly marked unpriced exchange estimate.",
                 "Refresh with a complete per-asset valuation observation.",
             ));
         }
@@ -7376,6 +7743,14 @@ fn convert_cost_to_origin(
     };
     let cost_price = price(cost_asset)?;
     let origin_price = price(origin_asset)?;
+    if cost_price.usd_micros_per_unit.is_zero() || origin_price.usd_micros_per_unit.is_zero() {
+        return Err(FinError::new(
+            "COST_ORIGIN_PRICE_MISSING",
+            "reconciliation",
+            "A scoped run cost cannot be converted through an unpriced estimate.",
+            "Keep the run unresolved and preserve the approved price map.",
+        ));
+    }
     let cost_usd = ceil_div(
         &(cost_atoms.integer() * cost_price.usd_micros_per_unit.integer()),
         &cost_price.unit_atoms.integer(),
@@ -7470,6 +7845,7 @@ fn validate_prepared(
     operation: &str,
     instant: DateTime<Utc>,
 ) -> Result<()> {
+    fin_domain::value_bounds::validate(prepared)?;
     validate_trading_bounds(&prepared.intent)?;
 
     if prepared.operation != operation {
@@ -7558,6 +7934,24 @@ fn validate_future_expiry(value: &str, instant: DateTime<Utc>, code: &str) -> Re
         ));
     }
     Ok(())
+}
+
+fn validate_price_observation(
+    value: &str,
+    source: &str,
+    instant: DateTime<Utc>,
+    code: &str,
+) -> Result<()> {
+    if fin_domain::price_freshness::is_fresh(value, source, instant) {
+        Ok(())
+    } else {
+        Err(FinError::new(
+            code,
+            "valuation",
+            "Price evidence has expired or contains invalid leg timestamps.",
+            "Obtain fresh prices for the specific expired leg.",
+        ))
+    }
 }
 
 fn validate_observation(value: &str, instant: DateTime<Utc>, code: &str) -> Result<()> {
@@ -7671,6 +8065,372 @@ fn to_value<T: Serialize>(value: &T) -> Result<Value> {
             "Preserve the current request and inspect the local journal.",
         )
     })
+}
+
+fn boundary_error(message: &str) -> FinError {
+    FinError::new(
+        "BOUNDARY_AUTHORIZATION_INVALID",
+        "authorization",
+        message,
+        "Review the operation boundaries and request fresh approval if the intended scope changed.",
+    )
+}
+
+fn format_boundary_usage(debits: &[ResourceAmount], costs: &[CostBound]) -> String {
+    let debit_text = if debits.is_empty() {
+        "no debit amounts".to_owned()
+    } else {
+        debits
+            .iter()
+            .map(|item| {
+                format!(
+                    "{} {}",
+                    item.amount.atoms.to_decimal(item.amount.asset.decimals),
+                    item.amount.asset.reference,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cost_text = if costs.is_empty() {
+        "no fee amounts".to_owned()
+    } else {
+        costs
+            .iter()
+            .map(|item| {
+                format!(
+                    "{} {} fees",
+                    item.amount.atoms.to_decimal(item.amount.asset.decimals),
+                    item.amount.asset.reference,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("{debit_text}; {cost_text}")
+}
+
+fn validate_boundary_request(request: &BoundaryAuthorizationRequest) -> Result<()> {
+    if request.request_id.trim().is_empty() || request.operation.trim().is_empty() {
+        return Err(boundary_error(
+            "A request identity and operation are required.",
+        ));
+    }
+    if request.valid_for_seconds == 0 {
+        return Err(boundary_error(
+            "Authorization duration must be a positive number of seconds.",
+        ));
+    }
+    if chrono::Duration::try_seconds(
+        i64::try_from(request.valid_for_seconds)
+            .map_err(|_| boundary_error("Authorization duration is too large."))?,
+    )
+    .is_none()
+    {
+        return Err(boundary_error("Authorization duration is too large."));
+    }
+    Ok(())
+}
+
+fn validate_boundary_spec(prepared: &PreparedOperation, spec: &BoundarySpec) -> Result<()> {
+    if spec.summary.trim().is_empty() || spec.fixed.is_null() || spec.parameters.is_null() {
+        return Err(boundary_error(
+            "The adapter returned incomplete boundary scope.",
+        ));
+    }
+    if spec.maximum_debits.is_empty() && spec.maximum_costs.is_empty() {
+        return Err(boundary_error(
+            "The adapter returned no enforceable debit or cost limits.",
+        ));
+    }
+    if spec.maximum_debits.iter().any(|limit| {
+        !prepared.intent.debits.iter().any(|debit| {
+            debit.resource == limit.resource && debit.amount.asset == limit.amount.asset
+        })
+    }) {
+        return Err(boundary_error(
+            "A debit boundary does not identify a resource and asset in the prepared intent.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_caps(
+    authorization: &BoundaryAuthorization,
+    prepared: &PreparedOperation,
+) -> Result<()> {
+    for debit in &prepared.intent.debits {
+        let Some(cap) = authorization
+            .remaining_debits
+            .iter()
+            .find(|cap| cap.resource == debit.resource && cap.amount.asset == debit.amount.asset)
+        else {
+            return Err(boundaries::violation_error(
+                "Candidate consumes a resource or asset outside the remaining authorization.",
+                boundaries::BoundaryViolation {
+                    constraint: "resource_asset_scope".into(),
+                    approved_bound: json!(authorization.remaining_debits),
+                    candidate_value: json!(debit),
+                    evidence_time: Some(prepared.observed_at.clone()),
+                    reauthorization_required: true,
+                    reconciliation_required: false,
+                },
+            ));
+        };
+        if debit.amount.atoms > cap.amount.atoms {
+            return Err(boundaries::violation_error(
+                "Candidate debit exceeds the remaining approved amount.",
+                boundaries::BoundaryViolation {
+                    constraint: "maximum_debit".into(),
+                    approved_bound: json!(cap),
+                    candidate_value: json!(debit),
+                    evidence_time: Some(prepared.observed_at.clone()),
+                    reauthorization_required: true,
+                    reconciliation_required: false,
+                },
+            ));
+        }
+    }
+    for cost in &prepared.intent.maximum_costs {
+        let Some(cap) = authorization.remaining_costs.iter().find(|cap| {
+            cap.location == cost.location
+                && cap.amount.asset == cost.amount.asset
+                && cap.treatment == cost.treatment
+        }) else {
+            return Err(boundaries::violation_error(
+                "Candidate includes a fee outside the remaining authorization.",
+                boundaries::BoundaryViolation {
+                    constraint: "fee_scope".into(),
+                    approved_bound: json!(authorization.remaining_costs),
+                    candidate_value: json!(cost),
+                    evidence_time: Some(prepared.observed_at.clone()),
+                    reauthorization_required: true,
+                    reconciliation_required: false,
+                },
+            ));
+        };
+        if cost.amount.atoms > cap.amount.atoms {
+            return Err(boundaries::violation_error(
+                "Candidate fee exceeds the remaining approved amount.",
+                boundaries::BoundaryViolation {
+                    constraint: "maximum_fee".into(),
+                    approved_bound: json!(cap),
+                    candidate_value: json!(cost),
+                    evidence_time: Some(prepared.observed_at.clone()),
+                    reauthorization_required: true,
+                    reconciliation_required: false,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remaining_debits(
+    maximum: &[ResourceAmount],
+    spent: Option<&Vec<ResourceAmount>>,
+) -> Result<Vec<ResourceAmount>> {
+    let spent = spent.cloned().unwrap_or_default();
+    maximum
+        .iter()
+        .map(|limit| {
+            let used = spent
+                .iter()
+                .filter(|item| {
+                    item.resource == limit.resource && item.amount.asset == limit.amount.asset
+                })
+                .try_fold(fin_domain::Quantity::zero(), |sum, item| {
+                    sum.checked_add(&item.amount.atoms)
+                })?;
+            let atoms = limit.amount.atoms.checked_sub(&used).map_err(|_| {
+                boundary_error("Replacement boundaries cannot restore spent debit authority.")
+            })?;
+            Ok(ResourceAmount {
+                resource: limit.resource.clone(),
+                amount: Amount {
+                    asset: limit.amount.asset.clone(),
+                    atoms,
+                },
+            })
+        })
+        .collect()
+}
+
+fn remaining_costs(
+    maximum: &[CostBound],
+    spent: Option<&Vec<CostBound>>,
+) -> Result<Vec<CostBound>> {
+    let spent = spent.cloned().unwrap_or_default();
+    maximum
+        .iter()
+        .map(|limit| {
+            let used = spent
+                .iter()
+                .filter(|item| {
+                    item.location == limit.location
+                        && item.amount.asset == limit.amount.asset
+                        && item.treatment == limit.treatment
+                })
+                .try_fold(fin_domain::Quantity::zero(), |sum, item| {
+                    sum.checked_add(&item.amount.atoms)
+                })?;
+            let atoms = limit.amount.atoms.checked_sub(&used).map_err(|_| {
+                boundary_error("Replacement boundaries cannot restore spent fee authority.")
+            })?;
+            Ok(CostBound {
+                location: limit.location.clone(),
+                amount: Amount {
+                    asset: limit.amount.asset.clone(),
+                    atoms,
+                },
+                treatment: limit.treatment.clone(),
+            })
+        })
+        .collect()
+}
+
+fn inject_boundary_marker(
+    prepared: &mut PreparedOperation,
+    authorization: &BoundaryAuthorization,
+    attempt_binding_hash: String,
+) -> Result<()> {
+    let grant_binding = boundaries::authorization_binding(
+        &authorization.operation,
+        &authorization.intent_id,
+        &authorization.spec,
+        authorization.valid_for_seconds,
+    );
+    let mut object = prepared
+        .binding
+        .as_object()
+        .cloned()
+        .ok_or_else(|| boundary_error("Prepared execution binding must be an object."))?;
+    object.remove(fin_domain::value_bounds::KEY);
+    object.insert(
+        boundaries::BOUNDARY_METADATA_KEY.to_owned(),
+        json!({
+            "version": 1,
+            "authorization_id": authorization.id,
+            "intent_id": authorization.intent_id,
+            "expires_at": authorization.expires_at,
+            "fixed": authorization.spec.fixed,
+            "parameters": authorization.spec.parameters,
+            "maximum_debits": authorization.spec.maximum_debits,
+            "maximum_costs": authorization.spec.maximum_costs,
+            "grant_binding": grant_binding,
+            "attempt_binding_hash": attempt_binding_hash,
+        }),
+    );
+    prepared.binding = Value::Object(object);
+    Ok(())
+}
+
+fn account_boundary_effects(
+    authorization: &mut BoundaryAuthorization,
+    effects: Option<&VerifiedEffects>,
+) -> Result<()> {
+    let Some(effects) = effects else {
+        return Ok(());
+    };
+    let mut debit_consumption: Vec<ResourceAmount> = Vec::new();
+    let mut cost_consumption: Vec<CostBound> = Vec::new();
+    for effect in &effects.effects {
+        match effect {
+            FinancialEffect::CashDebit { resource, amount } => {
+                add_resource_amount(&mut debit_consumption, resource, amount)?
+            }
+            FinancialEffect::Transfer { from, debit, .. } => {
+                add_resource_amount(&mut debit_consumption, from, debit)?
+            }
+            FinancialEffect::Conversion {
+                resource, spent, ..
+            } => add_resource_amount(&mut debit_consumption, resource, spent)?,
+            FinancialEffect::OriginMovement { from, debit, .. } => {
+                add_resource_amount(&mut debit_consumption, from.resource(), debit)?
+            }
+            FinancialEffect::Cost {
+                location,
+                amount,
+                treatment,
+                ..
+            } => {
+                let incoming = CostBound {
+                    location: location.clone(),
+                    amount: amount.clone(),
+                    treatment: treatment.clone(),
+                };
+                if let Some(existing) = cost_consumption.iter_mut().find(|item| {
+                    item.location == incoming.location
+                        && item.amount.asset == incoming.amount.asset
+                        && item.treatment == incoming.treatment
+                }) {
+                    existing.amount.atoms =
+                        existing.amount.atoms.checked_add(&incoming.amount.atoms)?;
+                } else {
+                    cost_consumption.push(incoming);
+                }
+            }
+            _ => {}
+        }
+    }
+    for consumed in debit_consumption {
+        if let Some(current) = authorization.spent_debits.iter_mut().find(|item| {
+            item.resource == consumed.resource && item.amount.asset == consumed.amount.asset
+        }) {
+            current.amount.atoms = current.amount.atoms.checked_add(&consumed.amount.atoms)?;
+        } else {
+            authorization.spent_debits.push(consumed);
+        }
+    }
+    for consumed in cost_consumption {
+        if let Some(current) = authorization.spent_costs.iter_mut().find(|item| {
+            item.location == consumed.location
+                && item.amount.asset == consumed.amount.asset
+                && item.treatment == consumed.treatment
+        }) {
+            current.amount.atoms = current.amount.atoms.checked_add(&consumed.amount.atoms)?;
+        } else {
+            authorization.spent_costs.push(consumed);
+        }
+    }
+    authorization.remaining_debits = remaining_debits(
+        &authorization.spec.maximum_debits,
+        Some(&authorization.spent_debits),
+    )?;
+    authorization.remaining_costs = remaining_costs(
+        &authorization.spec.maximum_costs,
+        Some(&authorization.spent_costs),
+    )?;
+    if authorization.status == BoundaryAuthorizationStatus::Active
+        && !authorization.remaining_debits.is_empty()
+        && authorization
+            .remaining_debits
+            .iter()
+            .all(|limit| limit.amount.atoms.is_zero())
+    {
+        // Unused fee allowance cannot authorize more of a completed spend.
+        authorization.status = BoundaryAuthorizationStatus::Exhausted;
+    }
+    Ok(())
+}
+
+fn add_resource_amount(
+    rows: &mut Vec<ResourceAmount>,
+    resource: &ResourceId,
+    amount: &Amount,
+) -> Result<()> {
+    if let Some(existing) = rows
+        .iter_mut()
+        .find(|item| &item.resource == resource && item.amount.asset == amount.asset)
+    {
+        existing.amount.atoms = existing.amount.atoms.checked_add(&amount.atoms)?;
+    } else {
+        rows.push(ResourceAmount {
+            resource: resource.clone(),
+            amount: amount.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
@@ -7844,11 +8604,80 @@ mod tests {
                 reference: "synthetic-tx-001".into(),
                 data: json!({"nonce":"synthetic-17"}),
             }),
+            dispatch_evidence: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
             run_id: None,
         }
+    }
+
+    #[test]
+    fn dispatch_receipt_persists_after_approval_expiry_without_changing_submission_state() {
+        let mut operation = record(vec![], vec![]);
+        let mut legacy_json = to_value(&operation).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("dispatch_evidence");
+        let legacy: OperationRecord = from_value(legacy_json).unwrap();
+        assert_eq!(legacy.dispatch_evidence, None);
+        let submission = operation.submission.clone().unwrap();
+        let mut store = Store::in_memory().unwrap();
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "pending",
+                &to_value(&operation).unwrap(),
+                &operation.created_at,
+            )
+            .unwrap();
+        store
+            .persist_submission(
+                &operation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                &operation.updated_at,
+            )
+            .unwrap();
+        operation.status = Status::Submitted;
+
+        let journal = OperationSubmissionJournal {
+            operation_id: operation.id.clone(),
+            expected_binding_hash: operation.approval.as_ref().unwrap().binding_hash.clone(),
+            approval: operation.approval.clone().unwrap(),
+            boundary_authorization_id: None,
+            boundary_authorization_snapshot: None,
+            options: EngineOptions::default(),
+            consumed: AtomicBool::new(true),
+            store: Arc::new(Mutex::new(store)),
+            record: Mutex::new(operation.clone()),
+        };
+        let evidence = json!({"txn_id":"SYNTHETIC-txn-42"});
+        journal
+            .persist_dispatch_evidence(&submission, &evidence)
+            .unwrap();
+        let persisted = journal.record.lock().unwrap().clone();
+        assert_eq!(persisted.dispatch_evidence, Some(evidence.clone()));
+        assert_eq!(persisted.submission, Some(submission.clone()));
+        assert_eq!(persisted.status, Status::Submitted);
+        assert_eq!(
+            journal
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&operation.id)
+                .unwrap()
+                .unwrap()["dispatch_evidence"],
+            evidence
+        );
     }
 
     fn proof(record: &OperationRecord, effects: Vec<FinancialEffect>) -> VerifiedEffects {
@@ -12552,6 +13381,7 @@ mod tests {
                 EngineOptions {
                     max_movement_and_cost_usd_micros: limit.into(),
                     max_run_allocation_usd_micros: "0".into(),
+                    allow_unpriced_exchange_assets: false,
                 },
             )
             .unwrap();
@@ -12634,6 +13464,7 @@ mod tests {
                 EngineOptions {
                     max_movement_and_cost_usd_micros: movement.into(),
                     max_run_allocation_usd_micros: allocation.into(),
+                    allow_unpriced_exchange_assets: false,
                 },
             )
             .unwrap();
@@ -12650,5 +13481,210 @@ mod tests {
                 if expected.is_none() { "165000000" } else { "0" }
             );
         }
+    }
+    struct UnpricedAdapter {
+        inner: SyntheticAdapter,
+        malformed: Option<&'static str>,
+    }
+    #[async_trait]
+    impl Adapter for UnpricedAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            let exact_asset = asset("binance", "ETH", 18);
+            let mut row = AssetPrice {
+                asset: exact_asset.clone(),
+                unit_atoms: quantity("1000000000000000000"),
+                usd_micros_per_unit: Quantity::zero(),
+                source: fin_domain::unpriced::source(&exact_asset),
+                observed_at: now(),
+            };
+            match self.malformed {
+                Some("forged") => row.source = "SYNTHETIC zero quote".into(),
+                Some("onchain") => {
+                    row.asset.network = "ethereum:1".into();
+                    row.source = fin_domain::unpriced::source(&row.asset);
+                }
+                Some("stale") => row.observed_at = "2000-01-01T00:00:00Z".into(),
+                _ => {}
+            }
+            let value = prepared.valuation.as_mut().unwrap();
+            value.movement_usd_micros = quantity(input["pricedMicros"].as_str().unwrap_or("0"));
+            value.prices = vec![row];
+            prepared.warnings.push(fin_domain::unpriced::WARNING.into());
+            Ok(prepared)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+
+    #[tokio::test]
+    async fn unpriced_ordinary_exception_is_protected_and_keeps_priced_caps_and_approval() {
+        for (enabled, priced, movement, allocation, expected) in [
+            (
+                false,
+                "0",
+                "0",
+                "0",
+                Some("UNPRICED_EXCHANGE_ASSET_DISABLED"),
+            ),
+            (true, "0", "1000000", "1000000", None),
+            (true, "1000001", "1000000", "0", Some("MOVEMENT_LIMIT")),
+            (true, "1000001", "0", "1000000", Some("ALLOCATION_LIMIT")),
+        ] {
+            let adapter = Arc::new(UnpricedAdapter {
+                inner: SyntheticAdapter::new(),
+                malformed: None,
+            });
+            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                auth.clone(),
+                EngineOptions {
+                    allow_unpriced_exchange_assets: enabled,
+                    max_movement_and_cost_usd_micros: movement.into(),
+                    max_run_allocation_usd_micros: allocation.into(),
+                },
+            )
+            .unwrap();
+            let mut request = ordinary_request("SYNTHETIC-unpriced");
+            request.input["pricedMicros"] = json!(priced);
+            let result = engine.execute(request.clone()).await.unwrap();
+            assert_eq!(result.error.as_ref().map(|e| e.code.as_str()), expected);
+            assert_eq!(
+                auth.challenges.lock().unwrap().len(),
+                usize::from(expected.is_none())
+            );
+            assert_eq!(
+                adapter.inner.submissions.load(Ordering::SeqCst),
+                usize::from(expected.is_none())
+            );
+            if expected.is_none() {
+                assert_eq!(engine.allocation_unpriced_operations().unwrap(), 1);
+                assert_eq!(engine.execute(request).await.unwrap().id, result.id);
+                assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unpriced_forged_onchain_and_stale_zero_rows_are_rejected_before_approval() {
+        for malformed in ["forged", "onchain", "stale"] {
+            let adapter = Arc::new(UnpricedAdapter {
+                inner: SyntheticAdapter::new(),
+                malformed: Some(malformed),
+            });
+            let auth = Arc::new(ChallengeValidatingAuthorizer::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                auth.clone(),
+                EngineOptions {
+                    allow_unpriced_exchange_assets: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let result = engine
+                .execute(ordinary_request("SYNTHETIC-bad-zero"))
+                .await
+                .unwrap();
+            assert!(result.error.is_some(), "{malformed}");
+            assert!(auth.challenges.lock().unwrap().is_empty());
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_unpriced_submission_reconciles_after_exception_is_disabled() {
+        let adapter = Arc::new(UnpricedAdapter {
+            inner: SyntheticAdapter::new(),
+            malformed: None,
+        });
+        let mut engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions {
+                allow_unpriced_exchange_assets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let original = engine
+            .execute(ordinary_request("SYNTHETIC-retained-unpriced"))
+            .await
+            .unwrap();
+        assert_eq!(original.status, Status::Pending);
+        engine.options.allow_unpriced_exchange_assets = false;
+        adapter.inner.completed_response();
+        let settled = engine.status(&original.id, true).await.unwrap();
+        assert_eq!(settled.status, Status::Completed);
+        assert_eq!(settled.submission, original.submission);
+        assert_eq!(settled.preview, original.preview);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+        assert_eq!(engine.allocation_unpriced_operations().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn unpriced_costs_settle_as_estimates_but_cannot_define_acceptance_runs() {
+        let exact_asset = asset("binance", "SYNTHETIC", 8);
+        let row = AssetPrice {
+            asset: exact_asset.clone(),
+            unit_atoms: quantity("100000000"),
+            usd_micros_per_unit: Quantity::zero(),
+            observed_at: now(),
+            source: fin_domain::unpriced::source(&exact_asset),
+        };
+        let valuation = fin_domain::Valuation {
+            movement_usd_micros: Quantity::zero(),
+            maximum_fee_usd_micros: Quantity::zero(),
+            additional_allocation_usd_micros: Quantity::zero(),
+            observed_at: now(),
+            source: "SYNTHETIC estimate".into(),
+            prices: vec![row],
+        };
+        let costs = vec![FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: resource("SYNTHETIC-exchange"),
+            },
+            amount: Amount {
+                asset: exact_asset,
+                atoms: quantity("100"),
+            },
+            category: "SYNTHETIC trading fee".into(),
+            treatment: fin_domain::CostTreatment::AdditionalDebit,
+        }];
+        assert_eq!(
+            actual_cost_usd(&costs, &valuation).unwrap(),
+            BigUint::zero()
+        );
+        let mut prepared = SyntheticAdapter::new()
+            .prepare("synthetic.transfer", &json!({}))
+            .await
+            .unwrap();
+        prepared.valuation = Some(valuation);
+        assert_eq!(
+            reject_unpriced_run(&prepared).unwrap_err().code,
+            "UNPRICED_ASSET"
+        );
     }
 }

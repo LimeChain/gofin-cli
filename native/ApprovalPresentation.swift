@@ -7,6 +7,85 @@ struct ConfigurationPresentation {
     let body: String
 }
 
+// An application presentation budget, not a promise about macOS dialog sizing.
+// Never truncate exact amounts midway or change the complete approval binding.
+let authenticationReasonMaximumCharacters = 240
+
+func compactAuthenticationReason(prefix: String, summary: String) -> String {
+    let visible = summary.unicodeScalars.map { scalar -> String in
+        let value = scalar.value
+        if CharacterSet.controlCharacters.contains(scalar) || value == 0x200E || value == 0x200F
+            || (0x202A...0x202E).contains(value) || (0x2066...0x2069).contains(value) {
+            return String(format: "\\u%04x", value)
+        }
+        return String(scalar)
+    }.joined()
+    // Only shorten complete EVM addresses; leave amounts, memo/tags and other
+    // identifiers intact. Exact addresses remain in terminal/agent review.
+    let addresses = try! NSRegularExpression(pattern: "(?<![A-Za-z0-9])0x[0-9a-fA-F]{40}(?![A-Za-z0-9])")
+    var compact = visible
+    for match in addresses.matches(in: visible, range: NSRange(visible.startIndex..., in: visible)).reversed() {
+        guard let range = Range(match.range, in: compact) else { continue }
+        let address = String(compact[range])
+        compact.replaceSubrange(range, with: "\(address.prefix(6))…\(address.suffix(4))")
+    }
+    for (long, short) in [
+        ("Withdraw API quantity ", "Withdraw "),
+        ("approved maximum fee ", "fee cap "),
+        ("maximum gross debit ", "debit cap "),
+        ("minimum net receipt ", "min receipt "),
+        ("USD ceilings: ", "USD caps: "),
+    ] {
+        compact = compact.replacingOccurrences(of: long, with: short)
+    }
+    let reason = prefix + compact
+    if reason.count <= authenticationReasonMaximumCharacters { return reason }
+
+    // Stop at a complete clause and explicitly disclose omitted details. This
+    // also bounds escaped control text and unusually long account/token names.
+    let suffix = " See terminal review for full details."
+    let available = authenticationReasonMaximumCharacters - prefix.count - suffix.count - 1
+    var clauses: [String] = []
+    for clause in compact.components(separatedBy: ";") {
+        let candidate = (clauses + [clause]).joined(separator: ";")
+        if candidate.count > available { break }
+        clauses.append(clause)
+    }
+    let synopsis = clauses.isEmpty ? "the reviewed operation." : clauses.joined(separator: ";") + ";"
+    return prefix + synopsis + suffix
+}
+
+// The broker supplies this summary over its private challenge channel. It is
+// presentation only: the helper still verifies and returns the complete binding
+// hash/nonce, and the broker alone decides whether that response authorizes a write.
+func financialAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
+    guard binding["version"] as? Int == 1,
+          let operation = binding["operation"] as? String, !operation.isEmpty,
+          binding["execution"] is [String: Any],
+          binding["financial_intent"] is [String: Any],
+          !summary.isEmpty, summary.count <= 4096 else { return nil }
+    return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
+}
+
+// The broker owns the grant and evaluates each concrete attempt separately.
+// This approval is explicitly for the displayed operation boundaries, not an
+// administrative action or an unrestricted wallet unlock.
+func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
+    guard binding["version"] as? Int == 1,
+          binding["kind"] as? String == "operation_boundaries",
+          let operation = binding["operation"] as? String, !operation.isEmpty,
+          !operation.hasPrefix("configuration:"), !operation.hasPrefix("policy."),
+          !operation.hasPrefix("connections."),
+          let intent = binding["intent_id"] as? String, !intent.isEmpty,
+          binding["fixed"] is [String: Any], binding["parameters"] is [String: Any],
+          let debits = binding["maximum_debits"] as? [[String: Any]], !debits.isEmpty,
+          binding["maximum_costs"] is [[String: Any]],
+          let duration = binding["valid_for_seconds"] as? NSNumber,
+          CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
+          !summary.isEmpty, summary.count <= 4096 else { return nil }
+    return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
+}
+
 // LocalAuthentication prefixes this reason with the app name. Use a specific
 // lower-case action, without repeating the product name or adding punctuation.
 // Full configuration/permissions remain in the protected terminal review.
@@ -17,7 +96,7 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
           CFGetTypeID(authority) == CFBooleanGetTypeID(), !authority.boolValue,
           let action = binding["action"] as? String else { return nil }
     if action == "initialize" { return "finish setup for your Mac account" }
-    if action == "policy_set" { return "change your financial limits" }
+    if action == "policy_set" { return "change your financial policy" }
     guard ["add", "update", "remove"].contains(action),
           let connection = binding["connection"] as? [String: Any],
           let name = connection["name"] as? String, !name.isEmpty, name.count <= 96,
@@ -32,7 +111,7 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"
-    return "\(verb) the \(providerName) connection \"\(name)\""
+    return compactAuthenticationReason(prefix: "", summary: "\(verb) the \(providerName) connection \"\(name)\"")
 }
 
 // Return nil whenever the complete configuration cannot be summarized. Call only
@@ -172,8 +251,8 @@ func configurationPresentation(_ binding: [String: Any]) -> ConfigurationPresent
 }
 
 // This private protocol field is emitted only after the root broker consumes an
-// opaque protected-terminal proof. Missing or inconsistent proof retains the
-// full native review; neither route ever replaces the biometric decision.
+// opaque protected-terminal proof. Missing or inconsistent proof refuses a
+// configuration approval; no custom dialog replaces this review or Touch ID.
 struct TerminalConfigurationReview: Decodable {
     let purpose: String
     let bindingHash: String

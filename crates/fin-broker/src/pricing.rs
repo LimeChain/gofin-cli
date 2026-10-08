@@ -1,30 +1,49 @@
 //! One shared USD source for policy valuation, application previews and allocations.
 use super::*;
 use fin_domain::Quantity;
-use fin_pricing::{CoinGeckoPrices, UsdPriceSource, UsdQuote};
+use fin_pricing::{CoinGeckoPrices, ExchangeSpotPrices, UsdPriceSource, UsdQuote};
+#[cfg(test)]
+#[path = "exchange_pricing_tests.rs"]
+mod exchange_tests;
 
 pub struct SharedUsdValuator {
     source: Arc<dyn UsdPriceSource>,
 }
 impl SharedUsdValuator {
     pub fn new() -> fin_domain::Result<Self> {
-        Ok(Self::with_source(Arc::new(CoinGeckoPrices::new()?)))
+        Ok(Self::with_source(Arc::new(ExchangeSpotPrices::new(
+            CoinGeckoPrices::new()?,
+        )?)))
     }
     pub fn with_source(source: Arc<dyn UsdPriceSource>) -> Self {
         Self { source }
+    }
+    async fn quote(&self, asset: &AssetId) -> fin_domain::Result<UsdQuote> {
+        match self.source.quote(asset).await {
+            Err(error)
+                if asset.network == "binance" && error.code == "PRICE_SPOT_PAIR_UNSUPPORTED" =>
+            {
+                // Unknown value, not a provider price. Execution requires the
+                // protected opt-in; stale/corrupt/outage evidence is never zero.
+                let detected = now();
+                Ok(UsdQuote {
+                    usd_per_unit: "0".into(),
+                    updated_at: detected.clone(),
+                    observed_at: detected,
+                    source: fin_domain::unpriced::source(asset),
+                })
+            }
+            result => result,
+        }
     }
     async fn amount_quote(
         &self,
         asset: &AssetId,
         units: Quantity,
     ) -> fin_domain::Result<(Quantity, String, String)> {
-        let quote = self.source.quote(asset).await?;
-        let updated = chrono::DateTime::parse_from_rfc3339(&quote.updated_at)
-            .map_err(|_| invalid_quote())?
-            .with_timezone(&Utc);
+        let quote = self.quote(asset).await?;
         let current = Utc::now();
-        if updated > current
-            || current - updated > chrono::Duration::seconds(120)
+        if !fin_domain::price_freshness::is_fresh(&quote.updated_at, &quote.source, current)
             || quote.source.trim().is_empty()
             || quote.source.len() > 1024
             || asset.decimals > 36
@@ -32,16 +51,12 @@ impl SharedUsdValuator {
             return Err(invalid_quote());
         }
         let price = Quantity::from_decimal(&quote.usd_per_unit, 36)?;
-        if price.is_zero() {
+        if price.is_zero() && !fin_domain::unpriced::is_source(asset, &quote.source) {
             return Err(invalid_quote());
         }
         let denominator = Quantity::new(format!("1{}", "0".repeat(asset.decimals as usize + 30)))?;
         let micros = units.mul_div_ceil(&price, &denominator)?;
-        Ok((
-            micros,
-            format!("{}; updated:{}", quote.source, quote.updated_at),
-            quote.updated_at,
-        ))
+        Ok((micros, quote_source(asset, &quote), quote.updated_at))
     }
 }
 fn invalid_quote() -> FinError {
@@ -49,7 +64,7 @@ fn invalid_quote() -> FinError {
         "PRICE_DATA_INVALID",
         "valuation",
         "A fresh positive USD quote with provider timestamp and source is required.",
-        "Retry when CoinGecko supplies a valid quote; no alternative price or parity is assumed.",
+        "Retry when each configured price leg is fresh and valid; no alternative route or stablecoin parity is assumed.",
     )
 }
 #[async_trait]
@@ -90,8 +105,22 @@ impl fin_binance::BinancePriceProvider for SharedUsdValuator {
                 decimals: 36,
             })
             .collect::<Vec<_>>();
-        for quote in self.source.quotes(&assets).await? {
-            validate_binance_quote(&quote)?;
+        let quotes = match self.source.quotes(&assets).await {
+            Ok(quotes) => quotes,
+            Err(error) if error.code == "PRICE_SPOT_PAIR_UNSUPPORTED" => {
+                let mut quotes = Vec::with_capacity(assets.len());
+                for asset in &assets {
+                    quotes.push(self.quote(asset).await?);
+                }
+                quotes
+            }
+            Err(error) => return Err(error),
+        };
+        if quotes.len() != assets.len() {
+            return Err(invalid_quote());
+        }
+        for (asset, quote) in assets.iter().zip(&quotes) {
+            validate_binance_quote(asset, quote)?;
         }
         Ok(())
     }
@@ -101,27 +130,32 @@ impl fin_binance::BinancePriceProvider for SharedUsdValuator {
             reference: coin.into(),
             decimals: 36,
         };
-        let quote = self.source.quote(&asset).await?;
+        let quote = self.quote(&asset).await?;
         // Check the same typed source contract before passing whole-unit prices
         // to Binance's exact decimal valuation path.
-        validate_binance_quote(&quote)?;
+        validate_binance_quote(&asset, &quote)?;
+        let source = quote_source(&asset, &quote);
         Ok(fin_binance::PriceQuote {
             usd_per_unit: quote.usd_per_unit,
             observed_at: quote.updated_at.clone(),
-            source: format!("{}; updated:{}", quote.source, quote.updated_at),
+            source,
         })
     }
 }
-fn validate_binance_quote(quote: &UsdQuote) -> fin_domain::Result<()> {
-    let updated = chrono::DateTime::parse_from_rfc3339(&quote.updated_at)
-        .map_err(|_| invalid_quote())?
-        .with_timezone(&Utc);
+fn quote_source(asset: &AssetId, quote: &UsdQuote) -> String {
+    if fin_domain::unpriced::is_source(asset, &quote.source) {
+        quote.source.clone()
+    } else {
+        format!("{}; updated:{}", quote.source, quote.updated_at)
+    }
+}
+fn validate_binance_quote(asset: &AssetId, quote: &UsdQuote) -> fin_domain::Result<()> {
     let current = Utc::now();
-    if updated > current
-        || current - updated > chrono::Duration::seconds(120)
+    if !fin_domain::price_freshness::is_fresh(&quote.updated_at, &quote.source, current)
         || quote.source.trim().is_empty()
         || quote.source.len() > 1024
-        || Quantity::from_decimal(&quote.usd_per_unit, 36)?.is_zero()
+        || (Quantity::from_decimal(&quote.usd_per_unit, 36)?.is_zero()
+            && !fin_domain::unpriced::is_source(asset, &quote.source))
     {
         return Err(invalid_quote());
     }

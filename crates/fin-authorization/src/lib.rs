@@ -38,6 +38,35 @@ impl Authorizer for UnavailableAuthorizer {
 
 /// Validation is independently testable; production accepts only its own private child's response.
 pub fn validate_challenge(challenge: &AuthorizationChallenge, current_time: &str) -> Result<()> {
+    if challenge.purpose == "financial_boundary" {
+        let binding = &challenge.binding;
+        if binding["version"] != 1
+            || binding["kind"] != "operation_boundaries"
+            || !binding["fixed"].is_object()
+            || !binding["parameters"].is_object()
+            || !binding["maximum_debits"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+            || !binding["maximum_costs"].is_array()
+            || !binding["valid_for_seconds"]
+                .as_u64()
+                .is_some_and(|seconds| seconds > 0)
+            || !binding["intent_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+            || !binding["operation"].as_str().is_some_and(|op| {
+                !op.is_empty()
+                    && !op.starts_with("configuration:")
+                    && !op.starts_with("policy.")
+                    && !op.starts_with("connections.")
+            })
+        {
+            return Err(denied(
+                "INVALID_APPROVAL",
+                "The operation-boundary authorization is malformed or administrative.",
+            ));
+        }
+    }
     let current = parse_time(current_time)?;
     let expiry = parse_time(&challenge.expires_at)?;
     if expiry <= current || expiry.signed_duration_since(current).num_milliseconds() > 90_000 {
@@ -604,7 +633,32 @@ mod tests {
         json!({"version":1,"status":"accepted","nonce":c.nonce,"bindingHash":c.binding_hash,"approvedAt":APPROVED,"expiresAt":c.expires_at})
     }
     #[test]
-    fn ordinary_authorization_keeps_native_review_for_financial_and_configuration() {
+    fn boundary_consent_duration_is_separate_from_biometric_challenge_deadline() {
+        let mut c = challenge();
+        c.purpose = "financial_boundary".into();
+        c.binding = json!({"version":1,"kind":"operation_boundaries","operation":"binance.spot.order-place",
+            "intent_id":"SYNTHETIC-intent","fixed":{"side":"BUY"},"parameters":{"maximum_spend":"20"},
+            "maximum_debits":[{"SYNTHETIC":"20"}],"maximum_costs":[],"valid_for_seconds":600});
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        validate_challenge(&c, ISSUED).unwrap();
+        validate_response(&c, &response(&c), ISSUED, NOW).unwrap();
+        c.expires_at = "2026-10-02T12:10:00.000Z".into();
+        assert_eq!(
+            validate_challenge(&c, ISSUED).unwrap_err().code,
+            "AUTHORIZATION_EXPIRED"
+        );
+        c.expires_at = "2026-10-02T12:01:30.000Z".into();
+        for operation in ["configuration:initialize", "policy.set", "connections.add"] {
+            c.binding["operation"] = json!(operation);
+            c.binding_hash = binding_hash(&c.binding).unwrap();
+            assert_eq!(
+                validate_challenge(&c, ISSUED).unwrap_err().code,
+                "INVALID_APPROVAL"
+            );
+        }
+    }
+    #[test]
+    fn ordinary_authorization_does_not_fabricate_protected_terminal_review() {
         let mut c = challenge();
         for purpose in ["financial_write", "configuration"] {
             c.purpose = purpose.into();

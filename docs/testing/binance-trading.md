@@ -1,8 +1,7 @@
 # Binance trading human acceptance
 
-Status: **not run**. Automated synthetic results are recorded in the
-[trading report](../reports/binance-trading.md). This checklist adds no authority
-to send production orders. Agree the exact account, amounts, live quotes, complete
+This checklist specifies acceptance behavior; it grants no authority to send
+production orders. Agree the exact account, amounts, live quotes, complete
 return route and cost reserve together before starting; follow the
 [live-test contract](README.md#live-test-contract).
 
@@ -22,7 +21,7 @@ and futures trading each require the venue's corresponding key permissions.
 The human configures a funded USD-M wallet, isolated margin at 1× leverage,
 one-way/single-asset mode and auto-add margin disabled. Fin never changes these
 settings automatically. There must be no other futures exposure on this account
-for an opening. Spot/futures wallet transfers are not exposed by this increment.
+for an opening. Spot/futures wallet transfers are not exposed by this trading profile.
 
 ## Joint run
 
@@ -61,4 +60,4 @@ Record results separately for authenticated reads, native approval acceptance,
 denial/expiry, approved writes, cancellation/recovery and complete restoration.
 COIN-M/delivery, hedge/cross/multi-asset mode, leverage/configuration changes,
 standing/market orders, whitelist editing and explicit deposit-address creation
-are outside this increment.
+are outside this trading profile.

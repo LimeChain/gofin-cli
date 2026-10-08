@@ -6,16 +6,14 @@
 - **Repository/package:** `fin-cli`
 - **Binary:** `fin`
 - **Distribution model:** Open source; license to be selected.
-- **Updated:** 2 October 2026
-- **Status:** Agreed product direction; compiled Rust foundation implemented; acceptance verification in progress.
 
-Implementation starts with the [build plan](implementation-plan.md) and [Binance and Ethereum acceptance guides](testing/README.md). These define the first development milestones within the broader scope below. Release-hardening proposals discussed after this concept were paused; they are not additional beta acceptance gates.
+Use the [implementation guide](implementation-plan.md) and [Binance and Ethereum acceptance guides](testing/README.md) alongside this product scope.
 
 The implementation follows the [Rust architecture](rust-architecture.md) and [terminal onboarding/discovery contract](onboarding.md). Implementation and automated/fork verification come first; the human subsequently runs onboarding and the real Touch ID path. Production/mainnet acceptance remains separately required and must not be claimed from automated or historical TS results.
 
 Fin is an open-source tool that brings **centralized and on-chain order-book trading, wallets and broader DeFi, and shared authorizations and limits into one locally executed interface** for humans and AI agents.
 
-Users can delegate financial work that spans trading, account transfers, deposits and withdrawals, collateral, borrowing, and repayment. General chain-to-chain bridging follows in the immediate next release. The LLM plans, presents, and orchestrates the work; Fin executes individual operations and provides evidence of their outcomes. The first version requires fresh Touch ID authorization for every write operation.
+Users can delegate financial work that spans trading, account transfers, deposits and withdrawals, collateral, borrowing, and repayment. General chain-to-chain bridging follows in the immediate next release. The LLM plans, presents, and orchestrates the work; Fin executes individual operations and provides evidence of their outcomes. Standalone writes require fresh Touch ID. Supported operations may instead use a human-approved intent with explicit, expiring boundaries; the first such family is Binance spot LIMIT IOC/FOK placement.
 
 ## 1. Problem
 
@@ -29,7 +27,7 @@ A workflow spanning several systems also crosses different account models, signi
 
 Limits and authorization are a second part of the problem. Instructions such as “ask before moving funds” or “use only this destination” are **hopefully followed** when they exist only in the LLM's prompt. Fin must obtain authorization independently of the model and check the actual operation before executing it. An LLM-generated statement that the user approved an action is not evidence of authorization.
 
-The intended outcome is less manual execution and checking: the agent prepares each operation, the user reviews its concrete effects and authorizes the write, and Fin executes and records the outcome. The initial product accepts an interruption for each write in exchange for a simple, explicit approval model.
+The intended outcome is less manual execution and checking: the agent prepares each operation, the user reviews its effects or permitted variations and authorizes it, and Fin executes and records the outcome. Repricing a candidate inside a supported intent's approved boundaries does not interrupt the human again.
 
 ## 2. Target Persona
 
@@ -57,12 +55,12 @@ A user can move from an exchange balance to an on-chain collateral position and 
 | Responsibility | LLM / agent                                                                                             | Fin                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Planning       | Understand the request, inspect available capabilities, choose steps, and explain the plan to the user. | Supply structured capabilities, state, previews, and constraints.                                                |
-| Authorization  | Propose the next concrete operation and explain why it is needed.                                       | Display the actual operation and obtain fresh Touch ID confirmation bound to that write.                         |
+| Authorization  | Propose a concrete operation or supported intent and boundaries; explain why it is needed.              | Display the exact action or permitted variations and obtain fresh Touch ID for that authorization.              |
 | Execution      | Invoke Fin separately for each step when its prerequisites are satisfied.                               | Validate the request, execute that operation, and track its outcome.                                             |
 | Recovery       | Decide how to continue or revise the plan using the reported state.                                     | Preserve receipts and progress; reconcile uncertain outcomes before allowing a potentially duplicate submission. |
 | Communication  | Explain progress, exceptions, and results to the user.                                                  | Return structured evidence and actionable errors.                                                                |
 
-**The LLM creates and presents the plan in the conversation.** Fin generates the confirmation details for each write from the operation it will execute, independently of the LLM's explanation. Reads and dry-runs do not require financial-action approval. The first version does not use timed authorization sessions or authenticate a complete plan. Ordinary operations support intentional permanent holdings and portfolio changes without a restoration run. Protected human-configurable ceilings apply to each movement and to installation-wide rolling 24-hour gross allocation; unresolved submissions retain reservations beyond the window. Zero removes the corresponding personal ceiling, while every write retains exact bounds and fresh approval.
+**The LLM creates and presents the plan in the conversation.** Fin independently generates terminal review details for the exact action or supported operation boundaries. Reads and dry-runs do not require financial-action approval. A boundary grant authorizes one intent, not a timed session for arbitrary writes or a complete plan. Ordinary operations support intentional permanent holdings and portfolio changes without a restoration run. Protected human-configurable ceilings apply to each movement and to installation-wide rolling 24-hour gross allocation; unresolved submissions retain reservations beyond the window. Zero removes the corresponding personal ceiling. The broker checks both operation authority and current personal policy before every dispatch.
 
 Fin may wait for confirmation and handle the mechanics within an operation. If the agent stops after borrowing, Fin retains that state; it does not independently choose the next use of the funds. This concept does not require an autonomous workflow or strategy engine inside Fin.
 
@@ -273,26 +271,30 @@ Most standard tokens should work through generic adapter support without a bespo
 
 Product coverage and test coverage are different: a representative ETH/USDC or SOL/USDC test set verifies common paths without becoming the only permitted assets. Fin should state what is discovered, available for an operation, and tested, and return a clear reason when a requested combination is unavailable.
 
-### Per-write authorization
+### Operation authorization
 
-Every write operation requires fresh Touch ID confirmation. This includes orders and cancellations, internal account transfers, wallet transfers, deposits and withdrawals, token allowances, swaps, collateral changes, borrowing, and repayment. General bridging will use the same rule when introduced. A swap requiring a separate token-approval transaction therefore requires two confirmations in the initial version. Reads, dry-runs, deposit-address lookup, and status reconciliation do not require financial-action approval; creating or changing account state is still a write regardless of the endpoint's HTTP method.
+Standalone writes require fresh Touch ID confirmation. This includes orders and venue cancellations, internal account transfers, wallet transfers, deposits and withdrawals, token allowances, swaps, collateral changes, borrowing, and repayment. General bridging will use the same rule when introduced. A swap requiring a separate token-approval transaction therefore requires two confirmations. Reads, dry-runs, deposit-address lookup, and status reconciliation do not require financial-action approval; creating or changing account state is still a write regardless of the endpoint's HTTP method.
 
-The authorization flow is:
+Binance spot LIMIT IOC/FOK placement additionally supports boundary authorization. The human approves a fixed account, asset pair and side, a cumulative SELL quantity or BUY spend, a price floor or ceiling, cumulative fee caps and permitted time-in-force choices. Consent defaults to ten minutes from approval; the requester may choose another duration. Quantity and price can change within that grant without another Touch ID. Quote freshness remains independent. MARKET, standing orders, futures boundary grants and multi-step approval are outside the implemented scope.
+
+Protected broker state tracks exact attempts, verified effects, consumed costs and unresolved reservations. Replacing an unsubmitted candidate invalidates the old one; submitted or uncertain attempts need reconciliation before another potentially duplicating action. Canceling a grant stops future dispatch without Touch ID but cannot undo a submitted venue order. Replacing boundaries or expiry requires fresh Touch ID and preserves lifetime intent consumption. Restart preserves original expiry and history without automatically submitting. See [operation-boundary authorization](rust-architecture.md#operation-boundary-authorization).
+
+The standalone exact authorization flow is:
 
 1. The agent submits a concrete operation. Fin validates it and prepares a pending request.
 2. Fin displays the actual action, account or wallet, assets, amounts, network, destination or contract, and relevant fee/slippage bounds. Named destinations resolve to fixed addresses for the request.
 3. The user confirms through Touch ID. Fin binds that confirmation to the pending operation; model-generated text, a CLI flag, or a terminal response cannot substitute for authentication.
 4. Fin revalidates current conditions and submits only the authorized operation within its displayed bounds, recording the authorization and resulting submission together.
 
-Authorization is short-lived and single-use. It cannot be reused for another logical write, and material parameter changes require a new confirmation. A previous device unlock or approval of another operation must not silently authorize the next write. Rejection, cancellation, unavailable authentication, or expired approval prevents submission and produces a structured authorization result.
+Standalone exact authorization is short-lived and single-use. It cannot be reused for another logical write, and material parameter changes require a new confirmation. Historical approvals remain exact. A previous device unlock or approval of another intent must not silently authorize the next write. Rejection, cancellation, unavailable authentication, or expired approval prevents new submission and produces a structured authorization result.
 
 Fin's approval does not replace protocol signatures or a wallet's own confirmation requirements. Any additional wallet prompts must be explicit. Authorization also does not imply atomic execution or automatic rollback across venues: assets may have left an exchange even if a subsequent collateral deposit fails.
 
 ### Execution bounds and later policy controls
 
-The first version asks for approval for every write rather than relying on amount thresholds or a timed authorization window. Fin checks explicit amounts, asset units, networks, recipients, fees, slippage, and other applicable bounds against the operation it will actually execute. For DeFi this includes token allowances and their spenders; the agent's description of a transaction is insufficient. User confirmation cannot override exchange permissions or protocol rules.
+A personal spending threshold is not operation authorization. Fin checks explicit amounts, asset units, networks, recipients, fees, slippage, and other applicable approved bounds against the operation it will actually execute. For DeFi this includes token allowances and their spenders; the agent's description of a transaction is insufficient. User confirmation cannot override exchange permissions or protocol rules.
 
-Timed sessions, authorization of a complete plan, automatic allowances, and richer amount or destination policies are deferred. Any future mode must preserve independent human control over granting or expanding permission. If cumulative budgets are introduced, accounting must include pending operations and distinguish trading notional, borrowing, and transfers.
+General timed sessions, authorization of a complete plan and automatic allowances are deferred. Operation-specific cumulative bounds include actual partial effects and costs; pending or uncertain attempts retain reservations. Expanding permission always requires independent human approval.
 
 ### Previews and errors
 
@@ -322,7 +324,7 @@ Fin must distinguish **awaiting approval, submitted, pending, completed, failed,
 
 The agent must be able to inspect an existing operation by its identifier. Fin should reconcile that operation against venue or chain state before permitting a potentially duplicate submission. Repeating the same logical request must return or reconcile its existing record rather than silently create another financial action. Where an outcome cannot be established, Fin must report the uncertainty and block a potentially duplicate submission. Use venue identifiers and idempotency mechanisms where supported; do not promise universal exactly-once execution.
 
-Records must distinguish submission, source confirmation, destination receipt, and availability for the next operation. Completion criteria depend on the operation: an accepted withdrawal does not establish that the destination received the funds. Read-only status checks and reconciliation require no Touch ID; every new write still requires fresh authorization.
+Records must distinguish submission, source confirmation, destination receipt, and availability for the next operation. Completion criteria depend on the operation: an accepted withdrawal does not establish that the destination received the funds. Read-only status checks and reconciliation require no Touch ID; a new write requires exact approval or remaining authority under a supported boundary grant.
 
 For example, if Binance subaccount consolidation succeeds but the withdrawal response times out, Fin preserves the successful transfers and the uncertain withdrawal record. The agent can resume by checking that withdrawal without repeating the consolidation. The LLM remains responsible for deciding how to continue the overall task; Fin tracks individual operations and supplies the evidence needed for that decision.
 
@@ -332,13 +334,13 @@ For example, if Binance subaccount consolidation succeeds but the withdrawal res
 
 The first MVP should also improve the validated workflows based on actual friction: easier setup, broader tested operation coverage, richer constraints, and more configurable approval behavior. A focused local `fin mcp serve` interface is a proposed early addition after the CLI-and-skill beta, with timing guided by demand from supported agent clients. It must share the CLI's operation definitions and authorization and execution engine.
 
-Per-write Touch ID and the protected execution boundary remain the baseline. Equivalent authentication on other platforms, richer policies, additional wallet integrations, and broader team permissions can follow demonstrated demand. Timed sessions, plan authorization, and unattended writes require separate design and validation; they are not requirements for the beta or first MVP.
+Standalone per-write Touch ID and the protected execution boundary remain the baseline, with operation-boundary consent available for the declared spot family. Equivalent authentication on other platforms, richer policies, additional wallet integrations, and broader team permissions can follow demonstrated demand. General timed sessions, plan authorization and unattended strategies require separate design and validation.
 
 ## 8. Core Product Hypothesis
 
 > **Combining CEX and on-chain order-book trading, wallets and broader DeFi, and shared authorizations and limits in one locally executed interface will make financial work substantially easier for crypto-native individuals and small teams to delegate and verify.**
 
-The hypothesis concerns the value of the combined experience. Validation must establish how much it reduces setup, manual execution, checking, and recovery work on meaningful recurring tasks while retaining a human approval for every write.
+The hypothesis concerns the value of the combined experience. Validation must establish how much it reduces setup, manual execution, checking, and recovery work on meaningful recurring tasks while retaining human control over each exact operation or bounded intent.
 
 ### Competitive baseline
 
@@ -354,7 +356,7 @@ The first-release baseline is an agent using CCXT together with the relevant DeF
 
 Use **Binance subaccount consolidation followed by withdrawal** as the primary recurring-use benchmark: move the specified asset amounts from selected subaccounts into the main account, verify that the funds are available, withdraw to a named wallet on an explicitly selected network, and verify destination receipt. Use the user's normal activity to choose accounts, assets, amounts, and network; balances committed to trading or collateral must not be assumed transferable. Main-to-subaccount transfers and wallet-to-Binance deposits remain required first-release capabilities with separate acceptance cases.
 
-Compare Fin with the same agent using CCXT and the necessary wallet tools, under equivalent task constraints. Measure initial setup separately from repeat use, and compare with the user's current manual workflow to establish practical value. The intended experience is one clear user request, the required per-write Touch ID confirmations, and a verified result without manual address copying, interface switching, or repeated balance checks.
+Compare Fin with the same agent using CCXT and the necessary wallet tools, under equivalent task constraints. Measure initial setup separately from repeat use, and compare with the user's current manual workflow to establish practical value. The intended experience is one clear user request, the required exact-operation or intent-boundary Touch ID confirmations, and a verified result without manual address copying, interface switching, or repeated balance checks.
 
 Live acceptance follows the [test contract](testing/README.md#live-test-contract): production accounts and Ethereum mainnet, real funds within the $100 limits, a recorded initial state, and a preplanned unwind. Revalidate value and available unwind funds before each write. Exact balance equality is not possible after execution costs; reconcile these explicitly and require restoration of account allocation and financial positions before recording a complete run. Simulations and fork tests supplement rather than replace live verification.
 

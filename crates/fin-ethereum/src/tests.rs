@@ -1454,6 +1454,7 @@ fn record(preview: PreparedOperation) -> OperationRecord {
         preview: Some(preview),
         approval: None,
         submission: Some(submission),
+        dispatch_evidence: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,
@@ -4636,6 +4637,7 @@ mod wallet_only_tests {
                         authorization.clone(),
                         EngineOptions {
                             max_movement_and_cost_usd_micros: "100000000".into(),
+                            allow_unpriced_exchange_assets: false,
                             max_run_allocation_usd_micros: if excessive_movement {
                                 "5000000000"
                             } else {

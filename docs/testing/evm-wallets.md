@@ -64,9 +64,8 @@ not authorize a live write.
 
 ## Optional authenticated pricing
 
-Anonymous ETH pricing was observed stale and public requests returned HTTP 429;
-these remain blocked pricing results, not financial passes. To use a CoinGecko
-Demo/Pro plan, the human runs:
+Anonymous pricing can be unavailable or stale, and public requests may be rate
+limited. To use an optional CoinGecko Demo/Pro plan, the human runs:
 
 ```sh
 fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo
@@ -79,8 +78,8 @@ quota/billing. Never provide it in chat, JSON, CLI values or environment variabl
 No enrollment is required during setup; without it, anonymous access remains
 best effort. Every financial write still needs its own approval, fresh valid
 USD quotes and the existing limits. Authentication itself does not make a stale
-or missing quote usable. Actual keyed enrollment and fresh authenticated quote
-verification remain pending until the human runs them.
+or missing quote usable. Verify protected enrollment and authenticated freshness
+independently from anonymous public probes.
 
 ## Coverage and settlement limits
 
@@ -91,12 +90,14 @@ verification remain pending until the human runs them.
 - Baseline snapshots track native ETH and configured token scope. They do not
   claim to discover every ERC-20, NFT, lending or liquidity position. Snapshot
   completeness describes the declared observer scope.
-- Shared CoinGecko USD valuation serves Binance and every EVM network. Native
-  ETH uses a verified coin ID; ERC-20 quotes use verified chain/platform plus
-  exact contract, and Binance symbols use reviewed coin IDs. Listed ERC-20s are
-  supported generically; symbols alone do not establish token identity. Missing
-  or unsupported quotes block writes/allocation checks. No stablecoin parity or
-  Binance/Coinbase/Kraken pricing fallback is assumed.
+- Shared pricing keeps CoinGecko native ETH and verified platform/contract ERC-20
+  lookups. Symbols alone never establish on-chain identity. Binance now uses
+  exact active direct USDC/USDT spot pairs times batched stablecoin USD rates;
+  see [pricing contracts](../implementation-plan.md#pricing-contracts).
+  No cross-exchange fallback or stablecoin parity is assumed. Unsupported Binance
+  pairs produce explicit unknown $0 estimates, with a protected opt-in for
+  ordinary writes. This exception does not apply to on-chain prices or scoped
+  acceptance-run accounting.
 - Numeric quote lexemes become exact positive decimal text without floating
   point. Source `last_updated_at` is retained as RFC3339 `updated_at`, distinct
   from retrieval time. Source age is bounded to 120 seconds (public updates are
@@ -130,18 +131,6 @@ cargo test --locked -p fin-pricing
 cargo test --locked -p fin-broker -p fin-credentials
 ```
 
-On 2026-10-06, shared CoinGecko pricing passed 466 Rust workspace tests,
-strict workspace Clippy, and 50 non-authorizing Swift presentation cases. One
-guarded Ethereum mainnet-fork test remains intentionally unrun. Run the full
-suite with `cargo test --locked --workspace -- --test-threads=1`; serial execution
-avoids an existing unrelated daemon-fixture temporary-directory collision.
-These results include protected pricing metadata, singleton connection identity,
-key rotation, header redaction, failed authentication without anonymous fallback,
-provider-time preservation and protocol-oracle isolation. Actual protected
-credential enrollment and Touch ID remain human-pending.
-The debug macOS bundle built successfully and its hardened signatures verified;
-no installed state changed.
-
 These use synthetic credentials, temporary state and injected RPC/indexer/
 valuation responses. Cover canonical/legacy providers, no required enrollment
 network, reviewed-network dispatch, wrong chain, missing dapp deployments,
@@ -154,25 +143,12 @@ does not establish Arbitrum or Robinhood behavior.
 
 ## Human verification checklist
 
-All new human, biometric and live-write cases are **pending until observed**.
-Public no-secret probes are a separate evidence category. On 2026-10-06, the
-actual Rust HTTP transport passed chain-ID, RPC-finalized block, priority-fee and
-reviewed token-decimal reads on both official RPCs (Arbitrum USDC and Robinhood
-USDG each reported six decimals). Robinhood WETH reported 18 decimals in a
-separate public RPC read. The Robinhood Blockscout endpoint returned HTTP 403;
-automatic discovery remains partial/unavailable there, with configured or explicit
-token reads available. These observations establish no signing or financial pass.
-
-Reproduce only the public RPC checks, without loading Fin configuration or keys:
+Run public read-only probes separately from synthetic tests and protected live
+acceptance. They load no credentials and establish no signing or settlement:
 
 ```sh
 cargo run --locked -p fin-broker --example evm-network-probe -- --public-read-only
 ```
-
-A public CoinGecko lookup for the exact Robinhood USDG contract returned a USD
-quote with provider source timestamp on 2026-10-06. This verifies only that
-public lookup, not anonymous availability for every quote or financial execution.
-Reproduce anonymous public pricing separately from the default synthetic suite:
 
 ```sh
 cargo run --locked -p fin-pricing --example public_probe -- --public-read-only
@@ -181,11 +157,6 @@ cargo run --locked -p fin-pricing --example public_probe -- --public-read-only
 The example loads no Fin configuration, secrets or environment API key and signs
 nothing. It reports quote/source age or structured failures for native ETH,
 Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
-The actual Rust transport accepted exact Arbitrum USDC and Robinhood USDG
-quotes (provider ages 96 and 106 seconds). Native ETH quotes were stale and
-Binance USDG returned HTTP 429. Those failures block writes and establish no
-financial acceptance. Authenticated quote
-verification remains pending until protected human enrollment is observed.
 
 1. Use the reviewed local build in the human's Terminal. Check help/schema and
    enroll one signing EVM connection; verify the same address is available on

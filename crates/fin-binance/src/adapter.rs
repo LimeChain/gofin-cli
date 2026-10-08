@@ -1,7 +1,9 @@
 use super::*;
 mod address_book;
+mod boundaries;
 mod spot;
 mod trading;
+mod transfer_rejection;
 mod withdrawal;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -211,6 +213,20 @@ impl Adapter for BinanceAdapter {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.0.connections()
     }
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
+        self.0.prepare_boundaries(prepared, bounds)
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &fin_domain::boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> Result<(), FinError> {
+        self.0.validate_boundary_candidate(spec, prepared)
+    }
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         self.0.snapshot().await
     }
@@ -261,6 +277,7 @@ pub struct BinanceDispatch {
     authority: String,
     request: BinanceRequest,
     noop: Option<Value>,
+    receipt_submission: Option<Submission>,
 }
 
 #[derive(Clone)]
@@ -857,26 +874,25 @@ impl BinanceProfile {
                 "USD price must be an exact positive decimal.",
             )
         })?;
-        if price.is_zero() || quote.source.is_empty() {
+        let identity = AssetId {
+            network: "binance".into(),
+            reference: coin.into(),
+            decimals: 36,
+        };
+        if (price.is_zero() && !fin_domain::unpriced::is_source(&identity, &quote.source))
+            || quote.source.is_empty()
+        {
             return Err(error(
                 "VALUATION_INVALID",
                 "preview",
                 "USD price source and positive price are required.",
             ));
         }
-        let observed = DateTime::parse_from_rfc3339(&quote.observed_at).map_err(|_| {
-            error(
-                "STALE_VALUATION",
-                "preview",
-                "Price observation time is invalid.",
-            )
-        })?;
-        let age = Utc::now().signed_duration_since(observed.with_timezone(&Utc));
-        if age < Duration::seconds(-5) || age > Duration::seconds(120) {
+        if !fin_domain::price_freshness::is_fresh(&quote.observed_at, &quote.source, Utc::now()) {
             return Err(error(
                 "STALE_VALUATION",
                 "preview",
-                "USD price must be observed within the last 120 seconds.",
+                "USD price evidence has expired; spot and conversion legs use separate freshness bounds.",
             ));
         }
         let movement_usd = decimal_product_micros(movement, &quote.usd_per_unit)?;
@@ -1095,11 +1111,67 @@ impl BinanceProfile {
         Ok((authority, from, to))
     }
 
+    /// Resolve either the historical main-authorized route or the Binance
+    /// `subToMaster` route. The latter is intentionally narrow: the selected
+    /// authority is the source child itself and the destination is its one
+    /// configured parent.
+    fn transfer_accounts(
+        &self,
+        input: &TransferInput,
+    ) -> Result<
+        (
+            &BinanceAccount,
+            &BinanceAccount,
+            &BinanceAccount,
+            &BinanceAccount,
+            bool,
+        ),
+        FinError,
+    > {
+        let selected = self.account(&input.authority)?;
+        if matches!(selected.role, AccountRole::Main) {
+            let (main, from, to) = self.validate_transfer_route(input)?;
+            return Ok((main, from, to, main, false));
+        }
+        let from = self.account(&input.from)?;
+        let to = self.account(&input.to)?;
+        if from.name != selected.name || !matches!(from.role, AccountRole::Sub) {
+            return Err(error(
+                "WRONG_AUTHORITY",
+                "validation",
+                "Subaccount authority is supported only when it is the transfer source.",
+            ));
+        }
+        let parent_name = from.parent.as_deref().ok_or_else(|| {
+            error(
+                "INVALID_HIERARCHY",
+                "validation",
+                "Source subaccount has no configured parent.",
+            )
+        })?;
+        let main = self.require_main(parent_name)?;
+        if to.name != main.name {
+            return Err(error(
+                "UNSUPPORTED_ROUTE",
+                "validation",
+                "A subaccount credential can authorize only a SPOT transfer to its configured master.",
+            ));
+        }
+        if from.name == to.name {
+            return Err(error(
+                "SAME_ACCOUNT",
+                "validation",
+                "Transfer source and destination must differ.",
+            ));
+        }
+        Ok((main, from, to, selected, true))
+    }
+
     async fn transfer_route(
         &self,
         input: &TransferInput,
-    ) -> Result<(BinanceRequest, String, String), FinError> {
-        let (authority, from, to) = self.validate_transfer_route(input)?;
+    ) -> Result<(BinanceRequest, String, String, String, bool), FinError> {
+        let (authority, from, to, signer, sub_to_master) = self.transfer_accounts(input)?;
         if input.from_wallet != "SPOT" || input.to_wallet != "SPOT" {
             return Err(error(
                 "UNSUPPORTED_WALLET",
@@ -1119,14 +1191,20 @@ impl BinanceProfile {
             child_transfer_type,
         )
         .await?;
-        let permissions = self.permissions(authority).await?;
-        if permissions.enable_internal_transfer != Some(true)
-            || permissions.permits_universal_transfer != Some(true)
+        let permissions = self.permissions(signer).await?;
+        if (!sub_to_master
+            && (permissions.enable_internal_transfer != Some(true)
+                || permissions.permits_universal_transfer != Some(true)))
+            || (sub_to_master && permissions.enable_spot_and_margin_trading != Some(true))
         {
             return Err(error(
                 "MISSING_PERMISSION",
                 "preview",
-                "Main credential must report internal-transfer and universal-transfer permissions.",
+                if sub_to_master {
+                    "Source subaccount credential must report SPOT and margin trading permission."
+                } else {
+                    "Main credential must report internal-transfer and universal-transfer permissions."
+                },
             ));
         }
         let currency = self.currency(authority, &input.coin).await?;
@@ -1169,12 +1247,22 @@ impl BinanceProfile {
         }
         let intent = UniversalTransferIntent {
             asset: input.coin.clone(),
-            amount,
+            amount: amount.clone(),
             from_email: from.email.clone().filter(|_| from.name != authority.name),
             to_email: to.email.clone().filter(|_| to.name != authority.name),
             client_id: ClientIdentity::transfer(&input.request_id).map_err(domain_error)?,
         };
-        let request = intent.request().map_err(domain_error)?;
+        let request = if sub_to_master {
+            SubToMasterTransferIntent {
+                asset: input.coin.clone(),
+                amount: amount.clone(),
+            }
+            .request()
+            .map_err(domain_error)?
+            .push("recvWindow", "5000")
+        } else {
+            intent.request().map_err(domain_error)?
+        };
         let source_free = Self::free(&source_balances, &input.coin)
             .expect("checked balance")
             .canonical();
@@ -1183,12 +1271,18 @@ impl BinanceProfile {
             .cloned()
             .unwrap_or_else(ExactDecimal::zero)
             .canonical();
-        Ok((request, source_free, destination_free))
+        Ok((
+            request,
+            source_free,
+            destination_free,
+            signer.name.clone(),
+            sub_to_master,
+        ))
     }
 
     async fn prepare_transfer(&self, input: TransferInput) -> Result<PreparedOperation, FinError> {
-        let (authority, from, to) = self.validate_transfer_route(&input)?;
-        let (request, _, _) = self.transfer_route(&input).await?;
+        let (authority, from, to, signer, sub_to_master) = self.transfer_accounts(&input)?;
+        let (request, _, _, _, _) = self.transfer_route(&input).await?;
         let value = amount(&input.amount)?;
         let currency = self.currency(authority, &input.coin).await?;
         let _precision = currency
@@ -1210,14 +1304,25 @@ impl BinanceProfile {
         let venue_decimals = 36;
         let value_atoms = decimal_to_atoms(&value, venue_decimals)?;
         let valuation = self.valuation(&input.coin, &value.canonical(), "0").await?;
-        let binding = json!({
-            "authority": authority.name, "from": from.name, "to": to.name,
-            "coin": input.coin, "amount": value.canonical(), "fromWallet": "SPOT", "toWallet": "SPOT",
-            "clientTranId": request.get("clientTranId").unwrap_or_default(),
-            "asset": AssetId { network: "binance".into(), reference: input.coin.clone(), decimals: venue_decimals },
-            "fromEmail": request.get("fromEmail"), "toEmail": request.get("toEmail"),
-            "params": request,
-        });
+        let binding = if sub_to_master {
+            json!({
+                "authority": signer.name, "parentAuthority": authority.name, "from": from.name, "to": to.name,
+                "coin": input.coin, "amount": value.canonical(), "fromWallet": "SPOT", "toWallet": "SPOT",
+                "localSubmissionId": ClientIdentity::transfer(&input.request_id).map_err(domain_error)?.as_str(),
+                "route": "sub_to_master", "signer": signer.name,
+                "asset": AssetId { network: "binance".into(), reference: input.coin.clone(), decimals: venue_decimals },
+                "fromEmail": from.email, "toEmail": to.email, "params": request,
+            })
+        } else {
+            json!({
+                "authority": authority.name, "from": from.name, "to": to.name,
+                "coin": input.coin, "amount": value.canonical(), "fromWallet": "SPOT", "toWallet": "SPOT",
+                "clientTranId": request.get("clientTranId").unwrap_or_default(),
+                "asset": AssetId { network: "binance".into(), reference: input.coin.clone(), decimals: venue_decimals },
+                "fromEmail": request.get("fromEmail"), "toEmail": request.get("toEmail"),
+                "params": request,
+            })
+        };
         let intent = FinancialIntent {
             debits: vec![ResourceAmount {
                 resource: from.resource.clone(),
@@ -1249,14 +1354,24 @@ impl BinanceProfile {
             }],
             locks: vec![from.resource.clone(), to.resource.clone()],
         };
-        let summary = format!(
-            "Transfer {} {} from {} SPOT to {} SPOT using main authority {}; internal transfer fee 0.",
-            value.canonical(),
-            input.coin,
-            from.name,
-            to.name,
-            authority.name
-        );
+        let summary = if sub_to_master {
+            format!(
+                "Transfer {} {} from {} SPOT to {} SPOT using source subaccount authority; internal transfer fee 0.",
+                value.canonical(),
+                input.coin,
+                from.name,
+                to.name
+            )
+        } else {
+            format!(
+                "Transfer {} {} from {} SPOT to {} SPOT using main authority {}; internal transfer fee 0.",
+                value.canonical(),
+                input.coin,
+                from.name,
+                to.name,
+                authority.name
+            )
+        };
         Ok(prepared(
             "binance.transfer",
             serde_json::to_value(&input).unwrap_or(Value::Null),
@@ -1266,12 +1381,20 @@ impl BinanceProfile {
                 Self::check(
                     "hierarchy",
                     CheckStatus::Passed,
-                    "Configured child identities and unfrozen status were observed under the selected main authority.",
+                    if sub_to_master {
+                        "Configured source child identity and unfrozen status were observed under its selected parent."
+                    } else {
+                        "Configured child identities and unfrozen status were observed under the selected main authority."
+                    },
                 ),
                 Self::check(
                     "permission",
                     CheckStatus::Passed,
-                    "Internal-transfer and universal-transfer permission were observed on the selected authority.",
+                    if sub_to_master {
+                        "SPOT and margin trading permission was observed on the selected source child credential."
+                    } else {
+                        "Internal-transfer and universal-transfer permission were observed on the selected authority."
+                    },
                 ),
                 Self::check(
                     "free_balance",
@@ -1455,6 +1578,7 @@ impl BinanceProfile {
             .await?;
         if let Some(valuation) = valuation.as_mut()
             && let Some(exchange_price) = valuation.prices.first().cloned()
+            && !fin_domain::unpriced::is_estimate(&exchange_price)
         {
             valuation.prices.push(AssetPrice {
                 asset: asset.clone(),
@@ -1620,6 +1744,8 @@ struct HistoryInput {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TransferInput {
     request_id: String,
+    /// Use a configured main connection for existing universal transfers; for
+    /// child-to-parent, select the source child to sign Binance subToMaster.
     authority: String,
     from: String,
     to: String,
@@ -1742,7 +1868,7 @@ fn definitions() -> Vec<Definition> {
         ),
         (
             "binance.transfer",
-            "Main-authorized SPOT transfer between a configured main account and one configured subaccount, with persistent clientTranId.",
+            "SPOT transfer between a configured main account and one configured subaccount. Main authority uses universalTransfer with clientTranId; a source-child authority can return SPOT to its configured parent through subToMaster, whose receipt is persisted by Fin.",
             OperationKind::Write,
             schema_for!(TransferInput),
             "One matching successful history row plus observed source debit and destination credit.",
@@ -1764,6 +1890,18 @@ fn definitions() -> Vec<Definition> {
         examples: if name == "binance.spot-order" { vec![json!({"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
         completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
     }).collect();
+    if let Some(definition) = result.iter_mut().find(|d| d.name == "binance.transfer") {
+        definition.semantics["authority"] = json!(
+            "For main→child or legacy main-authorized child→main, select the main account. For source-child→parent only, select the child as authority; Fin uses subToMaster and sends no clientTranId or recipient parameter."
+        );
+        definition.semantics["subToMasterReceipt"] = json!(
+            "Fin persists Binance txnId against the immutable local submission before returning. If the response is lost before the receipt is persisted, the result remains unknown and history is not inferred from amount or time."
+        );
+        definition.examples = vec![
+            json!({"requestId":"return-eth-to-master","authority":"binance-child","from":"binance-child","to":"binance-main","coin":"ETH","amount":"0.01","fromWallet":"SPOT","toWallet":"SPOT"}),
+            json!({"requestId":"fund-child","authority":"binance-main","from":"binance-main","to":"binance-child","coin":"ETH","amount":"0.01","fromWallet":"SPOT","toWallet":"SPOT"}),
+        ];
+    }
     if let Some(definition) = result.iter_mut().find(|d| d.name == "binance.withdraw") {
         definition.input_schema["oneOf"] = json!([
             {"required":["destination"],"properties":{"destination":{"type":"string","minLength":1}},"not":{"required":["address"]}},
@@ -1804,7 +1942,7 @@ fn prepared(
     intent: FinancialIntent,
 ) -> PreparedOperation {
     let now = Utc::now();
-    PreparedOperation {
+    let mut result = PreparedOperation {
         operation: operation.into(),
         input,
         binding,
@@ -1817,7 +1955,30 @@ fn prepared(
         valuation,
         intent,
         operation_version: 1,
+    };
+    let unpriced = result
+        .valuation
+        .as_ref()
+        .map(|value| {
+            value
+                .prices
+                .iter()
+                .filter(|price| fin_domain::unpriced::is_estimate(price))
+                .map(|price| price.asset.reference.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if !unpriced.is_empty() {
+        let names = unpriced.into_iter().collect::<Vec<_>>().join(", ");
+        result
+            .warnings
+            .push(format!("{names}: {}", fin_domain::unpriced::WARNING));
+        result.summary.push_str(&format!(
+            " Unpriced {names}: $0 estimate, excluded from USD limits."
+        ));
     }
+    fin_domain::value_bounds::bind(&mut result);
+    result
 }
 
 fn error(code: &str, stage: &str, message: impl Into<String>) -> FinError {
@@ -1864,7 +2025,11 @@ fn http_failure_error(
         error.message.push_str(&format!("; Binance code {code}"));
     }
     error.message.push(']');
-    error
+    error.with_details(json!({
+        "transport": "binance-ccxt",
+        "http_status": status,
+        "binance_code": binance_code,
+    }))
 }
 
 fn domain_error(error: impl std::fmt::Display) -> FinError {
@@ -1920,6 +2085,20 @@ fn valid_eth_address(value: &str) -> bool {
 
 #[async_trait]
 impl ExchangeProfile for BinanceProfile {
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
+        boundaries::prepare(prepared, bounds)
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &fin_domain::boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> Result<(), FinError> {
+        boundaries::validate(spec, prepared)
+    }
     fn definitions(&self) -> Vec<Definition> {
         definitions()
     }
@@ -2598,7 +2777,7 @@ impl ExchangeProfile for BinanceProfile {
         &self,
         prepared: &PreparedOperation,
     ) -> Result<PreparedOperation, FinError> {
-        if prepared.operation == "binance.futures.order-place" {
+        let mut current = if prepared.operation == "binance.futures.order-place" {
             let mut context = fin_domain::PreparationContext::default();
             if let Some(anchor) = prepared.binding.get("priorAnchor") {
                 context
@@ -2611,11 +2790,32 @@ impl ExchangeProfile for BinanceProfile {
                         )
                     })?);
             }
-            return self
-                .trading_prepare_with_anchor(&prepared.operation, &prepared.input, &context)
-                .await;
+            self.trading_prepare_with_anchor(&prepared.operation, &prepared.input, &context)
+                .await?
+        } else {
+            self.prepare(&prepared.operation, &prepared.input).await?
+        };
+        if let Some(metadata) = prepared
+            .binding
+            .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+        {
+            let binding = current
+                .binding
+                .as_object_mut()
+                .ok_or_else(|| FinError::validation("Invalid prepared binding."))?;
+            binding.remove(fin_domain::value_bounds::KEY);
+            binding.insert(
+                fin_domain::boundaries::BOUNDARY_METADATA_KEY.into(),
+                metadata.clone(),
+            );
+        } else {
+            fin_domain::value_bounds::carry(prepared, &mut current).map_err(|failure| {
+                if failure.code == "STALE_VALUATION" { failure } else {
+                    error("PREVIEW_CHANGED", "submission", "Fresh USD pricing exceeds the approved ceiling or changes identity; obtain fresh authorization.")
+                }
+            })?;
         }
-        self.prepare(&prepared.operation, &prepared.input).await
+        Ok(current)
     }
 
     type Request = BinanceDispatch;
@@ -2629,6 +2829,32 @@ impl ExchangeProfile for BinanceProfile {
         approved: &PreparedOperation,
         refreshed: &PreparedOperation,
     ) -> bool {
+        if approved
+            .binding
+            .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .is_some()
+        {
+            return refreshed.valuation.as_ref().is_some_and(|value| {
+                !value.prices.is_empty()
+                    && value.prices.iter().all(|price| {
+                        fin_domain::price_freshness::is_fresh(
+                            &price.observed_at,
+                            &price.source,
+                            Utc::now(),
+                        ) && (!price.usd_micros_per_unit.is_zero()
+                            || fin_domain::unpriced::is_estimate(price))
+                    })
+            });
+        }
+        if approved
+            .binding
+            .get(fin_domain::value_bounds::KEY)
+            .is_some()
+        {
+            return approved.binding.get(fin_domain::value_bounds::KEY)
+                == refreshed.binding.get(fin_domain::value_bounds::KEY)
+                && fin_domain::value_bounds::validate(refreshed).is_ok();
+        }
         if trading::is_write(&approved.operation) {
             return trading::valuation_matches(approved, refreshed);
         }
@@ -2652,9 +2878,44 @@ impl ExchangeProfile for BinanceProfile {
         match current.operation.as_str() {
             "binance.transfer" => {
                 let input: TransferInput = self.parse_input(&input).await?;
-                let (main, from, to) = self.validate_transfer_route(&input)?;
-                let (r, source_before, dest_before) = self.transfer_route(&input).await?;
+                let (main, from, to, signer, sub_to_master) = self.transfer_accounts(&input)?;
+                let (r, source_before, dest_before, _, _) = self.transfer_route(&input).await?;
                 request = r;
+                if sub_to_master {
+                    let local_id = current.binding["localSubmissionId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| {
+                            error(
+                                "PREVIEW_INVALID",
+                                "submission",
+                                "Subaccount transfer identity is missing.",
+                            )
+                        })?;
+                    submission = Submission {
+                        kind: "binance".into(),
+                        reference: local_id.into(),
+                        data: json!({
+                            "operation":"binance.transfer","route":"sub_to_master","binding":current.binding,
+                            "submittedAt":now(),"sourceFreeBefore":source_before,"destinationFreeBefore":dest_before,
+                            "authority":main.name,"signer":signer.name,"from":from.name,"to":to.name,
+                            "coin":input.coin,"amount":input.amount
+                        }),
+                    };
+                    // Binance's subToMaster endpoint returns only txnId. Carry
+                    // the exact already-journaled Submission into dispatch so
+                    // the venue receipt can be atomically linked before return.
+                    let dispatch_submission = submission.clone();
+                    return Ok(PlannedSubmission {
+                        submission,
+                        request: BinanceDispatch {
+                            authority: signer.name.clone(),
+                            request,
+                            noop: None,
+                            receipt_submission: Some(dispatch_submission),
+                        },
+                    });
+                }
                 // Binance's universal-transfer history defaults to the main
                 // account's outgoing transfers. Persist the one route filter
                 // needed to find the exact child leg after a lost response.
@@ -2738,6 +2999,7 @@ impl ExchangeProfile for BinanceProfile {
                 authority: authority.name.clone(),
                 request,
                 noop: None,
+                receipt_submission: None,
             },
         })
     }
@@ -2747,6 +3009,44 @@ impl ExchangeProfile for BinanceProfile {
         request: &BinanceDispatch,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Value, FinError> {
+        if request.request.endpoint == BinanceEndpoint::SubToMasterTransfer {
+            let submission = request.receipt_submission.as_ref().ok_or_else(|| {
+                error(
+                    "SUBMISSION_INVALID",
+                    "submission",
+                    "Subaccount transfer receipt identity is unavailable.",
+                )
+            })?;
+            journal.assert_authorized()?;
+            request
+                .request
+                .validate()
+                .map_err(|e| error("INVALID_ENDPOINT_REQUEST", "submission", e.to_string()))?;
+            let response = self
+                .transport
+                .request_authorized(
+                    &self.account(&request.authority)?.credential,
+                    request.request.clone(),
+                    journal.clone(),
+                )
+                .await
+                .map_err(|e| transport_error("submission", e))?;
+            let txn_id = response.get("txnId").ok_or_else(|| {
+                error(
+                    "SUBMISSION_RESPONSE_INVALID",
+                    "submission",
+                    "Binance subToMaster response lacks txnId; keep the original request unknown.",
+                )
+            })?;
+            let venue_id = VenueIdentifier::parse(txn_id).map_err(domain_error)?;
+            journal
+                .persist_dispatch_evidence(
+                    submission,
+                    &json!({"route":"sub_to_master","venueId":venue_id.as_str()}),
+                )
+                .map_err(|_| error("DISPATCH_EVIDENCE_UNAVAILABLE", "submission", "Binance accepted the transfer, but its venue receipt could not be durably linked. Reconcile the original submission."))?;
+            return Ok(response);
+        }
         if let Some(response) = &request.noop {
             journal.assert_authorized()?;
             return Ok(response.clone());
@@ -2780,6 +3080,12 @@ impl ExchangeProfile for BinanceProfile {
                 }
             }
             "binance.transfer" => {
+                if submission.data.get("route").and_then(Value::as_str) == Some("sub_to_master") {
+                    let txn_id = response.get("txnId").ok_or_else(|| error("SUBMISSION_RESPONSE_INVALID", "submission", "Binance subToMaster response lacks txnId; reconcile the original submission."))?;
+                    let venue_id = VenueIdentifier::parse(txn_id).map_err(domain_error)?;
+                    let _ = venue_id;
+                    return Ok(());
+                }
                 let value = response.get("tranId").ok_or_else(|| error("SUBMISSION_RESPONSE_INVALID", "submission", "Binance transfer response lacks a transaction ID; reconcile its clientTranId."))?;
                 // Validate any response transaction ID, but retain the
                 // already-journaled clientTranId as the immutable submission
@@ -2824,6 +3130,12 @@ impl ExchangeProfile for BinanceProfile {
         }
         match record.operation.as_str() {
             "binance.spot-order" => self.reconcile_spot(record, submission).await,
+            "binance.transfer"
+                if submission.data.get("route").and_then(Value::as_str)
+                    == Some("sub_to_master") =>
+            {
+                self.reconcile_sub_to_master(record, submission).await
+            }
             "binance.transfer" => self.reconcile_transfer(record, submission).await,
             "binance.withdraw" => self.reconcile_withdrawal(record, submission).await,
             _ => Ok(Reconciliation {
@@ -3306,6 +3618,15 @@ impl BinanceProfile {
             }
         }
         if matches.is_empty() {
+            if complete
+                && let Some(rejected) = self
+                    .reconcile_signature_rejection(
+                        record, submission, from, to, authority, &requested, complete,
+                    )
+                    .await?
+            {
+                return Ok(rejected);
+            }
             return Ok(unknown(
                 json!({"clientTranId":client_id,"historyComplete":complete,"reason":"No matching transfer history row proves whether submission occurred; do not retry."}),
             ));
@@ -3459,6 +3780,275 @@ impl BinanceProfile {
         let evidence = json!({"transfer":evidence_base,"sourceFreeBefore":source_before.canonical(),"sourceFree":source_now.canonical(),"destinationFreeBefore":dest_before.canonical(),"destinationFree":dest_now.canonical(),"sourceDebitObserved":debit.canonical(),"destinationCreditObserved":credit.canonical(),"balanceCorrelation":"matching clientTranId history plus exact net balance changes; unrelated concurrent activity is not attributable"});
         let verified = make_verified(submission.clone(), effects, evidence.clone())?;
         let _ = record;
+        Ok(Reconciliation {
+            status: Status::Completed,
+            evidence,
+            verified: Some(verified),
+        })
+    }
+
+    async fn reconcile_sub_to_master(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+    ) -> Result<Reconciliation, FinError> {
+        let unknown = |evidence| Reconciliation {
+            status: Status::Unknown,
+            evidence,
+            verified: None,
+        };
+        let data = &submission.data;
+        let binding = data.get("binding").ok_or_else(|| {
+            error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted subToMaster binding is missing.",
+            )
+        })?;
+        let main_name = data
+            .get("authority")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted master identity is missing.",
+                )
+            })?;
+        let signer_name = data.get("signer").and_then(Value::as_str).ok_or_else(|| {
+            error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted child signer is missing.",
+            )
+        })?;
+        let main = self.require_main(main_name)?;
+        let child = self.account(signer_name)?;
+        let from_name = binding
+            .get("from")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let to_name = binding
+            .get("to")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let coin = binding
+            .get("coin")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let qty_text = binding
+            .get("amount")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let requested = amount(qty_text)?;
+        let params: BinanceRequest = serde_json::from_value(
+            binding.get("params").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|_| {
+            error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted subToMaster request is invalid.",
+            )
+        })?;
+        if record.dispatch_evidence.is_none() {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","localSubmissionId":submission.reference,"reason":"The response receipt was not durably linked before a possible response loss; no transfer is inferred from amount or time."}),
+            ));
+        }
+        let dispatch_evidence = record.dispatch_evidence.as_ref().expect("checked above");
+        let persisted_venue_id = dispatch_evidence
+            .get("venueId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                error(
+                    "RECONCILIATION_INVALID",
+                    "reconciliation",
+                    "Persisted subToMaster venue receipt is malformed.",
+                )
+            })?;
+        let venue_id = VenueIdentifier::parse(&Value::String(persisted_venue_id.to_owned()))
+            .map_err(domain_error)?;
+        if dispatch_evidence != &json!({"route":"sub_to_master","venueId":venue_id.as_str()})
+            || data.get("route").and_then(Value::as_str) != Some("sub_to_master")
+            || record.operation != "binance.transfer"
+            || !matches!(child.role, AccountRole::Sub)
+            || from_name != child.name
+            || to_name != main.name
+            || child.parent.as_deref() != Some(main.name.as_str())
+            || binding.get("authority").and_then(Value::as_str) != Some(child.name.as_str())
+            || binding.get("parentAuthority").and_then(Value::as_str) != Some(main.name.as_str())
+            || data.get("signer").and_then(Value::as_str) != Some(child.name.as_str())
+            || data.get("authority").and_then(Value::as_str) != Some(main.name.as_str())
+            || binding.get("route").and_then(Value::as_str) != Some("sub_to_master")
+            || binding.get("localSubmissionId").and_then(Value::as_str)
+                != Some(submission.reference.as_str())
+            || binding.get("from").and_then(Value::as_str)
+                != data.get("from").and_then(Value::as_str)
+            || binding.get("to").and_then(Value::as_str) != data.get("to").and_then(Value::as_str)
+            || binding.get("coin").and_then(Value::as_str)
+                != data.get("coin").and_then(Value::as_str)
+            || binding.get("coin").and_then(Value::as_str) != Some(coin)
+            || binding.get("amount").and_then(Value::as_str)
+                != data.get("amount").and_then(Value::as_str)
+            || binding.get("amount").and_then(Value::as_str) != Some(qty_text)
+            || binding.get("fromWallet").and_then(Value::as_str) != Some("SPOT")
+            || binding.get("toWallet").and_then(Value::as_str) != Some("SPOT")
+            || params.endpoint != BinanceEndpoint::SubToMasterTransfer
+            || params.validate().is_err()
+            || params.params.len() != 3
+            || params.get("asset") != Some(coin)
+            || params
+                .get("amount")
+                .and_then(|v| amount(v).ok())
+                .is_none_or(|v| !v.checked_cmp(&requested).is_eq())
+            || params.get("recvWindow").is_none()
+        {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted subToMaster route, signer, receipt or immutable request does not match.",
+            ));
+        }
+        if from_name != child.name || to_name != main.name || coin.is_empty() {
+            return Err(error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted child-to-master transfer route is invalid.",
+            ));
+        }
+        let started =
+            DateTime::parse_from_rfc3339(data["submittedAt"].as_str().unwrap_or_default())
+                .map_err(|_| {
+                    error(
+                        "RECONCILIATION_INVALID",
+                        "reconciliation",
+                        "Persisted submission time is invalid.",
+                    )
+                })?
+                .with_timezone(&Utc);
+        if Utc::now() - started > Duration::days(7) || started > Utc::now() + Duration::seconds(5) {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":false,"reason":"Child transfer history is outside the supported reconciliation window."}),
+            ));
+        }
+        // Re-establish both ends using the configured hierarchy and physical
+        // UIDs. The master remains the only read authority for child assets.
+        if self.verify_subaccount(child, main).await.is_err()
+            || self.account_identity(child).await.is_err()
+            || self.account_identity(main).await.is_err()
+        {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"reason":"Configured child/master identity could not be revalidated."}),
+            ));
+        }
+        let end_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let history_request = subaccount_transfer_history_request(
+            coin,
+            2,
+            started.timestamp_millis().max(0) as u64,
+            end_ms,
+            200,
+        )
+        .map_err(domain_error)?;
+        let history_response = match self.call(child, history_request, "reconciliation").await {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(unknown(
+                    json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":false,"reason":"Child transfer history is unavailable; reconcile the same submission."}),
+                ));
+            }
+        };
+        let history: SubAccountTransferHistoryResponse = match parse_response(history_response) {
+            Ok(rows) => rows,
+            Err(_) => {
+                return Ok(unknown(
+                    json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":false,"reason":"Child transfer history response is invalid."}),
+                ));
+            }
+        };
+        // This endpoint has no pagination. A capped result cannot establish a
+        // unique venue receipt, even when one matching txnId is present.
+        if history.len() >= 200 {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":false,"reason":"Child transfer history reached its response cap."}),
+            ));
+        }
+        let matches = history
+            .iter()
+            .filter(|row| row.tran_id == venue_id)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":true,"reason":"No unique child history row matches the persisted venue receipt."}),
+            ));
+        }
+        let row = matches[0];
+        if row.counter_party != "master"
+            || row.transfer_type != 2
+            || row.asset != coin
+            || !row.quantity.checked_cmp(&requested).is_eq()
+            || row.from_account_type != "SPOT"
+            || row.to_account_type != "SPOT"
+            || row.status != "SUCCESS"
+            || main
+                .email
+                .as_deref()
+                .is_some_and(|email| row.email != email)
+            || row.timestamp < started.timestamp_millis().max(0) as u64
+            || row.timestamp > end_ms
+        {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":true,"reason":"Child history row does not match the exact master, asset, quantity, SPOT wallets, SUCCESS status, or time window."}),
+            ));
+        }
+        let source_before =
+            observed_decimal(data["sourceFreeBefore"].as_str().unwrap_or_default())?;
+        let destination_before =
+            observed_decimal(data["destinationFreeBefore"].as_str().unwrap_or_default())?;
+        let source_now = Self::free(&self.spot_balances(child, Some(main)).await?, coin)
+            .cloned()
+            .unwrap_or_else(ExactDecimal::zero);
+        let destination_now = Self::free(&self.spot_balances(main, None).await?, coin)
+            .cloned()
+            .unwrap_or_else(ExactDecimal::zero);
+        let source_debit = decimal_delta(&source_before, &source_now);
+        let destination_credit = decimal_delta(&destination_now, &destination_before);
+        if source_debit
+            .as_ref()
+            .is_none_or(|value| !value.checked_cmp(&requested).is_eq())
+            || destination_credit
+                .as_ref()
+                .is_none_or(|value| !value.checked_cmp(&requested).is_eq())
+        {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"sourceFreeBefore":source_before.canonical(),"sourceFree":source_now.canonical(),"destinationFreeBefore":destination_before.canonical(),"destinationFree":destination_now.canonical(),"reason":"Exact source debit and destination credit do not match the transfer; preserve the unresolved record."}),
+            ));
+        }
+        let asset: AssetId = serde_json::from_value(binding["asset"].clone()).map_err(|_| {
+            error(
+                "RECONCILIATION_INVALID",
+                "reconciliation",
+                "Persisted transfer asset identity is invalid.",
+            )
+        })?;
+        if asset.network != "binance" || asset.reference != coin || asset.decimals != 36 {
+            return Ok(unknown(
+                json!({"route":"sub_to_master","venueId":venue_id.as_str(),"reason":"Persisted asset identity does not match the exact Binance transfer asset."}),
+            ));
+        }
+        let atoms = decimal_to_atoms(&requested, asset.decimals)?;
+        let effects = vec![FinancialEffect::Transfer {
+            from: child.resource.clone(),
+            to: main.resource.clone(),
+            debit: Amount {
+                asset: asset.clone(),
+                atoms: atoms.clone(),
+            },
+            credit: Amount { asset, atoms },
+        }];
+        let evidence = json!({"route":"sub_to_master","localSubmissionId":submission.reference,"venueId":venue_id.as_str(),"historyComplete":true,"childHistoryVerified":true,"counterParty":"master","transferType":2,"status":"SUCCESS","sourceFreeBefore":source_before.canonical(),"sourceFree":source_now.canonical(),"destinationFreeBefore":destination_before.canonical(),"destinationFree":destination_now.canonical(),"balanceCorrelation":"exact persisted venue receipt, child type-2 master history and exact net SPOT balance deltas"});
+        let verified = make_verified(submission.clone(), effects, evidence.clone())?;
         Ok(Reconciliation {
             status: Status::Completed,
             evidence,

@@ -1859,13 +1859,16 @@ name = "fin-cli"
 version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
  "clap_complete",
  "fin-broker",
  "fin-discovery",
  "fin-domain",
+ "fin-engine",
  "fin-presentation",
  "fin-protocol",
+ "fin-store",
  "libc",
  "serde",
  "serde_json",
@@ -2045,6 +2048,7 @@ dependencies = [
 name = "fin-store"
 version = "0.2.0-beta.1"
 dependencies = [
+ "chrono",
  "hex",
  "rusqlite",
  "serde",

@@ -30,6 +30,67 @@ fn charge(prepared: &PreparedOperation) -> Result<BigUint> {
         + value.additional_allocation_usd_micros.integer())
 }
 
+fn record_charge(record: &OperationRecord) -> Result<BigUint> {
+    let Some(prepared) = record.preview.as_ref() else {
+        return Err(budget_error(
+            "VALUATION_UNAVAILABLE",
+            "A historical submission has no recorded valuation.",
+        ));
+    };
+    let bounded = prepared
+        .binding
+        .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+        .is_some();
+    if !bounded || !record.status.terminal() {
+        return charge(prepared);
+    }
+    let Some(verified) = &record.effects else {
+        return Ok(BigUint::zero());
+    };
+    let valuation = prepared.valuation.as_ref().ok_or_else(|| {
+        budget_error(
+            "VALUATION_UNAVAILABLE",
+            "A bounded attempt has no recorded pricing evidence.",
+        )
+    })?;
+    let mut total = BigUint::zero();
+    for effect in &verified.effects {
+        match effect {
+            fin_domain::FinancialEffect::CashDebit { amount, .. }
+            | fin_domain::FinancialEffect::Cost { amount, .. } => {
+                total += amount_usd(amount, &valuation.prices)?;
+            }
+            fin_domain::FinancialEffect::Transfer { debit, .. } => {
+                total += amount_usd(debit, &valuation.prices)?;
+            }
+            fin_domain::FinancialEffect::Conversion { spent, .. } => {
+                total += amount_usd(spent, &valuation.prices)?;
+            }
+            fin_domain::FinancialEffect::OriginMovement { debit, .. } => {
+                total += amount_usd(debit, &valuation.prices)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(total)
+}
+
+fn amount_usd(amount: &fin_domain::Amount, prices: &[fin_domain::AssetPrice]) -> Result<BigUint> {
+    let price = prices
+        .iter()
+        .find(|price| price.asset == amount.asset)
+        .ok_or_else(|| {
+            budget_error(
+                "VALUATION_UNAVAILABLE",
+                "Verified consumption has no matching recorded USD price.",
+            )
+        })?;
+    Ok(amount
+        .atoms
+        .mul_div_ceil(&price.usd_micros_per_unit, &price.unit_atoms)?
+        .integer())
+}
+
 fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
     let mut result: BTreeSet<_> = intent.locks.iter().cloned().collect();
     result.extend(intent.debits.iter().map(|v| v.resource.clone()));
@@ -50,12 +111,42 @@ fn counted(record: &OperationRecord, instant: DateTime<Utc>) -> Result<bool> {
         && parse_time(&record.updated_at)? > instant - chrono::Duration::hours(24))
 }
 
+fn unpriced(prepared: &PreparedOperation) -> bool {
+    prepared
+        .valuation
+        .as_ref()
+        .is_some_and(|value| value.prices.iter().any(fin_domain::unpriced::is_estimate))
+}
+
+pub(super) fn reject_unpriced_run(prepared: &PreparedOperation) -> Result<()> {
+    if unpriced(prepared) {
+        return Err(budget_error(
+            "UNPRICED_ASSET",
+            "Unpriced exchange estimates cannot satisfy a scoped acceptance run's verified USD budget.",
+        ));
+    }
+    Ok(())
+}
+
 impl Engine {
+    pub fn allocation_unpriced_operations(&self) -> Result<u64> {
+        let instant = Utc::now();
+        let mut count = 0;
+        for record in self.operations()? {
+            if counted(&record, instant)? {
+                let preview = record.preview.as_ref().ok_or_else(|| budget_error("VALUATION_UNAVAILABLE", "A historical submission has no recorded valuation; preserve and reconcile it."))?;
+                if unpriced(preview) {
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
     pub fn allocation_used_usd_micros(&self) -> Result<String> {
         let mut total = BigUint::zero();
         for record in self.operations()? {
             if counted(&record, Utc::now())? {
-                total += charge(record.preview.as_ref().ok_or_else(|| budget_error("VALUATION_UNAVAILABLE", "A historical submission has no recorded valuation; preserve and reconcile it."))?)?;
+                total += record_charge(&record)?;
             }
         }
         Ok(total.to_string())
@@ -71,12 +162,33 @@ impl Engine {
             fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?;
         let allocation_limit =
             fin_domain::policy::limit(&self.options.max_run_allocation_usd_micros)?;
+        if unpriced(prepared) && !self.options.allow_unpriced_exchange_assets {
+            return Err(FinError::new(
+                "UNPRICED_EXCHANGE_ASSET_DISABLED",
+                "budget",
+                "This operation includes an unpriced exchange asset. The protected policy exception is disabled.",
+                "The human may explicitly enable --allow-unpriced-exchange-assets true through fin policy set in their own Terminal after reviewing the USD coverage warning. Then obtain a fresh preview and per-write Touch ID approval.",
+            ));
+        }
+        if let Some(valuation) = &prepared.valuation {
+            let assets = valuation
+                .prices
+                .iter()
+                .map(|price| price.asset.clone())
+                .collect();
+            validate_price_rows(&valuation.prices, &assets, instant)?;
+        }
         // Zero removes personal ceilings, not the exact valuation/accounting contract.
         validate_cost_bound_contract(&prepared.intent)?;
         validate_cost_prices(prepared, &prepared_cost_assets(&prepared.intent), instant)?;
         let own_charge = charge(prepared)?;
         let valuation = prepared.valuation.as_ref().unwrap();
-        validate_observation(&valuation.observed_at, instant, "VALUATION_UNAVAILABLE")?;
+        validate_price_observation(
+            &valuation.observed_at,
+            &valuation.source,
+            instant,
+            "VALUATION_UNAVAILABLE",
+        )?;
         if valuation.source.trim().is_empty() {
             return Err(budget_error(
                 "VALUATION_UNAVAILABLE",
@@ -119,12 +231,7 @@ impl Engine {
                 }
             }
             if counted(&other, instant)? {
-                total += charge(other.preview.as_ref().ok_or_else(|| {
-                    budget_error(
-                        "VALUATION_UNAVAILABLE",
-                        "A historical submission has no recorded valuation.",
-                    )
-                })?)?;
+                total += record_charge(&other)?;
             }
         }
         if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
@@ -175,4 +282,78 @@ impl Engine {
             )
             .map_err(map_store)
     }
+}
+
+pub(super) fn validate_boundary_candidate_policy(
+    prepared: &PreparedOperation,
+    operation_id: &str,
+    options: &EngineOptions,
+    store: &Store,
+) -> Result<()> {
+    let instant = Utc::now();
+    if unpriced(prepared) && !options.allow_unpriced_exchange_assets {
+        return Err(budget_error(
+            "UNPRICED_EXCHANGE_ASSET_DISABLED",
+            "This operation includes an unpriced exchange asset and the protected exception is disabled.",
+        ));
+    }
+    let valuation = prepared.valuation.as_ref().ok_or_else(|| {
+        budget_error(
+            "VALUATION_UNAVAILABLE",
+            "Fresh USD valuation is required for every boundary attempt.",
+        )
+    })?;
+    validate_price_observation(
+        &valuation.observed_at,
+        &valuation.source,
+        instant,
+        "VALUATION_UNAVAILABLE",
+    )?;
+    validate_cost_bound_contract(&prepared.intent)?;
+    validate_cost_prices(prepared, &prepared_cost_assets(&prepared.intent), instant)?;
+    let movement_and_fee =
+        valuation.movement_usd_micros.integer() + valuation.maximum_fee_usd_micros.integer();
+    if fin_domain::policy::limit(&options.max_movement_and_cost_usd_micros)?
+        .is_some_and(|limit| movement_and_fee > BigUint::from(limit))
+    {
+        return Err(budget_error(
+            "MOVEMENT_LIMIT",
+            "Fresh movement and cost valuation exceeds the current protected per-write limit.",
+        ));
+    }
+    let allocation_limit = fin_domain::policy::limit(&options.max_run_allocation_usd_micros)?;
+    if allocation_limit.is_some() {
+        let requested_resources = resources(&prepared.intent);
+        let mut total = charge(prepared)?;
+        for value in store.list_records().map_err(map_store)? {
+            let other: OperationRecord = from_value(value)?;
+            if other.id == operation_id {
+                continue;
+            }
+            if !other.status.terminal() {
+                let Some(previous) = other.preview.as_ref() else {
+                    return Err(budget_error(
+                        "RESOURCE_RESERVED",
+                        "An unresolved operation has no inspectable resource reservation.",
+                    ));
+                };
+                if !requested_resources.is_disjoint(&resources(&previous.intent)) {
+                    return Err(budget_error(
+                        "RESOURCE_RESERVED",
+                        "An unresolved operation reserves a resource required by this write.",
+                    ));
+                }
+            }
+            if counted(&other, instant)? {
+                total += record_charge(&other)?;
+            }
+        }
+        if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
+            return Err(budget_error(
+                "ALLOCATION_LIMIT",
+                "Fresh valuation exceeds the current rolling 24-hour allocation.",
+            ));
+        }
+    }
+    Ok(())
 }

@@ -28,7 +28,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
         {
             return Err(error(
                 "INVALID_CHALLENGE",
-                "Only financial limits may change.",
+                "Only financial limits and the unpriced exchange exception may change.",
             ));
         }
         use fin_domain::policy::{ALLOCATION_INCLUDES, MOVEMENT_INCLUDES, format_limit};
@@ -44,7 +44,23 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             format_limit(&next.max_run_allocation_usd_micros)?
         ));
         lines.push(ALLOCATION_INCLUDES.into());
-        lines.push("Touch ID saves these limits for new operations. Every financial write still needs fresh Touch ID.".into());
+        lines.push(format!(
+            "Unpriced exchange writes: {} → {}",
+            if previous.allow_unpriced_exchange_assets {
+                "Allowed"
+            } else {
+                "Blocked"
+            },
+            if next.allow_unpriced_exchange_assets {
+                "Allowed"
+            } else {
+                "Blocked"
+            }
+        ));
+        if next.allow_unpriced_exchange_assets {
+            lines.push(fin_domain::unpriced::WARNING.into());
+        }
+        lines.push("Touch ID saves this policy for new operations. Every financial write still needs fresh Touch ID.".into());
     } else if action == "initialize" {
         let config: BrokerConfigV2 = serde_json::from_value(binding["configuration"].clone())
             .map_err(|_| {
@@ -335,6 +351,10 @@ mod tests {
         }
         binding["policy"]["max_movement_usd_micros"] = json!("0");
         assert!(review(&binding).unwrap().contains("$100 USD → No limit"));
+        binding["policy"]["allow_unpriced_exchange_assets"] = json!(true);
+        let exception = review(&binding).unwrap();
+        assert!(exception.contains("Unpriced exchange writes: Blocked → Allowed"));
+        assert!(exception.contains(fin_domain::unpriced::WARNING));
         binding["policy"]["require_run_for_writes"] = json!(true);
         assert!(review(&binding).is_err());
     }

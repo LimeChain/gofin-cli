@@ -1,13 +1,13 @@
 //! Explicit public market-data probe; no wallet/account credentials or writes.
 use fin_domain::AssetId;
-use fin_pricing::{CoinGeckoPrices, UsdPriceSource};
+use fin_pricing::{CoinGeckoPrices, ExchangeSpotPrices, UsdPriceSource};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().skip(1).collect::<Vec<_>>() != ["--public-read-only"] {
         return Err("Pass --public-read-only to make anonymous public CoinGecko requests.".into());
     }
-    let provider = CoinGeckoPrices::new()?;
+    let provider = ExchangeSpotPrices::new(CoinGeckoPrices::new()?)?;
     let mut failures = 0;
     for (network, reference, decimals) in [
         ("ethereum:1", "native", 18),

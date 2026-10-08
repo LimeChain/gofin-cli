@@ -54,6 +54,9 @@ where
     let mut candidate = config.clone();
     candidate.policy.max_movement_usd_micros = movement;
     candidate.policy.max_run_allocation_usd_micros = allocation;
+    if let Some(enabled) = args.allow_unpriced_exchange_assets {
+        candidate.policy.allow_unpriced_exchange_assets = enabled;
+    }
     candidate.validate()?;
     let binding = json!({"action":"policy_set", "previous_policy":config.policy, "policy":candidate.policy,
         "configuration_hash":binding_hash(&serde_json::to_value(&candidate).map_err(|_| FinError::validation("Configuration encoding failed."))?)?,
@@ -82,6 +85,7 @@ where
         &candidate.policy.max_movement_usd_micros,
         &candidate.policy.max_run_allocation_usd_micros,
     )?;
+    view.set_unpriced_policy(candidate.policy.allow_unpriced_exchange_assets);
     view.next_action = "Run fin policy show --json to verify. If the broker reports a configuration change, allow launchd to restart it and repeat policy show.".into();
     Ok(serde_json::to_value(view).expect("serializable policy view"))
 }
@@ -117,6 +121,7 @@ mod tests {
         PolicySetArgs {
             max_movement_usd: "1000.000001".into(),
             max_run_allocation_usd: "5000".into(),
+            allow_unpriced_exchange_assets: None,
         }
     }
     #[tokio::test]
@@ -185,6 +190,7 @@ mod tests {
         let input = PolicySetArgs {
             max_movement_usd: "0".into(),
             max_run_allocation_usd: "0.000000".into(),
+            allow_unpriced_exchange_assets: None,
         };
         let approved = Cell::new(false);
         let result = update(
@@ -430,5 +436,68 @@ mod tests {
             assert!(serde_json::from_value::<PolicySetArgs>(request.clone()).is_err());
             request.as_object_mut().unwrap().remove(key);
         }
+    }
+    #[tokio::test]
+    async fn unpriced_exception_defaults_closed_preserves_omission_and_binds_approval() {
+        let mut previous = config();
+        assert!(!previous.policy.allow_unpriced_exchange_assets);
+        let mut old = serde_json::to_value(&previous).unwrap();
+        old["policy"]
+            .as_object_mut()
+            .unwrap()
+            .remove("allow_unpriced_exchange_assets");
+        assert!(
+            !serde_json::from_value::<BrokerConfigV2>(old)
+                .unwrap()
+                .policy
+                .allow_unpriced_exchange_assets
+        );
+        for requested in [Some(true), None, Some(false)] {
+            let expected = requested.unwrap_or(previous.policy.allow_unpriced_exchange_assets);
+            let mut input = args();
+            input.allow_unpriced_exchange_assets = requested;
+            let result = update(
+                &previous,
+                &Store::in_memory().unwrap(),
+                &input,
+                |binding| {
+                    assert_eq!(
+                        binding["policy"]["allow_unpriced_exchange_assets"],
+                        expected
+                    );
+                    assert_eq!(
+                        binding["previous_policy"]["allow_unpriced_exchange_assets"],
+                        previous.policy.allow_unpriced_exchange_assets
+                    );
+                    std::future::ready(Ok(synthetic_approval(binding)))
+                },
+                |saved| {
+                    assert_eq!(saved.policy.allow_unpriced_exchange_assets, expected);
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["allow_unpriced_exchange_assets"], expected);
+            assert_eq!(result["unpriced_assets_warning"].is_string(), expected);
+            previous.policy.allow_unpriced_exchange_assets = expected;
+        }
+        let mut input = args();
+        input.allow_unpriced_exchange_assets = Some(true);
+        let refusal = update(
+            &previous,
+            &Store::in_memory().unwrap(),
+            &input,
+            |binding| {
+                let mut approved = synthetic_approval(binding);
+                approved.binding["policy"]["allow_unpriced_exchange_assets"] = json!(false);
+                approved.binding_hash = binding_hash(&approved.binding).unwrap();
+                std::future::ready(Ok(approved))
+            },
+            |_| panic!("exception requires exact protected approval"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refusal.code, "INVALID_CHALLENGE");
     }
 }

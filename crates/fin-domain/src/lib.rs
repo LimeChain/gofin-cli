@@ -1,6 +1,10 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
+pub mod boundaries;
 pub mod money;
 pub mod policy;
+pub mod price_freshness;
+pub mod unpriced;
+pub mod value_bounds;
 
 use async_trait::async_trait;
 pub use money::{Quantity, SignedQuantity};
@@ -20,6 +24,8 @@ pub struct FinError {
     pub stage: String,
     pub message: String,
     pub next_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<Value>>,
 }
 impl FinError {
     pub fn new(code: &str, stage: &str, message: impl Into<String>, next_action: &str) -> Self {
@@ -28,7 +34,12 @@ impl FinError {
             stage: stage.into(),
             message: message.into(),
             next_action: next_action.into(),
+            details: None,
         }
+    }
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(Box::new(details));
+        self
     }
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new(
@@ -591,6 +602,10 @@ pub struct OperationRecord {
     pub preview: Option<PreparedOperation>,
     pub approval: Option<ApprovalAudit>,
     pub submission: Option<Submission>,
+    /// Immutable venue evidence correlated to a dispatch after submission.
+    /// Older journal records predate this field and deserialize as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_evidence: Option<Value>,
     pub effects: Option<VerifiedEffects>,
     pub last_reconciliation_evidence: Option<Value>,
     pub error: Option<FinError>,
@@ -634,7 +649,24 @@ pub trait Authorizer: Send + Sync {
 /// Broker-owned hook; implementations atomically journal before returning.
 pub trait SubmissionJournal: Send + Sync {
     fn assert_authorized(&self) -> Result<()>;
+    /// Called after a fresh adapter revalidation immediately before dispatch.
+    /// Existing exact-operation implementations retain their old check.
+    fn assert_candidate(&self, _prepared: &PreparedOperation) -> Result<()> {
+        self.assert_authorized()
+    }
     fn persist_submission(&self, submission: &Submission) -> Result<()>;
+    /// Persist receipt evidence for the already durable submission identity.
+    /// Implementations must fail closed unless that exact submission exists.
+    /// This records evidence after dispatch and therefore must not recheck
+    /// approval freshness or authorize another write.
+    fn persist_dispatch_evidence(&self, _submission: &Submission, _evidence: &Value) -> Result<()> {
+        Err(FinError::new(
+            "DISPATCH_EVIDENCE_UNSUPPORTED",
+            "reconciliation",
+            "This execution journal cannot persist dispatch evidence.",
+            "Keep the operation unresolved and reconcile its original submission.",
+        ))
+    }
 }
 
 #[async_trait]
@@ -653,6 +685,34 @@ pub trait Adapter: Send + Sync {
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value>;
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation>;
+    /// Derive the enforceable, operation-specific scope for a bounded
+    /// authorization. Adapters opt in explicitly; the default fails closed.
+    fn prepare_boundaries(
+        &self,
+        _prepared: &PreparedOperation,
+        _bounds: &Value,
+    ) -> Result<boundaries::BoundarySpec> {
+        Err(FinError::new(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "This integration does not support boundary-based authorization.",
+            "Use the ordinary exact-operation approval flow.",
+        ))
+    }
+    /// Independently validate a concrete candidate against the approved
+    /// adapter-derived scope. Implementations must reject undeclared changes.
+    fn validate_boundary_candidate(
+        &self,
+        _spec: &boundaries::BoundarySpec,
+        _prepared: &PreparedOperation,
+    ) -> Result<()> {
+        Err(FinError::new(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "This integration does not support boundary-based authorization.",
+            "Use the ordinary exact-operation approval flow.",
+        ))
+    }
     async fn prepare_with_context(
         &self,
         operation: &str,
@@ -823,17 +883,24 @@ pub fn request_fingerprint(request: &OperationRequest) -> Result<String> {
 
 /// Native review binds execution, exact units, and finite financial outcomes together.
 pub fn authorization_binding(prepared: &PreparedOperation) -> Value {
+    if let Some(binding) = prepared
+        .binding
+        .get(boundaries::BOUNDARY_METADATA_KEY)
+        .and_then(|metadata| metadata.get("grant_binding"))
+    {
+        return binding.clone();
+    }
     serde_json::json!({
         "version":1,
         "operation":prepared.operation,
         "operation_version":prepared.operation_version,
         "execution":prepared.binding,
         "financial_intent":prepared.intent,
-        "value_bounds":prepared.valuation.as_ref().map(|v|serde_json::json!({
+        "value_bounds":prepared.binding.get(value_bounds::KEY).cloned().or_else(|| prepared.valuation.as_ref().map(|v|serde_json::json!({
             "movement_usd_micros":v.movement_usd_micros,
             "maximum_fee_usd_micros":v.maximum_fee_usd_micros,
             "additional_allocation_usd_micros":v.additional_allocation_usd_micros,
             "prices":v.prices.iter().map(|p|serde_json::json!({"asset":p.asset,"usd_micros_per_unit":p.usd_micros_per_unit,"unit_atoms":p.unit_atoms,"source":p.source})).collect::<Vec<_>>()
-        }))
+        })))
     })
 }
