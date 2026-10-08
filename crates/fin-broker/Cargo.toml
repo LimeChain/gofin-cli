@@ -34,8 +34,14 @@ tokio.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+[[example]]
+name = "fin-dev-broker"
+path = "examples/fin-dev-broker.rs"
+
 [dev-dependencies]
 fin-exchange = { workspace = true, features = ["test-support"] }
+ed25519-dalek.workspace = true
+rsa = { version = "0.9", features = ["pem", "sha2"] }
 tempfile.workspace = true
 
 [lints]

@@ -25,9 +25,12 @@ impl Server {
         let (tx, captured) = std::sync::mpsc::channel();
         listener.set_nonblocking(true).unwrap();
         let worker = std::thread::spawn(move || {
-            let end = std::time::Instant::now() + Duration::from_secs(3);
+            let mut end = std::time::Instant::now() + Duration::from_secs(3);
             while std::time::Instant::now() < end {
                 if let Ok((mut stream, _)) = listener.accept() {
+                    // Expire after inactivity, not during a still-active route
+                    // sweep on a slower CI runner. Keep observing late retries.
+                    end = std::time::Instant::now() + Duration::from_secs(3);
                     seen.fetch_add(1, Ordering::SeqCst);
                     stream.set_nonblocking(false).unwrap();
                     stream
