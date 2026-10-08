@@ -1,6 +1,8 @@
 ---
 name: fin
-description: Discover and invoke the local Fin financial CLI with individual human approvals and durable recovery.
+description: Discover and use the local Fin financial CLI to inspect holdings, preview and execute individually approved operations, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
+metadata:
+  version: "1.0.0"
 ---
 
 Start with `fin --help` and `fin capabilities --json`, even before setup exists. Inspect `fin explain setup --json`, `fin schema connections.add --json`, and `fin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and evidence limits; mocked/fork/live verification are separate.
@@ -62,3 +64,13 @@ Ordinary operations support permanent portfolio changes: sell available existing
 Only when the human explicitly authorizes a live acceptance test, follow the repository live-test contract independently of personal policy: every movement including its maximum costs must be at most $100; total test allocation including gas, fees, interest, borrowed proceeds and complete cleanup must also be at most $100. Snapshot initial account allocation, holdings/exposure, positions/debt and allowances. Calculate and record fresh exact USD bounds and fund a complete return path before the first write and recheck before every subsequent write. Do not count reused turnover as new allocation or net debt against borrowed assets. Restore that baseline net unavoidable explained costs, with fresh Touch ID for every cleanup write. Preserve cumulative test accounting across interruptions. Report unresolved submissions or incomplete restoration as incomplete/failed, never passed. Fin has no runtime verification classification or restoration completion command; retain this evidence in the test report. These instructions authorize no live execution by themselves.
 
 Keep credentials, signed transactions, account mappings, and unredacted live reports private. Missing access or unavailable authorization blocks the affected write; ask the human for the specific prerequisite. Do not substitute a different credential, destination, asset, or larger budget.
+
+
+The optional Codex companion skill is embedded in Fin. Discover its commands with
+`fin capabilities --json`, then use `fin skill install`, `fin skill inspect`,
+`fin skill update` or `fin skill remove` with `--agent codex` as appropriate.
+Installation needs no checkout, credentials,
+administrator access or financial approval; setup offers it as an opt-in after
+success. Compatible Fin runtime updates refresh only recorded, existing,
+unmodified copies. Modified or unmanaged content stays for review, and conflicts
+never grant financial authority. See the [companion skill guide](../../docs/companion-skill.md).

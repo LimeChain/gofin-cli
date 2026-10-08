@@ -6,7 +6,8 @@
 # this script and both bundles, then run in your own fresh macOS Terminal:
 #   sudo -k /bin/bash /absolute/path/to/this-script --from OLD_BUNDLE --to NEW_BUNDLE
 #   sudo -K
-# No Fin command, service restart, private-state access, or financial call occurs.
+# Only the user-owned companion-skill refresh runs after runtime commit.
+# No service restart, private-state access, or financial call occurs.
 # Existing daemon processes keep their loaded image; enrollment starts the new
 # broker directly. Process checks are advisory, not a synchronization guarantee.
 # Per-file renames are atomic, not the entire bundle; ordinary partial failures
@@ -283,4 +284,10 @@ if [ "${NO_COLOR+x}" != x ] && [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
   printf '\033[32m✓ Fin updated.\033[0m\n'
 else
   printf '✓ Fin updated.\n'
+fi
+# This optional user-file maintenance cannot roll back a verified runtime update.
+# Never execute user content as root or inherit the updater's environment.
+if ! /usr/bin/sudo -n -H -u "#$SUDO_UID" /usr/bin/env -i \
+  "$fin_runtime/fin" internal-skills-refresh; then
+  echo 'Fin updated, but optional skill refresh needs attention. Run fin skill inspect --agent codex.' >&2
 fi

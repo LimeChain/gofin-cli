@@ -111,10 +111,10 @@ class InstallerFixture(unittest.TestCase):
             executable.chmod(0o755)
         source = INSTALLER.read_text()
         terminal_guard = '[ -t 0 ] && [ -t 1 ] && [ -t 2 ]'
-        self.assertEqual(source.count(terminal_guard), 1)
+        self.assertEqual(source.count(terminal_guard), 2)
         # The synthetic harness substitutes privilege/TTY/OS checks; the shipped
         # installer has no testing flag or environment-controlled bypass.
-        source = source.replace(terminal_guard, "true")
+        source = source.replace(terminal_guard + " || {", "true || {")
         source = re.sub(r'(?<![\w/])/(?:Library|private|usr/local)(?=[/\s";:]|$)',
                         lambda match: str(self.root) + match.group(0), source)
         source = re.sub(r'(?<![\w/])/(?:usr/)?s?bin/([a-z]+)',
@@ -152,6 +152,7 @@ class InstallerFixture(unittest.TestCase):
         self.assertFalse(self.installed.exists())
         self.assertNotIn("mktemp", [event[0] for event in self.events()])
         self.assertNotIn("Fin installed", result.stdout)
+        self.assertNotIn("Optional:", result.stdout)
 
     def test_registers_path_after_configuration_and_bootstrap(self):
         result = self.run_installer()
@@ -193,6 +194,7 @@ class InstallerFixture(unittest.TestCase):
         marker_owner = ["chown", ["root:wheel", str(marker)]]
         self.assertIn(marker_owner, events)
         self.assertLess(events.index(marker_owner), events.index(["sudo", sudo_args]))
+        self.assertNotIn("[y/N]", result.stderr)
         self.assertIn("✓ Preparing protected runtime files", result.stderr)
         self.assertIn("✓ Verifying signed binaries and system libraries", result.stderr)
         self.assertNotIn("\033[", result.stderr)
@@ -244,6 +246,7 @@ class InstallerFixture(unittest.TestCase):
             # buffer. Keep our slave open until the final output is collected.
             os.set_blocking(master, False)
             chunks = []
+            answered = False
             deadline = time.monotonic() + 30
             with selectors.DefaultSelector() as ready:
                 ready.register(master, selectors.EVENT_READ)
@@ -257,6 +260,9 @@ class InstallerFixture(unittest.TestCase):
                         if not data:
                             break
                         chunks.append(data)
+                        if not answered and b"[y/N]" in b"".join(chunks):
+                            os.write(master, b"\n")
+                            answered = True
                     if process.poll() is not None:
                         break
                     if time.monotonic() >= deadline:
@@ -266,7 +272,11 @@ class InstallerFixture(unittest.TestCase):
             output = b"".join(chunks).decode()
             self.assertEqual(process.returncode, 0, output)
             self.assertIn("enrollment inherited three terminal descriptors", output)
-            self.assertIn("Fin installed", output)
+            self.assertIn("Fin installed and running.", output)
+            self.assertTrue(answered)
+            self.assertEqual(output.count("Install Fin's optional Codex skill? [y/N]"), 1)
+            self.assertLess(output.index("Fin installed and running."), output.index("[y/N]"))
+            self.assertFalse(any("skill" in args for name, args in self.events() if name == "sudo"))
             self.assertIn("Registering Fin for new Terminal sessions", output)
             self.assertNotIn("… ", output)
             self.assertEqual(output.count("Installing protected runtime"), 1)
@@ -364,6 +374,108 @@ class InstallerFixture(unittest.TestCase):
         self.assertTrue(self.path_file.is_symlink())
         self.assertNotIn("Fin installed", result.stdout)
         self.assertIn("Protected installation was preserved", result.stderr)
+
+
+class SkillOfferFixture(unittest.TestCase):
+    """Exercise the real optional prompt in disposable PTYs, never real sudo."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="fin-skill-offer-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.events = self.root / "events.txt"
+        mock = self.root / "sudo"
+        mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$EVENTS"\nexit "${SKILL_RESULT:-0}"\n')
+        mock.chmod(0o700)
+        source = INSTALLER.read_text().split("offer_companion_skill() {", 1)[1].split("\nfin_active_pid=''", 1)[0]
+        self.script = self.root / "offer.sh"
+        self.script.write_text("set -eu\nfin_uid=501\ntrap 'exit 130' INT\noffer_companion_skill() {" +
+                               source.replace('/usr/bin/sudo', str(mock)) +
+                               "\necho 'SYNTHETIC setup complete'\noffer_companion_skill\n")
+
+    def offer(self, answer, no_color=False, result=0, redirected=False):
+        import signal
+        env = {"PATH":"/usr/bin:/bin", "HOME":str(self.root), "TERM":"xterm-256color",
+               "EVENTS":str(self.events), "SKILL_RESULT":str(result)}
+        if no_color:
+            env["NO_COLOR"] = "1"
+        if redirected:
+            run = subprocess.run(['/bin/bash', str(self.script)], input='yes\n', capture_output=True, text=True, env=env, timeout=5)
+            return run.returncode, run.stdout + run.stderr
+        master, slave = os.openpty()
+        process = subprocess.Popen(['/bin/bash', str(self.script)], stdin=slave, stdout=slave, stderr=slave, env=env)
+        try:
+            os.set_blocking(master, False)
+            chunks = []
+            replied = False
+            deadline = time.monotonic() + 5
+            with selectors.DefaultSelector() as ready:
+                ready.register(master, selectors.EVENT_READ)
+                while True:
+                    ready.select(timeout=0.05)
+                    while True:
+                        try:
+                            data = os.read(master, 4096)
+                        except BlockingIOError:
+                            break
+                        if not data:
+                            break
+                        chunks.append(data)
+                    if not replied and b"[y/N]" in b"".join(chunks):
+                        if answer == 'cancel':
+                            process.send_signal(signal.SIGINT)
+                        else:
+                            os.write(master, answer)
+                        replied = True
+                    if process.poll() is not None:
+                        break
+                    if time.monotonic() > deadline:
+                        self.fail("Optional prompt timed out")
+            self.assertTrue(replied)
+            output = b"".join(chunks).decode()
+            self.assertEqual(output.count("[y/N]"), 1)
+            self.assertNotIn("\x1b[", output)
+            return process.returncode, output
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            os.close(slave)
+            os.close(master)
+
+    def test_yes_installs_as_human_without_backup_or_additional_approval(self):
+        for answer in (b'y\n', b'Y\n', b'yes\n', b'YES\n'):
+            with self.subTest(answer=answer):
+                status, output = self.offer(answer, no_color=True)
+                self.assertEqual(status, 0, output)
+                self.assertEqual(self.events.read_text().splitlines(), [
+                    '-n', '-H', '-u', '#501', '/usr/bin/env', 'TERM=xterm-256color', 'NO_COLOR=1',
+                    '/Library/Fin/runtime/fin', 'skill', 'install', '--agent', 'codex'])
+
+    def test_default_no_invalid_and_eof_do_not_install(self):
+        for answer in (b'\n', b'n\n', b'N\n', b'no\n', b'anything\n', b'\x04'):
+            with self.subTest(answer=answer):
+                status, output = self.offer(answer)
+                self.assertEqual(status, 0, output)
+                self.assertFalse(self.events.exists())
+
+    def test_optional_failure_leaves_successful_setup_intact(self):
+        status, output = self.offer(b'y\n', result=1)
+        self.assertEqual(status, 0, output)
+        self.assertIn('SYNTHETIC setup complete', output)
+        self.assertIn('Fin is installed; optional skill installation did not finish.', output)
+        self.assertIn('fin skill inspect --agent codex', output)
+
+    def test_cancellation_never_installs(self):
+        status, output = self.offer('cancel')
+        self.assertEqual(status, 130, output)
+        self.assertIn('SYNTHETIC setup complete', output)
+        self.assertFalse(self.events.exists())
+
+    def test_redirected_input_never_prompts_or_installs(self):
+        status, output = self.offer(None, redirected=True)
+        self.assertEqual(status, 0, output)
+        self.assertNotIn('[y/N]', output)
+        self.assertFalse(self.events.exists())
 
 
 if __name__ == "__main__":

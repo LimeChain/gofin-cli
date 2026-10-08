@@ -88,7 +88,7 @@ class DevWorkflowTests(unittest.TestCase):
             .replace("[ -t 0 ] && [ -t 1 ] && [ -t 2 ] || { echo 'Run this target yourself in macOS Terminal, without redirection.' >&2; exit 1; }", 'true'))
         (mocks / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         (mocks / 'id').write_text('#!/bin/sh\necho 501\n')
-        (mocks / 'sudo').write_text('#!/bin/sh\nexit 0\n')
+        (mocks / 'sudo').write_text('#!/bin/sh\nprintf \"sudo:%s\\n\" \"$*\" >> \"$EVENTS\"\nexit 0\n')
         for mock in mocks.iterdir():
             mock.chmod(0o700)
         (scripts / 'package-rust-macos.sh').write_text('''#!/bin/sh
@@ -111,7 +111,7 @@ chmod 700 "$bundle/fin"
             result = subprocess.run(args, cwd=fixture, capture_output=True, text=True,
                                     timeout=10, env=dict(os.environ, EVENTS=str(events)))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            lines = events.read_text().splitlines()
+            lines = [line for line in events.read_text().splitlines() if line != 'sudo:-K']
             self.assertEqual(len(lines), 2, lines)
             self.assertTrue(lines[0].startswith('package:'), lines)
             if verbose:
@@ -244,7 +244,6 @@ else: sys.exit('unexpected command: '+name)
                 result, events, _ = self.update_fixture(options)
                 self.assertNotEqual(result.returncode,0)
                 self.assertFalse(any(name=='update' or name=='fin' and args==['daemon','stop'] for name,args in events))
-
     def test_invalid_helper_action_is_rejected(self):
         result = subprocess.run(['/bin/sh', str(REPO/'scripts/dev-macos.sh'), 'anything'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)

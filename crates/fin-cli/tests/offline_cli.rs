@@ -990,3 +990,206 @@ fn setup_discovers_limit_prompts_and_zero_keeps_machine_handoff() {
     );
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
+    let home = tempfile::tempdir().unwrap();
+    let binary = home.path().join("standalone-fin");
+    std::fs::copy(env!("CARGO_BIN_EXE_fin"), &binary).unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(&binary)
+            .args(args)
+            .current_dir(home.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "")
+            .env("TERM", "dumb")
+            .env("NO_COLOR", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    for action in ["install", "install", "inspect", "update"] {
+        let output = invoke(&["skill", action, "--agent", "codex", "--json", "--verbose"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.contains(&27));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["managed"], true);
+        assert_eq!(
+            value["installed_version"],
+            fin_discovery::companion_skill::VERSION
+        );
+        serde_json::from_value::<fin_discovery::companion_skill::SkillResult>(value).unwrap();
+    }
+    let path = home.path().join(".agents/skills/fin/SKILL.md");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        fin_discovery::companion_skill::CONTENT
+    );
+    std::fs::write(&path, "human-customized skill").unwrap();
+    let conflict = invoke(&["skill", "update", "--agent", "codex", "--json"]);
+    assert_eq!(conflict.status.code(), Some(1));
+    assert!(conflict.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&conflict.stdout).unwrap()["error"]["code"],
+        "SKILL_CONFLICT"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "human-customized skill"
+    );
+    let restored = invoke(&["skill", "update", "--agent", "codex", "--backup", "--json"]);
+    assert!(restored.status.success());
+    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(
+            std::path::Path::new(restored["backup_path"].as_str().unwrap()).join("SKILL.md")
+        )
+        .unwrap(),
+        "human-customized skill"
+    );
+    let human = invoke(&["skill", "remove", "--agent", "codex"]);
+    assert!(human.status.success());
+    assert!(human.stderr.is_empty());
+    assert!(!human.stdout.contains(&27));
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.starts_with("✓ Fin skill removed for codex."));
+    assert_eq!(text.lines().count(), 1);
+    assert!(!path.exists());
+}
+
+#[test]
+fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
+    let caps: Value = serde_json::from_slice(&run(&["capabilities", "--json"]).stdout).unwrap();
+    let metadata = &caps["companion_skill"];
+    assert_eq!(metadata["bundled"], true);
+    assert_eq!(metadata["version"], fin_discovery::companion_skill::VERSION);
+    assert_eq!(metadata["supported_agent_environments"][0]["name"], "codex");
+    for action in ["install", "inspect", "update", "remove"] {
+        let help = run(&["skill", action, "--help"]);
+        assert!(help.status.success());
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(help.contains("--agent") && help.contains("codex"));
+        assert_eq!(help.contains("--backup"), action != "inspect");
+        let name = format!("skill.{action}");
+        let schema: Value =
+            serde_json::from_slice(&run(&["schema", &name, "--json"]).stdout).unwrap();
+        let definition = caps["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap();
+        assert_eq!(schema["input"], definition["input_schema"]);
+        assert_eq!(schema["output"], definition["output_schema"]);
+        assert_eq!(schema["semantics"]["service_required"], false);
+        assert_eq!(schema["semantics"]["requires_administrator"], false);
+        assert_eq!(schema["semantics"]["financial_authorization"], false);
+    }
+    let setup_help = run(&["setup", "--help"]);
+    assert!(String::from_utf8_lossy(&setup_help.stdout).contains("[y/N] (default No)"));
+    assert!(
+        include_str!("../../../packaging/install.sh")
+            .contains(fin_discovery::companion_skill::SETUP_PROMPT)
+    );
+    let setup = run(&["setup", "--json"]);
+    assert!(setup.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&setup.stdout).contains("[y/N]"));
+    let setup_schema: Value =
+        serde_json::from_slice(&run(&["schema", "setup", "--json"]).stdout).unwrap();
+    assert_eq!(
+        setup_schema["semantics"]["companion_skill_offer"]["default"],
+        "no"
+    );
+    assert_eq!(
+        setup_schema["semantics"]["companion_skill_offer"]["prompt"],
+        fin_discovery::companion_skill::SETUP_PROMPT
+    );
+    assert!(serde_json::from_slice::<Value>(&setup.stdout).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_human_and_machine_output_on_disposable_ttys() {
+    use std::{fs::File, io::Read, os::fd::FromRawFd, process::Stdio};
+    for (json, no_color, dumb) in [
+        (false, false, false),
+        (false, true, false),
+        (false, false, true),
+        (true, false, false),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let (mut master, mut slave) = (-1, -1);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut bytes = [0; 4096];
+            loop {
+                match master.read(&mut bytes) {
+                    Ok(0) => break,
+                    Ok(n) => output.extend_from_slice(&bytes[..n]),
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                    Err(error) => panic!("PTY read: {error}"),
+                }
+            }
+            output
+        });
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fin"));
+        command
+            .args(["skill", "install", "--agent", "codex"])
+            .env_clear()
+            .env("HOME", home.path())
+            .env("TERM", if dumb { "dumb" } else { "xterm-256color" })
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        if json {
+            command.args(["--json", "--verbose"]);
+        }
+        if no_color {
+            command.env("NO_COLOR", "1");
+        }
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() > deadline {
+                child.kill().unwrap();
+                panic!("skill command waited for input");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(status.success());
+        let output = reader.join().unwrap();
+        assert_eq!(output.contains(&27), !json && !no_color && !dumb);
+        if json {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&output).unwrap()["status"],
+                "installed"
+            );
+        } else {
+            assert!(String::from_utf8_lossy(&output).contains("✓ Fin skill installed for codex."));
+        }
+    }
+}

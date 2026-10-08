@@ -6,6 +6,7 @@ use fin_presentation::Ui;
 use fin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod companion_skill;
 mod daemon;
 mod onboarding;
 mod shell_integration;
@@ -58,6 +59,14 @@ enum Command {
         #[arg(value_enum)]
         action: shell_integration::Action,
     },
+    /// Refresh previously installed, unmodified skills as the human user.
+    #[command(hide = true)]
+    InternalSkillsRefresh,
+    /// Install, inspect, update or remove the optional bundled companion skill.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
     /// List available commands and financial operations.
     Capabilities,
     /// Generate shell completion from the installed command definitions.
@@ -102,7 +111,7 @@ enum Command {
     Snapshot,
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits."
+        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, Fin offers optional Codex skill installation [y/N] (default No)."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -120,6 +129,18 @@ enum Command {
         #[command(subcommand)]
         command: Option<ConnectionsCommand>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum SkillCommand {
+    /// Install for an explicitly selected agent; no administrator access required.
+    Install(fin_discovery::companion_skill::SkillChange),
+    /// Inspect the destination, version and managed-content status.
+    Inspect(fin_discovery::companion_skill::SkillTarget),
+    /// Refresh an existing installation using the bundled skill.
+    Update(fin_discovery::companion_skill::SkillChange),
+    /// Remove the skill; modified content requires explicit --backup handling.
+    Remove(fin_discovery::companion_skill::SkillChange),
 }
 
 #[derive(Args, Debug)]
@@ -625,6 +646,7 @@ fn find_definition(name: &str) -> Option<Value> {
 fn capabilities() -> Value {
     json!({
         "commands": definitions(),
+        "companion_skill": fin_discovery::companion_skill::metadata(),
         "operations": financial_catalog(),
         "service_required": false,
         "machine_contract": fin_discovery::machine_contract(),
@@ -743,6 +765,24 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
     };
     match command {
         Command::InternalCompletions { action } => shell_integration::run(action),
+        Command::InternalSkillsRefresh => companion_skill::refresh(),
+        Command::Skill { command } => {
+            use companion_skill::Action;
+            match command {
+                SkillCommand::Inspect(args) => {
+                    companion_skill::run(Action::Inspect, args.agent, false)
+                }
+                SkillCommand::Install(args) => {
+                    companion_skill::run(Action::Install, args.target.agent, args.backup)
+                }
+                SkillCommand::Update(args) => {
+                    companion_skill::run(Action::Update, args.target.agent, args.backup)
+                }
+                SkillCommand::Remove(args) => {
+                    companion_skill::run(Action::Remove, args.target.agent, args.backup)
+                }
+            }
+        }
         Command::Capabilities => Ok(capabilities()),
         Command::Completions { shell } => {
             let shell = match shell {
@@ -1258,6 +1298,8 @@ fn human_only(command: &Command) -> bool {
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::InternalCompletions { .. } => "internal-completions",
+        Command::InternalSkillsRefresh => "internal-skills-refresh",
+        Command::Skill { .. } => "skill",
         Command::Capabilities => "capabilities",
         Command::Explain { .. } => "explain",
         Command::Schema { .. } => "schema",
@@ -1306,6 +1348,7 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
                     | "--authorization"
                     | "--replaces-attempt"
                     | "--id"
+                    | "--agent"
                     | "--provider"
                     | "--name"
                     | "--role"
@@ -1343,6 +1386,28 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
                 } else {
                     ui.warning(message)
                 }
+            } else if command == "skill" && !ui.is_machine() && !ui.is_verbose() {
+                let text = format!(
+                    "{} {}",
+                    value["message"].as_str().unwrap_or_default(),
+                    value["next_action"].as_str().unwrap_or_default()
+                );
+                if matches!(value["status"].as_str(), Some("modified" | "unmanaged")) {
+                    ui.warning(&text)
+                } else {
+                    ui.success(&text)
+                }
+            } else if command == "internal-skills-refresh" && !ui.is_machine() {
+                for result in value["results"].as_array().into_iter().flatten() {
+                    if matches!(result["status"].as_str(), Some("current" | "updated")) {
+                        let _ = ui.success(result["message"].as_str().unwrap_or_default());
+                    } else {
+                        let _ = ui.warning(
+                            "Fin skill preserved; run fin skill inspect --agent codex for details.",
+                        );
+                    }
+                }
+                Ok(())
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(fin_presentation::render_human(command, &value, false).trim_end())
             } else {
@@ -1401,6 +1466,8 @@ async fn main() {
             | Command::Schema { .. }
             | Command::Completions { .. }
             | Command::InternalCompletions { .. }
+            | Command::InternalSkillsRefresh
+            | Command::Skill { .. }
     );
     let human_execution = !cli.json
         && (matches!(&cli.command, Command::Execute(args) if !args.dry_run && args.authorization.is_none())
@@ -1762,6 +1829,86 @@ mod tests {
         assert!(!caps["commands"].as_array().unwrap().is_empty());
         assert!(find_definition("setup").is_some());
         assert!(schema("connections.add").is_some());
+    }
+
+    #[tokio::test]
+    async fn dry_run_calls_only_preview_and_preserves_normal_execute() {
+        struct PreviewOnly;
+        #[async_trait]
+        impl Client for PreviewOnly {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                match request {
+                    BrokerRequest::Preview { operation, input } => {
+                        assert_eq!(operation, "fixture.write");
+                        assert_eq!(input, json!({"amount":"1"}));
+                        Ok(json!({"preview":true}))
+                    }
+                    _ => panic!("dry-run must only preview"),
+                }
+            }
+            async fn execute(&self, request: OperationRequest) -> Result<Value, FinError> {
+                assert_eq!(request.request_id, "synthetic-1");
+                Ok(json!({"execute":true}))
+            }
+        }
+        let args = [
+            "fin",
+            "execute",
+            "fixture.write",
+            "--input",
+            r#"{"amount":"1"}"#,
+            "--id",
+            "synthetic-1",
+            "--json",
+        ];
+        let dry = Cli::try_parse_from(args.into_iter().chain(["--dry-run"])).unwrap();
+        assert_eq!(
+            dispatch(dry, &PreviewOnly).await.unwrap(),
+            json!({"preview":true})
+        );
+        let normal = Cli::try_parse_from(args).unwrap();
+        assert_eq!(
+            dispatch(normal, &PreviewOnly).await.unwrap(),
+            json!({"execute":true})
+        );
+    }
+
+    #[test]
+    fn skill_definitions_examples_flags_and_embedded_metadata_agree() {
+        use fin_discovery::companion_skill::{CONTENT, SkillChange, SkillTarget, VERSION};
+        assert!(CONTENT.contains(&format!("version: \"{VERSION}\"")));
+        for definition in fin_discovery::companion_skill::definitions() {
+            for example in &definition.examples {
+                if definition.name == "skill.inspect" {
+                    serde_json::from_value::<SkillTarget>(example.clone()).unwrap();
+                } else {
+                    serde_json::from_value::<SkillChange>(example.clone()).unwrap();
+                }
+            }
+            for example in definition.semantics["command_line_examples"]
+                .as_array()
+                .unwrap()
+            {
+                let parsed =
+                    Cli::try_parse_from(example.as_str().unwrap().split_whitespace()).unwrap();
+                assert!(!human_only(&parsed.command));
+                assert_eq!(command_name(&parsed.command), "skill");
+            }
+            assert_eq!(
+                definition.output_schema,
+                fin_discovery::schema::<fin_discovery::companion_skill::SkillResult>()
+            );
+            assert_eq!(
+                schema(&definition.name).unwrap()["input"],
+                definition.input_schema
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["fin", "skill", "inspect", "--agent", "codex", "--backup"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["fin", "skill", "install", "--agent", "unreviewed"]).is_err());
+        assert!(Cli::try_parse_from(["fin", "skill", "install"]).is_err());
     }
 
     #[test]

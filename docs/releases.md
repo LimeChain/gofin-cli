@@ -87,7 +87,18 @@ color respects `NO_COLOR`, `TERM=dumb` and redirection.
 This bootstrap performs initial setup, not upgrades or uninstall. It refuses an
 existing installation rather than replacing credentials, configuration or financial
 state. The reviewed local runtime updater remains available to developers; a
-public user-facing upgrade command is separate work.
+public user-facing upgrade command is separate work. For a reviewed local update,
+the human runs `make update` in their own macOS Terminal. It builds a debug bundle,
+uses the verified installed runtime as `--from`, and accepts reviewed installer/
+helper changes through the existing updater option. It preserves protected state
+and retains a runtime backup. No reinstall or service restart occurs.
+
+The companion skill is compiled into `fin` (no new archive member). After a
+successful runtime commit the updater drops to the invoking user's UID, clears
+the environment and refreshes only existing, unchanged Fin-managed skill copies.
+It never installs a new environment or overwrites edited content. A skill conflict
+or refresh failure leaves the runtime update successful and gives an inspection
+command. See [skill maintenance](companion-skill.md) for explicit backup handling.
 
 ## Verification
 

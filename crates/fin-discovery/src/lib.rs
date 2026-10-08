@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod companion_skill;
 pub mod enrollment_contract;
 pub mod policy;
 pub use policy::{PolicySetArgs, PolicyView};
@@ -603,6 +604,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"secret_input":"none","journal":"Pending outcomes remain unresolved across restart; stop performs no financial cleanup.","restart":"Only explicit fin daemon start clears protected stop intent; ordinary commands cannot reactivate it."}),
         ),
     ];
+    definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
     connection_schema["$defs"]["Provider"]["enum"] =
         json!(["binance", "evm", "ethereum", "coingecko"]);
@@ -648,7 +650,33 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "then":{},
                 "else":{"required":["request_id"],"properties":{"request_id":{"type":"string","minLength":1}}}
             }]);
-        } else if matches!(item.name.as_str(), "policy.show" | "policy.set") {
+            let mut dry_run = item.examples[0].clone();
+            dry_run["dry_run"] = json!(true);
+            item.examples.push(dry_run);
+            item.semantics["command_line_examples"] = json!([
+                item.semantics["command_line_example"],
+                format!(
+                    "{} --dry-run",
+                    item.semantics["command_line_example"]
+                        .as_str()
+                        .unwrap_or_default()
+                )
+            ]);
+        }
+        if item.name == "setup" {
+            item.semantics["optional_companion_skill"] = companion_skill::metadata();
+            item.semantics["companion_skill_offer"] = json!({
+                "prompt":companion_skill::SETUP_PROMPT,
+                "default":"no",
+                "when":"After successful human setup; never in JSON mode.",
+                "installation":"Only an explicit y/yes runs fin skill install --agent codex as the human account; conflicts are preserved without automatic backup or replacement.",
+                "failure":"Optional skill failure or cancellation leaves the completed Fin installation intact."
+            });
+        }
+        if item.name == "capabilities" {
+            item.semantics["companion_skill"] = companion_skill::metadata();
+        }
+        if matches!(item.name.as_str(), "policy.show" | "policy.set") {
             item.output_schema = schema::<PolicyView>();
         } else if matches!(item.name.as_str(), "connections.add" | "connections.update") {
             item.input_schema = connection_schema.clone();

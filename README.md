@@ -89,7 +89,9 @@ for movement and rolling 24-hour allocation limits; Enter keeps $100 for each,
 and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
-shell (Zsh, Bash or Fish). Open a new Terminal afterward and run `fin doctor`.
+shell (Zsh, Bash or Fish). After successful setup,
+`Install Fin's optional Codex skill? [y/N]` lets you opt in; Enter skips it.
+Open a new Terminal afterward and run `fin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
 broker and Touch ID helper with your Mac login password, and restores the broker's
@@ -97,7 +99,6 @@ previous running/stopped state. Connections, credentials, stored personal limits
 and financial history are kept. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update, not a general
 schema-migration or published-version updater.
-
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
 and [completion](docs/shell-completion.md).
 
@@ -269,8 +270,21 @@ contract, with structured results/errors and no terminal prompts, animation or
 color. Setup/enrollment return a human handoff in machine mode. Financial
 approval requirements still apply. `NO_COLOR` disables human color.
 
-The [companion skill](skills/fin/SKILL.md) teaches discovery and recovery. Copy
-`skills/fin/` into your agent's skill directory and ensure `fin` is on its PATH.
+The optional [companion skill](skills/fin/SKILL.md) teaches discovery, dry-run
+previews and recovery. It is embedded in `fin`, so installation works offline
+without a source checkout, administrator access, credentials or financial approval:
+
+```sh
+fin skill install --agent codex
+fin skill inspect --agent codex --json
+fin skill update --agent codex
+fin skill remove --agent codex
+```
+
+Codex uses `~/.agents/skills/fin`. Existing or modified content is preserved;
+inspect it before using explicit `--backup` conflict handling. Fin upgrades refresh
+only existing, unmodified Fin-managed copies. See [skill maintenance](docs/companion-skill.md).
+Ensure `fin` is on the agent's PATH; restart the agent if it does not discover the skill.
 
 ## Binance account transfers
 
@@ -344,9 +358,12 @@ Ordinary operations support permanent portfolio changes, including selling
 existing holdings and retaining purchases. Execute each operation directly:
 
 ```sh
+fin execute OPERATION --input PUBLIC_JSON --id STABLE_REQUEST_ID --dry-run --json
 fin execute OPERATION --input PUBLIC_JSON --id STABLE_REQUEST_ID --json
 ```
 
+Dry-run routes only to preview and does not consume the ID, reserve funds or request
+financial approval. Removing `--dry-run` retains fresh per-write Touch ID.
 Use the selected operation's schema for actual JSON. No run, purpose,
 return plan or restoration is required. Inspect operations with
 `fin operations --json` and reconcile the original operation with
@@ -384,7 +401,7 @@ both values may already be active; inspect them before retrying the change.
 make dev                              # debug CLI help; no installation
 make dev ARGS='capabilities --json'    # incremental CLI execution
 make build                            # debug CLI and broker
-make update                           # HUMAN: update installed local build; keep connections
+make update                           # HUMAN Terminal: update installed local build; keep state
 make catalog                          # regenerate offline financial discovery
 make check                            # formatting and strict Clippy
 make test-ui                          # focused offline CLI/discovery tests
@@ -398,6 +415,10 @@ Default tests use synthetic credentials and temporary state; they do not load
 production secrets or broadcast to mainnet. Broker-backed `make dev` commands
 use the protected installed service and its approvals. `make bundle` creates a
 debug macOS bundle; `make release` creates an optimized bundle without installing.
+`make update` builds a debug bundle and runs the reviewed runtime updater in your
+own Terminal; it preserves protected state and refreshes unmodified managed skills.
+Review the local changes first; this path also accepts bundled installer/helper
+updates. It does not restart the broker or reinstall.
 `make uninstall` is a destructive development reset that deletes installed
 credentials/configuration and refuses financial history. Run setup/reset yourself
 in Terminal; neither is part of ordinary tests. `make help` lists the targets.

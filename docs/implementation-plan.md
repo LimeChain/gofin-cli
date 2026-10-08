@@ -99,6 +99,16 @@ protected broker, so ordinary approval and credential boundaries still apply.
 Setup, runtime update and uninstall are explicit human actions, not side effects
 of a test or build. Use temporary homes and databases for fixtures.
 
+## Optional Codex companion skill
+
+Fin embeds its companion skill so it can be installed offline without a checkout,
+credentials, administrator access or financial approval. Setup offers an optional
+opt-in after successful installation. Agents can inspect capability metadata and
+use `fin skill install|inspect|update|remove --agent codex` for lifecycle actions.
+Compatible runtime updates refresh only recorded, existing, unmodified copies;
+conflicting or edited files remain for human review. Skill installation grants no
+financial authority. See the [companion skill guide](companion-skill.md).
+
 ## Verification and delivery
 
 Follow the [testing guide](testing/README.md), [onboarding acceptance
