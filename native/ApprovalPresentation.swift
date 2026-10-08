@@ -11,7 +11,7 @@ struct ConfigurationPresentation {
 // Never truncate exact amounts midway or change the complete approval binding.
 let authenticationReasonMaximumCharacters = 240
 
-func compactAuthenticationReason(prefix: String, summary: String) -> String {
+func compactAuthenticationReason(prefix: String, summary: String, maximumCharacters: Int = authenticationReasonMaximumCharacters) -> String {
     let visible = summary.unicodeScalars.map { scalar -> String in
         let value = scalar.value
         if CharacterSet.controlCharacters.contains(scalar) || value == 0x200E || value == 0x200F
@@ -39,12 +39,12 @@ func compactAuthenticationReason(prefix: String, summary: String) -> String {
         compact = compact.replacingOccurrences(of: long, with: short)
     }
     let reason = prefix + compact
-    if reason.count <= authenticationReasonMaximumCharacters { return reason }
+    if reason.count <= maximumCharacters { return reason }
 
     // Stop at a complete clause and explicitly disclose omitted details. This
     // also bounds escaped control text and unusually long account/token names.
     let suffix = " See terminal review for full details."
-    let available = authenticationReasonMaximumCharacters - prefix.count - suffix.count - 1
+    let available = maximumCharacters - prefix.count - suffix.count - 1
     var clauses: [String] = []
     for clause in compact.components(separatedBy: ";") {
         let candidate = (clauses + [clause]).joined(separator: ";")
@@ -64,6 +64,17 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
           binding["execution"] is [String: Any],
           binding["financial_intent"] is [String: Any],
           !summary.isEmpty, summary.count <= 4096 else { return nil }
+    if operation == "binance.deposit", summary.hasPrefix("Deposit ") {
+        // macOS supplies the app name and approval context. Avoid a redundant
+        // prefix so the named route, amount and native gas cap fit together.
+        // USD ceilings remain in the full review and verified approval binding.
+        // Strip only the broker's complete, trailing USD-ceiling annotation.
+        let concise = summary.replacingOccurrences(
+            of: #" USD ceilings: \$[0-9]+(?:\.[0-9]+)? movement, \$[0-9]+(?:\.[0-9]+)? fees\.$"#,
+            with: "", options: .regularExpression)
+        // Exceptionally long aliases use the explicit full-review fallback.
+        return compactAuthenticationReason(prefix: "deposit ", summary: String(concise.dropFirst("Deposit ".count)), maximumCharacters: 180)
+    }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
 

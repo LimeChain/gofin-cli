@@ -2658,8 +2658,10 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
     let composite = fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum);
     let input = json!({"requestId":"synthetic-arbitrum-usdc","account":"child-a","wallet":"synthetic-wallet","amount":"1.25","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":token});
     let prepared = composite.prepare("binance.deposit", &input).await.unwrap();
-    assert!(prepared.summary.contains(&token.to_ascii_lowercase()));
-    assert!(prepared.summary.contains("ARBITRUM") && prepared.summary.contains("42161"));
+    assert!(prepared.summary.contains(
+        "Deposit 1.25 USDC: synthetic-wallet → child-a on Arbitrum One. Max fee 0.001 ETH."
+    ));
+    assert!(!prepared.summary.contains("0x") && !prepared.summary.contains("42161"));
     assert_eq!(
         prepared.binding["source_asset"]["reference"],
         token.to_ascii_lowercase()
