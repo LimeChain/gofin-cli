@@ -446,19 +446,93 @@ both values may already be active; inspect them before retrying the change.
 
 ## Development and contributing
 
+Use Make from the worktree you are changing. The normal synthetic development
+loop builds that worktree's CLI and broker together:
+
 ```sh
-make dev                              # debug CLI help; no installation
-make dev ARGS='capabilities --json'    # incremental CLI execution
-make build                            # debug CLI and broker
-make update                           # HUMAN Terminal: update installed local build; keep state
-make catalog                          # regenerate offline financial discovery
-make check                            # formatting and strict Clippy
-make test-ui                          # focused offline CLI/discovery tests
-make test-integration                 # isolated broker/store/installer fixtures
-make test                             # full offline Rust suite
-cargo run --locked --offline -p fin-cli --example financial-catalog > crates/fin-cli/data/financial-catalog.json
-sh scripts/verify-rust-fork.sh         # separately invoked fixed Ethereum fork
+make dev-env-start                         # start this worktree's local environment
+make dev-env-cli ARGS='capabilities --json'
+make dev-env-cli ARGS='operations --json'
+# After editing Rust code, stop then start to rebuild both binaries:
+make dev-env-stop                          # keeps synthetic configuration and journal
+make dev-env-start
+make dev-env-stop
+make dev-env-reset                         # explicitly discard this stopped environment
 ```
+
+`DEV_ENV` defaults to `local`, independently in each worktree. For multiple
+environments within one worktree, pass the same name to each command, for example
+`make dev-env-start DEV_ENV=feature-a` and
+`make dev-env-cli DEV_ENV=feature-a ARGS='doctor --json'`.
+CLI invocation uses the running environment's binary snapshot; it does not rebuild.
+Stop/start adopts source changes while preserving state for recovery and migration
+testing. The Python scripts implement these Make targets; direct script invocation
+is unnecessary for the normal development loop.
+
+```sh
+make test-dev-env                      # synthetic lifecycle/recovery/ownership tests; no Anvil
+make test-fork                         # explicit isolated Ethereum fork; existing Anvil required
+make test-ui                          # focused offline CLI/discovery tests
+make test-integration                 # environment tests plus broker/store/installer fixtures
+make test                             # full offline Rust suite
+make check                            # formatting and strict Clippy
+make build                            # regular debug CLI and broker
+make dev ARGS='capabilities --json'    # regular debug CLI; broker commands use installed service
+make catalog                          # regenerate offline financial discovery
+make update                           # HUMAN Terminal: update installed local build; keep state
+```
+
+Names are scoped to the source worktree. Different worktrees and named environments
+can run concurrently with separate binary snapshots, sockets, journals, locks,
+logs and process identities. The development CLI checks the selected environment,
+build and broker session before dispatch; a missing or mismatched broker fails
+without contacting the installed service. These separate Cargo example binaries
+default to synthetic adapters and development approval. Synthetic mode requires
+no Anvil, enrollment, installation or production credentials. `make dev-env-cli ARGS='... --json'`
+retains Fin's machine stdout contract. Add `DEV_FLAGS=--json` to start, stop or
+reset for lifecycle JSON, for example `make dev-env-start DEV_FLAGS=--json`.
+See [isolated development verification](docs/testing/development-environments.md)
+for fixture operations, state locations, recovery and concurrency tests.
+Automated isolation checks passed. Two concurrent real forks established separate
+nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`);
+neither completed restoration. The linked verification record separates these
+results from pending human Touch ID and live acceptance.
+
+For **real-adapter development**, provide disposable, noncritical credentials in
+a gitignored dotenv file using [.env.fin-dev.example](.env.fin-dev.example). These
+keys are intentionally accessible to the agent. Import and execution run as your
+user, with **no sudo, password or Touch ID prompts**:
+
+```sh
+# Human: copy the template, fill in dedicated development keys, then restrict the file.
+cp .env.fin-dev.example .env.fin-dev
+chmod 600 .env.fin-dev
+# Agent: import once into a separate named environment, then use the normal CLI.
+make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env.fin-dev"
+make dev-env-start DEV_ENV=live DEV_MODE=live
+make dev-env-cli DEV_ENV=live ARGS='connections --json'
+make dev-env-cli DEV_ENV=live ARGS='capabilities --json'
+# After code edits: rebuild the pair while keeping imported keys and financial state.
+make dev-env-stop DEV_ENV=live
+make dev-env-start DEV_ENV=live DEV_MODE=live
+```
+
+Live mode uses real Binance/EVM adapters and can move real funds with automatic
+development approval. It keeps the engine's financial limits and settlement
+checks. Imports support a Binance master and optional subaccount using HMAC,
+RSA or Ed25519, plus up to two EVM wallet keys. Wallet addresses are derived
+automatically. Import is offline when public UIDs and the subaccount email are
+supplied. Add `DEV_IMPORT_FLAGS=--discover-identities` to import with read-only
+Binance identity checks; a missing or ambiguous subaccount association requires
+its human-supplied email. The template lists supported names and aliases. Credentials are copied into the selected environment and reused after
+rebuilds; the source file is not needed again unless changing credentials.
+Installed Fin's service, keys, configuration and approval path are untouched.
+The synthetic reset command refuses live environments to preserve financial
+history. Multiple live environments may load the same credentials concurrently;
+the human coordinates shared-account tests. Journals, duplicate prevention and
+budgets are per environment. Lifecycle locks still protect each environment's
+own processes and state. See the [live development contract](docs/testing/development-environments.md#live-development-with-disposable-credentials)
+for discovery, credentials, concurrency and testing limits.
 
 Default tests use synthetic credentials and temporary state; they do not load
 production secrets or broadcast to mainnet. Broker-backed `make dev` commands

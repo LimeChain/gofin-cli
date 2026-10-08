@@ -1,15 +1,28 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/sh
 ARGS ?= --help
+DEV_ENV ?= local
+DEV_MODE ?= synthetic
+DEV_CREDENTIALS_FILE ?=
+DEV_IMPORT_FLAGS ?=
+DEV_FLAGS ?=
 
-.PHONY: help dev build catalog test-ui test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
-	  'make dev [ARGS="..."]  Run the debug CLI (default: help; no installation)' \
+	  'make dev [ARGS="..."]  Run the debug CLI; broker commands use the installed service' \
+	  'make dev-env-start [DEV_ENV=name] [DEV_MODE=synthetic|live]  Build and start this worktree environment' \
+	  'make dev-env-import [DEV_ENV=name] DEV_CREDENTIALS_FILE=/path/.env  Import development credentials while stopped' \
+	  'make dev-env-cli [DEV_ENV=name] ARGS="..."  Invoke that environment worktree CLI' \
+	  'make dev-env-stop [DEV_ENV=name]   Stop only that environment; preserve its journal' \
+	  'make dev-env-reset [DEV_ENV=name]  Explicitly remove only that stopped environment state' \
+	  '  DEV_ENV defaults to local, DEV_MODE defaults to synthetic; DEV_FLAGS=--json gives lifecycle JSON' \
 	  'make build             Incrementally build the debug CLI and broker' \
 	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
+	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
+	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
 	  'make test              Full offline Rust test suite' \
@@ -26,6 +39,22 @@ dev:
 build:
 	@cargo build --locked -p fin-cli -p fin-broker
 
+dev-env-start:
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)"
+
+dev-env-import:
+	@test -n "$(DEV_CREDENTIALS_FILE)" || { printf '%s\n' 'Set DEV_CREDENTIALS_FILE to your disposable .env file.' >&2; exit 2; }
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) import "$(DEV_ENV)" --credentials-file "$(DEV_CREDENTIALS_FILE)" $(DEV_IMPORT_FLAGS)
+
+dev-env-cli:
+	@python3 scripts/fin-dev.py cli "$(DEV_ENV)" -- $(ARGS)
+
+dev-env-stop:
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) stop "$(DEV_ENV)"
+
+dev-env-reset:
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) reset "$(DEV_ENV)"
+
 catalog:
 	@fin_catalog_tmp=$$(mktemp); trap 'rm -f "$$fin_catalog_tmp"' EXIT; \
 	  cargo run --quiet --locked -p fin-broker --example export_catalog > "$$fin_catalog_tmp" && \
@@ -34,12 +63,20 @@ catalog:
 test-ui:
 	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli
 
-test-integration:
+test-dev-env:
+	@python3 scripts/test-fin-dev.py
+	@python3 scripts/test-dev-runtime.py
+	@python3 scripts/test-fork-runner.py
+	@python3 scripts/test-dev-workflow.py
+
+test-fork:
+	@/bin/sh scripts/verify-rust-fork.sh
+
+test-integration: test-dev-env
 	@cargo test --locked -p fin-broker -p fin-engine -p fin-store -p fin-authorization -p fin-human-terminal
 	@python3 scripts/test-rust-macos-installer.py
 	@python3 scripts/test-rust-macos-runtime-update.py
 	@python3 scripts/test-rust-macos-uninstall.py
-	@python3 scripts/test-dev-workflow.py
 
 test-delivery:
 	@python3 scripts/test-curl-installer.py

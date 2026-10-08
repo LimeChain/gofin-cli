@@ -1,11 +1,10 @@
 //! Manual, isolated deployed-contract verification. This is never live-write,
 //! credential-isolation, or biometric evidence.
 //!
-//! Start a fresh Anvil externally with chain ID 1 and the reviewed public fork
-//! source pinned at block 26099326, bound to 127.0.0.1:8545. Then run:
-//! `cargo test -p fin-broker --test fork_roundtrip -- --ignored --nocapture`.
-//! This test accepts no RPC/key/config environment variables, starts no process,
-//! loads no files except its temporary SQLite journal, and has no remote fallback.
+//! Run through `scripts/verify-rust-fork.sh`, which starts and owns a fresh Anvil
+//! on an allocated loopback endpoint and passes its URL and instance ID. This
+//! test starts no process, loads no files except its temporary SQLite journal,
+//! and has no remote fallback.
 use async_trait::async_trait;
 use fin_broker::{
     AssetValuator, BrokerConfigV2, BrokerPolicy, BrokerRuntime, ConnectionConfig, DeploymentConfig,
@@ -38,7 +37,6 @@ use std::{
     time::Duration,
 };
 
-const RPC: &str = "http://127.0.0.1:8545";
 const FORK_BLOCK: u64 = 26_099_326;
 const FORK_HASH: &str = "0xe24db6a0bd48918550f6a7c35c0e129172816d1f6641ac16a37459627551f7bf";
 // Public Anvil default account 0. Never valid as a production-key fixture.
@@ -90,16 +88,75 @@ fn blocked(message: &str) -> FinError {
     )
 }
 
+fn validate_endpoint(endpoint: &str, instance_id: &str) -> Result<()> {
+    let port = endpoint
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            blocked("The fork endpoint must be an exact IPv4 loopback URL with a selected port.")
+        })?;
+    if endpoint != format!("http://127.0.0.1:{port}")
+        || !instance_id.starts_with("0x")
+        || instance_id.len() != 66
+        || !instance_id[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(blocked(
+            "The fork endpoint or instance identity is malformed.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_metadata(metadata: &Value, expected_instance_id: &str) -> Result<()> {
+    if metadata["instanceId"].as_str() != Some(expected_instance_id) {
+        return Err(blocked(
+            "The fork endpoint is no longer the owned Anvil instance.",
+        ));
+    }
+    if !metadata["clientVersion"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .starts_with("anvil/")
+    {
+        return Err(blocked("The fixed loopback peer is not Anvil."));
+    }
+    if metadata["chainId"].as_u64() != Some(1) {
+        return Err(blocked("The isolated fork must explicitly use chain ID 1."));
+    }
+    let fork = &metadata["forkedNetwork"];
+    if fork["forkBlockNumber"].as_u64() != Some(FORK_BLOCK)
+        || fork["forkBlockHash"].as_str() != Some(FORK_HASH)
+    {
+        return Err(blocked(
+            "The immutable fork anchor differs from the reviewed mainnet block.",
+        ));
+    }
+    Ok(())
+}
+
 struct ForkRpc {
+    endpoint: String,
+    expected_instance_id: String,
     client: reqwest::Client,
     ids: AtomicU64,
     sent: AtomicU64,
 }
 impl ForkRpc {
     fn new() -> Result<Self> {
+        let endpoint = std::env::var("FIN_FORK_RPC_URL")
+            .map_err(|_| blocked("The owned fork runner did not provide its loopback endpoint."))?;
+        let expected_instance_id = std::env::var("FIN_FORK_INSTANCE_ID").map_err(|_| {
+            blocked("The owned fork runner did not provide the Anvil instance identity.")
+        })?;
+        validate_endpoint(&endpoint, &expected_instance_id)?;
         Ok(Self {
+            endpoint,
+            expected_instance_id,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .map_err(|_| blocked("Could not construct loopback-only transport."))?,
@@ -111,7 +168,7 @@ impl ForkRpc {
         let id = self.ids.fetch_add(1, Ordering::SeqCst);
         let response = self
             .client
-            .post(RPC)
+            .post(&self.endpoint)
             .json(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .send()
             .await
@@ -134,13 +191,8 @@ impl ForkRpc {
             .ok_or_else(|| blocked("Loopback RPC omitted the required result."))
     }
     async fn guard(&self) -> Result<()> {
-        let version = self.raw("web3_clientVersion", json!([])).await?;
-        if !version
-            .as_str()
-            .is_some_and(|v| v.to_ascii_lowercase().starts_with("anvil/"))
-        {
-            return Err(blocked("The fixed loopback peer is not Anvil."));
-        }
+        let metadata = self.raw("anvil_metadata", json!([])).await?;
+        validate_metadata(&metadata, &self.expected_instance_id)?;
         if rpc_u64(&self.raw("eth_chainId", json!([])).await?)? != 1 {
             return Err(blocked("The isolated fork must explicitly use chain ID 1."));
         }
@@ -201,6 +253,38 @@ impl ForkRpc {
         self.advance(1).await
     }
 }
+
+#[test]
+fn fork_endpoint_and_numeric_metadata_are_strict() {
+    let instance = format!("0x{}", "a".repeat(64));
+    assert!(validate_endpoint("http://127.0.0.1:8546", &instance).is_ok());
+    for endpoint in [
+        "http://localhost:8546",
+        "http://127.0.0.1:0",
+        "https://127.0.0.1:8546",
+        "http://127.0.0.1:8546/path",
+        "http://127.0.0.1:8546?redirect=remote",
+    ] {
+        assert!(
+            validate_endpoint(endpoint, &instance).is_err(),
+            "{endpoint}"
+        );
+    }
+    let metadata = json!({
+        "instanceId":instance,
+        "clientVersion":"anvil/v1.6.0",
+        "chainId":1,
+        "forkedNetwork":{"forkBlockNumber":FORK_BLOCK,"forkBlockHash":FORK_HASH}
+    });
+    assert!(validate_metadata(&metadata, &instance).is_ok());
+    assert!(validate_metadata(&metadata, &format!("0x{}", "b".repeat(64))).is_err());
+    let mut wrong_chain = metadata.clone();
+    wrong_chain["chainId"] = json!(5);
+    assert!(validate_metadata(&wrong_chain, &instance).is_err());
+    let mut wrong_block = metadata;
+    wrong_block["forkedNetwork"]["forkBlockNumber"] = json!(FORK_BLOCK - 1);
+    assert!(validate_metadata(&wrong_block, &instance).is_err());
+}
 struct ForkOracleClock(Arc<ForkRpc>);
 #[async_trait]
 impl OracleObservationClock for ForkOracleClock {
@@ -239,7 +323,8 @@ impl EvmRpc for ForkRpc {
                 ));
             }
         }
-        // Fixed numeric loopback URL, no redirects, no fallback, no credentials.
+        // The runner-selected IPv4 loopback URL is validated above; no redirects,
+        // ambient proxy, remote fallback, or credentials are possible.
         self.raw(method, params).await
     }
 }
@@ -1149,7 +1234,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
     println!(
         "{}",
         json!({
-            "verification":"isolated-fixed-mainnet-fork",
+            "verification":"isolated-mainnet-fork",
             "fork_block":FORK_BLOCK,"fork_hash":FORK_HASH,
             "accrual_source":"guarded loopback Anvil evm_setNextBlockTimestamp plus evm_mine; actual historical Aave variable-debt index/backing proof at canonical receipts",
             "advanced_seconds":3600,"debt_before_advance_atoms":quantity(debt_before),"debt_after_advance_atoms":quantity(debt_after),
@@ -1165,7 +1250,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
         })
     );
     println!(
-        "Isolated fixed-fork verification: {} settled writes; {} duplicates without approval/sign/submission; guarded 1h debt accrual, exact cash evidence and complete cleanup passed. No biometric or live-write claim.",
+        "Isolated mainnet-fork verification: {} settled writes; {} duplicates without approval/sign/submission; guarded 1h debt accrual, exact cash evidence and complete cleanup passed. No biometric or live-write claim.",
         j.records.len(),
         j.records.len()
     );
