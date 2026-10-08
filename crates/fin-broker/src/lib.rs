@@ -325,7 +325,8 @@ impl BrokerConfigV2 {
                         || !matches!(role.as_str(), "main" | "sub")
                         || (*role == "main" && (parent.is_some() || email.is_some()))
                         || (*role == "sub"
-                            && (parent.is_none() || email.as_deref().unwrap_or("").is_empty()))
+                            && (parent.is_some() != email.is_some()
+                                || email.as_deref().is_some_and(str::is_empty)))
                         || !canonical_uid(physical_identity)
                         || !physical_identity_verified
                         || resource.0 != format!("binance:uid:{physical_identity}:SPOT")
@@ -334,8 +335,8 @@ impl BrokerConfigV2 {
                         return Err(error(
                             "CONFIG_BINANCE_CONNECTION_INVALID",
                             "configuration",
-                            "Binance SPOT connection hierarchy or verified physical identity is invalid.",
-                            "Verify the account mapping and enroll the main key through the human terminal.",
+                            "Binance SPOT connection metadata or verified physical identity is invalid.",
+                            "Verify the account identity; enroll a main connection only when parent-authorized hierarchy access is needed.",
                         ));
                     }
                     (name, resource)
@@ -957,13 +958,10 @@ pub fn build_protected_applications(
             payout_verifier,
         )?);
         adapters.push(adapter.clone());
-        if let Some(ethereum) = ethereum_adapters
-            .values()
-            .find(|adapter| adapter.config.chain_id == 1)
-        {
-            adapters.push(Arc::new(BinanceEthereumDepositAdapter::new(
+        if !ethereum_adapters.is_empty() {
+            adapters.push(Arc::new(BinanceEthereumDepositAdapter::with_networks(
                 adapter,
-                ethereum.clone(),
+                ethereum_adapters.values().cloned(),
             )));
         }
     }
@@ -1002,7 +1000,13 @@ fn configured_binance_destinations(
                 ),
                 _ => continue,
             };
-            let confirmations = u32::try_from(network.confirmations).map_err(|_| {
+            let payout_confirmations =
+                if fin_ethereum::EthereumConfig::external_credit_uses_sequencer(network.chain_id) {
+                    1
+                } else {
+                    network.confirmations
+                };
+            let confirmations = u32::try_from(payout_confirmations).map_err(|_| {
                 error(
                     "CONFIG_CONFIRMATIONS_INVALID",
                     "configuration",
@@ -1139,9 +1143,15 @@ impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
                 &request.asset,
                 &request.minimum_amount,
                 &request.maximum_amount,
-                request
-                    .confirmations
-                    .max(adapter.config.confirmations as u32),
+                if fin_ethereum::EthereumConfig::external_credit_uses_sequencer(request.chain_id) {
+                    // Reconcile historical payouts by their original identity under
+                    // the reviewed incoming-credit policy, without resubmission.
+                    1
+                } else {
+                    request
+                        .confirmations
+                        .max(adapter.config.confirmations as u32)
+                },
             )
             .await
         {
@@ -3603,13 +3613,7 @@ mod tests {
             );
             assert_eq!(
                 destination.confirmations,
-                if destination.chain_id == 1 {
-                    7
-                } else if destination.chain_id == 42161 {
-                    11
-                } else {
-                    2
-                }
+                if destination.chain_id == 1 { 7 } else { 1 }
             );
         }
         let legacy = destinations
@@ -3621,7 +3625,7 @@ mod tests {
             legacy.resource.0,
             "ethereum:42161:preserved-legacy-resource"
         );
-        assert_eq!(legacy.confirmations, 11);
+        assert_eq!(legacy.confirmations, 1);
         assert_eq!(
             legacy.assets.values().cloned().collect::<BTreeSet<_>>(),
             legacy_assets.into_iter().collect()
@@ -4324,6 +4328,31 @@ mod tests {
         }
         assert_eq!(
             config.validate().unwrap_err().code,
+            "CONFIG_BINANCE_CONNECTION_INVALID"
+        );
+    }
+
+    #[test]
+    fn standalone_subaccount_config_needs_no_master_connection() {
+        let mut standalone = config();
+        standalone.connections.push(ConnectionConfig::Binance {
+            name: "synthetic-child".into(),
+            resource: ResourceId("binance:uid:314159:SPOT".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440000".into(),
+            role: "sub".into(),
+            parent: None,
+            email: None,
+            wallet_type: "SPOT".into(),
+            physical_identity: "314159".into(),
+            physical_identity_verified: true,
+        });
+        standalone.validate().unwrap();
+
+        if let ConnectionConfig::Binance { email, .. } = &mut standalone.connections[0] {
+            *email = Some("synthetic@example.invalid".into());
+        }
+        assert_eq!(
+            standalone.validate().unwrap_err().code,
             "CONFIG_BINANCE_CONNECTION_INVALID"
         );
     }

@@ -234,6 +234,9 @@ pub fn definitions() -> Vec<Definition> {
             ("tokens",json!({"type":"array","items":contract,"maxItems":64,"uniqueItems":true})),("transaction_hash",json!({"type":"string","pattern":"^0x[0-9a-fA-F]{64}$"})),
             ("fee_tier",json!({"type":"integer","enum":[100,500,3000,10000]})),("slippage_bps",json!({"type":"integer","minimum":0,"maximum":1000})),("deadline",json!({"type":"integer","minimum":1})),("enabled",json!({"type":"boolean"}))
         ]{if properties.contains_key(name){properties.insert(name.into(),value);}}
+        if !read {
+            properties.get_mut("max_fee_eth").expect("write fee field")["description"] = json!("Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.");
+        }
         schema["additionalProperties"]=json!(false);
         if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap") {
             schema["allOf"]=json!([{"if":{"properties":{"amount":{"const":"all"}},"required":["amount"]},"then":{"required":["max_amount"]},"else":{"not":{"required":["max_amount"]}}}]);

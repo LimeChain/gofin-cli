@@ -178,17 +178,22 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 ));
                 lines.push("Signing: enabled using protected credentials.".into());
                 if role == "sub" {
-                    let (Some(parent), Some(email)) = (parent, email) else {
-                        return Err(error(
-                            "INVALID_CHALLENGE",
-                            "Subaccount association is incomplete.",
-                        ));
-                    };
-                    lines.push(format!(
-                        "Main connection: {} | Child email: {}",
-                        safe(parent),
-                        safe(email)
-                    ));
+                    match (parent, email) {
+                        (None, None) => {
+                            lines.push("Standalone subaccount | No main connection linked.".into());
+                        }
+                        (Some(parent), Some(email)) => lines.push(format!(
+                            "Main connection: {} | Child email: {}",
+                            safe(parent),
+                            safe(email)
+                        )),
+                        _ => {
+                            return Err(error(
+                                "INVALID_CHALLENGE",
+                                "Subaccount association is incomplete.",
+                            ));
+                        }
+                    }
                 }
                 if action != "remove" {
                     let permissions = binding["checks"]
@@ -458,6 +463,49 @@ mod tests {
                 .contains("External funds and positions remain")
         );
     }
+    #[test]
+    fn standalone_subaccount_review_supports_add_update_and_remove() {
+        for action in ["add", "update", "remove"] {
+            let mut binding = binance("sub");
+            binding["action"] = json!(action);
+            binding["connection"]["parent"] = Value::Null;
+            binding["connection"]["email"] = Value::Null;
+            let text = review(&binding).unwrap();
+            assert!(text.contains("Binance sub account | UID 123 | SPOT wallet"));
+            assert!(text.contains("Standalone subaccount | No main connection linked."));
+            assert!(!text.contains("SYNTHETIC-ref"));
+            assert!(!text.contains("Child email:"));
+        }
+    }
+
+    #[test]
+    fn subaccount_review_rejects_partial_associations() {
+        for action in ["add", "update", "remove"] {
+            for missing in ["parent", "email"] {
+                let mut binding = binance("sub");
+                binding["action"] = json!(action);
+                binding["connection"][missing] = Value::Null;
+                assert_eq!(review(&binding).unwrap_err().code, "INVALID_CHALLENGE");
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_subaccount_review_still_requires_verified_matching_identity() {
+        for (field, value) in [
+            ("physical_identity_verified", json!(false)),
+            ("physical_identity", json!("456")),
+            ("resource", json!("binance:uid:456:SPOT")),
+            ("wallet_type", json!("FUTURES")),
+        ] {
+            let mut binding = binance("sub");
+            binding["connection"]["parent"] = Value::Null;
+            binding["connection"]["email"] = Value::Null;
+            binding["connection"][field] = value;
+            assert_eq!(review(&binding).unwrap_err().code, "INVALID_CHALLENGE");
+        }
+    }
+
     #[test]
     fn setup_review_matches_only_the_implemented_policy() {
         let config = BrokerConfigV2 {

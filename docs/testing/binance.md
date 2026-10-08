@@ -70,8 +70,27 @@ These are API mapping notes, not permission to expose arbitrary signed venue met
 4. Check transfer history and main-account credit before counting the consolidated funds as available. Preserve successful transfers if another fails.
 5. Preview the withdrawal using current network availability, minimums, fees, and the resolved destination. Make gross debit versus net receipt explicit; do not assume every asset/route uses the same fee semantics.
 6. Obtain fresh Touch ID and submit the withdrawal once. Preserve the withdrawal identifier even if the response or subsequent polling fails.
-7. Track venue status and the corresponding Ethereum transfer. Verify exact network, asset identity, recipient, amount, and the configured confirmation requirement.
+7. Track venue status and the corresponding chain transfer. Verify exact network,
+   asset identity, recipient and amount. Ethereum mainnet keeps its configured
+   confirmation requirement. For Binance withdrawals to Arbitrum One or
+   Robinhood Chain, one canonical sequencer-included block is sufficient when
+   the original withdrawal hash and all approved destination fields match; do
+   not describe this evidence as parent-chain finality. This applies only when
+   Binance metadata provides a supported route. The Robinhood network mapping
+   is currently unavailable/unverified, so route availability must be reported
+   blocked rather than inferred from the chain observer.
 8. Reconcile source, main-account, and destination balances, fees, and any remaining in-flight funds. This establishes the outward leg; complete the return sequence below before marking the live run passed.
+
+The one-block sequencer rule applies only to receipt verification for an
+external Binance withdrawal to an Arbitrum or Robinhood recipient. It verifies
+the original transaction hash, chain and canonical block header, recipient,
+asset and expected net amount, plus the historical recipient holdings evidence.
+Its label is sequencer inclusion; it does not claim parent-chain finality.
+Fin-originated wallet transfers and Binance deposits keep their existing
+RPC-finality rule. Their pending submissions continue to reconcile against the
+same original operation ID after a restart or lost response. The L2 cases are
+synthetic verification here; they do not establish live settlement or extend
+the current production Ethereum-mainnet live-test contract.
 
 A blockchain receipt alone is insufficient if the asset or recipient is wrong. Balance changes alone may also be ambiguous when unrelated activity occurs; correlate them with transfer history, identifiers, and transaction/event evidence.
 
@@ -96,7 +115,7 @@ Every return transfer is part of the intended live test, has its own record, rem
 | B01 | Named hierarchy, balances, funding capabilities                                                                                | Correct main/subaccount ownership and wallet types; no credentials exposed; available versus committed amounts distinguished.                                                                    |
 | B02 | Two subaccounts → main                                                                                                         | Each authorized transfer produces one matching movement and main credit; per-step evidence persists.                                                                                             |
 | B03 | Main → subaccount                                                                                                              | Correct authority, source/destination, amount, and credited balance.                                                                                                                             |
-| B04 | Main withdrawal → Ethereum wallet                                                                                              | Correct network/token/address, reconciled amount and fees, venue record plus destination receipt.                                                                                                |
+| B04 | Main withdrawal → Ethereum wallet                                                                                              | Correct network/token/address, reconciled amount and fees, venue record plus destination receipt under Ethereum's configured confirmation rule.                                                   |
 | B05 | Ethereum wallet → Binance deposit                                                                                              | Correct deposit instructions, one authorized transfer, confirmed chain result and exchange credit.                                                                                               |
 | B06 | One consolidation succeeds, next fails                                                                                         | Completed transfer retained; no replay or unrequested compensating transfer; agent sees remaining work.                                                                                          |
 | B07 | Withdrawal accepted but response lost                                                                                          | Original record is reconciled; no duplicate withdrawal; result stays unknown if evidence is insufficient.                                                                                        |
@@ -104,6 +123,7 @@ Every return transfer is part of the intended live test, has its own record, rem
 | B09 | Missing permission, blocked network, insufficient balance, invalid precision, unmet account prerequisite, or declined approval | Specific reason and zero unauthorized financial submissions; no credential or route substitution.                                                                                                |
 | B10 | Accepted withdrawal/deposit still pending                                                                                      | Submission, chain receipt, and usable venue credit remain distinct; status polling requires no new approval.                                                                                     |
 | B11 | Production round trip within the test budget                                                                                   | Each movement and total allocation respect the $100 limits; funds return to the starting wallets/accounts/subaccounts with all costs explained and no displaced test funds or pending movements. |
+| B12 | Binance withdrawal → Arbitrum/Robinhood wallet                                                                                  | If Binance metadata exposes the route, exact original hash, chain, canonical header, recipient, asset, expected net amount and recipient holdings match a one-block receipt labeled sequencer inclusion. Otherwise report route unavailable; never infer it. |
 
 Apply [C01–C19](README.md#common-acceptance-cases) where relevant to onboarding and these operations. Induce destructive/ambiguous edge cases using controlled fixtures, not by deliberately disrupting a real funded account. Keep live and fixture results distinct.
 
@@ -185,3 +205,69 @@ symbol's finite maximum price, not an assumed favorable-fill price. Symbols whos
 worst-case fees cannot fit explicit/personal bounds fail before approval.
 Unexpected partial fills, missing trade evidence and unknown withdrawals remain
 unresolved with reservations; venue success alone is not destination receipt.
+
+## EVM deposit verification
+
+Run offline fixtures before any human deposit session:
+
+```sh
+cargo test --locked -p fin-binance --test address_book
+cargo test --locked -p fin-broker --test binance_roundtrip
+cargo test --locked -p fin-ethereum broker_verified_native_deposit --lib
+cargo test --locked -p fin-broker --lib
+make catalog
+cargo test --locked -p fin-cli --test offline_cli
+```
+
+Fixtures must cover own-account reads with only subaccount credentials, native
+and ERC20 routes (including Arbitrum), exact contract/chain/precision matching,
+deposit availability and minimums, unsupported memo/denomination, delayed or
+mismatched credit, response loss, duplicate requests, restart and historical
+bindings. Deposit revalidation must retain the approved transaction when current
+gas quotes change within its bounds; changed nonces, simulation failures and
+fees or gas estimates above the approved envelope must still prevent submission.
+Fresh USD quotes and observation timestamps inside displayed approval ceilings
+must retain the same approval; values above those ceilings, stale quotes or changed
+asset/provider identities must fail. Historical deposits remain reconcilable.
+No default test loads protected production credentials or submits a
+live transaction. Own-account network/address/history endpoints use the selected
+account's credential; master-authorized hierarchy reads are optional. A venue
+permission/IP/eligibility failure must identify the specific failing capability,
+without claiming all subaccount deposits require master credentials.
+
+For an authorized read-only capability check, use `fin connections list --json`,
+then `binance.networks`, `binance.deposit-address` and `binance.deposit-history`
+with that subaccount's name. Keep full account/address/history results private.
+An empty history proves endpoint access, not a completed deposit. Metadata may
+advertise chains that Fin cannot submit from. Missing denomination denotes the
+ordinary route; a supplied non-unit denomination is unsupported. Never derive
+a token contract from its ticker.
+
+Later human checklist (pending until actually observed):
+
+1. Review/build the changes and, separately, update the protected installation in
+   your own Terminal. Enroll a standalone subaccount with `fin connections add
+   binance --name binance-sub --role sub --credential-type hmac` if needed;
+   supply credentials only at the hidden protected prompt. An existing verified
+   subaccount may be used without changing its enrollment.
+2. Read current metadata, address and history for the chosen coin/network. Check
+   the source wallet chain, exact ERC20 contract or native identity, minimum,
+   available funds, gas cap and complete funded return route. For an acceptance
+   test, record the baseline and stay within the existing $100 total and movement
+   limits, including return costs.
+3. Inspect `fin schema binance.deposit --json`; preview with `--dry-run --json`.
+   Present the exact source, destination account/address, chain, asset, amount
+   and fee cap. Check concise human output and structured noninteractive JSON.
+4. Only after separately authorizing a live test, execute once with a stable ID.
+   Verify real Touch ID acceptance and, in separate unsubmitted attempts,
+   cancellation/expiry. Changed material inputs must require a new approval.
+5. Reconcile the original ID until both canonical chain evidence and matching
+   usable Binance credit are proved. During delayed credit, verify the operation
+   remains unresolved and duplicate invocation causes no second transfer.
+6. Restore the recorded test holdings and account allocation using separately
+   approved return operations; reconcile fees and any dust. No live pass while
+   credit or restoration is unresolved.
+
+Installation, native Touch ID, credential isolation, funded main/subaccount
+deposits and restoration are separate observations. Synthetic passes and
+read-only endpoint access do not establish any of those live-write cases.

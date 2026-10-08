@@ -26,13 +26,13 @@ struct DepositEntry {
 
 pub(super) fn definitions() -> Vec<Definition> {
     [
-        ("binance.deposit-addresses", "List Binance deposit addresses for an explicit coin/network. Creating an additional address requires Binance's website/app.", serde_json::to_value(schema_for!(DepositAddressInput)).unwrap(), json!({"account":"master","coin":"ETH","network":"ETH"}), "Use Binance Deposit Crypto to claim a new address where available, then repeat this read."),
+        ("binance.deposit-addresses", "List the selected account's own Binance deposit addresses for an explicit coin/network using that account's credential, including a subaccount-only connection. Creating an additional address requires Binance's website/app.", serde_json::to_value(schema_for!(DepositAddressInput)).unwrap(), json!({"account":"master","coin":"ETH","network":"ETH"}), "Use Binance Deposit Crypto to claim a new address where available, then repeat this read."),
         ("binance.whitelist", "Inspect withdrawal-address whitelist flags, optionally checking an exact coin/network/address/memo. Editing requires Binance's website/app.", serde_json::to_value(schema_for!(WhitelistInput)).unwrap(), json!({"account":"master","coin":"ETH","network":"ETH","address":"0x1111111111111111111111111111111111111111","memo":""}), "Use Binance withdrawal Address Management to edit entries and complete its security checks, then repeat this read."),
     ].into_iter().map(|(name, description, input_schema, example, human_action)| Definition {
         name: name.into(), description: description.into(), kind: OperationKind::Read,
         execution_actor: ExecutionActor::AgentReadable, input_schema: input_schema_with_constraints(name, input_schema),
         output_schema: output_schema(name), error_schema: schema_for!(FinError).into(), examples:vec![example],
-        coverage: "Documented Binance GET routes; synthetic tests. Authenticated live observations pending.".into(),
+        coverage: "Binance own-account GET routes use the selected connection's credential; no parent/master lookup is used. If Binance denies a specific route, its response is reported for that capability only. Synthetic tests; authenticated live observations pending.".into(),
         completion: "Bounded address-book observation only; no address creation, whitelist modification, account-wide enforcement or withdrawal eligibility proof.".into(),
         semantics:json!({"financial_movement":false,"editing_supported":false,"human_action":human_action,"next_check":format!("fin read {name} --input JSON --json"),"limits":"Per-entry whitelist flags do not prove account-wide enforcement or that a security cooldown has elapsed.","maximum_rows":MAX_ADDRESSES}),
     }).collect()
@@ -138,7 +138,7 @@ impl BinanceProfile {
             let account = self.account(&input.account)?;
             let currency = self.currency(account, &input.coin).await?;
             let network = self.network(&currency, &input.network)?;
-            if network.deposit_enable != Some(true) {
+            if currency.deposit_all_enable != Some(true) || network.deposit_enable != Some(true) {
                 return Err(error(
                     "DEPOSIT_DISABLED",
                     "read",

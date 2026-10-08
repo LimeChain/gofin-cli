@@ -29,6 +29,13 @@ fn error(code: &str, stage: &str, message: &str) -> FinError {
         "Inspect the original operation and its configured network; never replay an uncertain submission.",
     )
 }
+
+fn ceil_percent(value: U256, percent: u64) -> Option<U256> {
+    value
+        .checked_mul(U256::from(percent))
+        .and_then(|scaled| scaled.checked_add(U256::from(99)))
+        .map(|scaled| scaled / U256::from(100))
+}
 pub fn address(value: &str) -> Result<Address> {
     Address::from_str(value).map_err(|_| {
         error(
@@ -767,10 +774,7 @@ impl EvmRuntime {
                 "Current required fee exceeds the explicit total fee bound.",
             ));
         }
-        let max = required
-            .checked_mul(U256::from(150))
-            .and_then(|n| n.checked_add(U256::from(99)))
-            .map(|n| n / U256::from(100))
+        let max = ceil_percent(required, 150)
             .ok_or_else(|| {
                 error(
                     "U256_OVERFLOW",
@@ -779,6 +783,15 @@ impl EvmRuntime {
                 )
             })?
             .min(affordable);
+        let max_priority = ceil_percent(priority, 150)
+            .ok_or_else(|| {
+                error(
+                    "U256_OVERFLOW",
+                    "preview",
+                    "Priority fee headroom overflowed.",
+                )
+            })?
+            .min(max);
         let transaction = FrozenTransaction {
             chain_id: self.chain_id,
             sender: lower_address(sender),
@@ -788,7 +801,7 @@ impl EvmRuntime {
             nonce: self.pending_nonce(sender).await?,
             gas,
             max_fee_per_gas: quantity(max),
-            max_priority_fee_per_gas: quantity(priority),
+            max_priority_fee_per_gas: quantity(max_priority),
         };
         transaction.consensus()?;
         let cost = transaction.maximum_cost()?;
@@ -1042,6 +1055,19 @@ pub fn block_tag(block: Option<u64>) -> String {
     block
         .map(|n| format!("{n:#x}"))
         .unwrap_or_else(|| "latest".into())
+}
+
+#[cfg(test)]
+mod fee_math_tests {
+    use super::ceil_percent;
+    use alloy::primitives::U256;
+
+    #[test]
+    fn percentage_headroom_uses_checked_integer_arithmetic() {
+        assert_eq!(ceil_percent(U256::from(10), 150), Some(U256::from(15)));
+        assert_eq!(ceil_percent(U256::from(1), 150), Some(U256::from(2)));
+        assert_eq!(ceil_percent(U256::MAX, 150), None);
+    }
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -42,12 +42,23 @@ const STEP_A_OUT: &str = "main-to-a";
 fn resource(uid: u64) -> ResourceId {
     ResourceId(format!("binance:uid:{uid}:SPOT"))
 }
+fn micros(value: &str) -> i128 {
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or("0").parse::<i128>().unwrap();
+    let fraction = parts.next().unwrap_or("0");
+    assert!(fraction.len() <= 6);
+    whole * 1_000_000 + format!("{fraction:0<6}").parse::<i128>().unwrap()
+}
+fn format_micros(value: i128) -> String {
+    format!("{}.{:06}", value / 1_000_000, value % 1_000_000)
+}
 fn transfer(id: &str, from: &str, to: &str, amount: &str) -> Value {
     json!({"requestId":id,"authority":MAIN,"from":from,"to":to,"coin":ASSET,"amount":amount,"fromWallet":"SPOT","toWallet":"SPOT"})
 }
 #[derive(Default)]
 struct VenueState {
     balances: BTreeMap<String, String>,
+    usdc_balances: BTreeMap<String, String>,
     history: Vec<Value>,
     deposit_history: Vec<Value>,
     withdrawal_history: Vec<Value>,
@@ -58,6 +69,10 @@ struct VenueState {
     accept_then_timeout: Option<String>,
     restrictions: Option<bool>,
     withdraw_fee: String,
+    deposit_enabled: bool,
+    deposit_memo_regex: Option<String>,
+    deposit_memo: Option<String>,
+    deposit_denomination: Option<u64>,
 }
 struct SyntheticVenue {
     state: Mutex<VenueState>,
@@ -72,8 +87,17 @@ impl SyntheticVenue {
                     (EMAIL_A.into(), "0.005".into()),
                     (EMAIL_B.into(), "0.010".into()),
                 ]),
+                usdc_balances: BTreeMap::from([
+                    ("main".into(), "0".into()),
+                    (EMAIL_A.into(), "0".into()),
+                    (EMAIL_B.into(), "0".into()),
+                ]),
                 restrictions: Some(true),
                 withdraw_fee: "0.001".into(),
+                deposit_enabled: true,
+                deposit_memo_regex: None,
+                deposit_memo: None,
+                deposit_denomination: None,
                 ..VenueState::default()
             }),
             wallet_balance: Mutex::new(None),
@@ -93,15 +117,33 @@ impl SyntheticVenue {
             .insert(key.into(), format!("{}.{:03}", next / 1000, next % 1000));
     }
     fn record_deposit(&self, tx_hash: &str, amount: &str) {
+        self.record_coin_deposit_for("main", ASSET, "ETH", tx_hash, amount);
+    }
+    fn record_coin_deposit_for(
+        &self,
+        account: &str,
+        coin: &str,
+        network: &str,
+        tx_hash: &str,
+        amount: &str,
+    ) {
         let mut state = self.state.lock().unwrap();
-        let milli_amount = milli(amount);
-        Self::alter(&mut state, "main", milli_amount);
+        if coin == "ETH" {
+            let milli_amount = milli(amount);
+            Self::alter(&mut state, account, milli_amount);
+        } else if coin == "USDC" {
+            let current = micros(state.usdc_balances.get(account).unwrap());
+            let next = current + micros(amount);
+            state
+                .usdc_balances
+                .insert(account.into(), format_micros(next));
+        }
         state.deposit_history.push(json!({
             "id":"synthetic-deposit-row-1",
-            "coin":ASSET,
+            "coin":coin,
             "amount":amount,
             "transactionFee":"0",
-            "network":"ETH",
+            "network":network,
             "address":"0x1111111111111111111111111111111111111111",
             "addressTag":"",
             "txId":tx_hash,
@@ -155,7 +197,7 @@ impl BinanceTransport for SyntheticVenue {
                     _ => 1003,
                 };
                 Ok(
-                    json!({"uid":uid,"accountType":"SPOT","balances":[{"asset":ASSET,"free":Self::free(&s, owner),"locked":"0"}]}),
+                    json!({"uid":uid,"accountType":"SPOT","balances":[{"asset":ASSET,"free":Self::free(&s, owner),"locked":"0"},{"asset":"USDC","free":s.usdc_balances.get(owner).cloned().unwrap_or_else(||"0".into()),"locked":"0"}]}),
                 )
             }
             E::SubAccountSpotAssets => {
@@ -199,12 +241,28 @@ impl BinanceTransport for SyntheticVenue {
                 }).take(limit).collect::<Vec<_>>();
                 Ok(json!(rows))
             }
-            E::CapitalConfig => Ok(
-                json!([{"coin":ASSET,"depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ETH","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":s.withdraw_fee,"withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":true,"minConfirm":12,"unLockConfirm":64}]}]),
-            ),
-            E::DepositAddress => Ok(
-                json!({"coin":ASSET,"network":"ETH","address":"0x1111111111111111111111111111111111111111","tag":""}),
-            ),
+            E::CapitalConfig => Ok(json!([
+                {"coin":ASSET,"depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ETH","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":s.withdraw_fee,"withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"minConfirm":12,"unLockConfirm":64},{"network":"ARBITRUM","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":"0","withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"minConfirm":12,"unLockConfirm":64}]},
+                {"coin":"USDC","depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ARBITRUM","coin":"USDC","withdrawIntegerMultiple":"0.000001","withdrawFee":"0","withdrawMin":"0.001","withdrawMax":"1000000","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"contractAddress":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831","denomination":s.deposit_denomination,"minConfirm":12,"unLockConfirm":64}]}
+            ])),
+            E::DepositAddress => {
+                if params.get("coin").is_some_and(|coin| coin == "USDC") {
+                    Ok(
+                        json!({"coin":"USDC","network":"ARBITRUM","address":"0x1111111111111111111111111111111111111111","tag":s.deposit_memo.clone().unwrap_or_default()}),
+                    )
+                } else if params
+                    .get("network")
+                    .is_some_and(|network| network == "ARBITRUM")
+                {
+                    Ok(
+                        json!({"coin":ASSET,"network":"ARBITRUM","address":"0x1111111111111111111111111111111111111111","tag":""}),
+                    )
+                } else {
+                    Ok(
+                        json!({"coin":ASSET,"network":"ETH","address":"0x1111111111111111111111111111111111111111","tag":""}),
+                    )
+                }
+            }
             E::WithdrawAddressList => Ok(json!([])),
             E::DepositHistory => {
                 let records = s
@@ -360,6 +418,73 @@ impl Authorizer for SyntheticApproval {
     }
 }
 struct SyntheticBinancePrice;
+struct SyntheticWalletPrice;
+
+/// CoinGecko-shaped synthetic valuation source for composite deposit approval
+/// boundary tests. Price and publication timestamp move independently of the
+/// actual observation time, as with a refreshed provider quote.
+struct MutableEthereumUsd {
+    usd_micros_per_eth: AtomicU64,
+    updated_at: Mutex<String>,
+}
+
+impl MutableEthereumUsd {
+    fn new(usd_micros_per_eth: u64) -> Self {
+        Self {
+            usd_micros_per_eth: AtomicU64::new(usd_micros_per_eth),
+            updated_at: Mutex::new(
+                (chrono::Utc::now() - chrono::Duration::seconds(1))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+        }
+    }
+
+    fn update(&self, usd_micros_per_eth: u64) {
+        self.usd_micros_per_eth
+            .store(usd_micros_per_eth, Ordering::SeqCst);
+        *self.updated_at.lock().unwrap() =
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    }
+}
+
+#[async_trait]
+impl fin_ethereum::WalletValuation for MutableEthereumUsd {
+    async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+        let (value, source, _) = self.quote_observation(asset, units).await?;
+        Ok((value, source))
+    }
+
+    async fn quote_observation(
+        &self,
+        asset: &AssetId,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
+        assert_eq!(asset.reference, "native");
+        assert_eq!(asset.decimals, 18);
+        let micros = fin_evm::u256(&units)?
+            * fin_evm::alloy::primitives::U256::from(
+                self.usd_micros_per_eth.load(Ordering::SeqCst),
+            )
+            / fin_evm::alloy::primitives::U256::from(10u8)
+                .pow(fin_evm::alloy::primitives::U256::from(18u64));
+        let source = format!(
+            "coingecko:ethereum-usd; updated:{}",
+            self.updated_at.lock().unwrap()
+        );
+        Ok((fin_evm::quantity(micros), source, now()))
+    }
+}
+
+#[async_trait]
+impl fin_ethereum::WalletValuation for SyntheticWalletPrice {
+    async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+        let micros = fin_evm::u256(&units)? * fin_evm::alloy::primitives::U256::from(1_000_000u64)
+            / fin_evm::alloy::primitives::U256::from(10u64).pow(
+                fin_evm::alloy::primitives::U256::from(asset.decimals as u64),
+            );
+        Ok((fin_evm::quantity(micros), "synthetic-arbitrum-usd".into()))
+    }
+}
 #[async_trait]
 impl BinancePriceProvider for SyntheticBinancePrice {
     async fn quote_usd(&self, coin: &str) -> std::result::Result<PriceQuote, FinError> {
@@ -513,6 +638,16 @@ fn adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
             None,
         )
         .unwrap(),
+    )
+}
+fn subaccount_only_adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
+    let mut config = adapter_config();
+    let mut child = config.accounts.remove(1);
+    child.parent = None;
+    child.email = None;
+    config.accounts = vec![child];
+    Arc::new(
+        BinanceAdapter::new(config, venue, Some(Arc::new(SyntheticBinancePrice)), None).unwrap(),
     )
 }
 
@@ -953,8 +1088,69 @@ impl DepositPreviewRpc {
     }
 }
 
+struct ArbitrumTokenRpc {
+    token: String,
+}
+
+#[async_trait]
+impl EvmRpc for ArbitrumTokenRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let selector = |signature: &str| DepositPreviewRpc::selector(signature);
+        Ok(match method {
+            "eth_chainId" => json!("0xa4b1"),
+            "eth_blockNumber" => json!("0x65"),
+            "eth_getCode" => json!(if params[0]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case("0x1111111111111111111111111111111111111111")
+            {
+                "0x"
+            } else {
+                "0x6000"
+            }),
+            "eth_getBalance" => json!("0x16345785d8a0000"),
+            "eth_getTransactionCount" => json!("0x0"),
+            "eth_estimateGas" => json!("0x11170"),
+            "eth_maxPriorityFeePerGas" => json!("0x989680"),
+            "eth_getBlockByNumber" => {
+                json!({"number":"0x65","hash":format!("0x{}","cd".repeat(32)),"baseFeePerGas":"0x3b9aca00"})
+            }
+            "eth_call" => {
+                let to = params[0]["to"].as_str().unwrap_or_default();
+                let data = params[0]["data"].as_str().unwrap_or("0x");
+                if !to.eq_ignore_ascii_case(&self.token) || data.len() < 10 {
+                    json!("0x")
+                } else {
+                    let bytes = hex::decode(&data[2..10]).unwrap();
+                    let selected: [u8; 4] = bytes.try_into().unwrap();
+                    if selected == selector("decimals()") {
+                        json!(format!("0x{}", "00".repeat(31) + "06"))
+                    } else if selected == selector("symbol()") {
+                        let mut result = Vec::from(DepositPreviewRpc::abi_word(32));
+                        result.extend_from_slice(&DepositPreviewRpc::abi_word(4));
+                        result.extend_from_slice(b"USDC");
+                        result.resize(96, 0);
+                        json!(fin_evm::hex_bytes(&result))
+                    } else if selected == selector("balanceOf(address)") {
+                        json!(format!("0x{}", "00".repeat(28) + "05f5e100"))
+                    } else if selected == selector("transfer(address,uint256)") {
+                        json!(fin_evm::hex_bytes(&DepositPreviewRpc::abi_word(1)))
+                    } else {
+                        json!("0x")
+                    }
+                }
+            }
+            other => panic!("unexpected Arbitrum token preview RPC method {other}"),
+        })
+    }
+}
+
 struct DepositExecutionRpc {
     oracle_updated_at: u128,
+    priority_fee: AtomicU64,
+    nonce: AtomicU64,
+    gas_estimate: AtomicU64,
+    simulation_failure: AtomicBool,
     transaction: Arc<Mutex<Option<fin_evm::FrozenTransaction>>>,
     hash: Mutex<Option<String>>,
     accepted: AtomicUsize,
@@ -964,6 +1160,165 @@ struct DepositExecutionRpc {
     wallet_address: String,
     wallet_balance: Arc<Mutex<String>>,
     payout_amount: String,
+    lose_submit_response: AtomicBool,
+}
+
+struct ArbitrumErc20ExecutionRpc {
+    token: String,
+    transaction: Arc<Mutex<Option<fin_evm::FrozenTransaction>>>,
+    hash: Mutex<Option<String>>,
+    accepted: AtomicUsize,
+    venue: Arc<SyntheticVenue>,
+    journal: Arc<Mutex<Option<fin_domain::Submission>>>,
+    wallet_address: String,
+}
+
+#[async_trait]
+impl EvmRpc for ArbitrumErc20ExecutionRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        let transaction = self.transaction.lock().unwrap().clone();
+        match method {
+            "eth_chainId" => Ok(json!("0xa4b1")),
+            "eth_blockNumber" => Ok(json!("0x65")),
+            "eth_getCode" => Ok(json!(if params[0]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case("0x1111111111111111111111111111111111111111")
+            {
+                "0x"
+            } else {
+                "0x6000"
+            })),
+            "eth_getBalance" => Ok(json!("0x16345785d8a0000")),
+            "eth_getTransactionCount" => Ok(json!("0x0")),
+            "eth_estimateGas" => Ok(json!("0x11170")),
+            "eth_maxPriorityFeePerGas" => Ok(json!("0x989680")),
+            "eth_getBlockByNumber" => {
+                let number = if params[0] == "latest" || params[0] == "finalized" {
+                    "0x65"
+                } else {
+                    params[0].as_str().unwrap()
+                };
+                Ok(
+                    json!({"number":number,"hash":format!("0x{}","cd".repeat(32)),"baseFeePerGas":"0x3b9aca00"}),
+                )
+            }
+            "eth_call" => {
+                let to = params[0]["to"].as_str().unwrap_or_default();
+                let data = params[0]["data"].as_str().unwrap_or("0x");
+                if !to.eq_ignore_ascii_case(&self.token) || data.len() < 10 {
+                    return Ok(json!("0x"));
+                }
+                let selector: [u8; 4] = hex::decode(&data[2..10]).unwrap().try_into().unwrap();
+                if selector == DepositPreviewRpc::selector("decimals()") {
+                    Ok(json!(format!("0x{}", "00".repeat(31) + "06")))
+                } else if selector == DepositPreviewRpc::selector("symbol()") {
+                    let mut result = Vec::from(DepositPreviewRpc::abi_word(32));
+                    result.extend_from_slice(&DepositPreviewRpc::abi_word(4));
+                    result.extend_from_slice(b"USDC");
+                    result.resize(96, 0);
+                    Ok(json!(fin_evm::hex_bytes(&result)))
+                } else if selector == DepositPreviewRpc::selector("balanceOf(address)") {
+                    Ok(json!(format!("0x{}", "00".repeat(28) + "05f5e100")))
+                } else if selector == DepositPreviewRpc::selector("transfer(address,uint256)") {
+                    Ok(json!(fin_evm::hex_bytes(&DepositPreviewRpc::abi_word(1))))
+                } else {
+                    Ok(json!("0x"))
+                }
+            }
+            "eth_sendRawTransaction" => {
+                let persisted = self.journal.lock().unwrap().clone().ok_or_else(|| {
+                    FinError::new(
+                        "JOURNAL_ORDER_INVALID",
+                        "test",
+                        "No durable submission was stored before broadcast.",
+                        "Persist before dispatch.",
+                    )
+                })?;
+                if self.accepted.fetch_add(1, Ordering::SeqCst) != 0 {
+                    return Err(FinError::new(
+                        "DUPLICATE_BROADCAST",
+                        "test",
+                        "ERC20 transfer was broadcast twice.",
+                        "Reconcile the original hash.",
+                    ));
+                }
+                let raw =
+                    hex::decode(params[0].as_str().unwrap().trim_start_matches("0x")).unwrap();
+                let hash = format!("{:#x}", fin_evm::alloy::primitives::keccak256(raw));
+                if persisted.reference != hash {
+                    return Err(FinError::new(
+                        "JOURNAL_IDENTITY_MISMATCH",
+                        "test",
+                        "Persisted ERC20 hash differs from accepted bytes.",
+                        "Reconcile the original identity.",
+                    ));
+                }
+                let tx = transaction
+                    .ok_or_else(|| FinError::validation("No frozen ERC20 transaction."))?;
+                let calldata = hex::decode(tx.calldata.trim_start_matches("0x")).unwrap();
+                assert_eq!(
+                    &calldata[..4],
+                    &DepositPreviewRpc::selector("transfer(address,uint256)")
+                );
+                let amount = fin_evm::alloy::primitives::U256::from_be_slice(&calldata[36..68]);
+                let amount_text = format!(
+                    "{}.{:0>6}",
+                    amount / fin_evm::alloy::primitives::U256::from(1_000_000u64),
+                    amount % fin_evm::alloy::primitives::U256::from(1_000_000u64)
+                );
+                self.venue.record_coin_deposit_for(
+                    EMAIL_A,
+                    "USDC",
+                    "ARBITRUM",
+                    &hash,
+                    &amount_text,
+                );
+                *self.hash.lock().unwrap() = Some(hash.clone());
+                Ok(json!(hash))
+            }
+            "eth_getTransactionReceipt" => {
+                let hash = self.hash.lock().unwrap().clone();
+                if hash.as_deref() != params[0].as_str() || transaction.is_none() {
+                    return Ok(Value::Null);
+                }
+                let tx = transaction.unwrap();
+                let calldata = hex::decode(tx.calldata.trim_start_matches("0x")).unwrap();
+                let recipient = format!("0x{}", hex::encode(&calldata[16..36]));
+                let amount = format!("0x{}", hex::encode(&calldata[36..68]));
+                let transfer_topic = format!(
+                    "{:#x}",
+                    fin_evm::alloy::primitives::keccak256("Transfer(address,address,uint256)")
+                );
+                let from_topic = format!(
+                    "0x{}{}",
+                    "0".repeat(24),
+                    self.wallet_address
+                        .trim_start_matches("0x")
+                        .to_ascii_lowercase()
+                );
+                let to_topic = format!(
+                    "0x{}{}",
+                    "0".repeat(24),
+                    recipient.trim_start_matches("0x").to_ascii_lowercase()
+                );
+                Ok(
+                    json!({"transactionHash":hash,"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","status":"0x1","gasUsed":"0x11170","effectiveGasPrice":"0x77359400","logs":[{"address":self.token,"topics":[transfer_topic,from_topic,to_topic],"data":amount,"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64","transactionHash":hash,"logIndex":"0x0","removed":false}]}),
+                )
+            }
+            "eth_getTransactionByHash" => {
+                let hash = self.hash.lock().unwrap().clone();
+                if hash.as_deref() != params[0].as_str() || transaction.is_none() {
+                    return Ok(Value::Null);
+                }
+                let tx = transaction.unwrap();
+                Ok(
+                    json!({"hash":hash,"from":tx.sender,"to":tx.to,"nonce":format!("{:#x}",tx.nonce),"chainId":format!("{:#x}",tx.chain_id),"type":"0x2","gas":format!("{:#x}",tx.gas),"value":format!("{:#x}",fin_evm::alloy::primitives::U256::from_str(tx.value.as_str()).unwrap()),"input":tx.calldata,"maxFeePerGas":format!("{:#x}",fin_evm::alloy::primitives::U256::from_str(tx.max_fee_per_gas.as_str()).unwrap()),"maxPriorityFeePerGas":format!("{:#x}",fin_evm::alloy::primitives::U256::from_str(tx.max_priority_fee_per_gas.as_str()).unwrap()),"accessList":[],"blockHash":format!("0x{}","cd".repeat(32)),"blockNumber":"0x64"}),
+                )
+            }
+            other => panic!("unexpected ERC20 deposit RPC method {other}"),
+        }
+    }
 }
 
 struct RecordingSigner {
@@ -1068,6 +1423,15 @@ impl EvmRpc for DepositExecutionRpc {
                     false,
                 );
                 adjust_native_balance(&self.wallet_balance, "0.000042", false);
+                if self.lose_submit_response.swap(false, Ordering::SeqCst) {
+                    self.venue.state.lock().unwrap().deposit_history[0]["status"] = json!(0);
+                    return Err(FinError::new(
+                        "SUBMISSION_RESPONSE_LOST",
+                        "submission",
+                        "Synthetic RPC accepted the durable transaction but lost its response.",
+                        "Reconcile the original submission identity.",
+                    ));
+                }
                 Ok(json!(hash))
             }
             "eth_chainId" => Ok(json!("0x1")),
@@ -1128,10 +1492,26 @@ impl EvmRpc for DepositExecutionRpc {
                 "0x6000"
             })),
             "eth_getBalance" => Ok(json!("0x16345785d8a0000")),
-            "eth_getTransactionCount" => Ok(json!("0x0")),
-            "eth_estimateGas" => Ok(json!("0x5208")),
-            "eth_maxPriorityFeePerGas" => Ok(json!("0x989680")),
+            "eth_getTransactionCount" => {
+                Ok(json!(format!("{:#x}", self.nonce.load(Ordering::SeqCst))))
+            }
+            "eth_estimateGas" => Ok(json!(format!(
+                "{:#x}",
+                self.gas_estimate.load(Ordering::SeqCst)
+            ))),
+            "eth_maxPriorityFeePerGas" => Ok(json!(format!(
+                "{:#x}",
+                self.priority_fee.load(Ordering::SeqCst)
+            ))),
             "eth_call" => {
+                if self.simulation_failure.load(Ordering::SeqCst) {
+                    return Err(FinError::new(
+                        "SIMULATION_REVERTED",
+                        "test",
+                        "Synthetic transfer simulation reverted.",
+                        "Keep the approved operation blocked.",
+                    ));
+                }
                 let to = params[0]["to"].as_str().unwrap_or("");
                 let data = params[0]["data"].as_str().unwrap_or("0x");
                 if to.eq_ignore_ascii_case(&oracle) && data.len() >= 10 {
@@ -1366,7 +1746,7 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
 }
 
 #[tokio::test]
-async fn arbitrum_payout_verifier_requires_canonical_finalized_exact_destination_receipt() {
+async fn arbitrum_payout_verifier_recovers_legacy_confirmation_count_at_sequencer_inclusion() {
     use fin_binance::{BinanceRecipientVerifier, PayoutRequest};
     let rpc = Arc::new(CanonicalNativeCreditRpc::new(42161));
     let recipient = "0x1111111111111111111111111111111111111111";
@@ -1399,41 +1779,31 @@ async fn arbitrum_payout_verifier_requires_canonical_finalized_exact_destination
         maximum_amount: "0.01".into(),
         confirmations: 2,
     };
-    // Sequencer confirmations do not establish final destination receipt.
+    // A historical request retains its stored two-confirmation identity, but
+    // the reviewed incoming-credit policy requires only sequencer inclusion.
+    *rpc.latest.lock().unwrap() = "0x64".into();
     for finalized in [None, Some("0x63".to_owned()), Some("invalid".to_owned())] {
         *rpc.finalized.lock().unwrap() = finalized;
-        let result = verifier.verify(request.clone()).await;
-        assert_eq!(result.status, fin_domain::Status::Pending);
-        assert!(result.amount_atoms.is_none());
+        let completed = verifier.verify(request.clone()).await;
+        assert_eq!(completed.status, fin_domain::Status::Completed);
+        assert_eq!(
+            completed.amount_atoms,
+            Some(Quantity::from_decimal("0.01", 18).unwrap())
+        );
+        assert_eq!(
+            completed.evidence["proof_method"],
+            "canonical-direct-native-value"
+        );
+        assert_eq!(completed.evidence["chain_id"], 42161);
+        assert_eq!(completed.evidence["finality"], "sequencer-inclusion");
+        assert_eq!(rpc.finalized_seen.load(Ordering::SeqCst), 0);
     }
-    *rpc.finalized.lock().unwrap() = Some("0x65".into());
-    rpc.finalized_seen.store(0, Ordering::SeqCst);
-    rpc.change_inclusion_after_finality
-        .store(1, Ordering::SeqCst);
-    let changed = verifier.verify(request.clone()).await;
-    assert_eq!(changed.status, fin_domain::Status::Pending);
-    assert!(changed.amount_atoms.is_none());
-    rpc.change_inclusion_after_finality
-        .store(0, Ordering::SeqCst);
-    let completed = verifier.verify(request.clone()).await;
-    assert_eq!(completed.status, fin_domain::Status::Completed);
-    assert_eq!(
-        completed.amount_atoms,
-        Some(Quantity::from_decimal("0.01", 18).unwrap())
-    );
-    assert_eq!(
-        completed.evidence["proof_method"],
-        "canonical-direct-native-value"
-    );
-    assert_eq!(completed.evidence["chain_id"], 42161);
-    assert_eq!(completed.evidence["finality"], "rpc-finalized");
-
-    *rpc.latest.lock().unwrap() = "0x64".into();
+    *rpc.latest.lock().unwrap() = "0x63".into();
     assert_eq!(
         verifier.verify(request.clone()).await.status,
         fin_domain::Status::Pending
     );
-    *rpc.latest.lock().unwrap() = "0x65".into();
+    *rpc.latest.lock().unwrap() = "0x64".into();
     *rpc.recipient.lock().unwrap() = "0x3333333333333333333333333333333333333333".into();
     let wrong_recipient = verifier.verify(request.clone()).await;
     assert_eq!(wrong_recipient.status, fin_domain::Status::Unknown);
@@ -1472,7 +1842,7 @@ async fn arbitrum_payout_verifier_requires_canonical_finalized_exact_destination
 }
 
 #[tokio::test]
-async fn binance_deposit_preview_freezes_only_current_fixed_eth_target_and_exact_cross_asset_amount()
+async fn binance_deposit_preview_freezes_dynamic_main_or_subaccount_target_and_exact_cross_asset_amount()
  {
     let venue = Arc::new(SyntheticVenue::new());
     let binance = adapter(venue.clone());
@@ -1529,14 +1899,206 @@ async fn binance_deposit_preview_freezes_only_current_fixed_eth_target_and_exact
             .code,
         "DEPOSIT_MINIMUM"
     );
-    let invalid_wallet = json!({"requestId":"synthetic-deposit-3","account":"child-a","wallet":"synthetic-wallet","amount":"0.01","maxFeeEth":"0.001"});
+    let child = json!({"requestId":"synthetic-deposit-3","account":"child-a","wallet":"synthetic-wallet","amount":"0.01","maxFeeEth":"0.001"});
+    let child_preview = composite.prepare("binance.deposit", &child).await.unwrap();
+    assert_eq!(
+        child_preview.binding["target"]["account_resource"],
+        resource(1002).0
+    );
+}
+
+#[tokio::test]
+async fn subaccount_only_credentials_and_dynamic_arbitrum_usdc_route_are_supported() {
+    let venue = Arc::new(SyntheticVenue::new());
+    let binance = subaccount_only_adapter(venue.clone());
+    assert_eq!(binance.connections().len(), 1);
+    assert_eq!(binance.connections()[0].role.as_deref(), Some("sub"));
+    assert!(binance.connections()[0].parent.is_none());
+
+    let token = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+    let wallet_address = "0x2222222222222222222222222222222222222222";
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: wallet_address.into(),
+                signing_enabled: true,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(
+                Arc::new(ArbitrumTokenRpc {
+                    token: token.into(),
+                }),
+                42161,
+                None,
+            )),
+        )
+        .unwrap()
+        .with_wallet_valuation(Arc::new(SyntheticWalletPrice)),
+    );
+    let composite = fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum);
+    let input = json!({"requestId":"sub-usdc-arbitrum","account":"child-a","wallet":"synthetic-wallet","amount":"1.25","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":token});
+    let preview = composite.prepare("binance.deposit", &input).await.unwrap();
+    assert_eq!(
+        preview.binding["target"]["account_resource"],
+        resource(1002).0
+    );
+    assert_eq!(preview.binding["target"]["network"], "ARBITRUM");
+    assert_eq!(preview.binding["target"]["chain_id"], 42161);
+    assert_eq!(
+        preview.binding["source_asset"]["reference"],
+        token.to_ascii_lowercase()
+    );
+    assert_eq!(preview.binding["source_asset"]["decimals"], 6);
+    assert_eq!(
+        preview.binding["inner_input"]["token"],
+        token.to_ascii_lowercase()
+    );
+    assert_eq!(preview.intent.debits[0].amount.atoms.to_decimal(6), "1.25");
+    match &preview.intent.expected[0] {
+        fin_domain::EffectConstraint::Transfer {
+            minimum_credit,
+            credit_asset,
+            debit_asset,
+            ..
+        } => {
+            assert_eq!(minimum_credit.to_decimal(36), "1.25");
+            assert_eq!(credit_asset.reference, "USDC");
+            assert_eq!(debit_asset.reference, token.to_ascii_lowercase());
+        }
+        other => panic!("unexpected deposit effect constraint {other:?}"),
+    }
+
+    let arbitrum_eth = json!({"requestId":"sub-eth-arbitrum","account":"child-a","wallet":"synthetic-wallet","amount":"0.01","maxFeeEth":"0.001","coin":"ETH","network":"ARBITRUM","chainId":42161,"token":"native"});
+    let native_preview = composite
+        .prepare("binance.deposit", &arbitrum_eth)
+        .await
+        .unwrap();
+    assert_eq!(native_preview.binding["target"]["chain_id"], 42161);
+    assert_eq!(native_preview.binding["target"]["network"], "ARBITRUM");
+    assert_eq!(
+        native_preview.binding["source_asset"]["reference"],
+        "native"
+    );
+    assert_eq!(
+        native_preview.intent.debits[0].amount.asset.network,
+        "ethereum:42161"
+    );
+    assert_eq!(
+        native_preview.intent.debits[0].amount.atoms.to_decimal(18),
+        "0.01"
+    );
+
+    let mut wrong_token = input.clone();
+    wrong_token["requestId"] = json!("sub-usdc-wrong-token");
+    wrong_token["token"] = json!("0x1111111111111111111111111111111111111111");
     assert_eq!(
         composite
-            .prepare("binance.deposit", &invalid_wallet)
+            .prepare("binance.deposit", &wrong_token)
             .await
             .unwrap_err()
             .code,
-        "BINANCE_MAIN_REQUIRED"
+        "ASSET_IDENTITY_MISMATCH"
+    );
+
+    let mut below_minimum = input.clone();
+    below_minimum["requestId"] = json!("sub-usdc-below-min");
+    below_minimum["amount"] = json!("0.0009");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &below_minimum)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_MINIMUM"
+    );
+
+    let mut over_precision = input.clone();
+    over_precision["requestId"] = json!("sub-usdc-over-precision");
+    over_precision["amount"] = json!("1.0000001");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &over_precision)
+            .await
+            .unwrap_err()
+            .code,
+        "INVALID_AMOUNT"
+    );
+
+    let mut wrong_chain = input.clone();
+    wrong_chain["requestId"] = json!("sub-usdc-wrong-chain");
+    wrong_chain["chainId"] = json!(1);
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &wrong_chain)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_ROUTE_UNSUPPORTED"
+    );
+
+    let mut unknown_network = input.clone();
+    unknown_network["requestId"] = json!("sub-usdc-unknown-network");
+    unknown_network["network"] = json!("UNREVIEWED_EVM");
+    unknown_network["chainId"] = json!(42161);
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &unknown_network)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_ROUTE_UNSUPPORTED"
+    );
+
+    venue.state.lock().unwrap().deposit_memo_regex = Some("^[0-9]+$".into());
+    let mut memo_required = input.clone();
+    memo_required["requestId"] = json!("sub-usdc-memo");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &memo_required)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_MEMO_UNSUPPORTED"
+    );
+
+    venue.state.lock().unwrap().deposit_memo_regex = None;
+    venue.state.lock().unwrap().deposit_memo = Some("12345".into());
+    let mut tagged_address = input.clone();
+    tagged_address["requestId"] = json!("sub-usdc-tagged-address");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &tagged_address)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_ADDRESS_UNSUPPORTED"
+    );
+
+    venue.state.lock().unwrap().deposit_memo = None;
+    venue.state.lock().unwrap().deposit_denomination = Some(10);
+    let mut scaled_denomination = input.clone();
+    scaled_denomination["requestId"] = json!("sub-usdc-scaled-denomination");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &scaled_denomination)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_DENOMINATION_UNSUPPORTED"
+    );
+
+    venue.state.lock().unwrap().deposit_denomination = None;
+    venue.state.lock().unwrap().deposit_enabled = false;
+    let mut disabled = input;
+    disabled["requestId"] = json!("sub-usdc-disabled");
+    assert_eq!(
+        composite
+            .prepare("binance.deposit", &disabled)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_DISABLED"
     );
 }
 
@@ -1693,6 +2255,10 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     )));
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at,
+        priority_fee: AtomicU64::new(10_000_000),
+        nonce: AtomicU64::new(0),
+        gas_estimate: AtomicU64::new(21_000),
+        simulation_failure: AtomicBool::new(false),
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),
@@ -1702,6 +2268,7 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
         wallet_address: wallet_address.clone(),
         wallet_balance: wallet_balance.clone(),
         payout_amount: "0.01".into(),
+        lose_submit_response: AtomicBool::new(false),
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
@@ -1740,11 +2307,54 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     // new oracle round. Exact prices/source and the frozen authorization must
     // remain identical at the final check.
     oracle_clock.0.fetch_add(1, Ordering::SeqCst);
+    // A lower current priority-fee quote is admissible inside the approved
+    // envelope and must not replace its frozen transaction binding.
+    rpc.priority_fee.store(1, Ordering::SeqCst);
+    rpc.gas_estimate.store(20_000, Ordering::SeqCst);
     let refreshed = composite.revalidate(&prepared).await.unwrap();
     assert_eq!(
         fin_domain::authorization_binding(&refreshed),
         fin_domain::authorization_binding(&prepared)
     );
+    assert_eq!(
+        refreshed.binding["inner_preview"]["binding"], prepared.binding["inner_preview"]["binding"],
+        "revalidation must preserve the original signed transaction envelope"
+    );
+    rpc.gas_estimate.store(21_001, Ordering::SeqCst);
+    rpc.priority_fee.store(14_000_000, Ordering::SeqCst);
+    let higher_estimate = composite.revalidate(&prepared).await.unwrap();
+    assert_eq!(
+        higher_estimate.binding["inner_preview"]["binding"],
+        prepared.binding["inner_preview"]["binding"],
+        "an estimate increase still inside the approved gas limit must keep the frozen gas limit"
+    );
+    rpc.gas_estimate.store(1_000_000, Ordering::SeqCst);
+    assert_eq!(
+        composite.revalidate(&prepared).await.unwrap_err().code,
+        "GAS_BOUND_CHANGED"
+    );
+    rpc.gas_estimate.store(21_000, Ordering::SeqCst);
+    rpc.nonce.store(1, Ordering::SeqCst);
+    assert_eq!(
+        composite.revalidate(&prepared).await.unwrap_err().code,
+        "NONCE_CHANGED",
+        "a changed source nonce must invalidate the approved transfer"
+    );
+    rpc.nonce.store(0, Ordering::SeqCst);
+    rpc.simulation_failure.store(true, Ordering::SeqCst);
+    assert_eq!(
+        composite.revalidate(&prepared).await.unwrap_err().code,
+        "SIMULATION_REVERTED",
+        "a failed fresh transfer simulation must block the approved transfer"
+    );
+    rpc.simulation_failure.store(false, Ordering::SeqCst);
+    rpc.priority_fee.store(100_000_000_000, Ordering::SeqCst);
+    assert_eq!(
+        composite.revalidate(&prepared).await.unwrap_err().code,
+        "FEE_BOUND_CHANGED",
+        "a gas quote beyond the approved envelope must still block submission"
+    );
+    rpc.priority_fee.store(1, Ordering::SeqCst);
     let submission = composite.submit(&prepared, journal.clone()).await.unwrap();
     assert_eq!(submission.kind, "ethereum");
     assert_eq!(
@@ -1802,6 +2412,61 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     );
     assert_eq!(venue.state.lock().unwrap().balances["main"], "0.010");
 
+    let mut legacy_record = record.clone();
+    let mut legacy_preview = legacy_record.preview.clone().unwrap();
+    legacy_preview.operation_version = 1;
+    legacy_preview
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove("coin");
+    legacy_preview
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove("token_symbol");
+    legacy_preview
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove("source_asset");
+    legacy_preview
+        .binding
+        .as_object_mut()
+        .unwrap()
+        .remove(fin_domain::value_bounds::KEY);
+    legacy_preview.binding["inner_preview"]["binding"]
+        .as_object_mut()
+        .unwrap()
+        .remove(fin_domain::value_bounds::KEY);
+    legacy_preview.binding["inner_input"]["network"] = json!("ethereum");
+    legacy_preview.binding["inner_preview"]["input"]["network"] = json!("ethereum");
+    assert_eq!(
+        composite
+            .revalidate(&legacy_preview)
+            .await
+            .unwrap_err()
+            .code,
+        "PREVIEW_CHANGED"
+    );
+    legacy_record.preview = Some(legacy_preview);
+    // Model a durable pre-ceiling record by omitting the newly introduced
+    // optional composite ceiling field before serde deserialization.
+    let mut legacy_json = serde_json::to_value(&legacy_record).unwrap();
+    legacy_json["preview"]["binding"]
+        .as_object_mut()
+        .unwrap()
+        .remove("_fin_usd_ceiling_v1");
+    let legacy_record: fin_domain::OperationRecord =
+        serde_json::from_value(legacy_json).expect("pre-ceiling records remain deserializable");
+    let legacy_recovered = composite.reconcile(&legacy_record).await.unwrap();
+    assert_eq!(
+        legacy_recovered.status,
+        fin_domain::Status::Completed,
+        "historical v1 ETH deposit records remain reconcilable"
+    );
+    assert!(legacy_recovered.verified.is_some());
+
     // Chain finality alone, locked venue credit, and a partial credit never
     // produce completed composite financial effects.
     venue.state.lock().unwrap().deposit_history[0]["status"] = json!(6);
@@ -1824,6 +2489,244 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     let malformed_travel_state = composite.reconcile(&record).await.unwrap();
     assert_eq!(malformed_travel_state.status, fin_domain::Status::Unknown);
     assert!(malformed_travel_state.verified.is_none());
+}
+
+#[tokio::test]
+async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repricing() {
+    let venue = Arc::new(SyntheticVenue::new());
+    let binance = adapter(venue.clone());
+    let signer = fin_evm::LocalEnvelopeSigner::from_private_key(
+        "0x0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .unwrap();
+    let wallet_address = format!("{:#x}", signer.address());
+    let wallet_balance = Arc::new(Mutex::new("0.1".to_owned()));
+    let transaction = Arc::new(Mutex::new(None));
+    let journal = Arc::new(SyntheticSubmissionJournal::default());
+    let usd = Arc::new(MutableEthereumUsd::new(2_000_100_000));
+    let rpc = Arc::new(DepositExecutionRpc {
+        oracle_updated_at: synthetic_oracle_updated_at(),
+        priority_fee: AtomicU64::new(10_000_000),
+        nonce: AtomicU64::new(0),
+        gas_estimate: AtomicU64::new(21_000),
+        simulation_failure: AtomicBool::new(false),
+        transaction: transaction.clone(),
+        hash: Mutex::new(None),
+        accepted: AtomicUsize::new(0),
+        venue: venue.clone(),
+        journal: journal.inner.clone(),
+        durable_store_path: None,
+        wallet_address: wallet_address.clone(),
+        wallet_balance,
+        payout_amount: "0.01".into(),
+        lose_submit_response: AtomicBool::new(false),
+    });
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::default(),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: wallet_address,
+                signing_enabled: true,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(
+                rpc.clone(),
+                1,
+                Some(Arc::new(RecordingSigner {
+                    signer,
+                    transaction,
+                })),
+            )),
+        )
+        .unwrap()
+        .with_wallet_valuation(usd.clone()),
+    );
+    let composite = fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum);
+    let input = json!({"requestId":"synthetic-deposit-usd-reprice","account":"main","wallet":"synthetic-wallet","amount":"0.01","maxFeeEth":"0.001"});
+    let approved = composite.prepare("binance.deposit", &input).await.unwrap();
+    let transaction_binding = approved.binding["inner_preview"]["binding"]["transaction"].clone();
+    assert_eq!(transaction_binding["value"], "10000000000000000");
+    assert_eq!(
+        transaction_binding["to"],
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(transaction_binding["gas"], 25_200);
+    let initial_authorization = fin_domain::authorization_binding(&approved);
+    let old_publication = approved.valuation.as_ref().unwrap().prices[0]
+        .source
+        .clone();
+    let old_unit_price = approved.valuation.as_ref().unwrap().prices[0]
+        .usd_micros_per_unit
+        .clone();
+
+    // Reprice ETH by half a cent on the exact principal and publish a newer
+    // RFC3339 CoinGecko-style timestamp. Both changes are real fresh evidence;
+    // the authorization still binds the original finite transaction.
+    usd.update(2_000_500_000);
+    let refreshed = composite.revalidate(&approved).await.unwrap();
+    assert_ne!(
+        refreshed.valuation.as_ref().unwrap().prices[0].source,
+        old_publication
+    );
+    assert!(
+        refreshed.valuation.as_ref().unwrap().prices[0]
+            .source
+            .contains("coingecko:ethereum-usd; updated:")
+    );
+    assert_ne!(
+        refreshed.valuation.as_ref().unwrap().prices[0].usd_micros_per_unit,
+        old_unit_price,
+        "the fresh valuation must contain the repriced ETH/USD quote"
+    );
+    assert_eq!(
+        refreshed.valuation.as_ref().unwrap().movement_usd_micros,
+        approved.valuation.as_ref().unwrap().movement_usd_micros,
+        "the carried approval valuation remains the immutable cent-rounded ceiling"
+    );
+    assert_eq!(
+        fin_domain::authorization_binding(&refreshed),
+        initial_authorization,
+        "repricing and source publication time must not alter the approved binding"
+    );
+    assert_eq!(
+        refreshed.binding["inner_preview"]["binding"]["transaction"], transaction_binding,
+        "gas, principal, and destination remain exactly frozen"
+    );
+
+    // A materially higher price crosses the cent-rounded approved USD ceiling.
+    usd.update(2_100_000_000);
+    let over_ceiling = composite.revalidate(&approved).await.unwrap_err();
+    assert_eq!(over_ceiling.code, "VALUE_BOUND_EXCEEDED");
+    assert_eq!(rpc.accepted.load(Ordering::SeqCst), 0);
+
+    // Return within the approved ceiling with another fresh source timestamp;
+    // actual submission still uses precisely the originally approved fields.
+    usd.update(2_000_500_000);
+    let submission = composite.submit(&approved, journal.clone()).await.unwrap();
+    assert_eq!(submission.kind, "ethereum");
+    assert_eq!(rpc.accepted.load(Ordering::SeqCst), 1);
+    let submitted = rpc.transaction.lock().unwrap().clone().unwrap();
+    assert_eq!(submitted.value.to_decimal(18), "0.01");
+    assert_eq!(
+        submitted.to.to_string().to_lowercase(),
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(submitted.gas, 25_200);
+}
+
+#[tokio::test]
+async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit() {
+    let venue = Arc::new(SyntheticVenue::new());
+    let binance = subaccount_only_adapter(venue.clone());
+    let token = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+    let signer = fin_evm::LocalEnvelopeSigner::from_private_key(
+        "0x0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .unwrap();
+    let wallet_address = format!("{:#x}", signer.address());
+    let transaction = Arc::new(Mutex::new(None));
+    let journal = Arc::new(SyntheticSubmissionJournal::default());
+    let rpc = Arc::new(ArbitrumErc20ExecutionRpc {
+        token: token.into(),
+        transaction: transaction.clone(),
+        hash: Mutex::new(None),
+        accepted: AtomicUsize::new(0),
+        venue: venue.clone(),
+        journal: journal.inner.clone(),
+        wallet_address: wallet_address.clone(),
+    });
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: wallet_address,
+                signing_enabled: true,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(
+                rpc.clone(),
+                42161,
+                Some(Arc::new(RecordingSigner {
+                    signer,
+                    transaction,
+                })),
+            )),
+        )
+        .unwrap()
+        .with_wallet_valuation(Arc::new(SyntheticWalletPrice)),
+    );
+    let composite = fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum);
+    let input = json!({"requestId":"synthetic-arbitrum-usdc","account":"child-a","wallet":"synthetic-wallet","amount":"1.25","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":token});
+    let prepared = composite.prepare("binance.deposit", &input).await.unwrap();
+    assert!(prepared.summary.contains(&token.to_ascii_lowercase()));
+    assert!(prepared.summary.contains("ARBITRUM") && prepared.summary.contains("42161"));
+    assert_eq!(
+        prepared.binding["source_asset"]["reference"],
+        token.to_ascii_lowercase()
+    );
+    assert_eq!(
+        prepared.binding["inner_preview"]["binding"]["transaction"]["sender"],
+        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    );
+    assert_eq!(prepared.intent.debits[0].amount.asset.decimals, 6);
+    assert_eq!(prepared.intent.debits[0].amount.atoms.to_decimal(6), "1.25");
+    let submission = composite.submit(&prepared, journal.clone()).await.unwrap();
+    assert_eq!(submission.kind, "ethereum");
+    assert_eq!(rpc.accepted.load(Ordering::SeqCst), 1);
+
+    let record = fin_domain::OperationRecord {
+        id: "synthetic-arbitrum-deposit-record".into(),
+        request_id: "synthetic-arbitrum-usdc".into(),
+        fingerprint: "synthetic-arbitrum-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "binance.deposit".into(),
+        input,
+        status: fin_domain::Status::Submitted,
+        created_at: now(),
+        updated_at: now(),
+        preview: Some(prepared),
+        approval: None,
+        submission: Some(submission.clone()),
+        dispatch_evidence: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    let result = composite.reconcile(&record).await.unwrap();
+    assert_eq!(
+        result.status,
+        fin_domain::Status::Completed,
+        "{:?}",
+        result.evidence
+    );
+    let verified = result.verified.unwrap();
+    assert_eq!(verified.submission, submission);
+    assert!(verified.effects.iter().any(|effect| matches!(effect,
+        fin_domain::FinancialEffect::Transfer { debit, credit, to, .. }
+            if debit.asset.network == "ethereum:42161"
+                && debit.asset.reference == token.to_ascii_lowercase()
+                && debit.asset.decimals == 6
+                && debit.atoms.to_decimal(6) == "1.25"
+                && credit.asset.network == "binance"
+                && credit.asset.reference == "USDC"
+                && credit.atoms.to_decimal(36) == "1.25"
+                && to == &resource(1002)
+    )));
+    assert_eq!(
+        venue.state.lock().unwrap().usdc_balances[EMAIL_A],
+        "1.250000"
+    );
+    assert_eq!(
+        rpc.accepted.load(Ordering::SeqCst),
+        1,
+        "reconciliation must not replay the original transfer"
+    );
+
+    venue.state.lock().unwrap().deposit_history[0]["network"] = json!("ETH");
+    let mismatched_network = composite.reconcile(&record).await.unwrap();
+    assert_eq!(mismatched_network.status, fin_domain::Status::Unknown);
+    assert!(mismatched_network.verified.is_none());
 }
 
 #[tokio::test]
@@ -1852,6 +2755,10 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     let journal = Arc::new(SyntheticSubmissionJournal::default());
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at: synthetic_oracle_updated_at(),
+        priority_fee: AtomicU64::new(10_000_000),
+        nonce: AtomicU64::new(0),
+        gas_estimate: AtomicU64::new(21_000),
+        simulation_failure: AtomicBool::new(false),
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),
@@ -1861,6 +2768,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
         wallet_address: address.clone(),
         wallet_balance: wallet_balance.clone(),
         payout_amount: "0.009".into(),
+        lose_submit_response: AtomicBool::new(true),
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
@@ -1919,45 +2827,100 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     }
     let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
     let broker = compose_runtime(
-        config,
+        config.clone(),
         RuntimeDependencies {
             store: Store::open(&store_path).unwrap(),
-            adapters: vec![binance, composite, wallet_observer],
+            adapters: vec![binance.clone(), composite.clone(), wallet_observer.clone()],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
         },
     )
     .unwrap();
+    let deposit_request = OperationRequest {
+        request_id: "scoped-deposit-forward".into(),
+        operation: "binance.deposit".into(),
+        input: json!({"requestId":"scoped-deposit-forward","account":"main","wallet":"synthetic-wallet","amount":"0.009","maxFeeEth":"0.001"}),
+        run_id: None,
+    };
+    let lost_response = broker
+        .handle(BrokerRequest::Execute {
+            request: deposit_request.clone(),
+        })
+        .await;
+    let uncertain = lost_response.result.unwrap_or_else(|| {
+        panic!(
+            "lost transport response should retain the durable uncertain operation: {:?}",
+            lost_response.error
+        )
+    });
+    assert_eq!(uncertain["status"], "unknown");
+    assert!(uncertain["submission"].is_object());
+    assert_eq!(rpc.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(venue.state.lock().unwrap().deposit_history[0]["status"], 0);
 
-    for (request_id, operation, input) in [
-        (
-            "scoped-deposit-forward",
-            "binance.deposit",
-            json!({"requestId":"scoped-deposit-forward","account":"main","wallet":"synthetic-wallet","amount":"0.009","maxFeeEth":"0.001"}),
-        ),
-        (
-            "scoped-withdraw-return",
-            "binance.withdraw",
-            json!({"requestId":"scoped-withdraw-return","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.009","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"}),
-        ),
-    ] {
-        let response = broker
-            .handle(BrokerRequest::Execute {
-                request: OperationRequest {
-                    request_id: request_id.into(),
-                    operation: operation.into(),
-                    input,
-                    run_id: None,
-                },
-            })
-            .await;
-        assert!(response.ok, "{operation} failed: {:?}", response.error);
-        let result = response.result.unwrap();
-        assert_eq!(
-            result["status"], "completed",
-            "{operation} result: {result}"
-        );
-    }
+    // Recreate the protected runtime over the same durable store. The same
+    // request identity reconciles its persisted hash while Binance credit is
+    // delayed; it does not create a new transaction or approval.
+    drop(broker);
+    let broker = compose_runtime(
+        config.clone(),
+        RuntimeDependencies {
+            store: Store::open(&store_path).unwrap(),
+            adapters: vec![binance.clone(), composite.clone(), wallet_observer.clone()],
+            authorizer: approval.clone(),
+            valuator: Arc::new(SyntheticValuator),
+        },
+    )
+    .unwrap();
+    let delayed = broker
+        .handle(BrokerRequest::Execute {
+            request: deposit_request.clone(),
+        })
+        .await;
+    assert!(
+        delayed.ok,
+        "duplicate request should return its durable pending status: {:?}",
+        delayed.error
+    );
+    assert_eq!(delayed.result.unwrap()["status"], "unknown");
+    assert_eq!(
+        rpc.accepted.load(Ordering::SeqCst),
+        1,
+        "restart recovery must not rebroadcast"
+    );
+
+    venue.state.lock().unwrap().deposit_history[0]["status"] = json!(1);
+    let recovered = broker
+        .handle(BrokerRequest::Execute {
+            request: deposit_request.clone(),
+        })
+        .await;
+    assert!(
+        recovered.ok,
+        "credited deposit should reconcile after restart: {:?}",
+        recovered.error
+    );
+    assert_eq!(recovered.result.unwrap()["status"], "completed");
+    assert_eq!(
+        rpc.accepted.load(Ordering::SeqCst),
+        1,
+        "duplicate execution remains suppressed"
+    );
+
+    let withdrawal = broker.handle(BrokerRequest::Execute {
+        request: OperationRequest {
+            request_id: "scoped-withdraw-return".into(),
+            operation: "binance.withdraw".into(),
+            input: json!({"requestId":"scoped-withdraw-return","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.009","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"}),
+            run_id: None,
+        },
+    }).await;
+    assert!(
+        withdrawal.ok,
+        "binance.withdraw failed: {:?}",
+        withdrawal.error
+    );
+    assert_eq!(withdrawal.result.unwrap()["status"], "completed");
     assert_eq!(
         rpc.accepted.load(Ordering::SeqCst),
         1,
@@ -1997,6 +2960,10 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
     let journal = Arc::new(SyntheticSubmissionJournal::default());
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at: synthetic_oracle_updated_at(),
+        priority_fee: AtomicU64::new(10_000_000),
+        nonce: AtomicU64::new(0),
+        gas_estimate: AtomicU64::new(21_000),
+        simulation_failure: AtomicBool::new(false),
         transaction: transaction.clone(),
         hash: Mutex::new(None),
         accepted: AtomicUsize::new(0),
@@ -2006,6 +2973,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
         wallet_address: address.clone(),
         wallet_balance: wallet_balance.clone(),
         payout_amount: "0.015".into(),
+        lose_submit_response: AtomicBool::new(false),
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(

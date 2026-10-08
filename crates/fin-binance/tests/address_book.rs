@@ -36,7 +36,7 @@ fn fixture(response: Value, enabled: bool) -> (BinanceAdapter, Arc<Fixture>) {
     fixture_with_capital(
         response,
         Ok(
-            json!([{"coin":"ETH","networkList":[{"network":"ETH","coin":"ETH","depositEnable":enabled}]}]),
+            json!([{"coin":"ETH","depositAllEnable":true,"networkList":[{"network":"ETH","coin":"ETH","depositEnable":enabled}]}]),
         ),
     )
 }
@@ -328,6 +328,138 @@ async fn malformed_or_disabled_deposit_lists_fail_without_a_write() {
         "DEPOSIT_DISABLED"
     );
     assert_eq!(transport.seen.lock().unwrap().len(), 1);
+
+    for global in [json!(false), Value::Null] {
+        let (adapter, transport) = fixture_with_capital(
+            json!([]),
+            Ok(
+                json!([{"coin":"ETH","depositAllEnable":global,"networkList":[{"coin":"ETH","network":"ETH","depositEnable":true}]}]),
+            ),
+        );
+        assert_eq!(
+            adapter
+                .read("binance.deposit-address", &deposit_input())
+                .await
+                .unwrap_err()
+                .code,
+            "DEPOSIT_DISABLED"
+        );
+        assert_eq!(transport.seen.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn subaccount_only_credentials_can_read_own_deposit_metadata_address_and_history() {
+    struct SubOnly {
+        seen: Mutex<Vec<BinanceRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl BinanceTransport for SubOnly {
+        async fn request(
+            &self,
+            credential: &CredentialHandle,
+            request: BinanceRequest,
+        ) -> Result<Value, TransportError> {
+            assert_eq!(credential.as_str(), "test-only:synthetic-subaccount");
+            self.seen.lock().unwrap().push(request.clone());
+            Ok(match request.endpoint {
+                E::CapitalConfig => {
+                    json!([{"coin":"USDC","depositAllEnable":true,"networkList":[{"coin":"USDC","network":"ARBITRUM","depositEnable":true,"depositDust":"0.01","contractAddress":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831","denomination":1,"withdrawTag":false,"memoRegex":""}]}])
+                }
+                E::DepositAddress => json!({"coin":"USDC","address":ADDRESS,"tag":""}),
+                E::DepositAddressList => {
+                    json!([{"coin":"USDC","address":ADDRESS,"tag":"","isDefault":1}])
+                }
+                E::DepositHistory => json!([]),
+                endpoint => panic!("unexpected endpoint: {endpoint:?}"),
+            })
+        }
+    }
+    let transport = Arc::new(SubOnly {
+        seen: Mutex::new(vec![]),
+    });
+    let adapter = BinanceAdapter::new(
+        BinanceConfig {
+            accounts: vec![BinanceAccount {
+                name: "synthetic-child".into(),
+                resource: ResourceId("binance:synthetic-child".into()),
+                credential: CredentialHandle::new("test-only:synthetic-subaccount").unwrap(),
+                role: AccountRole::Sub,
+                parent: None,
+                email: None,
+                wallet_type: "SPOT".into(),
+            }],
+            destinations: vec![],
+        },
+        transport.clone(),
+        None,
+        None,
+    )
+    .expect("a subaccount-only credential is a valid account configuration");
+
+    let routes = adapter
+        .read(
+            "binance.networks",
+            &json!({"account":"synthetic-child","coin":"USDC"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        routes["assets"][0]["networks"][0]["contractAddress"],
+        "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    );
+    assert_eq!(routes["assets"][0]["networks"][0]["depositDust"], "0.01");
+    assert_eq!(routes["assets"][0]["networks"][0]["memoRegex"], "");
+
+    let mut input = deposit_input();
+    input["account"] = json!("synthetic-child");
+    input["coin"] = json!("USDC");
+    input["network"] = json!("ARBITRUM");
+    let address = adapter
+        .read("binance.deposit-address", &input)
+        .await
+        .unwrap();
+    assert_eq!(address["account"], "synthetic-child");
+    assert_eq!(address["coin"], "USDC");
+    assert_eq!(address["network"], "ARBITRUM");
+
+    adapter
+        .read("binance.deposit-addresses", &input)
+        .await
+        .unwrap();
+    adapter
+        .read(
+            "binance.deposit-history",
+            &json!({"account":"synthetic-child","coin":"USDC"}),
+        )
+        .await
+        .unwrap();
+    let seen = transport.seen.lock().unwrap();
+    assert_eq!(seen.len(), 6); // Metadata is fetched before each address request.
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.endpoint == E::CapitalConfig)
+            .count(),
+        3
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.endpoint == E::DepositAddress)
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.endpoint == E::DepositAddressList)
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|request| request.endpoint == E::DepositHistory)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

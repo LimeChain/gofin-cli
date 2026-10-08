@@ -7,7 +7,7 @@ metadata:
 
 Start with `fin --help` and `fin capabilities --json`, even before setup exists. Inspect `fin explain setup --json`, `fin schema connections.add --json`, and `fin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and evidence limits; mocked/fork/live verification are separate.
 
-Setup and credential changes belong to the human's fresh Terminal. Explain the supported command with safe metadata flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. Binance accepts HMAC, RSA, and Ed25519; a child also needs its existing main `--parent` and `--email`. The human enters secrets directly in the protected hidden prompt and separately approves configuration. Never ask for credentials in chat, arguments, JSON, environment variables, or an agent-controlled terminal. A bare add command guides public metadata; complete flags skip those prompts. Installation/enrollment moves no funds and grants no future financial authorization. Later `connections update` rotates credentials for the same identity/relationships; unresolved operations refuse changes. Cancelled or invalid rotation preserves the prior connection; an uncertain commit requires checking the original configuration outcome. Check `fin connections list --json` and `fin doctor --json` afterward. Missing platform support fails closed.
+Setup and credential changes belong to the human's fresh Terminal. Explain the supported command with safe metadata flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. Binance accepts HMAC, RSA, and Ed25519. A standalone subaccount needs only its own credentials: `fin connections add binance --name sub --role sub --credential-type ed25519`. No main credentials are required. Optionally supply both `--parent` and `--email` to link an enrolled main connection for hierarchy verification and main-authorized reads. The human enters secrets directly in the protected hidden prompt and separately approves configuration. Never ask for credentials in chat, arguments, JSON, environment variables, or an agent-controlled terminal. A bare add command guides public metadata; complete flags skip those prompts. Installation/enrollment moves no funds and grants no future financial authorization. Later `connections update` rotates credentials for the same identity/relationships; unresolved operations refuse changes. Cancelled or invalid rotation preserves the prior connection; an uncertain commit requires checking the original configuration outcome. Check `fin connections list --json` and `fin doctor --json` afterward. Missing platform support fails closed.
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
 
@@ -16,6 +16,26 @@ EVM enrollment uses `fin connections add --provider evm --name wallet --credenti
 Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
 
 Invoke one operation per write. Prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass.
+
+Choose practical finite fee and price ranges before requesting approval. Avoid
+setting caps exactly at a transient quote: propose enough headroom for ordinary
+repricing, scaled to the operation's size, liquidity and expected cost. Explain
+the expected cost separately from the worst-case fee, spend or minimum receipt,
+including approximate USD impact, and confirm those bounds with the human before
+execution. Existing explicit bounds remain authoritative; do not ask again merely
+because a quote moves within them. Keep the source, destination, chain, asset and
+requested principal exact; extra fee headroom does not authorize extra principal
+or allowances. Use only flexibility advertised by the installed schema, including
+operation-boundary consent where supported. EVM gas headroom is frozen before
+Touch ID; a larger input cap does not permit rewriting an approved transaction.
+When a preview shows USD ceilings, disclose them separately from the current USD
+estimate. Fresh quotes may vary within those ceilings without increasing the
+approved asset quantity or gas envelope.
+Ordinary exact-approval operations may still reject a price change—do not promise
+price tolerance they do not implement. If a bound is exceeded, explain the
+specific change and seek revised bounds and fresh approval. Reconcile any
+uncertain submission before considering another attempt; never widen limits or
+repeatedly request approval just to force an operation through.
 
 For operations advertising `semantics.boundary_authorization.supported`, use
 `fin schema OPERATION --json` and `fin schema authorizations.authorize --json`

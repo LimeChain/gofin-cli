@@ -5,7 +5,10 @@ use fin_evm::{
     *,
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 // Unmistakably synthetic, exercised only against the in-memory RPC below.
 const SYNTHETIC_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -88,8 +91,9 @@ struct Rpc {
     reorg: bool,
     wrong_chain: bool,
     nonce: u64,
-    priority_fee: u64,
-    gas_estimate: u64,
+    priority_fee: AtomicU64,
+    base_fee: AtomicU64,
+    gas_estimate: AtomicU64,
     balance: U256,
     simulation_failure: bool,
 }
@@ -112,11 +116,13 @@ impl EvmRpc for Rpc {
                 }
                 json!("0x")
             }
-            "eth_estimateGas" => json!(format!("{:#x}", self.gas_estimate)),
-            "eth_maxPriorityFeePerGas" => json!(format!("{:#x}", self.priority_fee)),
+            "eth_estimateGas" => json!(format!("{:#x}", self.gas_estimate.load(Ordering::SeqCst))),
+            "eth_maxPriorityFeePerGas" => {
+                json!(format!("{:#x}", self.priority_fee.load(Ordering::SeqCst)))
+            }
             "eth_blockNumber" => json!(format!("{:#x}", self.latest)),
             "eth_getBlockByNumber" => {
-                json!({"hash":format!("0x{}",if self.reorg{"22"}else{"11"}.repeat(32)),"number":"0xa","baseFeePerGas":"0x1"})
+                json!({"hash":format!("0x{}",if self.reorg{"22"}else{"11"}.repeat(32)),"number":"0xa","baseFeePerGas":format!("{:#x}",self.base_fee.load(Ordering::SeqCst))})
             }
             "eth_sendRawTransaction" => {
                 self.events.lock().unwrap().push("send".into());
@@ -148,11 +154,141 @@ fn rpc(events: Arc<Mutex<Vec<String>>>) -> Rpc {
         reorg: false,
         wrong_chain: false,
         nonce: 3,
-        priority_fee: 10_000_000,
-        gas_estimate: 21000,
+        priority_fee: AtomicU64::new(10_000_000),
+        base_fee: AtomicU64::new(1),
+        gas_estimate: AtomicU64::new(21000),
         balance: U256::from(u64::MAX),
         simulation_failure: false,
     }
+}
+
+fn runtime_with_rpc(transport: Arc<Rpc>) -> EvmRuntime {
+    EvmRuntime::new(
+        transport,
+        1,
+        Some(Arc::new(
+            LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY).unwrap(),
+        )),
+    )
+}
+
+#[tokio::test]
+async fn revalidation_accepts_only_changes_inside_the_frozen_fee_and_gas_envelope() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(rpc(events.clone()));
+    transport.base_fee.store(1_000_000, Ordering::SeqCst);
+    let runtime = runtime_with_rpc(transport.clone());
+    let sender = LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY)
+        .unwrap()
+        .address();
+    let prepared = runtime
+        .prepare(
+            sender,
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            U256::from(7),
+            Bytes::new(),
+            U256::from(1_000_000_000_000u64),
+        )
+        .await
+        .unwrap();
+    let frozen = prepared.transaction.clone();
+    assert_eq!(
+        u256(&frozen.max_fee_per_gas).unwrap(),
+        U256::from(18_000_000)
+    );
+    assert_eq!(
+        u256(&frozen.max_priority_fee_per_gas).unwrap(),
+        U256::from(15_000_000)
+    );
+
+    transport.base_fee.store(2_000_000, Ordering::SeqCst);
+    transport.priority_fee.store(14_000_000, Ordering::SeqCst);
+    transport.gas_estimate.store(23_000, Ordering::SeqCst);
+    runtime.revalidate(&prepared.transaction).await.unwrap();
+    assert_eq!(
+        prepared.transaction, frozen,
+        "revalidation never mutates the signed envelope"
+    );
+
+    // Isolate the priority bound: aggregate fee remains below its own cap.
+    transport.base_fee.store(1_000_000, Ordering::SeqCst);
+    transport.priority_fee.store(15_000_001, Ordering::SeqCst);
+    assert_eq!(
+        runtime
+            .revalidate(&prepared.transaction)
+            .await
+            .unwrap_err()
+            .code,
+        "FEE_BOUND_CHANGED"
+    );
+    transport.priority_fee.store(14_000_000, Ordering::SeqCst);
+    transport.base_fee.store(2_500_001, Ordering::SeqCst);
+    assert_eq!(
+        runtime
+            .revalidate(&prepared.transaction)
+            .await
+            .unwrap_err()
+            .code,
+        "FEE_BOUND_CHANGED"
+    );
+    transport.base_fee.store(2_000_000, Ordering::SeqCst);
+    transport
+        .gas_estimate
+        .store(frozen.gas + 1, Ordering::SeqCst);
+    assert_eq!(
+        runtime
+            .revalidate(&prepared.transaction)
+            .await
+            .unwrap_err()
+            .code,
+        "GAS_BOUND_CHANGED"
+    );
+}
+
+#[tokio::test]
+async fn total_fee_cap_clips_priority_headroom() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(rpc(events));
+    transport.base_fee.store(0, Ordering::SeqCst);
+    let runtime = runtime_with_rpc(transport.clone());
+    let sender = LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY)
+        .unwrap()
+        .address();
+    let gas = 25_200u64;
+    let cap = U256::from(10_000_000u64) * U256::from(gas);
+    let prepared = runtime
+        .prepare(
+            sender,
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            U256::from(7),
+            Bytes::new(),
+            cap,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        u256(&prepared.transaction.max_fee_per_gas).unwrap(),
+        U256::from(10_000_000)
+    );
+    assert_eq!(
+        u256(&prepared.transaction.max_priority_fee_per_gas).unwrap(),
+        U256::from(10_000_000),
+        "priority headroom is clipped by the approved max fee"
+    );
+    assert_eq!(prepared.transaction.maximum_cost().unwrap(), cap);
+    transport.priority_fee.store(10_000_001, Ordering::SeqCst);
+    assert_eq!(
+        runtime
+            .revalidate(&prepared.transaction)
+            .await
+            .unwrap_err()
+            .code,
+        "FEE_BOUND_CHANGED"
+    );
 }
 
 struct AlteringSigner {
@@ -268,8 +404,8 @@ async fn changed_nonce_fees_gas_balance_and_failed_simulation_stop_before_signin
         match case {
             0 => transport.wrong_chain = true,
             1 => transport.nonce = 4,
-            2 => transport.priority_fee = 101_000_000,
-            3 => transport.gas_estimate = 30001,
+            2 => transport.priority_fee.store(101_000_000, Ordering::SeqCst),
+            3 => transport.gas_estimate.store(30001, Ordering::SeqCst),
             4 => transport.balance = U256::from(6),
             5 => transport.simulation_failure = true,
             _ => unreachable!(),

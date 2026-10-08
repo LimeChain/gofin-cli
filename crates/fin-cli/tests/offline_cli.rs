@@ -38,6 +38,61 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn deposit_discovery_exposes_exact_evm_routes_without_service_or_prompts() {
+    let output = run(&["schema", "binance.deposit", "--json", "--verbose"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!output.stdout.contains(&0x1b));
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(schema["execution_actor"], "agent_invocable");
+    assert_eq!(schema["input"]["additionalProperties"], false);
+    for field in [
+        "account",
+        "wallet",
+        "coin",
+        "network",
+        "chainId",
+        "token",
+        "amount",
+        "maxFeeEth",
+    ] {
+        assert!(
+            schema["input"]["properties"][field].is_object(),
+            "missing {field}"
+        );
+    }
+    let output = run(&["explain", "binance.deposit", "--json"]);
+    let definition: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(definition["kind"], "write");
+    assert!(
+        definition["description"]
+            .as_str()
+            .unwrap()
+            .contains("subaccount")
+    );
+    assert!(
+        definition["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|example| example["network"] == "ARBITRUM"
+                && example["coin"] == "USDC"
+                && example["token"]
+                    .as_str()
+                    .is_some_and(|token| token.starts_with("0x")))
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_fin"))
+        .args(["explain", "binance.deposit"])
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(human.stderr.is_empty());
+    assert!(!human.stdout.contains(&0x1b));
+}
+
+#[test]
 fn bare_discovery_commands_show_usage_and_keep_machine_output_structured() {
     for command in ["explain", "schema"] {
         let human = run(&[command]);
@@ -851,6 +906,9 @@ fn generic_withdrawal_discovery_explains_routes_targets_and_receipt_limits_offli
             .unwrap()
             .contains("pending")
     );
+    let receipt_policy = schema["semantics"]["destinationReceipt"].as_str().unwrap();
+    assert!(receipt_policy.contains("sequencer inclusion"));
+    assert!(receipt_policy.contains("parent-chain finality"));
     assert!(
         schema["semantics"]["ordinaryExecution"]
             .as_str()

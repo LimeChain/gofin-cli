@@ -82,7 +82,7 @@ Adding, replacing, or removing supported credentials later must use the same pro
 
 ## Guided credential enrollment
 
-The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519; subaccounts also require an enrolled main `--parent` and `--email`. EVM wallets use `--provider evm` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. One wallet is reusable across reviewed chains; no network is required at enrollment. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
+The Rust CLI accepts safe metadata through documented flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. A bare `fin connections add` guides the human through public metadata; complete flags skip those prompts. Updates require explicit metadata flags. Binance supports HMAC, RSA, and Ed25519. A subaccount may enroll directly using its own key and verified UID, without master credentials. Supplying an optional `--parent` requires its `--email` and checks the relationship with that main key; it enables only explicitly parent-authorized hierarchy operations. EVM wallets use `--provider evm` and `--credential-type private_key` or `read_only`, with `--address` required for read-only wallets. One wallet is reusable across reviewed chains; no network is required at enrollment. The protected component collects only the applicable secrets through hidden input in the human's Terminal. RSA and Ed25519 use their corresponding PKCS#8 PEM signing key. Do not put keys in flags, JSON, agent-readable environment variables, stdout, help examples, or logs. No-TTY/agent-tool invocation must fail before collecting secrets.
 
 EVM examples for the human's own Terminal:
 
@@ -134,7 +134,7 @@ Examples of provider-specific prompts:
 
 | Provider           | Non-secret setup information                                                                                                               | Secret input and checks                                                                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Binance            | Stable name, main/subaccount role, parent relationship and subaccount identity where relevant, selected wallet type and credential scheme. | API/signing credential through hidden input; read-only authentication, reported permissions and account mapping. Report unknown permission/identity explicitly. |
+| Binance            | Stable name, main/subaccount role, optional parent relationship and subaccount email, selected wallet type and credential scheme. | API/signing credential through hidden input; read-only authentication and reported permissions. Verify the enrolled account's own UID; parent mapping is checked only when a parent is supplied. |
 | EVM wallet         | Stable name, address, read-only versus signing connection; reusable across reviewed chains.                                                              | A signing credential only for a signing connection; independently verify its derived address matches the chosen wallet.                                         |
 | CoinGecko          | Stable name and Demo/Pro plan; one pricing provider, no wallet/account relationship.                                                     | API key through hidden input; authenticated ping and fresh ETH/USD quote, then approval to save market-data configuration.                                                    |
 | Future integration | Its registered typed connection definition and reviewed prerequisites.                                                                     | Its own credential fields and read-only checks through the same protected enrollment contract. Unsupported types remain unavailable.                            |
@@ -339,8 +339,10 @@ Record results separately for automated discovery/enrollment tests, fresh-agent 
 ## Exchange connectivity and discovery
 
 Binance enrollment still accepts HMAC, RSA and Ed25519 through the same protected
-terminal path. Validation now uses official CCXT Rust; supported account roles,
-UID evidence and human-confirmed parent/email associations are unchanged.
+terminal path. Validation uses official CCXT Rust. A subaccount can use its own
+verified UID without a master key. Supplying a parent retains parent-key
+verification and human-confirmed email association; standalone subaccounts gain
+no hierarchy authority from their own credentials.
 `capabilities --json` exposes separate `exchanges.library`, `exchanges.fin` and
 `exchanges.verification` metadata. A compiled CCXT venue is not automatically a Fin
 connection provider or writable operation. Kraken, Hyperliquid, OKX, Coinbase

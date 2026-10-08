@@ -320,24 +320,26 @@ impl BinanceProfile {
                     ));
                 }
                 AccountRole::Sub
-                    if account.parent.is_none()
-                        || account.email.as_deref().unwrap_or("").is_empty() =>
+                    if account.parent.is_some() != account.email.is_some()
+                        || account.email.as_deref().is_some_and(str::is_empty) =>
                 {
                     return Err(error(
                         "INVALID_HIERARCHY",
                         "setup",
-                        "Subaccount connections require a parent and Binance account email.",
+                        "An optional subaccount parent and Binance account email must be configured together.",
                     ));
                 }
                 _ => {}
             }
         }
         for account in &config.accounts {
-            if let AccountRole::Sub = account.role {
-                let parent = account
-                    .parent
-                    .as_deref()
-                    .and_then(|n| config.accounts.iter().find(|candidate| candidate.name == n));
+            if let AccountRole::Sub = account.role
+                && let Some(parent_name) = &account.parent
+            {
+                let parent = config
+                    .accounts
+                    .iter()
+                    .find(|candidate| candidate.name == *parent_name);
                 if !matches!(parent.map(|p| &p.role), Some(AccountRole::Main)) {
                     return Err(error(
                         "INVALID_HIERARCHY",
@@ -485,10 +487,45 @@ impl BinanceProfile {
         request
             .validate()
             .map_err(|e| error("INVALID_ENDPOINT_REQUEST", stage, e.to_string()))?;
+        let endpoint = request.endpoint;
         self.transport
             .request(&account.credential, request)
             .await
-            .map_err(|e| transport_error(stage, e))
+            .map_err(|cause| {
+                let permission_denied = matches!(
+                    &cause,
+                    TransportError::PermissionDenied
+                        | TransportError::HttpFailure {
+                            kind: HttpFailureKind::PermissionDenied,
+                            ..
+                        }
+                );
+                let mut mapped = transport_error(stage, cause);
+                if permission_denied
+                    && matches!(account.role, AccountRole::Sub)
+                    && matches!(
+                        endpoint,
+                        BinanceEndpoint::CapitalConfig
+                            | BinanceEndpoint::DepositAddress
+                            | BinanceEndpoint::DepositAddressList
+                            | BinanceEndpoint::DepositHistory
+                    )
+                {
+                    let path = endpoint.method_path().1;
+                    mapped.message = format!(
+                        "Binance denied this subaccount's own-account read at {path}. Check this key's read restrictions and the selected account's eligibility for this specific endpoint; this request used the selected account's credential, and master access is not universally required."
+                    );
+                    mapped.next_action = "Check the selected subaccount key's reported read permission and ask Binance about this endpoint-specific account restriction; retry the same read after resolving it.".into();
+                    let previous = mapped.details.take().map(|details| *details);
+                    mapped.details = Some(Box::new(json!({
+                        "endpoint": path,
+                        "accountRole": "sub",
+                        "parentCredentialUsed": false,
+                        "transport": previous,
+                    })));
+                }
+                mapped
+            })
     }
 
     async fn permissions(&self, account: &BinanceAccount) -> Result<ApiRestrictions, FinError> {
@@ -1833,21 +1870,21 @@ fn definitions() -> Vec<Definition> {
         ),
         (
             "binance.networks",
-            "Current Binance asset networks, precision, fee, minimum, maximum, and deposit/withdraw availability.",
+            "Current Binance asset/network metadata and deposit availability for the selected account using its own credential, including subaccount-only connections.",
             OperationKind::Read,
             schema_for!(NetworksInput),
             "Current funding metadata observed.",
         ),
         (
             "binance.deposit-address",
-            "Selected Binance deposit address and memo/tag. Address lookup is read-only.",
+            "Selected account's own Binance deposit address and memo/tag, read with that account's credential. Subaccount deposit-address restrictions, if any, apply to this endpoint specifically.",
             OperationKind::Read,
             schema_for!(DepositAddressInput),
             "Address observed; credit requires a matching Binance deposit record.",
         ),
         (
             "binance.deposit-history",
-            "Paginated Binance deposit history with pending, locked, and usable credit kept distinct.",
+            "Paginated own-account Binance deposit history with pending, locked, and usable credit kept distinct, read using the selected account's credential including a subaccount-only connection.",
             OperationKind::Read,
             schema_for!(HistoryInput),
             "A matching credited record establishes usable exchange credit.",
@@ -1890,6 +1927,14 @@ fn definitions() -> Vec<Definition> {
         examples: if name == "binance.spot-order" { vec![json!({"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
         completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
     }).collect();
+    for definition in &mut result {
+        if matches!(
+            definition.name.as_str(),
+            "binance.networks" | "binance.deposit-address" | "binance.deposit-history"
+        ) {
+            definition.coverage = "Own-account Binance USER_DATA read uses the selected connection's credential, including a subaccount-only connection; no parent/master lookup is made. A Binance denial applies to this endpoint/capability and should be reported specifically. Synthetic tests; live account eligibility remains account-dependent.".into();
+        }
+    }
     if let Some(definition) = result.iter_mut().find(|d| d.name == "binance.transfer") {
         definition.semantics["authority"] = json!(
             "For main→child or legacy main-authorized child→main, select the main account. For source-child→parent only, select the child as authority; Fin uses subToMaster and sends no clientTranId or recipient parameter."
@@ -1914,7 +1959,7 @@ fn definitions() -> Vec<Definition> {
         definition.semantics["coinNetworkSelection"] =
             json!("live Binance metadata; no coin/network allowlist");
         definition.semantics["destinationReceipt"] = json!(
-            "independent observer required for terminal financial settlement; otherwise explicitly pending"
+            "independent observer required for terminal financial settlement; otherwise explicitly pending. The configured Arbitrum One and Robinhood Chain observers accept successful canonical sequencer inclusion with exact recipient and amount proof, without waiting for parent-chain finality. Venue route availability remains separate."
         );
         definition.semantics["ordinaryExecution"] = json!(
             "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced"
@@ -2669,7 +2714,8 @@ impl ExchangeProfile for BinanceProfile {
                 let account = self.account(&input.account)?;
                 let currency = self.currency(account, &input.coin).await?;
                 let network = self.network(&currency, &input.network)?;
-                if network.deposit_enable != Some(true) {
+                if currency.deposit_all_enable != Some(true) || network.deposit_enable != Some(true)
+                {
                     return Err(error(
                         "DEPOSIT_DISABLED",
                         "read",

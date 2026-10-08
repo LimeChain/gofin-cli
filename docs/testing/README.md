@@ -130,9 +130,16 @@ account during development; manual generation remains read-only.
   fixtures. `python3 scripts/test-rust-macos-runtime-update.py` verifies actual
   updater staging/rollback and unchanged synthetic private state. No fixture
   accesses the real installation or tests native authorization.
-- `make uninstall`: human Terminal only; runs the reviewed credential-deleting reset
-  with labelled fresh sudo and clears cached elevation even on failure. The
-  financial-history and maintenance-lock checks remain mandatory.
+- `make uninstall`: human Terminal only; explains deletion of credentials,
+  configuration and all financial history, then asks for confirmation before
+  service or file changes. Existing or unreadable history does not block an
+  explicitly confirmed uninstall. Decline, EOF and cancellation at the prompt
+  preserve the installation. The maintenance lock and verified broker shutdown remain
+  mandatory; uninstall does not cancel external transactions or orders. Fresh
+  sudo is labelled and cached elevation is cleared even on failure.
+  `python3 scripts/test-rust-macos-uninstall.py` uses isolated temporary
+  installations to cover populated/WAL/damaged/missing journals, confirmation,
+  cancellation and genuine path/service safety failures.
 - `make bundle` builds an uninstalled debug bundle in a fresh ignored directory;
   `make release` uses the optimized release path. Debug packaging reuses the native
   helper when its sources/build script have not changed; it still verifies code

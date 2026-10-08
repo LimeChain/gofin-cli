@@ -158,10 +158,10 @@ struct ConnectionCommandArgs {
     /// Binance account role: main or sub.
     #[arg(long, value_enum, requires_all = ["provider_choice", "name"])]
     role: Option<fin_discovery::BinanceRole>,
-    /// Existing main connection for a Binance subaccount.
+    /// Optional existing main connection for hierarchy verification and parent-authorized reads.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     parent: Option<String>,
-    /// Binance subaccount email; not a credential. Accepted only for role=sub.
+    /// Binance subaccount email; required with --parent and accepted only for role=sub.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     email: Option<String>,
     /// Optional enrollment read-check network: ethereum:1, ethereum:42161 or ethereum:4663.

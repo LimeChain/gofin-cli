@@ -113,10 +113,20 @@ Legacy `binance` financial identities are unchanged; additional integrations can
 use `exchange:<venue>` with explicitly registered market readers.
 CoinGecko remains responsible for verified EVM platform/contract and native ETH
 identity. Aave health/collateral oracles remain protocol-specific checks.
-Fee preparation freezes the RPC-estimated envelope;
-L2 terminal reconciliation additionally checks finalized inclusion. A receipt
-before the RPC finalized block remains pending with its original identity.
-The finalized marker is not independent proof of the rollup challenge period.
+Fee preparation freezes the RPC-estimated envelope. For Fin-originated EVM
+transfers (including Binance deposits), L2 terminal reconciliation additionally
+checks finalized inclusion. A receipt before the RPC finalized block remains
+pending with its original identity. The finalized marker is not independent
+proof of the rollup challenge period.
+
+Binance withdrawals to EVM wallets use a separate recipient-proof rule. For a
+withdrawal mapped to Arbitrum One or Robinhood Chain, one canonical
+sequencer-included block is sufficient when the saved withdrawal transaction
+hash, chain, recipient, asset identity and expected amount all match. This
+evidence is labeled `sequencer-inclusion`; it does not claim parent-chain
+finality. A receipt observer does not establish that Binance offers a route:
+the Robinhood network mapping is currently unavailable/unverified. The original
+withdrawal identity remains the recovery key after response loss or restart.
 
 RPC customization belongs to protected network configuration and will need a
 human-authorized setting; no public RPC-changing command is implemented.
@@ -178,9 +188,11 @@ This subsection describes legacy and standalone exact-operation approval.
 Operation-boundary attempts use fresh USD evidence for protected policy but do
 not inherit these incidental cent-rounded consent ceilings.
 
-Binance preparation attaches versioned `_fin_usd_ceiling_v1` metadata using the
+Binance and EVM preparation attach versioned `_fin_usd_ceiling_v1` metadata using the
 shared domain helper. Movement, fee and extra-allocation maxima round upward to
 cents before initial policy checks/reservation and appear in the review summary.
+Composite deposits carry the wallet transfer's ceilings into their outer approval
+while preserving the original nested transaction and historical deposit records.
 The immutable approval binds these ceilings and exact priced asset/unit/provider
 identities along with execution and financial intent. Actual unit prices and
 observation timestamps remain factual valuation evidence, outside that ceiling's
@@ -418,6 +430,9 @@ Alloy preparation completes nonce, gas and chain fields before approval and
 freezes the approved envelope. Signing/dispatch checks the exact serialized
 sender and payload/fee fields; changing a provider must not mutate the approved
 transaction. A new adapter can reuse runtime tooling only through this path.
+Preparation uses 20% gas-unit and up to 50% fee-quote headroom, including priority
+fees, within the caller's finite total fee cap. Revalidation checks fresh
+conditions against those frozen bounds without rebuilding the envelope.
 
 Compatibility shims are deliberately limited to demonstrated 4.5.85 gaps:
 

@@ -18,7 +18,7 @@ help:
 	  'make release           Build an optimized macOS release bundle; do not install' \
 	  'make setup             HUMAN: build debug bundle and run real protected setup' \
 	  'make update            HUMAN: update runtime and existing managed skills; keep connections' \
-	  'make uninstall         HUMAN: delete installed credentials/config; refuse financial history'
+	  'make uninstall         HUMAN: confirm deletion of installed credentials, config and history'
 
 dev:
 	@cargo run --quiet --locked -p fin-cli -- $(ARGS)

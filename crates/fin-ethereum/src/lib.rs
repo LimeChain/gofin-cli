@@ -230,6 +230,13 @@ impl Default for EthereumConfig {
     }
 }
 impl EthereumConfig {
+    /// External Binance payout proofs for these L2s settle at canonical
+    /// sequencer inclusion rather than waiting for Ethereum L1 finality.
+    /// Fin-originated writes continue to use `require_finalized` unchanged.
+    pub const fn external_credit_uses_sequencer(chain_id: u64) -> bool {
+        matches!(chain_id, 42161 | 4663)
+    }
+
     pub fn wallet_only(chain_id: u64, confirmations: u64, snapshot_tokens: Vec<String>) -> Self {
         Self {
             chain_id,
@@ -281,13 +288,15 @@ pub struct WalletConnection {
 /// This is an internal composition seam, never an agent operation or request
 /// field. The broker must authenticate the account and hash its full observed
 /// eligibility evidence before constructing this target.
+/// The historical type name and serialized fields are retained for recovery;
+/// generalized deposits also carry a separately verified exact source asset.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerVerifiedNativeDepositTarget {
     pub chain_id: u64,
     pub account_resource: ResourceId,
     pub address: String,
-    /// Actual venue holding identity: binance/ETH with 36 atomic decimals.
+    /// Actual venue holding identity with 36 atomic decimals.
     pub asset: AssetId,
     /// Usable-credit minimum in the venue asset's 36-decimal atomic units.
     pub minimum_deposit: Quantity,
@@ -526,6 +535,12 @@ struct Binding {
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
+    #[serde(
+        default,
+        rename = "_fin_usd_ceiling_v1",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value_bounds: Option<Value>,
 }
 
 #[async_trait]
@@ -553,8 +568,11 @@ impl Adapter for EthereumAdapter {
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
-        self.prepare_operation(operation, input, None, &PreparationContext::default())
-            .await
+        let mut prepared = self
+            .prepare_operation(operation, input, None, &PreparationContext::default())
+            .await?;
+        fin_domain::value_bounds::bind(&mut prepared);
+        Ok(prepared)
     }
     async fn prepare_with_context(
         &self,
@@ -562,8 +580,11 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
-        self.prepare_operation(operation, input, None, context)
-            .await
+        let mut prepared = self
+            .prepare_operation(operation, input, None, context)
+            .await?;
+        fin_domain::value_bounds::bind(&mut prepared);
+        Ok(prepared)
     }
     async fn preflight_return_route(
         &self,
@@ -592,13 +613,16 @@ impl Adapter for EthereumAdapter {
                 .flatten()
                 .collect(),
         };
-        self.prepare_operation(
-            &prepared.operation,
-            &prepared.input,
-            Some(&original),
-            &context,
-        )
-        .await
+        let mut refreshed = self
+            .prepare_operation(
+                &prepared.operation,
+                &prepared.input,
+                Some(&original),
+                &context,
+            )
+            .await?;
+        fin_domain::value_bounds::carry(prepared, &mut refreshed)?;
+        Ok(refreshed)
     }
     async fn submit(
         &self,
@@ -611,7 +635,15 @@ impl Adapter for EthereumAdapter {
             "BINDING_CHANGED",
             "Current executable fields differ from approved envelope.",
         )?;
-        require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())?;
+        if prepared
+            .binding
+            .get(fin_domain::value_bounds::KEY)
+            .is_some()
+        {
+            fin_domain::value_bounds::validate(&fresh)?;
+        } else {
+            require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())?;
+        }
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",

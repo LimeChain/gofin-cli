@@ -126,7 +126,15 @@ and read-only connections. Inspect provider-specific prerequisites with
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
 address with its exact memo/tag. Completion requires independent recipient
-evidence from a supported observer; venue success alone does not prove receipt. Connection changes reload
+evidence from a supported observer; venue success alone does not prove receipt.
+For a Binance route that is exposed by live metadata, Arbitrum One and Robinhood
+Chain destination verification accepts a matching receipt in one canonical
+sequencer-included block without waiting for parent-chain finality. Binance's
+Robinhood network mapping is currently unavailable/unverified, so this does not
+claim that withdrawals to that chain can be submitted. Ethereum-mainnet
+withdrawals keep their configured confirmation rule. Fin-originated EVM
+transfers and Binance deposits retain their existing chain-finality
+requirements. Connection changes reload
 automatically before the next broker request, without stopping the daemon or
 replaying a request. Local connection listing and service commands remain available
 during venue authentication failures; account operations retain identity checks.
@@ -136,7 +144,7 @@ separators; press Enter after its END line.
 Financial execution shows its human preview in the terminal; `--verbose` includes
 technical details. Agents use `--dry-run --json` and present the result before
 invoking execution. The only approval popup is the system Touch ID prompt,
-which identifies the specific write. Binance previews display immutable USD
+which identifies the specific write. Binance and EVM previews display immutable USD
 ceilings rounded up to cents. Fin refreshes pricing before submission and accepts
 it only within those ceilings, with the same asset identities, amounts, limit
 price, fees and destination. Stale or invalid pricing still blocks execution;
@@ -311,6 +319,47 @@ proved failure only with complete matching history absent and unchanged source
 and destination balances. Other uncertain failures remain reserved. Always check
 the original `fin status OPERATION_ID --json` before creating another request.
 
+## Binance deposits from EVM wallets
+
+`binance.deposit` sends an exact native or ERC20 amount into the selected main
+account or subaccount using that account's own credentials. A standalone
+subaccount needs no enrolled master. Parent-authorized hierarchy and transfer
+operations remain separate optional capabilities.
+
+Discover coins and networks from Binance, then inspect the exact chain token:
+
+```sh
+fin read binance.networks --input '{"account":"binance-sub","coin":"USDC"}' --json
+fin read binance.deposit-address --input '{"account":"binance-sub","coin":"USDC","network":"ARBITRUM"}' --json
+fin schema binance.deposit --json
+fin execute binance.deposit --dry-run --input '{"requestId":"deposit-001","account":"binance-sub","wallet":"wallet","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","amount":"1","maxFeeEth":"0.0001"}' --json
+```
+
+These are illustrative names and bounds; preview checks the actual availability,
+minimum, balances, exact contract and token precision. ERC20 requests must name
+the contract reported for that exact Binance network. Native ETH uses
+`"token":"native"`. Legacy inputs without route fields still select ETH on
+Ethereum mainnet. Binance routes are dynamic; source execution currently needs
+an explicitly mapped, configured Fin EVM network. An advertised Binance route
+alone does not establish source-chain support. Memo/tag routes and non-unit
+asset denominations are refused rather than silently translated.
+
+Approval binds the source wallet, destination account, chain, exact asset,
+Binance address, amount and native fee cap. Human deposit summaries show account
+aliases and network names; exact addresses and asset identities remain available
+in `--verbose` and `--json` output. The existing wallet transfer path
+handles pricing, signing and canonical chain proof. Gas preparation allows 20%
+headroom on gas units and up to 50% on fee quotes, including priority fees, within
+the explicit total fee cap. Routine gas changes inside those approved bounds
+retain the same transaction; exceeding a bound requires a new approval.
+Completion also requires a
+matching usable Binance credit and balance evidence. Delayed credit and lost
+responses retain the original submission and reservation: use
+`fin status OPERATION_ID --json`, never repeat with a new ID to recover.
+
+See the [deposit verification checklist](docs/testing/binance.md#evm-deposit-verification)
+for synthetic checks and the later human Touch ID session.
+
 ## Financial limits
 
 ```sh
@@ -419,9 +468,21 @@ debug macOS bundle; `make release` creates an optimized bundle without installin
 own Terminal; it preserves protected state and refreshes unmodified managed skills.
 Review the local changes first; this path also accepts bundled installer/helper
 updates. It does not restart the broker or reinstall.
-`make uninstall` is a destructive development reset that deletes installed
-credentials/configuration and refuses financial history. Run setup/reset yourself
-in Terminal; neither is part of ordinary tests. `make help` lists the targets.
+`make uninstall` asks for confirmation in your own Terminal, then deletes the
+installed runtime, saved credentials, configuration and all financial history,
+including pending-operation recovery records. Existing history does not block
+uninstall. Deletion does not cancel transactions or orders already submitted to
+a chain or exchange, and no credential/history backup is created. Declining or
+cancelling the confirmation leaves the installation intact. To intentionally start fresh:
+
+```sh
+make uninstall  # review and confirm permanent local data deletion
+make setup      # install the current source build, then re-enroll connections
+```
+
+Uninstall retains the maintenance lock and service-stop checks so it cannot
+race an active command or approval. Neither uninstall nor setup runs as part of
+ordinary tests. `make help` lists the targets.
 
 Read [AGENTS.md](AGENTS.md), the [implementation plan](docs/implementation-plan.md),
 [Rust architecture](docs/rust-architecture.md), [onboarding](docs/onboarding.md),
@@ -576,9 +637,15 @@ required. The adapter checks venue formats, exact increments, limits, fee bounds
 permissions and Travel Rule eligibility; it has no coin/network allowlist.
 Named reusable EVM wallets select their chain using the Binance network identifier
 (for example `ARBITRUM`). Independent receipt observers currently cover configured
-reviewed EVM chains and standard native/ERC-20 assets; other routes explicitly
-remain pending after Binance reports completion. Observer routing is separate
-from exchange submission support.
+reviewed EVM chains and standard native/ERC-20 assets. For a Binance withdrawal
+that live metadata can map to Arbitrum One (`42161`) or Robinhood Chain (`4663`),
+one canonical sequencer-included block is sufficient when the original hash,
+chain, recipient, asset and expected amount match. Binance's Robinhood network
+mapping is currently unavailable/unverified, so the receipt observer does not
+establish that such a withdrawal route can be submitted. Other routes explicitly
+remain pending after Binance reports completion. This receipt policy does not
+change finality for Fin-originated wallet transfers or Binance deposits.
+Observer routing is separate from exchange submission support.
 
 Inspect the exact withdrawal contract before preparing a real amount:
 

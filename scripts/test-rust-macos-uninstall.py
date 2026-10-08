@@ -3,7 +3,7 @@
 import fcntl
 from contextlib import closing
 import importlib.util
-import os
+import io
 from pathlib import Path
 import plistlib
 import sqlite3
@@ -71,13 +71,14 @@ class ResetTests(unittest.TestCase):
         return subprocess.CompletedProcess(arguments, code)
 
     def check_fixture_path(self, path, directory=False):
-        self.assertTrue(path.is_relative_to(self.base))
-        self.assertFalse(path.is_symlink())
-        self.assertTrue(path.is_dir() if directory else path.is_file())
+        if not path.is_relative_to(self.base) or path.is_symlink():
+            raise reset.ResetError('Unexpected synthetic path.')
+        if not (path.is_dir() if directory else path.is_file()):
+            raise reset.ResetError('Unexpected synthetic path type.')
 
-    def execute(self):
+    def execute(self, confirm=lambda: True):
         with patch.object(reset, 'protected', self.check_fixture_path):
-            return reset.uninstall(self.root, self.plist, self.registration, self.run_command)
+            return reset.uninstall(self.root, self.plist, self.registration, self.run_command, confirm)
 
     def test_clean_reset_deletes_secrets_config_service_path_without_backup(self):
         self.execute()
@@ -165,80 +166,86 @@ class ResetTests(unittest.TestCase):
             self.execute()
         self.assertEqual(self.calls, [])
 
-    def test_every_financial_table_blocks_deletion_and_restores_service(self):
-        for table in ('operations','runs','submissions','reservations','effect_ledger','proof_records'):
-            with self.subTest(table=table):
-                with closing(sqlite3.connect(self.database)) as db, db:
-                    db.execute('INSERT INTO ' + table + ' VALUES (?)', ('synthetic-unresolved',))
-                with self.assertRaisesRegex(reset.ResetError, 'Financial history'):
-                    self.execute()
-                self.assertTrue((self.root / 'private/credentials/synthetic').exists())
-                self.assertTrue(any('bootstrap' in command for command in self.calls))
-                with closing(sqlite3.connect(self.database)) as db, db:
-                    db.execute('DELETE FROM ' + table)
+    def invoke_main(self, answer):
+        output, prompt = io.StringIO(), io.StringIO()
+        with patch.object(reset, 'protected', self.check_fixture_path), \
+                patch.object(reset.sys, 'platform', 'darwin'), \
+                patch.object(reset.os, 'geteuid', return_value=0), \
+                patch.object(reset.os, 'isatty', return_value=True), \
+                patch.dict(reset.os.environ, {'SUDO_UID':'501'}):
+            result = reset.main(
+                self.root, self.plist, self.registration, self.run_command,
+                input_stream=answer, prompt_stream=prompt, result_stream=output,
+            )
+        return result, output.getvalue(), prompt.getvalue()
 
-    def test_unreadable_schema_refuses(self):
-        with closing(sqlite3.connect(self.database)) as db, db:
-            db.execute('DROP TABLE operations')
-        with self.assertRaisesRegex(reset.ResetError, 'journal'):
-            self.execute()
-        self.assertTrue(self.root.exists())
-
-    def test_sqlite_diagnostics_are_specific_without_echoing_arbitrary_data(self):
-        for message, expected in [
-            ('database is locked', 'database is locked'),
-            ('disk I/O error', 'SQLite disk I/O failure'),
-            ('no such table: operations', 'missing expected operations table'),
-            ('SYNTHETIC_PRIVATE_DATA_NOT_FOR_OUTPUT', 'unclassified SQLite failure'),
-        ]:
-            self.assertEqual(reset.journal_error_reason(sqlite3.OperationalError(message)), expected)
-
-    def test_wal_history_is_not_mistaken_for_an_empty_database(self):
-        with closing(sqlite3.connect(self.database)) as writer:
-            writer.execute('PRAGMA journal_mode=WAL')
-            writer.execute("INSERT INTO operations VALUES ('synthetic-wal-only-record')")
-            writer.commit()
-            self.assertTrue(Path(str(self.database) + '-wal').exists())
-            with self.assertRaisesRegex(reset.ResetError, 'Financial history'):
-                self.execute()
-            self.assertTrue(self.root.exists())
-
-    def test_snapshot_handles_read_only_wal_support_failure_and_preserves_original(self):
-        # Reproduce the reported error using macOS SQLite: readonly WAL cannot
-        # create its missing shm in a non-writable source directory.
-        source = self.base / 'source.sqlite'
-        with closing(sqlite3.connect(source)) as writer:
-            writer.execute('PRAGMA journal_mode=WAL')
-            for table in ('operations','runs','submissions','reservations','effect_ledger','proof_records'):
-                writer.execute('CREATE TABLE ' + table + ' (id TEXT)')
-            writer.commit()
-            import shutil
-            shutil.copyfile(source, self.database)
+    def test_confirmed_main_deletes_populated_pending_history_and_wal(self):
+        reader = sqlite3.connect(self.database)
+        try:
+            reader.execute('PRAGMA journal_mode=WAL')
+            reader.execute('BEGIN')
+            reader.execute('SELECT * FROM operations').fetchall()
+            with closing(sqlite3.connect(self.database)) as writer, writer:
+                writer.execute("INSERT INTO operations VALUES ('synthetic-pending-recovery-record')")
             wal = Path(str(self.database) + '-wal')
-            shutil.copyfile(Path(str(source) + '-wal'), wal)
-            before = (self.database.read_bytes(), wal.read_bytes())
-            self.database.parent.chmod(0o500)
-            try:
-                if os.geteuid() != 0:
-                    with closing(sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True)) as reader:
-                        with self.assertRaises(sqlite3.OperationalError):
-                            reader.execute('SELECT * FROM operations').fetchall()
-                with patch.object(reset, 'protected', self.check_fixture_path):
-                    reset.empty_journal(self.database)
-                self.assertEqual(before, (self.database.read_bytes(), wal.read_bytes()))
-                self.assertFalse(list(self.root.glob('.fin-journal-check-*')))
-            finally:
-                self.database.parent.chmod(0o700)
-
-    def test_journal_is_checked_after_stop_and_before_deletion(self):
-        original = reset.empty_journal
-        def inspect(path):
+            self.assertTrue(wal.exists())
+            status, output, prompt = self.invoke_main(io.StringIO('yes\n'))
+            self.assertEqual(status, 0)
+            self.assertIn('financial history deleted', output)
+            self.assertIn('pending', prompt)
+            self.assertIn('avoiding duplicates', prompt)
+            self.assertIn('does not cancel existing', prompt)
+            self.assertIn('exchanges or chains', prompt)
             self.assertTrue(any('bootout' in command for command in self.calls))
-            self.assertTrue(self.plist.exists())
-            self.assertTrue((self.root / 'private/credentials/synthetic').exists())
-            return original(path)
-        with patch.object(reset, 'empty_journal', side_effect=inspect):
-            self.execute()
+            self.assertFalse(self.root.exists())
+            self.assertFalse(wal.exists())
+        finally:
+            reader.close()
+
+    def test_missing_database_does_not_block_confirmed_uninstall(self):
+        self.database.unlink()
+        status, output, _ = self.invoke_main(io.StringIO('yes\n'))
+        self.assertEqual(status, 0)
+        self.assertIn('financial history deleted', output)
+        self.assertFalse(self.root.exists())
+
+    def test_damaged_database_does_not_block_confirmed_uninstall(self):
+        self.database.write_bytes(b'not sqlite data')
+        status, output, _ = self.invoke_main(io.StringIO('yes\n'))
+        self.assertEqual(status, 0)
+        self.assertIn('financial history deleted', output)
+        self.assertFalse(self.root.exists())
+
+    def test_decline_eof_and_interrupt_preserve_all_files_and_service(self):
+        class InterruptedInput:
+            def readline(self):
+                raise KeyboardInterrupt
+
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute("INSERT INTO operations VALUES ('synthetic-pending-recovery-record')")
+        wal = Path(str(self.database) + '-wal')
+        shm = Path(str(self.database) + '-shm')
+        wal.write_bytes(b'SYNTHETIC PENDING WAL')
+        shm.write_bytes(b'SYNTHETIC SHARED MEMORY')
+        for label, answer, expected_status in (
+            ('declined', io.StringIO('n\n'), 1),
+            ('enter-default-no', io.StringIO('\n'), 1),
+            ('eof', io.StringIO(''), 1),
+            ('interrupt', InterruptedInput(), 130),
+        ):
+            with self.subTest(label=label):
+                before = {path.relative_to(self.base): path.read_bytes()
+                          for path in self.base.rglob('*') if path.is_file()}
+                status, output, prompt = self.invoke_main(answer)
+                self.assertEqual(status, expected_status)
+                self.assertIn('saved data were not changed', output + prompt)
+                self.assertIn('financial history', prompt)
+                after = {path.relative_to(self.base): path.read_bytes()
+                         for path in self.base.rglob('*') if path.is_file()}
+                self.assertEqual(after, before)
+                self.assertFalse(any('bootout' in command for command in self.calls))
+                self.assertFalse(any(command[0] == '/usr/bin/sudo' for command in self.calls))
+                self.calls.clear()
 
     def test_changed_path_registration_refuses(self):
         self.registration.write_text('/unrelated\n')
@@ -270,6 +277,16 @@ class ResetTests(unittest.TestCase):
         with self.assertRaisesRegex(reset.ResetError, 'stop'):
             self.execute()
         self.assertTrue((self.root / 'private/credentials/synthetic').exists())
+
+    def test_financial_storage_symlink_fails_path_guard_before_commands(self):
+        self.database.unlink()
+        outside = self.base / 'outside.sqlite'
+        outside.write_bytes(b'SYNTHETIC OUTSIDE DATA')
+        self.database.symlink_to(outside)
+        with self.assertRaises(reset.ResetError):
+            self.execute()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(outside.read_bytes(), b'SYNTHETIC OUTSIDE DATA')
 
     def test_symlinks_fail_real_path_guard(self):
         link = self.base / 'link'

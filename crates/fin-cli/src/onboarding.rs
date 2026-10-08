@@ -66,8 +66,16 @@ fn guided_add_with(
             )?;
             args.role = Some(role);
             if role == BinanceRole::Sub {
-                args.parent = Some(prompt(input, output, "Parent connection name", None)?);
-                args.email = Some(prompt(input, output, "Subaccount email", None)?);
+                let parent = prompt(
+                    input,
+                    output,
+                    "Parent main connection name (leave blank for standalone subaccount access)",
+                    None,
+                )?;
+                if !parent.is_empty() {
+                    args.parent = Some(parent);
+                    args.email = Some(prompt(input, output, "Subaccount email", None)?);
+                }
             }
             args.credential_type = Some(choice(
                 input,
@@ -225,14 +233,24 @@ mod tests {
     }
 
     #[test]
-    fn subaccount_collects_public_relationship_fields() {
+    fn subaccount_parent_link_is_optional_and_collects_public_relationship_fields() {
         let (result, output) = run("binance\nsavings\nsub\nmain\nchild@example.invalid\ned25519\n");
         let args = result.unwrap();
         assert_eq!(args.role, Some(BinanceRole::Sub));
         assert_eq!(args.parent.as_deref(), Some("main"));
         assert_eq!(args.email.as_deref(), Some("child@example.invalid"));
         assert_eq!(args.credential_type, Some(CredentialType::Ed25519));
-        assert!(output.contains("Parent connection name"));
+        assert!(output.contains("Parent main connection name"));
+    }
+
+    #[test]
+    fn subaccount_can_be_enrolled_without_master_metadata() {
+        let (result, output) = run("binance\nsavings\nsub\n\nhmac\n");
+        let args = result.unwrap();
+        assert_eq!(args.role, Some(BinanceRole::Sub));
+        assert!(args.parent.is_none() && args.email.is_none());
+        assert_eq!(args.credential_type, Some(CredentialType::Hmac));
+        assert!(output.contains("leave blank for standalone subaccount access"));
     }
 
     #[test]

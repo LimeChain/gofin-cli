@@ -18,6 +18,7 @@
           "type": "integer"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -937,6 +938,7 @@
           "type": "boolean"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -1987,6 +1989,7 @@
           "type": "string"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -3009,6 +3012,7 @@
           "type": "integer"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -3961,6 +3965,7 @@
           "type": "string"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -4997,7 +5002,7 @@
   },
   {
     "name": "binance.deposit",
-    "description": "Send an exact finite native ETH amount from an enrolled Ethereum mainnet wallet to the current fixed Binance ETH deposit address; completion requires canonical chain proof and one usable matching Binance credit.",
+    "description": "Deposit native ETH or an exact ERC20 token from a protected EVM wallet into a Binance main account or subaccount using its own credentials. Live Binance metadata selects the asset/network route; completion requires canonical chain evidence and matching usable Binance credit.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -5010,11 +5015,41 @@
         "amount": {
           "type": "string"
         },
+        "chainId": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coin": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "maxFeeEth": {
           "type": "string"
         },
+        "network": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "requestId": {
           "type": "string"
+        },
+        "token": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "wallet": {
           "type": "string"
@@ -5060,20 +5095,51 @@
       "title": "FinError",
       "type": "object"
     },
-    "examples": [],
-    "coverage": "Broker-composite synthetic transport and canonical fake-EVM proof; production access and live funding acceptance are not verified.",
-    "completion": "Original transaction identity is canonical and finalized, and exactly one current usable ETH deposit row plus matching Binance free-balance delta is observed.",
+    "examples": [
+      {
+        "account": "binance-sub",
+        "amount": "0.001",
+        "chainId": 42161,
+        "coin": "ETH",
+        "maxFeeEth": "0.0001",
+        "network": "ARBITRUM",
+        "requestId": "deposit-native-001",
+        "token": "native",
+        "wallet": "wallet"
+      },
+      {
+        "account": "binance-sub",
+        "amount": "1",
+        "chainId": 42161,
+        "coin": "USDC",
+        "maxFeeEth": "0.0001",
+        "network": "ARBITRUM",
+        "requestId": "deposit-token-001",
+        "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+        "wallet": "wallet"
+      }
+    ],
+    "coverage": "Synthetic broker-composite transport and canonical fake-EVM proof; live funding capabilities and acceptance remain separately reported.",
+    "completion": "Original transaction identity is canonical and finalized, and exactly one usable matching Binance credit plus the corresponding free-balance increase is observed.",
     "semantics": {
-      "amount": "exact finite native ETH; amount=all is unsupported",
-      "completion": "chain submission alone is insufficient; deposit history status 1 and usable balance delta are required",
-      "ethereumNativeDecimals": 18,
-      "recipient": "fixed from current protected Binance ETH deposit-address endpoint",
+      "accounts": "Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.",
+      "amount": "exact finite amount; amount=all is unsupported",
+      "approval": "Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.",
+      "coin": "Binance asset identity; never resolved from an EVM ticker",
+      "completion": "chain submission alone is insufficient; matching usable deposit history and balance delta are required",
+      "legacyDefaults": "Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.",
+      "maxFeeEth": "Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.",
+      "network": "explicit Binance network code matched to current metadata and a configured Fin EVM chain",
+      "recipient": "fixed from the authenticated account's current Binance deposit-address endpoint",
+      "recovery": "Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.",
+      "sourceCoverage": "Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.",
+      "token": "native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata",
       "venueAssetDecimals": 36
     }
   },
   {
     "name": "binance.deposit-address",
-    "description": "Selected Binance deposit address and memo/tag. Address lookup is read-only.",
+    "description": "Selected account's own Binance deposit address and memo/tag, read with that account's credential. Subaccount deposit-address restrictions, if any, apply to this endpoint specifically.",
     "kind": "read",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -5129,7 +5195,7 @@
       "type": "object"
     },
     "examples": [],
-    "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
+    "coverage": "Own-account Binance USER_DATA read uses the selected connection's credential, including a subaccount-only connection; no parent/master lookup is made. A Binance denial applies to this endpoint/capability and should be reported specifically. Synthetic tests; live account eligibility remains account-dependent.",
     "completion": "Address observed; credit requires a matching Binance deposit record.",
     "semantics": {
       "amount": "exact decimal string",
@@ -5139,7 +5205,7 @@
   },
   {
     "name": "binance.deposit-addresses",
-    "description": "List Binance deposit addresses for an explicit coin/network. Creating an additional address requires Binance's website/app.",
+    "description": "List the selected account's own Binance deposit addresses for an explicit coin/network using that account's credential, including a subaccount-only connection. Creating an additional address requires Binance's website/app.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -5277,7 +5343,7 @@
         "network": "ETH"
       }
     ],
-    "coverage": "Documented Binance GET routes; synthetic tests. Authenticated live observations pending.",
+    "coverage": "Binance own-account GET routes use the selected connection's credential; no parent/master lookup is used. If Binance denies a specific route, its response is reported for that capability only. Synthetic tests; authenticated live observations pending.",
     "completion": "Bounded address-book observation only; no address creation, whitelist modification, account-wide enforcement or withdrawal eligibility proof.",
     "semantics": {
       "editing_supported": false,
@@ -5290,7 +5356,7 @@
   },
   {
     "name": "binance.deposit-history",
-    "description": "Paginated Binance deposit history with pending, locked, and usable credit kept distinct.",
+    "description": "Paginated own-account Binance deposit history with pending, locked, and usable credit kept distinct, read using the selected account's credential including a subaccount-only connection.",
     "kind": "read",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -5372,7 +5438,7 @@
       "type": "object"
     },
     "examples": [],
-    "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
+    "coverage": "Own-account Binance USER_DATA read uses the selected connection's credential, including a subaccount-only connection; no parent/master lookup is made. A Binance denial applies to this endpoint/capability and should be reported specifically. Synthetic tests; live account eligibility remains account-dependent.",
     "completion": "A matching credited record establishes usable exchange credit.",
     "semantics": {
       "amount": "exact decimal string",
@@ -7050,7 +7116,7 @@
   },
   {
     "name": "binance.networks",
-    "description": "Current Binance asset networks, precision, fee, minimum, maximum, and deposit/withdraw availability.",
+    "description": "Current Binance asset/network metadata and deposit availability for the selected account using its own credential, including subaccount-only connections.",
     "kind": "read",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -7104,7 +7170,7 @@
       "type": "object"
     },
     "examples": [],
-    "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
+    "coverage": "Own-account Binance USER_DATA read uses the selected connection's credential, including a subaccount-only connection; no parent/master lookup is made. A Binance denial applies to this endpoint/capability and should be reported specifically. Synthetic tests; live account eligibility remains account-dependent.",
     "completion": "Current funding metadata observed.",
     "semantics": {
       "amount": "exact decimal string",
@@ -8861,7 +8927,7 @@
         "network": "ETH"
       }
     ],
-    "coverage": "Documented Binance GET routes; synthetic tests. Authenticated live observations pending.",
+    "coverage": "Binance own-account GET routes use the selected connection's credential; no parent/master lookup is used. If Binance denies a specific route, its response is reported for that capability only. Synthetic tests; authenticated live observations pending.",
     "completion": "Bounded address-book observation only; no address creation, whitelist modification, account-wide enforcement or withdrawal eligibility proof.",
     "semantics": {
       "editing_supported": false,
@@ -9021,7 +9087,7 @@
       "amount": "exact decimal string",
       "coinNetworkSelection": "live Binance metadata; no coin/network allowlist",
       "credentialValues": "never exposed",
-      "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending",
+      "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending. The configured Arbitrum One and Robinhood Chain observers accept successful canonical sequencer inclusion with exact recipient and amount proof, without waiting for parent-chain finality. Venue route availability remains separate.",
       "ordinaryExecution": "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced",
       "walletType": "SPOT"
     }
@@ -9901,6 +9967,7 @@
           "type": "string"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -10959,6 +11026,7 @@
           "type": "integer"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -12174,6 +12242,7 @@
           "type": "integer"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -13132,6 +13201,7 @@
           "type": "string"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
@@ -14042,6 +14112,7 @@
           "type": "integer"
         },
         "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
