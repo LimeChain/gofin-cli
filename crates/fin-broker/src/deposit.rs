@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+#[path = "deposit_presentation.rs"]
+mod presentation;
+
 fn error(code: &str, stage: &str, message: &str, next: &str) -> FinError {
     FinError::new(code, stage, message, next)
 }
@@ -711,19 +714,13 @@ impl BinanceEthereumDepositAdapter {
         }
         let intent =
             Self::cross_custody_intent(&inner_preview, &target, &input.amount, &source_asset)?;
-        let source_address = wallet.address.as_deref().unwrap_or("unknown");
-        let summary = format!(
-            "Deposit {} {} ({}/{}) from {} to {} {} ({}) on {}. Fee cap {} ETH.",
-            input.amount,
-            coin,
-            source_asset.reference,
-            source_asset.decimals,
-            source_address,
-            account.name,
-            target.address,
-            network,
+        let summary = presentation::summary(
+            &input.amount,
+            &coin,
+            (&wallet.name, wallet.address.as_deref().unwrap_or("unknown")),
+            (&account.name, &target.address),
             chain_id,
-            input.max_fee_eth
+            &input.max_fee_eth,
         );
         let binding = DepositBinding {
             target,

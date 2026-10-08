@@ -150,6 +150,22 @@ struct ApprovalPresentationTests {
                                    "execution": ["amount": "1", "destination": "SYNTHETIC-wallet"],
                                    "financial_intent": [:] as [String: Any]]
         let writeSummary = "Send 1 SYNTHETIC to SYNTHETIC-wallet; fee cap 0.01 SYNTHETIC."
+        var deposit = write
+        deposit["operation"] = "binance.deposit"
+        let depositSummary = "Deposit 0.0000003 ETH: synthetic-wallet → synthetic-sub on Arbitrum One. Max fee 0.00001 ETH. USD ceilings: $0.01 movement, $0.01 fees."
+        let depositReason = financialAuthenticationReason(deposit, summary: depositSummary)!
+        assert(depositReason == "deposit 0.0000003 ETH: synthetic-wallet → synthetic-sub on Arbitrum One. Max fee 0.00001 ETH.")
+        assert(!depositReason.contains("USD") && depositSummary.contains("USD ceilings:"))
+        let depositWithoutCaps = "Deposit 1 USDC: wallet → savings on Arbitrum One. Max fee 0.001 ETH."
+        assert(financialAuthenticationReason(deposit, summary: depositWithoutCaps) == "deposit 1 USDC: wallet → savings on Arbitrum One. Max fee 0.001 ETH.")
+        // Unrecognized trailing text must not disappear along with USD limits.
+        assert(financialAuthenticationReason(deposit, summary: depositWithoutCaps + " USD ceilings: invalid.")!.contains("invalid"))
+        assert(financialAuthenticationReason(write, summary: depositSummary)!.contains("USD caps:"))
+        assert(depositReason.count <= 180 && !depositReason.contains("full details"))
+        assert(!depositReason.contains("native/18") && !depositReason.contains("42161") && !depositReason.contains("0x"))
+        let oversizedDeposit = "Deposit 0.0000003 ETH: " + String(repeating: "long-alias", count: 30) + " on Arbitrum One. Max fee 0.00001 ETH."
+        let oversizedReason = financialAuthenticationReason(deposit, summary: oversizedDeposit)!
+        assert(oversizedReason.count <= 180 && oversizedReason.contains("See terminal review for full details."))
         assert(financialAuthenticationReason(write, summary: writeSummary) == "approve this action: \(writeSummary)")
         assert(financialAuthenticationReason(write, summary: "") == nil)
         assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: 4097)) == nil)

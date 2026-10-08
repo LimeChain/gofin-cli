@@ -293,6 +293,14 @@ The native biometric prompt identifies the app as **Fin** and names the action
 (for example, finishing setup for the Mac account or saving a named Binance
 connection). Configuration and permissions remain in the protected terminal;
 the biometric prompt does not repeat them as an opaque "configuration change".
+Deposit reviews use wallet/account aliases and readable network names. The short
+Touch ID text keeps the amount, named route and maximum network fee. USD caps
+remain enforced and visible in the full review; addresses are shortened only
+when no alias exists. Exact addresses, asset
+contracts and chain IDs remain in the structured approval binding and verbose
+review. Exceptionally long summaries explicitly refer to the full terminal
+review rather than silently cutting off an amount or fee. Native dialog layout
+still needs human verification on the target Mac.
 
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
