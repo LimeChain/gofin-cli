@@ -266,6 +266,8 @@ struct PlanFundingTransport {
     main: Mutex<String>,
     transfer_posts: AtomicUsize,
     withdrawal_posts: AtomicUsize,
+    transfer_time_ms: Mutex<Option<u64>>,
+    withdrawal_time_ms: Mutex<Option<u64>>,
 }
 
 impl PlanFundingTransport {
@@ -275,6 +277,8 @@ impl PlanFundingTransport {
             main: Mutex::new("0".into()),
             transfer_posts: AtomicUsize::new(0),
             withdrawal_posts: AtomicUsize::new(0),
+            transfer_time_ms: Mutex::new(None),
+            withdrawal_time_ms: Mutex::new(None),
         }
     }
     fn account(&self, child: bool) -> Value {
@@ -282,8 +286,27 @@ impl PlanFundingTransport {
             "asset":"USDC", "free":if child { self.child.lock().unwrap().clone() } else { self.main.lock().unwrap().clone() }, "locked":"0"
         }]})
     }
-    fn timestamp() -> u64 {
-        chrono::Utc::now().timestamp_millis().max(0) as u64
+    fn bounded_history_timestamp(request: &BinanceRequest, timestamp: Option<u64>) -> u64 {
+        let timestamp = timestamp.expect("the synthetic venue accepted the original write");
+        let end_time = request
+            .get("endTime")
+            .expect("history request carries an endTime")
+            .parse::<u64>()
+            .expect("history endTime is an exact integer");
+        let start_time = request
+            .get("startTime")
+            .expect("history request carries a startTime")
+            .parse::<u64>()
+            .expect("history startTime is an exact integer");
+        assert!(
+            timestamp >= start_time,
+            "venue history row falls inside its query window"
+        );
+        assert!(
+            timestamp <= end_time,
+            "venue history row falls inside its query window"
+        );
+        timestamp
     }
 }
 
@@ -314,7 +337,7 @@ impl fin_binance::BinanceTransport for PlanFundingTransport {
                 Ok(
                     json!([{"counterParty":"master","email":"main@example.invalid","type":2,
                     "asset":"USDC","qty":"10","fromAccountType":"SPOT","toAccountType":"SPOT",
-                    "status":"SUCCESS","tranId":123456789,"time":Self::timestamp()}]),
+                    "status":"SUCCESS","tranId":123456789,"time":Self::bounded_history_timestamp(&request, *self.transfer_time_ms.lock().unwrap())}]),
                 )
             }
             E::CapitalConfig => Ok(
@@ -326,27 +349,48 @@ impl fin_binance::BinanceTransport for PlanFundingTransport {
             E::TravelRuleRequirements => Ok(json!({"questionnaireCountryCode":"NIL"})),
             E::SubToMasterTransfer => {
                 self.transfer_posts.fetch_add(1, Ordering::SeqCst);
+                // Binance transfer history can report whole-second time.
+                *self.transfer_time_ms.lock().unwrap() =
+                    Some(chrono::Utc::now().timestamp_millis().max(0) as u64 / 1_000 * 1_000);
                 *self.child.lock().unwrap() = "0".into();
                 *self.main.lock().unwrap() = "10".into();
                 Ok(json!({"txnId":123456789}))
             }
-            E::UniversalTransferHistory => Ok(json!({"totalCount":1,"result":[{
-                "tranId":123456789,"clientTranId":request.get("clientTranId"),"asset":"USDC","amount":"10",
-                "fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":"child@example.invalid",
-                "status":"SUCCESS","createTimeStamp":Self::timestamp()
-            }]})),
+            E::UniversalTransferHistory => {
+                let timestamp = Self::bounded_history_timestamp(
+                    &request,
+                    *self.transfer_time_ms.lock().unwrap(),
+                );
+                Ok(json!({"totalCount":1,"result":[{
+                    "tranId":123456789,"clientTranId":request.get("clientTranId"),"asset":"USDC","amount":"10",
+                    "fromAccountType":"SPOT","toAccountType":"SPOT","fromEmail":"child@example.invalid",
+                    "status":"SUCCESS","createTimeStamp":timestamp
+                }]}))
+            }
             E::StandardWithdrawal => {
                 self.withdrawal_posts.fetch_add(1, Ordering::SeqCst);
+                *self.withdrawal_time_ms.lock().unwrap() =
+                    Some(chrono::Utc::now().timestamp_millis().max(0) as u64);
                 assert_eq!(request.get("amount"), Some("9.5"));
                 *self.main.lock().unwrap() = "0".into();
                 Ok(json!({"id":"synthetic-withdrawal-1"}))
             }
-            E::WithdrawalHistory => Ok(json!([{
-                "id":"synthetic-withdrawal-1","coin":"USDC","amount":"9.5","transactionFee":"0.5",
-                "network":"ETH","address":"0x1111111111111111111111111111111111111111",
-                "txId":format!("0x{}", "a".repeat(64)),"status":6,"completeTime":chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                "withdrawOrderId":request.get("withdrawOrderId"),"transferType":0,"walletType":0
-            }])),
+            E::WithdrawalHistory => {
+                let timestamp = Self::bounded_history_timestamp(
+                    &request,
+                    *self.withdrawal_time_ms.lock().unwrap(),
+                );
+                let complete_time = chrono::DateTime::from_timestamp_millis(timestamp as i64)
+                    .unwrap()
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                Ok(json!([{
+                    "id":"synthetic-withdrawal-1","coin":"USDC","amount":"9.5","transactionFee":"0.5",
+                    "network":"ETH","address":"0x1111111111111111111111111111111111111111",
+                    "txId":format!("0x{}", "a".repeat(64)),"status":6,"completeTime":complete_time,
+                    "withdrawOrderId":request.get("withdrawOrderId"),"transferType":0,"walletType":0
+                }]))
+            }
             endpoint => panic!("unexpected synthetic financial-plan endpoint {endpoint:?}"),
         }
     }
@@ -617,6 +661,7 @@ async fn unrelated_balance_cannot_make_up_insufficient_predecessor_proceeds() {
 struct RetryTransferTransport {
     main: Mutex<String>,
     child: Mutex<String>,
+    transfer_time_ms: Mutex<Option<u64>>,
     client_ids: Mutex<Vec<String>>,
     history_client_ids: Mutex<Vec<String>>,
     posts: AtomicUsize,
@@ -632,6 +677,7 @@ impl RetryTransferTransport {
         Self {
             main: Mutex::new("10".into()),
             child: Mutex::new("0".into()),
+            transfer_time_ms: Mutex::new(None),
             client_ids: Mutex::new(Vec::new()),
             history_client_ids: Mutex::new(Vec::new()),
             posts: AtomicUsize::new(0),
@@ -679,6 +725,11 @@ impl fin_binance::BinanceTransport for RetryTransferTransport {
                 self.client_ids.lock().unwrap().push(client_id.clone());
                 if attempt == 0 {
                     if self.lose_first_response {
+                        // Retain the accepted write's venue time even though
+                        // its response is lost, at Binance history precision.
+                        *self.transfer_time_ms.lock().unwrap() = Some(
+                            chrono::Utc::now().timestamp_millis().max(0) as u64 / 1_000 * 1_000,
+                        );
                         *self.main.lock().unwrap() = "0".into();
                         *self.child.lock().unwrap() = "10".into();
                         return Err(fin_binance::TransportError::Timeout);
@@ -689,6 +740,8 @@ impl fin_binance::BinanceTransport for RetryTransferTransport {
                         kind: fin_binance::HttpFailureKind::Rejected,
                     });
                 }
+                *self.transfer_time_ms.lock().unwrap() =
+                    Some(chrono::Utc::now().timestamp_millis().max(0) as u64 / 1_000 * 1_000);
                 *self.main.lock().unwrap() = "0".into();
                 *self.child.lock().unwrap() = "10".into();
                 Ok(json!({"tranId":987654322,"clientTranId":client_id}))
@@ -703,7 +756,39 @@ impl fin_binance::BinanceTransport for RetryTransferTransport {
                 {
                     return Ok(json!({"totalCount":0,"result":[]}));
                 }
-                let timestamp = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                // Model the accepted venue write's stable timestamp, truncated
+                // to seconds as Binance reports it. Delay the response so the
+                // fixture also proves that history time is independent of when
+                // reconciliation reads the row.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                let wall_time = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                let end_time = request
+                    .get("endTime")
+                    .expect("history request carries an endTime")
+                    .parse::<u64>()
+                    .expect("history endTime is an exact integer");
+                assert!(
+                    wall_time > end_time,
+                    "fixture delayed history past query endTime"
+                );
+                let start_time = request
+                    .get("startTime")
+                    .expect("history request carries a startTime")
+                    .parse::<u64>()
+                    .expect("history startTime is an exact integer");
+                let timestamp = self
+                    .transfer_time_ms
+                    .lock()
+                    .unwrap()
+                    .expect("accepted transfer has a stable venue timestamp");
+                assert!(
+                    timestamp >= start_time,
+                    "accepted row falls inside query startTime"
+                );
+                assert!(
+                    timestamp <= end_time,
+                    "accepted row falls inside query endTime"
+                );
                 Ok(json!({"totalCount":1,"result":[{
                     "tranId":987654322,"clientTranId":client_id,"asset":"USDC","amount":"10",
                     "fromAccountType":"SPOT","toAccountType":"SPOT",
