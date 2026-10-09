@@ -654,7 +654,12 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
         });
-        let bounds = h.bounds();
+        let quoted_floor = h.state.transfer(&transfer).unwrap().unwrap()
+            .settlement_expectation.unwrap().destination[0].minimum_atoms.clone();
+        let mut bounds = h.bounds();
+        bounds.minimum_net_receipt.as_mut().unwrap().atoms = q("9400000");
+        assert!(quoted_floor > bounds.minimum_net_receipt.as_ref().unwrap().atoms,
+            "first claim must bind the approved floor even below the provisional quote floor");
         let inputs = links
             .iter()
             .map(|link| h.step_input(&transfer, link, Some(bounds.clone())))
@@ -775,6 +780,14 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             "reset error={:?}",
             reset.error
         );
+        let first_claim = h.state.transfer(&transfer).unwrap().unwrap();
+        assert_eq!(first_claim.settlement_expectation.as_ref().unwrap().destination[0].minimum_atoms,
+            q("9400000"), "first claim freezes the plan-approved receipt floor");
+        let mut changed_bounds = bounds.clone();
+        changed_bounds.minimum_net_receipt.as_mut().unwrap().atoms = q("9300000");
+        let rebind = h.bridge.prepare("bridge.transfer",
+            &h.step_input(&transfer, &links[1], Some(changed_bounds))).await.unwrap_err();
+        assert_eq!(rebind.code, "BRIDGE_BOUNDS_ALREADY_APPROVED");
         let approve = execute_plan_step(1, "plan-erc20-approve".into()).await;
         assert_eq!(
             approve.status,

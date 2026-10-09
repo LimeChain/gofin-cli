@@ -2699,7 +2699,7 @@ fn prepare_plan_bridge_attempt_claim(
             store_transfer.settlement_expectation = Some(expectation);
         }
         (None, Some(quote_expectation))
-            if bridge_expectation_preserves_quote_floor(quote_expectation, &expectation) =>
+            if bridge_expectation_preserves_quote_targets(quote_expectation, &expectation) =>
         {
             store_transfer.approved_bounds = Some(bounds.clone());
             store_transfer.settlement_expectation = Some(expectation);
@@ -2772,24 +2772,21 @@ fn prepare_plan_bridge_attempt_claim(
     }))
 }
 
-fn bridge_expectation_preserves_quote_floor(
+fn bridge_expectation_preserves_quote_targets(
     quote: &fin_domain::BridgeSettlementExpectation,
     selected: &fin_domain::BridgeSettlementExpectation,
 ) -> bool {
-    let targets_preserve =
-        |quoted: &[fin_domain::BridgeSettlementTarget],
-         chosen: &[fin_domain::BridgeSettlementTarget]| {
-            quoted.len() == chosen.len()
-                && quoted.iter().all(|target| {
-                    chosen.iter().any(|candidate| {
-                        candidate.resource == target.resource
-                            && candidate.asset == target.asset
-                            && candidate.minimum_atoms >= target.minimum_atoms
-                    })
+    let targets_match = |quoted: &[fin_domain::BridgeSettlementTarget],
+                         chosen: &[fin_domain::BridgeSettlementTarget]| {
+        quoted.len() == chosen.len()
+            && quoted.iter().all(|target| {
+                chosen.iter().any(|candidate| {
+                    candidate.resource == target.resource && candidate.asset == target.asset
                 })
-        };
-    targets_preserve(&quote.destination, &selected.destination)
-        && targets_preserve(&quote.refund, &selected.refund)
+            })
+    };
+    targets_match(&quote.destination, &selected.destination)
+        && targets_match(&quote.refund, &selected.refund)
 }
 
 fn validate_cumulative_scope_caps(
@@ -5439,6 +5436,59 @@ mod tests {
         // Fits in i64 and the duration type, but exceeds chrono's representable
         // UTC timestamp range when added to the current time.
         assert!(plan_duration(10_000_000_000_000).is_err());
+    }
+
+    #[test]
+    fn first_plan_bridge_claim_can_bind_a_lower_approved_minimum_for_same_targets() {
+        let target =
+            |resource: &str, asset_ref: &str, minimum: &str| fin_domain::BridgeSettlementTarget {
+                resource: ResourceId(resource.into()),
+                asset: asset(asset_ref),
+                minimum_atoms: Quantity::new(minimum).unwrap(),
+            };
+        let quote = fin_domain::BridgeSettlementExpectation {
+            destination: vec![target("wallet:destination", "USDC", "9883478507950693")],
+            refund: vec![target("wallet:source", "ETH", "123")],
+        };
+        let selected = fin_domain::BridgeSettlementExpectation {
+            destination: vec![target("wallet:destination", "USDC", "9840000000000000")],
+            refund: vec![target("wallet:source", "ETH", "100")],
+        };
+
+        assert!(bridge_expectation_preserves_quote_targets(
+            &quote, &selected
+        ));
+    }
+
+    #[test]
+    fn first_plan_bridge_claim_rejects_changed_target_identity() {
+        let target =
+            |resource: &str, asset_ref: &str, minimum: &str| fin_domain::BridgeSettlementTarget {
+                resource: ResourceId(resource.into()),
+                asset: asset(asset_ref),
+                minimum_atoms: Quantity::new(minimum).unwrap(),
+            };
+        let quote = fin_domain::BridgeSettlementExpectation {
+            destination: vec![target("wallet:destination", "USDC", "100")],
+            refund: vec![target("wallet:source", "ETH", "20")],
+        };
+        let changed_route = fin_domain::BridgeSettlementExpectation {
+            destination: vec![target("wallet:attacker", "USDC", "1")],
+            refund: vec![target("wallet:source", "ETH", "1")],
+        };
+        let changed_asset = fin_domain::BridgeSettlementExpectation {
+            destination: vec![target("wallet:destination", "OTHER", "1")],
+            refund: vec![target("wallet:source", "ETH", "1")],
+        };
+
+        assert!(!bridge_expectation_preserves_quote_targets(
+            &quote,
+            &changed_route
+        ));
+        assert!(!bridge_expectation_preserves_quote_targets(
+            &quote,
+            &changed_asset
+        ));
     }
 
     #[test]

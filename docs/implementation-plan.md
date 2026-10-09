@@ -72,6 +72,12 @@ amount inside the approved interval while preserving route, identities, steps,
 receipt floor and grant; it does not renew an expired grant. Refresh after a
 submitted or uncertain source deposit is prohibited.
 
+For named plans, the first bridge claim replaces provisional quote settlement
+floors with the explicitly approved plan floors, including a lower selected floor
+that the executable quote still satisfies. Destination and refund resource/asset
+identities remain fixed. Once claimed, approved bounds and settlement targets
+require exact equality; a quote hint cannot widen or override plan authority.
+
 Source transaction confirmation releases the wallet transaction lock and moves
 principal into non-spendable transfer transit. It is not end-to-end completion.
 `bridge.status` independently verifies exact order-correlated destination receipt
@@ -80,8 +86,8 @@ status and transaction hashes are candidate locators only. Base (`8453`) and
 Relay Chain (`537713`) are observer-only. The provider requires no key and
 currently depends on Relay's deprecated anonymous `/quote`; the newer
 `/requests/v3` path requires an API key and is not used. If the anonymous endpoint
-is removed or a route is unsupported, Fin leaves it unavailable. Canonical
-bridges, Across, LayerZero/Stargate and Chainlink CCIP remain deferred. See the
+is removed or a route is unsupported, Fin leaves it unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
+are also supported; Across, LayerZero/Stargate and Chainlink CCIP remain deferred. See the
 [bridge testing guide](testing/bridge.md) for synthetic coverage and the separate
 human/live verification recipe.
 

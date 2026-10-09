@@ -35,6 +35,12 @@ availability, mainnet or Robinhood settlement, installation isolation, or real
 Touch ID. Report any unrun command separately; do not infer it passed from
 compilation or protocol vectors.
 
+The named-plan ERC-20 lifecycle regression selects a receipt floor below the
+provisional quote floor, verifies the first claim freezes that approved floor,
+and rejects a later floor change. It continues through quote refresh, source
+settlement and exact destination proof with one synthetic approval. Engine tests
+also reject changed destination/refund target identities.
+
 ## Synthetic CLI and broker lifecycle
 
 The default synthetic CLI environment deliberately does not expose the Relay
