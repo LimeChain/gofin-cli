@@ -200,6 +200,216 @@ struct Market {
     metadata: Value,
 }
 impl BinanceProfile {
+    pub(in crate::adapter) async fn trading_plan_permission(
+        &self,
+        operation: &str,
+        raw: &Value,
+        raw_bounds: &Value,
+    ) -> Result<fin_domain::financial_plans::PlanPermission, FinError> {
+        if operation != order_name(false) {
+            return Err(FinError::new(
+                "PLAN_PERMISSION_UNSUPPORTED",
+                "authorization",
+                "Named plans currently support Binance spot LIMIT IOC/FOK orders only.",
+                "Use a supported spot order step or standalone approval for this operation.",
+            ));
+        }
+        let input: OrderInput = self.parse_input(raw).await?;
+        validate_id(&input.request_id)?;
+        validate_symbol(&input.symbol)?;
+        if input.quantity == "all"
+            || input.maximum_quantity.is_some()
+            || input.reduce_only
+            || input.maximum_loss.is_some()
+            || input.maximum_profit.is_some()
+            || input.maximum_funding_loss.is_some()
+            || input.maximum_funding_profit.is_some()
+        {
+            return Err(FinError::validation(
+                "Financial plan spot steps require a fixed positive quantity and cannot include cleanup or derivative fields.",
+            ));
+        }
+        let quantity = amount(&input.quantity)?;
+        let price = amount(&input.limit_price)?;
+        let account = self.account(&input.account)?;
+        let permissions = self.permissions(account).await?;
+        if permissions.enable_spot_and_margin_trading != Some(true) {
+            return Err(error(
+                "MISSING_PERMISSION",
+                "authorization",
+                "The enrolled Binance key does not report spot trading permission.",
+            ));
+        }
+        let (uid, _) = self.account_identity(account).await?;
+        if !account.resource.0.contains(&format!("uid:{uid}:")) {
+            return Err(error(
+                "ACCOUNT_IDENTITY_MISMATCH",
+                "authorization",
+                "Trading authority differs from the enrolled Binance account.",
+            ));
+        }
+        let market = self.trading_market(account, &input.symbol, false).await?;
+        let sell = matches!(input.side, Side::Sell);
+        let spec = boundaries::prepare_plan_scope(
+            operation,
+            &account.name,
+            account.resource.clone(),
+            &input.symbol,
+            sell,
+            &market.base,
+            &market.quote,
+            raw_bounds,
+        )?;
+
+        let notional = product(&quantity, &price)?;
+        let output_asset = if sell { &market.quote } else { &market.base };
+        if input.maximum_fees.is_empty()
+            || !input.maximum_fees.contains_key(output_asset)
+            || input
+                .maximum_fees
+                .keys()
+                .any(|coin| coin != output_asset && coin != "BNB")
+        {
+            return Err(FinError::validation(
+                "Provide the output-asset fee cap and optional BNB fee cap for each Binance spot plan step.",
+            ));
+        }
+        let params = &spec.parameters;
+        let scope_fee_caps = params["maximum_fees"]
+            .as_object()
+            .ok_or_else(|| FinError::validation("Spot plan scope is missing fee asset bounds."))?;
+        if !market.metadata["orderTypes"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value.as_str() == Some("LIMIT")))
+        {
+            return Err(error(
+                "UNSUPPORTED_MARKET",
+                "authorization",
+                "Binance does not advertise LIMIT orders for this spot market.",
+            ));
+        }
+        let supported_times = market.metadata["timeInForce"].as_array().ok_or_else(|| {
+            error(
+                "VENUE_RESPONSE_INVALID",
+                "authorization",
+                "Binance spot market metadata omitted supported time-in-force values.",
+            )
+        })?;
+        if params["allowed_time_in_force"]
+            .as_array()
+            .is_none_or(|allowed| {
+                allowed.iter().any(|candidate| {
+                    !supported_times
+                        .iter()
+                        .any(|supported| supported == candidate)
+                })
+            })
+        {
+            return Err(error(
+                "UNSUPPORTED_MARKET",
+                "authorization",
+                "The plan's IOC/FOK variation set is not supported by this spot market.",
+            ));
+        }
+        let input_time = match input.time_in_force {
+            ImmediateTime::Ioc => "IOC",
+            ImmediateTime::Fok => "FOK",
+        };
+        if !params["allowed_time_in_force"]
+            .as_array()
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some(input_time))
+            })
+            || params["allowed_order_types"] != json!(["LIMIT"])
+        {
+            return Err(FinError::validation(
+                "The plan's fixed input must use a permitted LIMIT IOC/FOK variation.",
+            ));
+        }
+        if let Some(cap) = params["maximum_quantity"].as_str()
+            && quantity.checked_cmp(&amount(cap)?).is_gt()
+        {
+            return Err(FinError::validation(
+                "The spot plan input quantity exceeds its permitted variation bound.",
+            ));
+        }
+        if let Some(cap) = params["maximum_spend"].as_str()
+            && notional.checked_cmp(&amount(cap)?).is_gt()
+        {
+            return Err(FinError::validation(
+                "The spot plan input spend exceeds its permitted variation bound.",
+            ));
+        }
+        if let Some(floor) = params["minimum_price"].as_str()
+            && price.checked_cmp(&amount(floor)?).is_lt()
+        {
+            return Err(FinError::validation(
+                "The spot plan input price is below its permitted variation bound.",
+            ));
+        }
+        if let Some(ceiling) = params["maximum_price"].as_str()
+            && price.checked_cmp(&amount(ceiling)?).is_gt()
+        {
+            return Err(FinError::validation(
+                "The spot plan input price is above its permitted variation bound.",
+            ));
+        }
+        for (coin, fee) in &input.maximum_fees {
+            let Some(cap) = scope_fee_caps.get(coin).and_then(Value::as_str) else {
+                return Err(FinError::validation(
+                    "The spot plan input fee asset is outside its permitted variation bounds.",
+                ));
+            };
+            if amount(fee)?.checked_cmp(&amount(cap)?).is_gt() {
+                return Err(FinError::validation(
+                    "The spot plan input fee cap exceeds its permitted variation bound.",
+                ));
+            }
+        }
+        validate_filters(&market.metadata, &quantity, &price, &notional, false)?;
+
+        let commission = self
+            .call(
+                account,
+                BinanceRequest::new(BinanceEndpoint::SpotCommission).push("symbol", &input.symbol),
+                "authorization",
+            )
+            .await?;
+        let rate = commission_rate(&commission, &input.side, false)?;
+        let fee_basis = if sell { &notional } else { &quantity };
+        let estimated_output_fee = product(fee_basis, &rate)?;
+        let seed_output_fee = amount(&input.maximum_fees[output_asset])?;
+        if seed_output_fee.checked_cmp(&estimated_output_fee).is_lt() {
+            return Err(error(
+                "FEE_BOUND_TOO_LOW",
+                "authorization",
+                "The plan's initial spot fee cap does not cover the currently advertised commission rate.",
+            ));
+        }
+        if commission["discount"]["enabledForAccount"] == true
+            && commission["discount"]["enabledForSymbol"] == true
+            && (!scope_fee_caps.contains_key("BNB") || !input.maximum_fees.contains_key("BNB"))
+        {
+            return Err(error(
+                "FEE_ASSET_UNRESERVED",
+                "authorization",
+                "Binance BNB discounts are enabled; include a BNB fee bound in the plan scope.",
+            ));
+        }
+        let fees: Vec<_> = scope_fee_caps.keys().map(|coin| asset(coin)).collect();
+        let possible_credits = vec![fin_domain::financial_plans::FinancialPlanFundingIdentity {
+            resource: account.resource.clone(),
+            asset: asset(if sell { &market.quote } else { &market.base }),
+        }];
+        Ok(fin_domain::financial_plans::PlanPermission {
+            spec,
+            possible_credits,
+            fee_assets: fees,
+        })
+    }
+
     pub(in crate::adapter) async fn trading_prepare_with_anchor(
         &self,
         operation: &str,

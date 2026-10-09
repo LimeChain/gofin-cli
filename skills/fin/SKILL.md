@@ -1,8 +1,8 @@
 ---
 name: fin
-description: Discover and use the local Fin financial CLI to inspect holdings, preview and execute individually approved operations, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
+description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.0.0"
+  version: "1.2.0"
 ---
 
 Start with `fin --help` and `fin capabilities --json`, even before setup exists. Inspect `fin explain setup --json`, `fin schema connections.add --json`, and `fin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and evidence limits; mocked/fork/live verification are separate.
@@ -15,7 +15,9 @@ EVM enrollment uses `fin connections add --provider evm --name wallet --credenti
 
 Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
 
-Invoke one operation per write. Prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass.
+For a user's coherent intent that requires multiple linked financial actions, strongly recommend one bounded named plan. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
+
+For a genuinely standalone write, use one operation per write: prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass. If the installed Fin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.
 
 Choose practical finite fee and price ranges before requesting approval. Avoid
 setting caps exactly at a transient quote: propose enough headroom for ordinary
@@ -66,8 +68,64 @@ consumption. `--replaces-attempt OLD_OPERATION_ID` only supersedes an unsubmitte
 candidate inside existing consent. Reconcile submitted/uncertain attempts first.
 Fin does not schedule a limit-to-market switch: suggest it to the user, verify
 implemented order types and seek new approval when outside the authorized choices.
-The initial bounded execution scope is Binance spot LIMIT IOC/FOK only; other
-financial writes retain the exact approval path. Enrollment/policy are separate.
+The initial standalone operation-boundary consent scope is Binance spot LIMIT
+IOC/FOK only. Other financial writes use exact per-write approval or named plan
+authority. Enrollment and policy changes remain separate.
+
+For a bounded sequence that should share one Touch ID approval, create one named
+plan. The name is a display label and is included in approval; changing it needs
+a revised approval. Keep step IDs stable and ordered, declare completion targets,
+exact predecessor funding dependencies and aggregate debit/fee caps, and use
+only operation scopes that `fin plans preview` confirms. Named plans accept all
+registered financial operations, including wallet transfers, protocol
+withdrawals, and exchange orders; reads do not establish financial evidence.
+The reviewed scope binds each exact operation input template, its registered
+schema and protected connection identities, plus declared debit, fee and
+possible-credit limits. A trusted operation definition may explicitly declare
+string fields, such as a venue request ID, that Fin assigns separately for each
+attempt. The template remains bound, and human review labels those fields as
+Fin-assigned instead of showing the template value as the venue ID.
+Authorization does not check live balances, quotes or simulations.
+Preview never reserves funds or approves:
+
+```text
+fin plans preview --input PLAN_JSON --json
+```
+
+Review the returned ordered permissions, variations, cumulative bounds, prior
+usage, duration and `review_hash`. For machine-driven review, carry that exact
+hash into authorization; a changed review is rejected before Touch ID:
+
+```text
+fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-hash REVIEW_HASH --json
+```
+
+The human reviews the full plan in the terminal and approves one named revision
+with Touch ID. Completion requires verified operation success and any declared
+spend or net-receipt targets. A plan does not run by itself. Preview each intended attempt with
+`fin execute OPERATION --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run
+--json`, then explicitly submit it with a stable attempt ID. Only the first
+incomplete step is eligible. A dependent step remains blocked until the declared
+producer has verified settlement and its net proceeds are available at the exact
+resource and asset; a projected receipt or unrelated deposit cannot fund it.
+The engine refreshes balances, prices, fees, market metadata and policy for each
+attempt. Partial fills consume verified cumulative authority and may leave a
+step incomplete; status reports remaining targets and blockers. Never assume a
+terminal partial or no-fill attempt completes a step.
+
+```text
+fin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json
+fin plans status PLAN_ID --json
+fin plans cancel PLAN_ID --json
+```
+
+`--plan` and `--authorization` cannot be combined. `--replaces-attempt` may
+replace only an explicitly identified unsubmitted candidate under its current
+authority. Submitted or uncertain attempts must be reconciled first. A revised
+plan needs fresh approval, preserves started and completed step identities and
+usage, and can restructure only the unstarted suffix. Expiry or cancellation
+stops future dispatch but does not cancel an order already submitted; status
+continues reconciliation and never executes another step.
 
 Keep one `--id` for a logical action and follow the operation schema for any venue request identifier. After interruption, use `fin operations --json` and `fin status OPERATION_ID --json`; status reconciles the original submission. A venue acceptance or transaction hash is not completion. Preserve successful steps. Never create a fresh identity to bypass an uncertain original outcome. A deliberate new action requires a fresh identity and approval.
 

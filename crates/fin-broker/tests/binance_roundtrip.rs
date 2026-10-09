@@ -640,6 +640,90 @@ fn adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
         .unwrap(),
     )
 }
+
+#[test]
+fn composite_deposit_connection_snapshot_binds_both_binance_and_evm_identities() {
+    let compose = |main_resource: &str, wallet_address: &str| {
+        let mut config = adapter_config();
+        config.accounts[0].resource = ResourceId(main_resource.into());
+        let binance = Arc::new(
+            BinanceAdapter::new(
+                config,
+                Arc::new(SyntheticVenue::new()),
+                Some(Arc::new(SyntheticBinancePrice)),
+                None,
+            )
+            .unwrap(),
+        );
+        let ethereum = Arc::new(
+            fin_ethereum::EthereumAdapter::new(
+                fin_ethereum::EthereumConfig::default(),
+                vec![fin_ethereum::WalletConnection {
+                    name: "synthetic-wallet".into(),
+                    address: wallet_address.into(),
+                    signing_enabled: true,
+                }],
+                Arc::new(fin_evm::EvmRuntime::new(
+                    Arc::new(DepositPreviewRpc::new()),
+                    1,
+                    None,
+                )),
+            )
+            .unwrap(),
+        );
+        fin_broker::BinanceEthereumDepositAdapter::new(binance, ethereum)
+    };
+
+    let original = compose(
+        "binance:uid:1001:SPOT",
+        "0x2222222222222222222222222222222222222222",
+    );
+    let connections = original.connections();
+    assert_eq!(connections.len(), 5);
+    assert_eq!(connections[0].resource.0, "binance:uid:1001:SPOT");
+    assert_eq!(connections[0].provider, "binance");
+    assert_eq!(connections[1].resource.0, "binance:uid:1002:SPOT");
+    assert_eq!(connections[2].resource.0, "binance:uid:1003:SPOT");
+    assert_eq!(connections[3].provider, "binance-ethereum-destination");
+    assert_eq!(connections[3].role.as_deref(), Some("deposit-destination"));
+    assert_eq!(connections[3].network.as_deref(), Some("ethereum:1"));
+    assert_eq!(
+        connections[3].details["assets"]["ETH"]["reference"],
+        "native"
+    );
+    assert_eq!(
+        connections[3].address.as_deref(),
+        Some("0x2222222222222222222222222222222222222222")
+    );
+    assert_eq!(connections[4].provider, "evm");
+    assert_eq!(connections[4].network.as_deref(), Some("ethereum:1"));
+    assert!(
+        connections
+            .iter()
+            .all(|connection| connection.credential_ref.is_none())
+    );
+    let original_hash_input = serde_json::to_value(&connections).unwrap();
+
+    let changed_binance = compose(
+        "binance:uid:9001:SPOT",
+        "0x2222222222222222222222222222222222222222",
+    );
+    let changed_wallet = compose(
+        "binance:uid:1001:SPOT",
+        "0x3333333333333333333333333333333333333333",
+    );
+    assert_ne!(
+        original_hash_input,
+        serde_json::to_value(changed_binance.connections()).unwrap(),
+        "a changed Binance account resource must change the adapter's connection hash input"
+    );
+    assert_ne!(
+        original_hash_input,
+        serde_json::to_value(changed_wallet.connections()).unwrap(),
+        "a changed EVM wallet address/resource must change the adapter's connection hash input"
+    );
+}
+
 fn subaccount_only_adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
     let mut config = adapter_config();
     let mut child = config.accounts.remove(1);
@@ -1911,9 +1995,23 @@ async fn binance_deposit_preview_freezes_dynamic_main_or_subaccount_target_and_e
 async fn subaccount_only_credentials_and_dynamic_arbitrum_usdc_route_are_supported() {
     let venue = Arc::new(SyntheticVenue::new());
     let binance = subaccount_only_adapter(venue.clone());
-    assert_eq!(binance.connections().len(), 1);
-    assert_eq!(binance.connections()[0].role.as_deref(), Some("sub"));
-    assert!(binance.connections()[0].parent.is_none());
+    let connections = binance.connections();
+    let account = connections
+        .iter()
+        .find(|connection| connection.provider == "binance")
+        .unwrap();
+    assert_eq!(account.role.as_deref(), Some("sub"));
+    assert!(account.parent.is_none());
+    let destination = connections
+        .iter()
+        .find(|connection| connection.name == "synthetic-wallet")
+        .unwrap();
+    assert_eq!(destination.role.as_deref(), Some("deposit-destination"));
+    assert_eq!(destination.network.as_deref(), Some("ethereum:1"));
+    assert_eq!(
+        destination.address.as_deref(),
+        Some("0x2222222222222222222222222222222222222222")
+    );
 
     let token = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
     let wallet_address = "0x2222222222222222222222222222222222222222";

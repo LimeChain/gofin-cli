@@ -1,5 +1,6 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 pub mod boundaries;
+pub mod financial_plans;
 pub mod money;
 pub mod policy;
 pub mod price_freshness;
@@ -699,6 +700,23 @@ pub trait Adapter: Send + Sync {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    /// Derive a reusable, balance-independent permission scope for one plan
+    /// step. Implementations validate operation support, static identities,
+    /// permissions and market metadata without requiring balances or freezing
+    /// short-lived prices. The default fails closed.
+    async fn prepare_plan_permission(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _bounds: &Value,
+    ) -> Result<financial_plans::PlanPermission> {
+        Err(FinError::new(
+            "PLAN_PERMISSION_UNSUPPORTED",
+            "authorization",
+            "This integration does not support named financial plan permissions.",
+            "Use an operation with an explicitly supported plan permission scope.",
+        ))
+    }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.
     fn validate_boundary_candidate(
@@ -840,6 +858,9 @@ pub struct ConnectionMetadata {
     pub address: Option<String>,
     pub credential_ref: Option<String>,
     pub signing_enabled: bool,
+    /// Stable, non-secret identity/configuration attributes for this
+    /// connection. Adapters must omit volatile observations and secrets; the
+    /// engine includes this value in exact-plan connection bindings.
     pub details: Value,
 }
 

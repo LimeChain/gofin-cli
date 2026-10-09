@@ -237,6 +237,7 @@ impl Method {
             self,
             Self::BinanceSpotPlaceOrder
                 | Self::BinanceSubToMasterTransfer
+                | Self::BinanceUniversalTransfer
                 | Self::BinanceSpotCancelOrder
                 | Self::BinanceFuturesPlaceOrder
                 | Self::BinanceFuturesCancelOrder
@@ -413,7 +414,45 @@ impl<T: ExchangeBase> DerivedExchange for Observed<T> {
         {
             panic!("[PermissionDenied] Fin write approval expired before signing");
         }
-        DerivedExchange::sign(&self.core, path, api, method, params, headers, body)
+        let universal_transfer_post = matches!(
+            (&path, &api, &method),
+            (
+                ccxt::Value::Str(path),
+                ccxt::Value::Str(api),
+                ccxt::Value::Str(method)
+            ) if path.as_ref() == "sub-account/universalTransfer"
+                && api.as_ref() == "sapi"
+                && method.as_ref() == "POST"
+        );
+        let mut signed =
+            DerivedExchange::sign(&self.core, path, api, method, params, headers, body);
+        if universal_transfer_post {
+            // CCXT signs the URL-encoded payload before returning it as a POST
+            // body. Binance also accepts that exact signed payload in the URL
+            // query. Move the bytes CCXT produced; never re-encode or re-sign.
+            let ccxt::Value::Dict(fields) = &mut signed else {
+                panic!("[InvalidRequest] Binance transfer signing result was invalid");
+            };
+            let fields = std::sync::Arc::make_mut(fields);
+            let (url, payload) = match (fields.get("url"), fields.get("body")) {
+                (Some(ccxt::Value::Str(url)), Some(ccxt::Value::Str(payload)))
+                    if !url.contains('?') && !payload.is_empty() =>
+                {
+                    (url.to_string(), payload.to_string())
+                }
+                _ => panic!("[InvalidRequest] Binance transfer signing result was invalid"),
+            };
+            fields.insert(
+                "url".to_owned(),
+                ccxt::Value::from(format!("{url}?{payload}")),
+            );
+            fields.insert("body".to_owned(), ccxt::Value::Null);
+            if let Some(ccxt::Value::Dict(headers)) = fields.get_mut("headers") {
+                let headers = std::sync::Arc::make_mut(headers);
+                headers.retain(|name, _| !name.eq_ignore_ascii_case("Content-Type"));
+            }
+        }
+        signed
     }
     fn handle_errors(
         &self,

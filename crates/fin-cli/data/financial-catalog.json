@@ -918,6 +918,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -1831,6 +1851,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -1929,6 +1969,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -2892,6 +2952,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -2990,6 +3070,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -3905,6 +4005,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -4875,6 +4995,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -4882,7 +5022,7 @@
     "name": "binance.account-identity",
     "description": "Authenticated Binance UID and SPOT account type from the fixed Account endpoint, checked against the enrolled physical resource.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -4933,6 +5073,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -4940,7 +5100,7 @@
     "name": "binance.balances",
     "description": "Observed Binance SPOT free and committed balances. Main authority can read a configured subaccount.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -4997,6 +5157,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -5125,11 +5305,34 @@
       "accounts": "Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.",
       "amount": "exact finite amount; amount=all is unsupported",
       "approval": "Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.",
+      "broker_generated_attempt_input_fields": [
+        "/requestId"
+      ],
       "coin": "Binance asset identity; never resolved from an EVM ticker",
       "completion": "chain submission alone is insufficient; matching usable deposit history and balance delta are required",
       "legacyDefaults": "Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.",
       "maxFeeEth": "Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.",
       "network": "explicit Binance network code matched to current metadata and a configured Fin EVM chain",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "recipient": "fixed from the authenticated account's current Binance deposit-address endpoint",
       "recovery": "Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.",
       "sourceCoverage": "Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.",
@@ -5141,7 +5344,7 @@
     "name": "binance.deposit-address",
     "description": "Selected account's own Binance deposit address and memo/tag, read with that account's credential. Subaccount deposit-address restrictions, if any, apply to this endpoint specifically.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5200,6 +5403,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -5351,14 +5574,34 @@
       "human_action": "Use Binance Deposit Crypto to claim a new address where available, then repeat this read.",
       "limits": "Per-entry whitelist flags do not prove account-wide enforcement or that a security cooldown has elapsed.",
       "maximum_rows": 1000,
-      "next_check": "fin read binance.deposit-addresses --input JSON --json"
+      "next_check": "fin read binance.deposit-addresses --input JSON --json",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.deposit-history",
     "description": "Paginated own-account Binance deposit history with pending, locked, and usable credit kept distinct, read using the selected account's credential including a subaccount-only connection.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5443,6 +5686,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -5450,7 +5713,7 @@
     "name": "binance.futures.balances",
     "description": "USD-M collateral, available balance, margin equity and unrealized PnL by asset.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5621,14 +5884,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.futures.income",
     "description": "Bounded recent income events for one USD-M perpetual symbol; signed funding/commission/PnL amounts.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5776,14 +6059,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.futures.markets",
     "description": "USD-M perpetual market identities and exact venue filters; delivery contracts excluded.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -5930,14 +6233,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.futures.order",
     "description": "Query one USD-M perpetual order by exactly one venue or client identifier.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -6172,7 +6495,27 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
@@ -6268,6 +6611,26 @@
     "semantics": {
       "approval": "fresh per write",
       "fills": "original order owns all accounting, including fills that race cancellation",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "run": "same run as the original order",
       "target": "entire original durable Submission plus its Fin operation_id",
       "walletType": "USD_M"
@@ -6430,8 +6793,31 @@
     "completion": "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.",
     "semantics": {
       "approval": "fresh per write",
+      "broker_generated_attempt_input_fields": [
+        "/request_id"
+      ],
       "concurrentPositions": 1,
       "orderType": "LIMIT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "quantity": "exact base decimal; all only for scoped cleanup",
       "scopedTimeInForce": [
         "IOC",
@@ -6449,7 +6835,7 @@
     "name": "binance.futures.orders",
     "description": "Bounded current USD-M perpetual open orders for one symbol.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -6652,14 +7038,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.futures.positions",
     "description": "USD-M perpetual position quantities and margin/PnL observations, preserving hedge sides.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -6855,14 +7261,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.futures.trades",
     "description": "Bounded recent USD-M perpetual fills, realized PnL and commissions.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7053,14 +7479,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "USD-M perpetual"
+      "marketScope": "USD-M perpetual",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.hierarchy",
     "description": "Configured main/subaccount hierarchy compared with the main account subaccount list.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7111,6 +7557,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -7118,7 +7584,7 @@
     "name": "binance.networks",
     "description": "Current Binance asset/network metadata and deposit availability for the selected account using its own credential, including subaccount-only connections.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7175,6 +7641,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -7182,7 +7668,7 @@
     "name": "binance.permissions",
     "description": "Observed Binance API permissions for the selected named connection. Unknown values remain unknown.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7233,6 +7719,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -7332,7 +7838,30 @@
     "completion": "Matching terminal order plus complete authenticated fills and commissions establish the conversion; submission alone does not.",
     "semantics": {
       "amount": "exact decimal string",
+      "broker_generated_attempt_input_fields": [
+        "/requestId"
+      ],
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -7340,7 +7869,7 @@
     "name": "binance.spot.markets",
     "description": "Binance SPOT market identities and exact price/quantity filters.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7487,14 +8016,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "SPOT"
+      "marketScope": "SPOT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.spot.order",
     "description": "Query one SPOT order by exactly one venue or client identifier.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -7723,7 +8272,27 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "SPOT"
+      "marketScope": "SPOT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
@@ -7819,6 +8388,26 @@
     "semantics": {
       "approval": "fresh per write",
       "fills": "original order owns all accounting, including fills that race cancellation",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "run": "same run as the original order",
       "target": "entire original durable Submission plus its Fin operation_id",
       "walletType": "SPOT"
@@ -8139,8 +8728,31 @@
           "multi-step approval"
         ]
       },
+      "broker_generated_attempt_input_fields": [
+        "/request_id"
+      ],
       "concurrentPositions": null,
       "orderType": "LIMIT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "quantity": "exact base decimal; all only for scoped cleanup",
       "scopedTimeInForce": [
         "FOK"
@@ -8157,7 +8769,7 @@
     "name": "binance.spot.orders",
     "description": "Bounded current SPOT open orders for one symbol.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -8354,14 +8966,34 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "SPOT"
+      "marketScope": "SPOT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
     "name": "binance.spot.trades",
     "description": "Bounded recent SPOT fills and commissions for one symbol.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -8552,7 +9184,27 @@
       "credentials": "never returned",
       "history": "bounded recent slice, not complete history",
       "identifiers": "decimal strings",
-      "marketScope": "SPOT"
+      "marketScope": "SPOT",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
@@ -8660,7 +9312,30 @@
     "semantics": {
       "amount": "exact decimal string",
       "authority": "For main→child or legacy main-authorized child→main, select the main account. For source-child→parent only, select the child as authority; Fin uses subToMaster and sends no clientTranId or recipient parameter.",
+      "broker_generated_attempt_input_fields": [
+        "/requestId"
+      ],
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "subToMasterReceipt": "Fin persists Binance txnId against the immutable local submission before returning. If the response is lost before the receipt is persisted, the result remains unknown and history is not inferred from amount or time.",
       "walletType": "SPOT"
     }
@@ -8935,7 +9610,27 @@
       "human_action": "Use Binance withdrawal Address Management to edit entries and complete its security checks, then repeat this read.",
       "limits": "Per-entry whitelist flags do not prove account-wide enforcement or that a security cooldown has elapsed.",
       "maximum_rows": 1000,
-      "next_check": "fin read binance.whitelist --input JSON --json"
+      "next_check": "fin read binance.whitelist --input JSON --json",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      }
     }
   },
   {
@@ -9085,10 +9780,33 @@
     "completion": "Matching venue withdrawal plus bounded source debit/fee and independently verified destination receipt. Unobserved routes remain pending after venue completion.",
     "semantics": {
       "amount": "exact decimal string",
+      "broker_generated_attempt_input_fields": [
+        "/requestId"
+      ],
       "coinNetworkSelection": "live Binance metadata; no coin/network allowlist",
       "credentialValues": "never exposed",
       "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending. The configured Arbitrum One and Robinhood Chain observers accept successful canonical sequencer inclusion with exact recipient and amount proof, without waiting for parent-chain finality. Venue route availability remains separate.",
       "ordinaryExecution": "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -9096,7 +9814,7 @@
     "name": "binance.withdrawal-history",
     "description": "Paginated Binance withdrawal history; venue completion and destination chain receipt are separate.",
     "kind": "read",
-    "execution_actor": "agent_invocable",
+    "execution_actor": "agent_readable",
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -9181,6 +9899,26 @@
     "semantics": {
       "amount": "exact decimal string",
       "credentialValues": "never exposed",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "walletType": "SPOT"
     }
   },
@@ -9293,6 +10031,26 @@
         "hyperliquid": "perpetuals; primary dex",
         "kraken": "spot",
         "okx": "spot"
+      },
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
       },
       "verification": "offline_synthetic; see verification report for public network checks",
       "writes": false
@@ -9565,6 +10323,26 @@
           "spot"
         ]
       },
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "writes": false
     }
   },
@@ -9741,6 +10519,26 @@
         "kraken": "spot",
         "okx": "spot"
       },
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "verification": "offline_synthetic; see verification report for public network checks",
       "writes": false
     }
@@ -9777,6 +10575,26 @@
     "semantics": {
       "clientSuppliedState": false,
       "pendingJournalIncluded": true,
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "scope": "all-configured-resources"
     }
   },
@@ -9894,6 +10712,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -10896,6 +11734,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -11004,6 +11862,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -11925,6 +12803,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -12023,6 +12921,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -12118,6 +13036,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -12220,6 +13158,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -13141,6 +14099,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -14090,6 +15068,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   },
@@ -14992,6 +15990,26 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
   }

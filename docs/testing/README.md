@@ -82,6 +82,12 @@ round trips must each be reported separately when observed; this guide marks no
 unrun case passed. Existing $100 allocation, per-write approval and complete
 restoration requirements also apply to any separately authorized L2 live test.
 
+## Named financial plans
+
+See [plan verification and human handoff](plans.md) for cumulative completion,
+future funding, durable authority, native named approval and update checks.
+Synthetic approval is not biometric or live-write evidence.
+
 ## Local development loop
 
 Use [isolated development environments](development-environments.md) to run
@@ -315,7 +321,7 @@ Use [the report template](report-template.md). Automated testing may use a fake 
 - Agent onboarding: [C12–C19](#common-acceptance-cases) and the [onboarding contract](../onboarding.md), including LLM guidance before configuration and later human credential changes. Record synthetic rehearsal, real enrollment, isolation, and native authorization independently.
 - Agent experience: a fresh conversation discovers the CLI, guides the human through missing setup without receiving secrets, inspects state, explains the plan, invokes individual steps, and reports reconciled results. Record human interventions and time spent approving separately from chain/exchange waiting time.
 
-General bridging, Lighter, MCP, unattended execution, full-plan approvals, and aggregate portfolio valuation are outside these initial milestones. The remaining integrations and networks in the product concept stay on the delivery inventory.
+General bridging, Lighter, MCP, unattended execution and aggregate portfolio valuation are outside these initial milestones. The remaining integrations and networks in the product concept stay on the delivery inventory.
 
 ## CCXT exchange regression checks
 

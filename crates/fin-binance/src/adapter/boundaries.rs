@@ -2,6 +2,14 @@
 use super::*;
 use fin_domain::boundaries::BoundarySpec;
 
+fn asset(coin: &str) -> AssetId {
+    AssetId {
+        network: "binance".into(),
+        reference: coin.into(),
+        decimals: 36,
+    }
+}
+
 fn default_times() -> Vec<String> {
     vec!["IOC".into(), "FOK".into()]
 }
@@ -136,6 +144,116 @@ fn parse_bounds(raw: &Value, sell: bool) -> Result<SpotBounds, FinError> {
         *value = amount(value)?.canonical();
     }
     Ok(bounds)
+}
+
+/// Construct a reusable spot permission scope from stable identities and
+/// explicit variation limits. This deliberately does not take a prepared
+/// execution, balance snapshot, or quote: those are fetched for each attempt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "these arguments are the exact stable identities and bound inputs for a Binance spot scope"
+)]
+pub(super) fn prepare_plan_scope(
+    operation: &str,
+    account: &str,
+    resource: ResourceId,
+    symbol: &str,
+    sell: bool,
+    base: &str,
+    quote: &str,
+    raw_bounds: &Value,
+) -> Result<BoundarySpec, FinError> {
+    if operation != "binance.spot.order-place" {
+        return Err(unsupported());
+    }
+    let bounds = parse_bounds(raw_bounds, sell)?;
+    let spent = if sell { asset(base) } else { asset(quote) };
+    let received = if sell { asset(quote) } else { asset(base) };
+    let fixed = json!({
+        "operation": operation,
+        "account": account,
+        "resource": resource,
+        "symbol": symbol,
+        "side": if sell { "SELL" } else { "BUY" },
+        "base": asset(base),
+        "quote": asset(quote),
+        "spent": spent,
+        "received": received,
+    });
+    let principal = if sell {
+        bounds.maximum_quantity.clone()
+    } else {
+        bounds.maximum_spend.clone()
+    }
+    .ok_or_else(|| FinError::validation("Missing cumulative spot principal bound."))?;
+    let mut maximum_costs = Vec::new();
+    for (coin, cap) in &bounds.maximum_fees {
+        if coin != &received.reference && coin != "BNB" {
+            return Err(FinError::validation(
+                "Fee bounds may include only the output asset and BNB.",
+            ));
+        }
+        maximum_costs.push(CostBound {
+            location: AccountingLocation::Cash {
+                resource: resource.clone(),
+            },
+            amount: Amount {
+                asset: asset(coin),
+                atoms: decimal_to_atoms(&amount(cap)?, 36)?,
+            },
+            treatment: if coin == &received.reference {
+                CostTreatment::DeductedFromCredit
+            } else {
+                CostTreatment::AdditionalDebit
+            },
+        });
+    }
+    let price_limit = if sell {
+        format!(
+            "minimum price {} {} per {}",
+            bounds.minimum_price.as_deref().unwrap_or(""),
+            quote,
+            base
+        )
+    } else {
+        format!(
+            "maximum price {} {} per {}",
+            bounds.maximum_price.as_deref().unwrap_or(""),
+            quote,
+            base
+        )
+    };
+    let fee_caps = bounds
+        .maximum_fees
+        .iter()
+        .map(|(coin, cap)| format!("{cap} {coin}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let summary = format!(
+        "{} up to {} {} into {} on {} SPOT; {}; LIMIT {}. Cumulative fee caps: {}.",
+        if sell { "Sell" } else { "Spend" },
+        principal,
+        spent.reference,
+        received.reference,
+        account,
+        price_limit,
+        bounds.allowed_time_in_force.join("/"),
+        fee_caps,
+    );
+    Ok(BoundarySpec {
+        fixed,
+        parameters: serde_json::to_value(bounds)
+            .map_err(|_| FinError::validation("Invalid plan variation bounds."))?,
+        maximum_debits: vec![ResourceAmount {
+            resource,
+            amount: Amount {
+                asset: spent.clone(),
+                atoms: decimal_to_atoms(&amount(&principal)?, spent.decimals)?,
+            },
+        }],
+        maximum_costs,
+        summary,
+    })
 }
 
 pub(super) fn prepare(prepared: &PreparedOperation, raw: &Value) -> Result<BoundarySpec, FinError> {

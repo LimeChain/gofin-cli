@@ -628,7 +628,7 @@ impl BinanceEthereumDepositAdapter {
             ],
             coverage: "Synthetic broker-composite transport and canonical fake-EVM proof; live funding capabilities and acceptance remain separately reported.".into(),
             completion: "Original transaction identity is canonical and finalized, and exactly one usable matching Binance credit plus the corresponding free-balance increase is observed.".into(),
-            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.","approval":"Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","coin":"Binance asset identity; never resolved from an EVM ticker","network":"explicit Binance network code matched to current metadata and a configured Fin EVM chain","token":"native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata","amount":"exact finite amount; amount=all is unsupported","completion":"chain submission alone is insufficient; matching usable deposit history and balance delta are required","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted."}),
+            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.","approval":"Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","coin":"Binance asset identity; never resolved from an EVM ticker","network":"explicit Binance network code matched to current metadata and a configured Fin EVM chain","token":"native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata","amount":"exact finite amount; amount=all is unsupported","completion":"chain submission alone is insufficient; matching usable deposit history and balance delta are required","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.","broker_generated_attempt_input_fields":["/requestId"]}),
         }
     }
 
@@ -774,7 +774,21 @@ impl Adapter for BinanceEthereumDepositAdapter {
     }
 
     fn connections(&self) -> Vec<ConnectionMetadata> {
-        Vec::new()
+        // A composite write is authorized against both the Binance account
+        // receiving the credit and the EVM signer sending the deposit. Keep
+        // provider order deterministic (Binance config order, then chain ID
+        // order from the BTreeMap) and collapse only exact duplicate metadata.
+        // The engine hashes this ordinary connection snapshot canonically,
+        // independent of ordering.
+        let mut connections = self.binance.connections();
+        for adapter in self.ethereum.values() {
+            for connection in adapter.connections() {
+                if !connections.contains(&connection) {
+                    connections.push(connection);
+                }
+            }
+        }
+        connections
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {

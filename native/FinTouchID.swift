@@ -107,7 +107,8 @@ if challenge.terminalReview != nil && !terminalReviewed { finish("invalid") }
 // protected terminal proof; removing a window must not bypass that proof.
 let verifiedBinding = binding as? [String: Any] ?? [:]
 let approvalReason: String
-if let reason = boundaryAuthenticationReason(verifiedBinding, summary: summary)
+if let reason = financialPlanAuthenticationReason(verifiedBinding, summary: summary)
+    ?? boundaryAuthenticationReason(verifiedBinding, summary: summary)
     ?? financialAuthenticationReason(verifiedBinding, summary: summary) {
     guard challenge.terminalReview == nil else { finish("invalid") }
     approvalReason = reason

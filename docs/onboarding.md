@@ -38,7 +38,7 @@ root shell or override passwordless sudo policy; check the actual agent's access
 Setup, connection add/update/remove and policy set use sudo. Those commands
 explain why they need administrator access before the OS prompt. Reads, previews,
 status, service lifecycle and financial commands use the protected background
-service without sudo; each financial write independently requires fresh Touch ID.
+service without sudo; standalone financial writes require fresh Touch ID, while supported boundary grants and named plans approve finite authority once.
 The pre-prompt explanation is flushed before handing control to macOS. If it
 cannot be displayed, Fin refuses to start administrator authentication.
 
@@ -221,8 +221,17 @@ dispatch, not already submitted venue orders. `--replaces-attempt` supersedes an
 unsubmitted candidate; changed grant boundaries use `authorizations authorize
 --replaces` with fresh Touch ID. Replacement caps are cumulative totals for the
 same intent, preserving prior effects/costs. Expiry never resets consumption.
-Other operations retain standalone exact approval, and financial grants cannot
-authorize enrollment or protected policy changes.
+Other operations retain standalone exact approval or can be included as exact
+steps in a named plan. Plans sequence registered financial operations and reads,
+including newly added operations, with exact input and cumulative caps. Plan
+review labels live checks deferred to execution. Financial grants and plans
+cannot authorize enrollment or protected policy changes.
+
+Every plan input field stays fixed except a string JSON pointer explicitly
+declared by the trusted operation definition as broker-generated per attempt.
+Fin assigns such a field separately for each attempt; the original input
+template remains part of the approval binding. Human review marks these fields
+as Fin-assigned and does not present a template value as the venue request ID.
 
 **Implemented locally 6 October 2026.** `--json` selects the agent-facing
 execution contract. It controls interaction, output, errors, and compatibility,
@@ -246,7 +255,8 @@ not just serialization after an interactive command has finished.
   enrollment return a structured requirement for human action with a safe
   command to run separately. Non-interactive equivalence does not mean accepting
   credentials through arguments, JSON, environment variables, or agent stdin.
-- Financial commands retain fresh per-write Touch ID. Discovery must explicitly
+- Financial commands require fresh Touch ID for exact writes or creation/revision
+  of supported boundary grants and named plans. Discovery must explicitly
   describe any required human approval outside the agent's terminal, how the
   caller observes waiting/cancellation/expiry, and bounded wait behavior. Machine
   mode grants no approval and introduces no authentication bypass. A durable

@@ -220,6 +220,16 @@ impl Adapter for BinanceAdapter {
     ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
         self.0.prepare_boundaries(prepared, bounds)
     }
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> Result<fin_domain::financial_plans::PlanPermission, FinError> {
+        self.0
+            .prepare_plan_permission(operation, input, bounds)
+            .await
+    }
     fn validate_boundary_candidate(
         &self,
         spec: &fin_domain::boundaries::BoundarySpec,
@@ -778,7 +788,12 @@ impl BinanceProfile {
         }
         self.verify_subaccount(child, authority).await?;
         let (uid, account_type) = self.account_identity(child).await?;
-        let start = submitted_at.timestamp_millis().max(0) as u64;
+        // Child transfer history also reports timestamps with second
+        // precision. Include the submission's containing second in the query
+        // and accept that same floored timestamp while retaining exact receipt
+        // and peer checks.
+        let submitted_at_ms = submitted_at.timestamp_millis().max(0) as u64;
+        let start = submitted_at_ms / 1_000 * 1_000;
         let request =
             subaccount_transfer_history_request(asset, transfer_type, start, end_time_ms, 200)
                 .map_err(domain_error)?;
@@ -1918,16 +1933,40 @@ fn definitions() -> Vec<Definition> {
             "Matching venue withdrawal plus bounded source debit/fee and independently verified destination receipt. Unobserved routes remain pending after venue completion.",
         ),
     ];
-    let mut result: Vec<_> = defs.into_iter().map(|(name, description, kind, input, completion)| Definition {
-        name: name.into(), description: description.into(), kind,
-        execution_actor: ExecutionActor::AgentInvocable,
-        input_schema: serde_json::to_value(input).unwrap_or(Value::Null),
-        output_schema: json!({"type":"object"}),
-        error_schema: schema_for!(FinError).into(),
-        examples: if name == "binance.spot-order" { vec![json!({"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"})] } else { vec![] }, coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
-        completion: completion.into(), semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
-    }).collect();
+    let mut result: Vec<_> = defs
+        .into_iter()
+        .map(|(name, description, kind, input, completion)| {
+            let execution_actor = if kind == OperationKind::Read {
+                ExecutionActor::AgentReadable
+            } else {
+                ExecutionActor::AgentInvocable
+            };
+            Definition {
+                name: name.into(),
+                description: description.into(),
+                kind,
+                execution_actor,
+                input_schema: serde_json::to_value(input).unwrap_or(Value::Null),
+                output_schema: json!({"type":"object"}),
+                error_schema: schema_for!(FinError).into(),
+                examples: if name == "binance.spot-order" {
+                    vec![json!({"requestId":"buy-eth","account":"binance-sub","symbol":"ETHUSDC","side":"BUY","quantity":"0.01","limitPrice":"2000","maxFee":"0.00002","minReceiveAmount":"0.00998"})]
+                } else {
+                    vec![]
+                },
+                coverage: "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.".into(),
+                completion: completion.into(),
+                semantics: json!({"walletType":"SPOT", "amount":"exact decimal string", "credentialValues":"never exposed"}),
+            }
+        })
+        .collect();
     for definition in &mut result {
+        if matches!(
+            definition.name.as_str(),
+            "binance.transfer" | "binance.withdraw" | "binance.spot-order"
+        ) {
+            definition.semantics["broker_generated_attempt_input_fields"] = json!(["/requestId"]);
+        }
         if matches!(
             definition.name.as_str(),
             "binance.networks" | "binance.deposit-address" | "binance.deposit-history"
@@ -1972,6 +2011,16 @@ fn definitions() -> Vec<Definition> {
     result.extend(crate::trading_reads::trading_read_definitions());
     result.extend(trading::definitions());
     result.extend(address_book::definitions());
+    for definition in &mut result {
+        if matches!(
+            definition.name.as_str(),
+            "binance.spot.order-place" | "binance.futures.order-place"
+        ) {
+            // These IDs only correlate the concrete venue order. The actual
+            // order terms and cancellation target remain pinned by the plan.
+            definition.semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
+        }
+    }
     result
 }
 
@@ -2130,6 +2179,14 @@ fn valid_eth_address(value: &str) -> bool {
 
 #[async_trait]
 impl ExchangeProfile for BinanceProfile {
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> Result<fin_domain::financial_plans::PlanPermission, FinError> {
+        self.trading_plan_permission(operation, input, bounds).await
+    }
     fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
@@ -2149,7 +2206,8 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     fn connections(&self) -> Vec<ConnectionMetadata> {
-        self.config
+        let mut connections = self
+            .config
             .accounts
             .iter()
             .map(|account| ConnectionMetadata {
@@ -2170,7 +2228,34 @@ impl ExchangeProfile for BinanceProfile {
                 signing_enabled: true,
                 details: json!({"walletType":"SPOT", "credentialEnrolled":true}),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        // Named withdrawal aliases are protected routing configuration too.
+        // Publish them as ordinary connection metadata so a plan binds the
+        // alias, exact EVM route/address, and token identity map along with
+        // the Binance account identity. The engine hashes stable `details`.
+        connections.extend(self.config.destinations.iter().map(|destination| {
+            ConnectionMetadata {
+                name: destination.name.clone(),
+                provider: "binance-ethereum-destination".into(),
+                resource: destination.resource.clone(),
+                role: Some("deposit-destination".into()),
+                parent: None,
+                network: Some(format!("ethereum:{}", destination.chain_id)),
+                address: Some(destination.address.clone()),
+                credential_ref: None,
+                signing_enabled: false,
+                // Destination routing and token identity are stable protected
+                // configuration. The plan binding hashes this metadata, so
+                // remapping an alias forces fresh authorization.
+                details: json!({
+                    "identity_kind":"binance_ethereum_deposit_destination",
+                    "chain_id":destination.chain_id,
+                    "confirmations":destination.confirmations,
+                    "assets":destination.assets,
+                }),
+            }
+        }));
+        connections
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
@@ -2841,6 +2926,10 @@ impl ExchangeProfile for BinanceProfile {
         } else {
             self.prepare(&prepared.operation, &prepared.input).await?
         };
+        let plan_metadata = prepared
+            .binding
+            .get(fin_domain::financial_plans::PLAN_METADATA_KEY)
+            .cloned();
         if let Some(metadata) = prepared
             .binding
             .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
@@ -2860,6 +2949,16 @@ impl ExchangeProfile for BinanceProfile {
                     error("PREVIEW_CHANGED", "submission", "Fresh USD pricing exceeds the approved ceiling or changes identity; obtain fresh authorization.")
                 }
             })?;
+        }
+        if let Some(metadata) = plan_metadata {
+            current
+                .binding
+                .as_object_mut()
+                .ok_or_else(|| FinError::validation("Invalid prepared binding."))?
+                .insert(
+                    fin_domain::financial_plans::PLAN_METADATA_KEY.into(),
+                    metadata,
+                );
         }
         Ok(current)
     }
@@ -3618,8 +3717,13 @@ impl BinanceProfile {
                 json!({"clientTranId":client_id,"historyComplete":false,"reason":"Binance transfer history is outside the supported reconciliation window; operator review is required."}),
             ));
         }
+        // Binance universal-transfer history timestamps can be truncated to
+        // whole seconds. Query the containing second; the exact immutable
+        // clientTranId and full row checks below remain mandatory.
+        let submitted_at_ms = started.timestamp_millis().max(0) as u64;
+        let history_start_ms = submitted_at_ms / 1_000 * 1_000;
         let window = HistoryWindow {
-            start_time_ms: started.timestamp_millis().max(0) as u64,
+            start_time_ms: history_start_ms,
             end_time_ms: Utc::now().timestamp_millis().max(0) as u64,
         };
         let mut matches = Vec::<TransferHistoryRow>::new();
@@ -3703,6 +3807,8 @@ impl BinanceProfile {
             && row.amount.checked_cmp(&requested).is_eq()
             && row.from_account_type == "SPOT"
             && row.to_account_type == "SPOT"
+            && row.timestamp >= history_start_ms
+            && row.timestamp <= window.end_time_ms
             && child_email_matches
             && data
                 .get("venueId")
@@ -3989,14 +4095,15 @@ impl BinanceProfile {
             ));
         }
         let end_ms = Utc::now().timestamp_millis().max(0) as u64;
-        let history_request = subaccount_transfer_history_request(
-            coin,
-            2,
-            started.timestamp_millis().max(0) as u64,
-            end_ms,
-            200,
-        )
-        .map_err(domain_error)?;
+        // Binance's child transfer history timestamps are reported at whole
+        // second precision. Query from the containing second for a request
+        // submitted during that second; keep receipt-ID matching and every
+        // other proof check exact below.
+        let submitted_at_ms = started.timestamp_millis().max(0) as u64;
+        let history_start_ms = submitted_at_ms / 1_000 * 1_000;
+        let history_request =
+            subaccount_transfer_history_request(coin, 2, history_start_ms, end_ms, 200)
+                .map_err(domain_error)?;
         let history_response = match self.call(child, history_request, "reconciliation").await {
             Ok(value) => value,
             Err(_) => {
@@ -4041,7 +4148,7 @@ impl BinanceProfile {
                 .email
                 .as_deref()
                 .is_some_and(|email| row.email != email)
-            || row.timestamp < started.timestamp_millis().max(0) as u64
+            || row.timestamp < history_start_ms
             || row.timestamp > end_ms
         {
             return Ok(unknown(
@@ -4104,7 +4211,7 @@ impl BinanceProfile {
 
     async fn reconcile_withdrawal(
         &self,
-        _record: &OperationRecord,
+        record: &OperationRecord,
         submission: &Submission,
     ) -> Result<Reconciliation, FinError> {
         let unknown = |evidence: Value| Reconciliation {
@@ -4268,9 +4375,50 @@ impl BinanceProfile {
             }
         }
         if matches.is_empty() {
+            if complete
+                && transfer_rejection::withdrawal_rejection_identity_matches(
+                    record, submission, account, data, binding, coin, network,
+                )
+            {
+                if self.account_identity(account).await.is_err() {
+                    return Ok(unknown(json!({
+                        "withdrawOrderId":reference,
+                        "historyComplete":true,
+                        "reason":"The exact source account UID could not be revalidated; keep the rejected submission unresolved."
+                    })));
+                }
+                let evidence = json!({
+                    "method": "recorded-binance-withdrawal-rejection-v1",
+                    "proofBasis": "deterministic_whitelist_rejection",
+                    "balancesUsedForProof": false,
+                    "submissionIdentity": submission.reference,
+                    "httpStatus": 400,
+                    "binanceCode": -4035,
+                    "historyComplete": true,
+                    "matchingHistoryRows": 0,
+                    "reason": "The protected broker recorded Binance's exact pre-acceptance whitelist rejection for this immutable withdrawal request; bounded complete history contains no matching withdrawal."
+                });
+                return Ok(Reconciliation {
+                    status: Status::Failed,
+                    evidence: evidence.clone(),
+                    verified: Some(make_verified(submission.clone(), vec![], evidence)?),
+                });
+            }
             return Ok(unknown(
                 json!({"withdrawOrderId":reference,"historyComplete":complete,"reason":"No matching withdrawal record proves whether the write reached Binance; do not retry."}),
             ));
+        }
+        if record
+            .error
+            .as_ref()
+            .is_some_and(transfer_rejection::recorded_withdrawal_whitelist_rejection)
+        {
+            return Ok(unknown(json!({
+                "withdrawOrderId":reference,
+                "historyComplete":complete,
+                "matchingHistoryRows":matches.len(),
+                "reason":"A matching withdrawal-history row conflicts with the recorded whitelist rejection; preserve the original attempt for reconciliation."
+            })));
         }
         if matches.len() != 1 {
             return Ok(unknown(
