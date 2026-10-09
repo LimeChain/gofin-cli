@@ -69,8 +69,9 @@ Use existing `read`, `preview`, `execute`, `authorizations`, `status`, and
    source and destination settlement policy; refund terms; observation time;
    validity; and executable versus indicative
    classification. The returned settlement policy gives source and destination
-   confirmation/finality rules; source finality follows network configuration,
-   while destination settlement always waits for a finalized receipt. Provider
+   confirmation/finality rules; source and destination follow network configuration.
+   Arbitrum and Robinhood require a successful receipt included in one canonical
+   sequencer-produced block; RPC finality is not required. Provider
    arrival estimates describe timing, not finality. Unknown
    values stay unknown. Quotes do not reserve funds or
    authorize spending.
@@ -192,7 +193,7 @@ contracts and exact correlation. Never let an unrecognized payout shape settle
 funds.
 
 Status diagnostics distinguish candidate receipt absence, confirmation/finality
-waiting, and a finalized receipt whose payment proof was rejected. Diagnostics
+waiting, and an included receipt whose payment proof was rejected. Diagnostics
 may show transaction shape, input length, exact-match booleans, or emitter/topic
 summaries; they must not expose full calldata or raw receipt payloads. A proof
 mismatch remains unresolved and is not reported as a finality delay.

@@ -785,7 +785,7 @@ impl BridgeAdapter {
                 error_schema: schema_for_fin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id"})],
                 coverage: "Reconciles saved Relay transfers and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.".into(),
-                completion: "Relay settles only after exact reviewed-router or direct-order-tag proof and finality. Canonical settles only after the source-derived type-0x64 child transaction and finality match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.".into(),
+                completion: "Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.".into(),
                 semantics: json!({"financial_authorization":false,"may_reconcile":true,"may_submit":false,"provider_identity":"saved provider only; no fallback or route switching","provider_request_identity":"broker-persisted only"}),
             },
         ]
@@ -1446,7 +1446,7 @@ impl BridgeAdapter {
             BridgeTransferState::InTransit
             | BridgeTransferState::DestinationPending
             | BridgeTransferState::RefundPending => {
-                "Retry bridge.status until an exact finalized destination receipt or refund is proven."
+                "Retry bridge.status until an exact destination receipt or refund satisfies the configured confirmation policy."
             }
             BridgeTransferState::Completed => {
                 "Transfer completed with a verified destination credit."
@@ -1601,19 +1601,24 @@ impl BridgeAdapter {
                     );
                     continue;
                 };
-                let (confirmations, _) = self
+                let (confirmations, require_finalized) = self
                     .confirmation_rules
                     .get(&chain_id)
                     .copied()
                     .unwrap_or((2, true));
                 let Some(receipt) = runtime
-                    .observe_receipt(&candidate.transaction_hash, confirmations.max(1), true)
+                    .observe_receipt(
+                        &candidate.transaction_hash,
+                        confirmations.max(1),
+                        require_finalized,
+                    )
                     .await?
                 else {
                     let progress = bridge_candidate_finality_observation(
                         runtime,
                         &candidate,
                         confirmations.max(1),
+                        require_finalized,
                     )
                     .await;
                     candidate_observations
@@ -2002,20 +2007,24 @@ impl BridgeAdapter {
                 "Retry the same transfer status check when the reviewed chain observer is available.",
             )
         })?;
-        let (confirmations, _) = self
+        let (confirmations, require_finalized) = self
             .confirmation_rules
             .get(&chain_id)
             .copied()
             .unwrap_or((2, true));
         let Some(receipt) = runtime
-            .observe_receipt(&locator.transaction_hash, confirmations.max(1), true)
+            .observe_receipt(
+                &locator.transaction_hash,
+                confirmations.max(1),
+                require_finalized,
+            )
             .await?
         else {
             let observation = canonical_candidate_progress(
                 runtime,
                 &locator.transaction_hash,
                 confirmations.max(1),
-                true,
+                require_finalized,
             )
             .await;
             return Ok(json!({
@@ -2580,8 +2589,8 @@ fn bridge_confirmation_rules(mut rules: BTreeMap<u64, (u64, bool)>) -> BTreeMap<
     for (chain_id, rule) in [
         (8453, (2, true)),
         (537713, (2, true)),
-        (42161, (2, true)),
-        (4663, (2, true)),
+        (42161, (1, false)),
+        (4663, (1, false)),
     ] {
         rules.entry(chain_id).or_insert(rule);
     }
@@ -2772,7 +2781,7 @@ fn settlement_policy_from_rules(
 ) -> Value {
     let (source_confirmations, source_finalized) =
         rules.get(&source_chain_id).copied().unwrap_or((2, true));
-    let (destination_confirmations, _) = rules
+    let (destination_confirmations, destination_finalized) = rules
         .get(&destination_chain_id)
         .copied()
         .unwrap_or((2, true));
@@ -2785,10 +2794,9 @@ fn settlement_policy_from_rules(
         "destination": {
             "chain_id": destination_chain_id,
             "min_confirmations": destination_confirmations,
-            // Destination bridge settlement always requires finalized receipts.
-            "require_finalized": true,
+            "require_finalized": destination_finalized,
         },
-        "arrival_estimate_scope": "Provider arrival estimates describe route timing only; they do not predict or replace Fin receipt finality and settlement verification."
+        "arrival_estimate_scope": "Provider arrival estimates describe route timing only; they do not predict or replace Fin receipt confirmation and settlement verification."
     })
 }
 
@@ -4391,6 +4399,7 @@ async fn bridge_candidate_finality_observation(
     runtime: &fin_evm::EvmRuntime,
     candidate: &BridgeEvidenceCandidate,
     required_confirmations: u64,
+    require_finalized: bool,
 ) -> Value {
     // These are diagnostic reads only. `observe_receipt` remains the authority
     // for canonical inclusion and finality, and this result never settles funds.
@@ -4413,6 +4422,7 @@ async fn bridge_candidate_finality_observation(
         latest.as_ref(),
         finalized.as_ref(),
         required_confirmations,
+        require_finalized,
     )
 }
 
@@ -4421,6 +4431,7 @@ fn bridge_finality_observation(
     latest: Option<&Value>,
     finalized: Option<&Value>,
     required_confirmations: u64,
+    require_finalized: bool,
 ) -> Value {
     let receipt_block_number = receipt
         .filter(|value| !value.is_null())
@@ -4442,9 +4453,11 @@ fn bridge_finality_observation(
             };
             if confirmations < required_confirmations {
                 "confirmations_pending"
-            } else if finalized_block_number.is_none() {
+            } else if require_finalized && finalized_block_number.is_none() {
                 "finalized_head_unavailable"
-            } else if finalized_block_number.expect("checked above") < block {
+            } else if require_finalized
+                && finalized_block_number.is_some_and(|finalized| finalized < block)
+            {
                 "finality_pending"
             } else {
                 // `observe_receipt` still returned None despite both reported
@@ -4458,6 +4471,7 @@ fn bridge_finality_observation(
         "receipt_block_number":receipt_block_number,
         "latest_block_number":latest_block_number,
         "finalized_block_number":finalized_block_number,
+        "require_finalized":require_finalized,
         "cause":cause
     })
 }
@@ -6025,6 +6039,69 @@ fn receipt_logs_canonical(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SequencedBlockRpc {
+        finalized_requested: AtomicBool,
+        tx_hash: String,
+        block_hash: String,
+    }
+
+    #[async_trait::async_trait]
+    impl fin_evm::EvmRpc for SequencedBlockRpc {
+        async fn request(&self, method: &str, params: Value) -> fin_domain::Result<Value> {
+            Ok(match method {
+                "eth_chainId" => json!("0x1237"),
+                "eth_getTransactionReceipt" => json!({
+                    "transactionHash": self.tx_hash,
+                    "blockHash": self.block_hash,
+                    "blockNumber": "0x10",
+                    "status": "0x1",
+                    "gasUsed": "0x5208",
+                    "effectiveGasPrice": "0x2"
+                }),
+                "eth_getTransactionByHash" => json!({
+                    "hash": self.tx_hash,
+                    "blockHash": self.block_hash,
+                    "blockNumber": "0x10",
+                    "from": "0x4444444444444444444444444444444444444444"
+                }),
+                "eth_getBlockByNumber" if params[0] == "finalized" => {
+                    self.finalized_requested.store(true, Ordering::SeqCst);
+                    Value::Null
+                }
+                "eth_getBlockByNumber" => json!({
+                    "hash": self.block_hash,
+                    "number": "0x10"
+                }),
+                "eth_blockNumber" => json!("0x10"),
+                _ => return Err(FinError::validation("Unexpected synthetic RPC method.")),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn robinhood_sequenced_success_needs_no_finalized_head_for_bridge_settlement() {
+        let rules = bridge_confirmation_rules(BTreeMap::new());
+        let (confirmations, require_finalized) = rules[&4663];
+        assert_eq!((confirmations, require_finalized), (1, false));
+
+        let rpc = Arc::new(SequencedBlockRpc {
+            finalized_requested: AtomicBool::new(false),
+            tx_hash: format!("0x{}", "11".repeat(32)),
+            block_hash: format!("0x{}", "22".repeat(32)),
+        });
+        let runtime = fin_evm::EvmRuntime::new(rpc.clone(), 4663, None);
+        let receipt = runtime
+            .observe_receipt(&rpc.tx_hash, confirmations, require_finalized)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(receipt.success);
+        assert_eq!(receipt.confirmations, 1);
+        assert!(!rpc.finalized_requested.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn bridge_observer_defaults_preserve_configured_wallet_finality() {
@@ -6032,7 +6109,7 @@ mod tests {
             bridge_confirmation_rules(BTreeMap::from([(1, (6, true)), (42161, (1, false))]));
         assert_eq!(configured[&1], (6, true));
         assert_eq!(configured[&42161], (1, false));
-        assert_eq!(configured[&4663], (2, true));
+        assert_eq!(configured[&4663], (1, false));
         assert_eq!(configured[&8453], (2, true));
         assert_eq!(configured[&537713], (2, true));
     }
@@ -6047,9 +6124,7 @@ mod tests {
         assert_eq!(configured_policy["source"]["require_finalized"], false);
         assert_eq!(configured_policy["destination"]["chain_id"], 42161);
         assert_eq!(configured_policy["destination"]["min_confirmations"], 4);
-        // The settlement path requires a finalized destination receipt even if
-        // this chain also has a wallet connection configured with a weaker rule.
-        assert_eq!(configured_policy["destination"]["require_finalized"], true);
+        assert_eq!(configured_policy["destination"]["require_finalized"], false);
         assert!(
             configured_policy["arrival_estimate_scope"]
                 .as_str()
@@ -6058,8 +6133,13 @@ mod tests {
         );
 
         let observer_policy = settlement_policy_from_rules(&configured, 1, 4663);
-        assert_eq!(observer_policy["destination"]["min_confirmations"], 2);
-        assert_eq!(observer_policy["destination"]["require_finalized"], true);
+        assert_eq!(observer_policy["destination"]["min_confirmations"], 1);
+        assert_eq!(observer_policy["destination"]["require_finalized"], false);
+
+        let stricter = bridge_confirmation_rules(BTreeMap::from([(42161, (12, true))]));
+        let stricter_policy = settlement_policy_from_rules(&stricter, 1, 42161);
+        assert_eq!(stricter_policy["destination"]["min_confirmations"], 12);
+        assert_eq!(stricter_policy["destination"]["require_finalized"], true);
     }
 
     #[test]
@@ -6463,6 +6543,7 @@ mod tests {
                 latest.as_ref(),
                 finalized.as_ref(),
                 2,
+                true,
             );
             assert_eq!(diagnostic["cause"], cause);
             assert_eq!(diagnostic["receipt_block_number"], expected_receipt);
@@ -6476,9 +6557,20 @@ mod tests {
             Some(&json!("0x110")),
             Some(&json!({"number":"0x100"})),
             2,
+            true,
         );
         assert_eq!(sufficient_heads["cause"], "inclusion_not_canonical");
         assert!(sufficient_heads.get("settled").is_none());
+
+        let confirmations_only = bridge_finality_observation(
+            Some(&json!({"blockNumber":"0x100"})),
+            Some(&json!("0x100")),
+            None,
+            1,
+            false,
+        );
+        assert_eq!(confirmations_only["cause"], "inclusion_not_canonical");
+        assert_eq!(confirmations_only["require_finalized"], false);
 
         let candidate = BridgeEvidenceCandidate {
             order_id: Some("synthetic-order".into()),
@@ -6494,6 +6586,7 @@ mod tests {
                 Some(&json!("0x100")),
                 None,
                 2,
+                true,
             ),
         );
         let status = bridge_external_pending_status(

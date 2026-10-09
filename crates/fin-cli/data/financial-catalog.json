@@ -10718,7 +10718,7 @@
       }
     ],
     "coverage": "Reconciles saved Relay transfers and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
-    "completion": "Relay settles only after exact reviewed-router or direct-order-tag proof and finality. Canonical settles only after the source-derived type-0x64 child transaction and finality match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
+    "completion": "Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
     "semantics": {
       "financial_authorization": false,
       "may_reconcile": true,

@@ -254,7 +254,10 @@ impl EvmRpc for Rpc {
             }
             "eth_blockNumber" => json!("0x66"),
             "eth_getBlockByNumber" => {
-                if params[0] == json!("finalized") {
+                if self.chain_id != 1 && params[0] == json!("finalized") {
+                    // Both reviewed child chains settle from sequencer inclusion.
+                    Value::Null
+                } else if params[0] == json!("finalized") {
                     self.block("0x66")
                 } else {
                     self.block(params[0].as_str().unwrap_or("0x64"))

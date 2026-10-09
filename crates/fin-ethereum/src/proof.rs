@@ -210,10 +210,8 @@ impl EthereumAdapter {
         maximum_amount: &str,
         confirmations: u32,
     ) -> Result<ExternalCredit> {
-        // Fin's external payout policy accepts canonical Arbitrum One and
-        // Robinhood Chain sequencer inclusion without waiting for the Ethereum
-        // L1 finalized tag. Wallet-originated operations retain
-        // EthereumConfig::require_finalized in reconcile_operation.
+        // Reviewed Arbitrum One and Robinhood Chain proofs accept canonical
+        // sequencer inclusion without waiting for the Ethereum L1 finalized tag.
         let sequencer_inclusion =
             EthereumConfig::external_credit_uses_sequencer(self.config.chain_id);
         require(
@@ -598,7 +596,7 @@ impl EthereumAdapter {
             category: "ethereum_gas".into(),
             treatment: CostTreatment::AdditionalDebit,
         }];
-        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
+        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":if self.config.require_finalized {"rpc-finalized"} else if EthereumConfig::external_credit_uses_sequencer(self.config.chain_id) {"sequencer-inclusion"} else {"confirmation-count"}});
         if receipt.success {
             self.success_effects(&record.operation, &b, &receipt, &mut effects, &mut details)
                 .await?;

@@ -230,18 +230,24 @@ impl Default for EthereumConfig {
     }
 }
 impl EthereumConfig {
-    /// External Binance payout proofs for these L2s settle at canonical
+    /// Reviewed Arbitrum and Robinhood Chain operations settle at canonical
     /// sequencer inclusion rather than waiting for Ethereum L1 finality.
-    /// Fin-originated writes continue to use `require_finalized` unchanged.
     pub const fn external_credit_uses_sequencer(chain_id: u64) -> bool {
         matches!(chain_id, 42161 | 4663)
     }
 
     pub fn wallet_only(chain_id: u64, confirmations: u64, snapshot_tokens: Vec<String>) -> Self {
+        let sequencer_inclusion = Self::external_credit_uses_sequencer(chain_id);
         Self {
             chain_id,
-            confirmations,
-            require_finalized: true,
+            // Legacy protected configs may still say two confirmations. The
+            // reviewed L2 wallet policy is one sequencer-produced block.
+            confirmations: if sequencer_inclusion {
+                1
+            } else {
+                confirmations
+            },
+            require_finalized: !sequencer_inclusion,
             snapshot_tokens,
             weth: None,
             uniswap: None,
@@ -551,7 +557,9 @@ impl Adapter for EthereumAdapter {
             .filter(|definition| self.supports_operation(&definition.name))
             .map(|mut definition| {
                 for example in &mut definition.examples { example["chain_id"] = json!(self.config.chain_id); }
-                if self.config.require_finalized {
+                if !self.config.require_finalized && self.config.confirmations == 1 && EthereumConfig::external_credit_uses_sequencer(self.config.chain_id) {
+                    definition.completion = "Writes require the original canonical envelope and receipt, one sequencer-produced L2 block, bounded actual fees and verified transfer effects; no RPC finalized-tag wait is required.".into();
+                } else if self.config.require_finalized {
                     definition.completion = "Writes require the original canonical envelope and receipt, bounded actual fees, verified transfer effects, and RPC finalized inclusion; sequencer confirmation alone remains pending.".into();
                 }
                 definition

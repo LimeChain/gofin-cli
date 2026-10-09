@@ -1573,7 +1573,7 @@ impl Engine {
             .count();
         if pending_bridge_settlements > 0 {
             blockers.push(format!(
-                "{pending_bridge_settlements} plan-linked bridge transfer(s) still need finalized destination settlement."
+                "{pending_bridge_settlements} plan-linked bridge transfer(s) still need verified destination settlement."
             ));
         }
         let recovery_bridge_count = bridge_transfers

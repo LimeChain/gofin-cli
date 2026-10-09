@@ -166,7 +166,12 @@ impl EvmRpc for Rpc {
             "eth_maxPriorityFeePerGas" => json!("0x3b9aca00"),
             "eth_blockNumber" => json!("0x64"),
             "eth_getBlockByNumber" => {
-                json!({"hash":block_hash(),"number":"0x64","baseFeePerGas":"0x3b9aca00"})
+                if self.chain == 42161 && p[0] == "finalized" {
+                    // Destination settlement must work at its sequenced head.
+                    Value::Null
+                } else {
+                    json!({"hash":block_hash(),"number":"0x64","baseFeePerGas":"0x3b9aca00"})
+                }
             }
             "eth_sendRawTransaction" => {
                 assert_eq!(self.chain, 1, "destination observer cannot sign");

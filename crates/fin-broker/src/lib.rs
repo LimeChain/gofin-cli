@@ -175,7 +175,7 @@ impl NetworkConfig {
                 id: "ethereum:42161".into(),
                 chain_id: 42161,
                 rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
-                confirmations: 2,
+                confirmations: 1,
                 snapshot_tokens: vec![
                     "0x82af49447d8a07e3bd95bd0d56f35241523fbab1".into(),
                     "0xaf88d065e77c8cc2239327c5edb3a432268e5831".into(),
@@ -185,7 +185,7 @@ impl NetworkConfig {
                 id: "ethereum:4663".into(),
                 chain_id: 4663,
                 rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
-                confirmations: 2,
+                confirmations: 1,
                 snapshot_tokens: vec![
                     "0x0bd7d308f8e1639fab988df18a8011f41eacad73".into(),
                     "0x5fc5360d0400a0fd4f2af552add042d716f1d168".into(),
@@ -3823,6 +3823,9 @@ mod tests {
         let address = "0x1111111111111111111111111111111111111111";
         let mut config = binance_only_config();
         config.networks = NetworkConfig::reviewed_evm_networks();
+        assert_eq!(config.networks[0].confirmations, 2);
+        assert_eq!(config.networks[1].confirmations, 1);
+        assert_eq!(config.networks[2].confirmations, 1);
         config.networks[0].confirmations = 7;
         config.networks[1].confirmations = 11;
         config.connections.push(ConnectionConfig::Evm {

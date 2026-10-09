@@ -114,7 +114,7 @@ its original transaction identity, never repriced and resent.
 The source receipt proves only source inclusion/debit and creates a non-spendable
 transit resource while releasing the source nonce/transaction lock. It does not
 prove user receipt. Relay status provides candidate hashes and diagnostics. The
-broker independently checks finalized canonical receipts, the pinned solver,
+broker independently checks canonical receipts at the network receipt policy, the pinned solver,
 exact router event metadata and the user-selected destination/refund expectation
 before calling the engine's idempotent external settlement API. Missing or
 ambiguous correlation remains pending. See the [bridge guide](../README.md#relay-bridge-transfers)
@@ -145,11 +145,13 @@ Legacy `binance` financial identities are unchanged; additional integrations can
 use `exchange:<venue>` with explicitly registered market readers.
 CoinGecko remains responsible for verified EVM platform/contract and native ETH
 identity. Aave health/collateral oracles remain protocol-specific checks.
-Fee preparation freezes the RPC-estimated envelope. For Fin-originated EVM
-transfers (including Binance deposits), L2 terminal reconciliation additionally
-checks finalized inclusion. A receipt before the RPC finalized block remains
-pending with its original identity. The finalized marker is not independent
-proof of the rollup challenge period.
+Fee preparation freezes the RPC-estimated envelope. Fin-originated wallet
+transfers, Binance deposits and bridge payouts on Arbitrum One and Robinhood
+complete after successful inclusion in one canonical sequencer-produced block.
+RPC finalized-head availability is not required on these two L2s. Original
+transaction envelopes, block/hash inclusion and exact payment proofs still
+apply. Other networks retain their configured confirmation/finality policy;
+sequencer inclusion does not claim parent-chain finality.
 
 Binance withdrawals to EVM wallets use a separate recipient-proof rule. For a
 withdrawal mapped to Arbitrum One or Robinhood Chain, one canonical

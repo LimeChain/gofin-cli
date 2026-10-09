@@ -107,7 +107,7 @@ step; the broker binds each step to the same persisted parent transfer and exact
 step identity, while an engine-enforced cumulative scope applies source
 principal and route fee ceilings once across that group. Source-deposit proof
 may advance independent later steps, but a plan containing a bridge remains
-incomplete until finalized destination/refund proof settles the parent transfer.
+incomplete until destination/refund proof meeting the network receipt policy settles the parent transfer.
 Connection metadata includes
 stable non-secret alias mappings, addresses, networks and asset configuration;
 volatile observations do not belong in that identity contract. Schema validation uses the
@@ -181,9 +181,10 @@ protected human-approved update. Wallet-only support does not imply dapp support
 
 Indexers supply bounded discovery candidates. Confirm token metadata and balances
 with pinned RPC reads and declare partial coverage. Fin-originated EVM writes
-must verify the configured finality rule; a sequencer receipt alone is
-insufficient for wallet transfers and Binance deposits. Binance withdrawal
-recipient verification has a distinct policy: for a withdrawal mapped to
+must verify the network receipt rule. Wallet transfers, Binance deposits and
+bridge payouts on Arbitrum and Robinhood require successful inclusion in one
+canonical sequencer-produced block, without waiting for RPC finality. Other
+chains keep their configured confirmation/finality rules. For withdrawals mapped to
 Arbitrum One (`42161`) or Robinhood Chain (`4663`), one canonical
 sequencer-included block is sufficient when the original hash, chain, recipient,
 asset identity and expected amount match the approved withdrawal. Preserve its

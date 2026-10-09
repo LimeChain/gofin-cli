@@ -134,9 +134,9 @@ Chain destination verification accepts a matching receipt in one canonical
 sequencer-included block without waiting for parent-chain finality. Binance's
 Robinhood network mapping is currently unavailable/unverified, so this does not
 claim that withdrawals to that chain can be submitted. Ethereum-mainnet
-withdrawals keep their configured confirmation rule. Fin-originated EVM
-transfers and Binance deposits retain their existing chain-finality
-requirements. Connection changes reload
+withdrawals keep their configured confirmation rule. Fin-originated wallet
+transfers, Binance deposits and bridge payouts on Arbitrum and Robinhood also
+complete after successful inclusion in one sequencer-produced canonical block. Connection changes reload
 automatically before the next broker request, without stopping the daemon or
 replaying a request. Local connection listing and service commands remain available
 during venue authentication failures; account operations retain identity checks.
@@ -238,8 +238,8 @@ The response contains persisted `transfer_id` and declared step IDs/kinds for
 each supported destination quote, plus any per-asset failures and its
 `settlement_policy`. That policy reports source and destination chain IDs,
 minimum confirmations and whether finalization is required. Source rules reflect
-configured network policy; destination bridge settlement always requires a
-finalized receipt. Inspect the actual quote's fees, net minimum, optional
+configured network policy. Arbitrum and Robinhood use one successful
+sequencer-produced canonical block, without waiting for RPC finalization. Inspect the actual quote's fees, net minimum, optional
 provider arrival estimate, validity, refund alternatives and ordered steps. A
 missing estimate stays unknown, and an arrival estimate does not replace the
 settlement policy. Then choose the amount interval,
@@ -297,7 +297,7 @@ after exact order-correlated destination/refund evidence and configured
 finality are independently verified. For a direct payout, the saved protocol
 order ID inside the payout transaction is the correlation; provider request IDs
 and Relay status are not sufficient proof. Status distinguishes a missing
-receipt, pending confirmations/finality, and a finalized transaction whose
+receipt, pending required inclusion/finality, and an included transaction whose
 payment proof did not match. Diagnostics report bounded transaction and log
 shape facts, such as input length and exact-match booleans, without returning
 full calldata or receipt payloads. A proof mismatch leaves the transfer
@@ -977,8 +977,8 @@ one canonical sequencer-included block is sufficient when the original hash,
 chain, recipient, asset and expected amount match. Binance's Robinhood network
 mapping is currently unavailable/unverified, so the receipt observer does not
 establish that such a withdrawal route can be submitted. Other routes explicitly
-remain pending after Binance reports completion. This receipt policy does not
-change finality for Fin-originated wallet transfers or Binance deposits.
+remain pending after Binance reports completion. The same one-block sequencer
+policy applies to Fin wallet writes and bridge payouts on these two L2s.
 Observer routing is separate from exchange submission support.
 
 For standard Binance withdrawals, `amount` is the gross SPOT debit and already

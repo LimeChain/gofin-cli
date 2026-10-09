@@ -4666,6 +4666,8 @@ mod wallet_only_tests {
             let a = wallet_adapter(chain, Arc::new(Fixture::new()));
             let config = serde_json::to_value(&a.config).unwrap();
             assert_eq!(config["weth"], Value::Null);
+            assert_eq!(config["confirmations"], json!(1));
+            assert_eq!(config["require_finalized"], json!(false));
             let parsed: EthereumConfig = serde_json::from_value(
                 json!({"chain_id":chain,"confirmations":2,"snapshot_tokens":[]}),
             )
@@ -5728,6 +5730,10 @@ mod wallet_only_tests {
             let rpc = Arc::new(Fixture::new());
             let mut a = wallet_adapter(chain, rpc.clone())
                 .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+            // Direct callers may retain an explicit stricter policy. The
+            // reviewed broker wallet defaults no longer enable this path.
+            a.config.confirmations = 2;
+            a.config.require_finalized = true;
             let finality = Arc::new(FinalityRpc {
                 inner: rpc.clone(),
                 mode: AtomicU64::new(0),
@@ -5754,6 +5760,33 @@ mod wallet_only_tests {
             let result = a.reconcile(&record).await.unwrap();
             assert_eq!(result.status, Status::Completed);
             assert_eq!(result.evidence["finality"], json!("rpc-finalized"));
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_l2_wallet_default_settles_sequenced_receipt_without_finalized_rpc() {
+        for chain in [42161, 4663] {
+            let rpc = Arc::new(Fixture::new());
+            let mut a = wallet_adapter(chain, rpc.clone())
+                .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+            let finality = Arc::new(FinalityRpc {
+                inner: rpc.clone(),
+                mode: AtomicU64::new(1), // finalized tag unavailable
+                finalized_seen: AtomicU64::new(0),
+            });
+            a.runtime = Arc::new(EvmRuntime::new(finality.clone(), chain, None));
+            let prepared = a
+                .prepare("wallet.transfer", &transfer(chain, "native"))
+                .await
+                .unwrap();
+            let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+            rpc.latest.store(21, Ordering::SeqCst); // Exactly one sequencer block.
+            rpc.set_receipt(&binding, 21, vec![]);
+            let result = a.reconcile(&record(prepared)).await.unwrap();
+            assert_eq!(result.status, Status::Completed, "{chain}");
+            assert_eq!(result.evidence["finality"], json!("sequencer-inclusion"));
+            assert_eq!(result.evidence["confirmations"], json!(1));
+            assert_eq!(finality.finalized_seen.load(Ordering::SeqCst), 0);
         }
     }
     #[tokio::test]

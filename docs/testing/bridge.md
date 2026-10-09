@@ -153,8 +153,9 @@ separate stable transfer identity and per-step operation identity. Wait for
 canonical source proof, then poll `bridge.status` until the exact destination
 credit reaches configured finality. Quotes and status show `settlement_policy`
 for source and destination (`chain_id`, `min_confirmations`, and
-`require_finalized`); source rules reflect configuration and destination bridge
-settlement always requires a finalized receipt. Provider arrival estimates do
+`require_finalized`); both source and destination reflect network configuration.
+Arbitrum and Robinhood use one successful receipt in a canonical sequencer-produced
+block, including when the RPC finalized head is behind or unavailable. Provider arrival estimates do
 not substitute for those rules. Source confirmation is not destination
 completion; API status and candidate hashes are not proof.
 
@@ -163,7 +164,7 @@ be the same EOA as the source. Its source proof pairs the reviewed Inbox and
 Bridge events from the source receipt after it meets configured confirmation
 and finality rules, then derives the child transaction hash from the pinned
 deployment and message index. Status checks that derived transaction's exact
-destination proof and waits for the destination's required finalized receipt; it
+destination proof against the chain's receipt policy; it
 does not accept a provider-supplied destination hash. For a native Relay payout
 whose address-level retention needs the intrinsic-gas proof, Fin requires a
 reviewed Nitro chain, an empty transaction access list, and the exact
