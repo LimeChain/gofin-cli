@@ -112,7 +112,7 @@ enum Command {
     Snapshot,
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
-        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, Fin offers optional Codex skill installation [y/N] (default No)."
+        after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select Codex and/or Claude Code with arrows and Space, then Enter to install. Enter with none selected or Esc skips."
     )]
     Setup,
     /// Start, stop or check the protected service.
@@ -1893,9 +1893,10 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
                     if matches!(result["status"].as_str(), Some("current" | "updated")) {
                         let _ = ui.success(result["message"].as_str().unwrap_or_default());
                     } else {
-                        let _ = ui.warning(
-                            "Fin skill preserved; run fin skill inspect --agent codex for details.",
-                        );
+                        let _ = ui.warning(&format!(
+                            "Fin skill preserved; run fin skill inspect --agent {} for details.",
+                            result["agent"].as_str().unwrap_or("codex")
+                        ));
                     }
                 }
                 Ok(())

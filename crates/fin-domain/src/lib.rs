@@ -914,8 +914,17 @@ pub trait SubmissionJournal: Send + Sync {
 #[async_trait]
 pub trait Adapter: Send + Sync {
     fn definitions(&self) -> Vec<Definition>;
+    /// Public, user-facing enrolled connections for discovery and snapshots.
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
+    }
+    /// Stable protected identities whose change can alter an approved
+    /// operation's authority, such as account UIDs or resolved destination
+    /// aliases. This collection is broker-only and must never be reduced by
+    /// display name. The default preserves adapters whose public connection
+    /// metadata already contains every stable identity relevant to writes.
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        self.connections()
     }
     async fn snapshot(&self) -> Result<StateSnapshot> {
         Err(FinError::new(

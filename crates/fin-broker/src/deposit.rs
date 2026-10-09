@@ -774,21 +774,25 @@ impl Adapter for BinanceEthereumDepositAdapter {
     }
 
     fn connections(&self) -> Vec<ConnectionMetadata> {
-        // A composite write is authorized against both the Binance account
-        // receiving the credit and the EVM signer sending the deposit. Keep
-        // provider order deterministic (Binance config order, then chain ID
-        // order from the BTreeMap) and collapse only exact duplicate metadata.
-        // The engine hashes this ordinary connection snapshot canonically,
-        // independent of ordering.
-        let mut connections = self.binance.connections();
+        // Deposit-route metadata is an authorization identity, not a separate
+        // public connection. Public discovery lists the enrolled account and
+        // grouped EVM wallet through their owning adapters.
+        Vec::new()
+    }
+
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        // Bind the receiving Binance accounts, configured deposit routes and
+        // per-chain EVM signer details without leaking internal destination
+        // rows into `fin connections list`.
+        let mut identities = self.binance.authorization_identities();
         for adapter in self.ethereum.values() {
-            for connection in adapter.connections() {
-                if !connections.contains(&connection) {
-                    connections.push(connection);
+            for identity in adapter.authorization_identities() {
+                if !identities.contains(&identity) {
+                    identities.push(identity);
                 }
             }
         }
-        connections
+        identities
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {

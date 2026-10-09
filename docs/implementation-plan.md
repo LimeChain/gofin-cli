@@ -136,6 +136,10 @@ retain their ordinary conservative USD charge, including non-cash exposure such
 as derivative notional. Credits cannot erase gross usage. Revisions retain usage
 and started steps; historical restoration-run models are not reused. The LLM names
 the plan and submits each step; there is no scheduler or automatic renewal.
+Public grouped EVM-wallet discovery stays concise while authorization hashes the
+complete per-chain signer/confirmation and configured deposit-destination
+metadata. Existing generic EVM plan bindings that used the earlier public row may
+fail closed and need a freshly approved revision.
 
 Keep administrative approval separate from financial authority. Credential and
 protected policy changes belong to the human's private Terminal and independent
@@ -317,12 +321,21 @@ human-supplied and observed in the master listing, not proved by a venue-returne
 child UID. No remote financial write was submitted; funded trading/settlement
 requires its selected test scope. Human Touch ID acceptance remains pending.
 
-## Optional Codex companion skill
+## Optional companion skill
 
 Fin embeds its companion skill so it can be installed offline without a checkout,
 credentials, administrator access or financial approval. Setup offers an optional
-opt-in after successful installation. Agents can inspect capability metadata and
-use `fin skill install|inspect|update|remove --agent codex` for lifecycle actions.
+checkbox selection after successful installation: arrows move between Codex
+and Claude Code, Space toggles, Enter installs selected copies. No selection
+or Esc skips. The Bash selector saves terminal state before single-key reads
+and restores it before dispatch and in the installer cleanup trap; no extra
+runtime dependency or agent process is needed.
+Explicit selection avoids guessing from absent or stale agent configuration folders.
+Agents can inspect capability metadata and use
+`fin skill install|inspect|update|remove --agent codex` (or `--agent claude`)
+for lifecycle actions. The shared agent enum owns destinations; each agent has
+its own maintenance record and uses the same conflict-safe file operations.
+The installer only selects agents and dispatches the existing user-owned CLI.
 Compatible runtime updates refresh only recorded, existing, unmodified copies;
 conflicting or edited files remain for human review. Skill installation grants no
 financial authority. See the [companion skill guide](companion-skill.md).

@@ -13,6 +13,7 @@ Run as your own user, without sudo:
 ```sh
 fin capabilities --json
 fin skill install --agent codex
+fin skill install --agent claude
 fin skill inspect --agent codex --json
 fin explain skill.install --json
 fin schema skill.update --json
@@ -20,11 +21,13 @@ fin schema skill.update --json
 
 The `companion_skill` capability field includes purpose, independent skill
 version, supported agent environments, destination, offline availability and
-installation/update/removal guidance. Codex is the first supported environment;
+installation/update/removal guidance. Codex (`codex`) and Claude Code (`claude`) are supported;
 other environment names are rejected until their mapping is implemented.
 
-The destination is `$HOME/.agents/skills/fin`, the current
-[Codex user skill location](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills).
+Destinations are `$HOME/.agents/skills/fin` for
+[Codex](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills) and
+`$HOME/.claude/skills/fin` for
+[Claude Code](https://code.claude.com/docs/en/skills#choose-where-skills-load).
 Fin does not scan for agents or automatically migrate old manual copies from
 other locations. If you copied an older Fin skill elsewhere, review and move it
 aside to avoid duplicate skill names. Ensure `fin` is on the agent's PATH;
@@ -33,9 +36,15 @@ restart the agent if its skill list does not refresh.
 `SKILL.md` is embedded at compile time, including in standalone Linux discovery
 binaries. Installation needs no checkout, network, broker, configuration,
 credentials, administrator permission or financial approval. Initial protected
-setup asks `Install Fin's optional Codex skill? [y/N]` only after success.
-Enter, No, unrecognized input or EOF skips it; an explicit `y`/`yes` installs as
-the human account, with no additional approval and no automatic conflict backup.
+setup offers a checkbox selector after success. Arrow keys move between Codex
+and Claude Code, Space toggles the focused choice, and Enter installs selected
+copies. Nothing is preselected. Enter with no selection, Esc or EOF skips.
+Unrecognized keys leave selection unchanged. `TERM=dumb` prints plain lines
+instead of redrawing; `NO_COLOR` needs no special terminal styling. Terminal
+settings are restored before installation and on cancellation.
+Fin installs only the chosen copies as the human account, with no additional
+approval and no automatic conflict backup. Selecting both attempts each agent
+independently; a conflict in one preserves it and does not prevent the other.
 Ctrl-C cancels the optional step while leaving completed setup intact. An optional
 installation failure reports a next step and does not undo setup.
 All four skill commands support `--json` without prompts, animation or chatter;
@@ -43,13 +52,16 @@ All four skill commands support `--json` without prompts, animation or chatter;
 
 ## Maintenance and conflicts
 
+Each command accepts `--agent codex` or `--agent claude`. Each copy has an
+independent management record, so editing or removing one does not affect the other.
+
 ```sh
 fin skill update --agent codex
 fin skill remove --agent codex
 ```
 
 Fin records the exact installed bytes and version in
-`$HOME/.local/share/fin/skills/codex.json`. The record is ordinary user-owned
+`$HOME/.local/share/fin/skills/<agent>.json` (`codex.json` or `claude.json`). The record is ordinary user-owned
 maintenance data, not trusted financial configuration. Repeated installation is
 safe. `inspect` reports `not_installed`, `unmanaged`, `modified`, `current` or
 `outdated`, the destination and bundled/recorded versions. A recorded version for
@@ -120,15 +132,17 @@ cargo clippy --locked --offline -p fin-cli -p fin-discovery -p fin-presentation 
 Synthetic fixtures use temporary homes and public fake runtime bundles. They
 cover installation/repetition, changed bundles, unmanaged/modified/extra-file
 conflicts, backups, removal, symlinks, malformed records, concurrent Fin writers,
-opt-in-only refresh, standalone binary availability, help/schema/capability
+opt-in-only refresh for both agents, standalone binary availability, help/schema/capability
 consistency, redirected/TTY/NO_COLOR/TERM=dumb/JSON output and JSON setup handoffs.
 An isolated dispatch test proves `execute --dry-run` routes to preview only.
 
 Human checks remain separate: run `make update`, inspect the skill status, opt
-in with `fin skill install --agent codex` if desired, and confirm Codex discovers
-it. On a later approved update verify an unchanged managed copy refreshes and an
+in with `fin skill install --agent codex` or `--agent claude` if desired,
+and confirm the selected agent discovers it. Test Codex-only, Claude-only, both
+and skip on fresh temporary accounts. On a later approved update verify an
+unchanged managed copy refreshes and an
 edited copy is preserved. Initial setup's optional prompt is covered synthetically;
-real setup is not required for this update. Human setup/upgrade, Codex reload,
+real setup is not required for this update. Human setup/upgrade, agent discovery,
 Touch ID and live financial operations are not established by these tests.
 
 Observed on 7 October 2026 in the local macOS development checkout:

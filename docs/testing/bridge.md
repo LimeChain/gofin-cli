@@ -263,6 +263,14 @@ change, root verification passed 375 focused engine, broker, wallet, bridge and
 CLI tests, plus strict Clippy and formatting. The explicit canonical fork case
 was not rerun; its existing ignored case remains separate from synthetic tests.
 
+After merging the latest main (protected authorization identities and Claude Code
+onboarding), the full workspace passed 1,003 tests with no failures; three explicit
+fork cases stayed ignored. Strict workspace Clippy, native approval presentation,
+synthetic development environments and all 24 installer tests also passed. One
+older alias-routing fixture was corrected to treat the withdrawal fee as included
+in the gross debit. The protected live plan above was completed on its recorded
+installed runtime before this merge; no financial writes were repeated for the merge.
+
 ## Remaining human installation and Touch ID checklist
 
 

@@ -648,7 +648,7 @@ fn adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
 }
 
 #[test]
-fn composite_deposit_connection_snapshot_binds_both_binance_and_evm_identities() {
+fn composite_deposit_hides_route_rows_publicly_but_binds_binance_and_evm_identities() {
     let compose = |main_resource: &str, wallet_address: &str| {
         let mut config = adapter_config();
         config.accounts[0].resource = ResourceId(main_resource.into());
@@ -684,31 +684,32 @@ fn composite_deposit_connection_snapshot_binds_both_binance_and_evm_identities()
         "binance:uid:1001:SPOT",
         "0x2222222222222222222222222222222222222222",
     );
-    let connections = original.connections();
-    assert_eq!(connections.len(), 5);
-    assert_eq!(connections[0].resource.0, "binance:uid:1001:SPOT");
-    assert_eq!(connections[0].provider, "binance");
-    assert_eq!(connections[1].resource.0, "binance:uid:1002:SPOT");
-    assert_eq!(connections[2].resource.0, "binance:uid:1003:SPOT");
-    assert_eq!(connections[3].provider, "binance-ethereum-destination");
-    assert_eq!(connections[3].role.as_deref(), Some("deposit-destination"));
-    assert_eq!(connections[3].network.as_deref(), Some("ethereum:1"));
+    assert!(original.connections().is_empty());
+    let identities = original.authorization_identities();
+    assert_eq!(identities.len(), 5);
+    assert_eq!(identities[0].resource.0, "binance:uid:1001:SPOT");
+    assert_eq!(identities[0].provider, "binance");
+    assert_eq!(identities[1].resource.0, "binance:uid:1002:SPOT");
+    assert_eq!(identities[2].resource.0, "binance:uid:1003:SPOT");
+    assert_eq!(identities[3].provider, "binance-ethereum-destination");
+    assert_eq!(identities[3].role.as_deref(), Some("deposit-destination"));
+    assert_eq!(identities[3].network.as_deref(), Some("ethereum:1"));
     assert_eq!(
-        connections[3].details["assets"]["ETH"]["reference"],
+        identities[3].details["assets"]["ETH"]["reference"],
         "native"
     );
     assert_eq!(
-        connections[3].address.as_deref(),
+        identities[3].address.as_deref(),
         Some("0x2222222222222222222222222222222222222222")
     );
-    assert_eq!(connections[4].provider, "evm");
-    assert_eq!(connections[4].network.as_deref(), Some("ethereum:1"));
+    assert_eq!(identities[4].provider, "evm");
+    assert_eq!(identities[4].network.as_deref(), Some("ethereum:1"));
     assert!(
-        connections
+        identities
             .iter()
             .all(|connection| connection.credential_ref.is_none())
     );
-    let original_hash_input = serde_json::to_value(&connections).unwrap();
+    let original_hash_input = serde_json::to_value(&identities).unwrap();
 
     let changed_binance = compose(
         "binance:uid:9001:SPOT",
@@ -720,13 +721,13 @@ fn composite_deposit_connection_snapshot_binds_both_binance_and_evm_identities()
     );
     assert_ne!(
         original_hash_input,
-        serde_json::to_value(changed_binance.connections()).unwrap(),
-        "a changed Binance account resource must change the adapter's connection hash input"
+        serde_json::to_value(changed_binance.authorization_identities()).unwrap(),
+        "a changed Binance account resource must change the adapter's authorization identity"
     );
     assert_ne!(
         original_hash_input,
-        serde_json::to_value(changed_wallet.connections()).unwrap(),
-        "a changed EVM wallet address/resource must change the adapter's connection hash input"
+        serde_json::to_value(changed_wallet.authorization_identities()).unwrap(),
+        "a changed EVM wallet address/resource must change the adapter's authorization identity"
     );
 }
 
@@ -2011,9 +2012,11 @@ async fn subaccount_only_credentials_and_dynamic_arbitrum_usdc_route_are_support
         .unwrap();
     assert_eq!(account.role.as_deref(), Some("sub"));
     assert!(account.parent.is_none());
-    let destination = connections
+    assert_eq!(connections.len(), 1);
+    let identities = binance.authorization_identities();
+    let destination = identities
         .iter()
-        .find(|connection| connection.name == "synthetic-wallet")
+        .find(|identity| identity.name == "synthetic-wallet")
         .unwrap();
     assert_eq!(destination.role.as_deref(), Some("deposit-destination"));
     assert_eq!(destination.network.as_deref(), Some("ethereum:1"));

@@ -1051,74 +1051,90 @@ fn setup_discovers_limit_prompts_and_zero_keeps_machine_handoff() {
 
 #[test]
 fn bundled_skill_installs_without_checkout_network_service_or_prompts() {
-    let home = tempfile::tempdir().unwrap();
-    let binary = home.path().join("standalone-fin");
-    std::fs::copy(env!("CARGO_BIN_EXE_fin"), &binary).unwrap();
-    let invoke = |args: &[&str]| {
-        Command::new(&binary)
-            .args(args)
-            .current_dir(home.path())
-            .env_clear()
-            .env("HOME", home.path())
-            .env("PATH", "")
-            .env("TERM", "dumb")
-            .env("NO_COLOR", "1")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap()
-    };
-    for action in ["install", "install", "inspect", "update"] {
-        let output = invoke(&["skill", action, "--agent", "codex", "--json", "--verbose"]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert!(output.stderr.is_empty());
-        assert!(!output.stdout.contains(&27));
-        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["managed"], true);
+    for agent in fin_discovery::companion_skill::AgentEnvironment::ALL {
+        let home = tempfile::tempdir().unwrap();
+        let binary = home.path().join("standalone-fin");
+        std::fs::copy(env!("CARGO_BIN_EXE_fin"), &binary).unwrap();
+        let invoke = |args: &[&str]| {
+            Command::new(&binary)
+                .args(args)
+                .current_dir(home.path())
+                .env_clear()
+                .env("HOME", home.path())
+                .env("PATH", "")
+                .env("TERM", "dumb")
+                .env("NO_COLOR", "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        for action in ["install", "install", "inspect", "update"] {
+            let output = invoke(&[
+                "skill",
+                action,
+                "--agent",
+                agent.name(),
+                "--json",
+                "--verbose",
+            ]);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(output.stderr.is_empty());
+            assert!(!output.stdout.contains(&27));
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["managed"], true);
+            assert_eq!(
+                value["installed_version"],
+                fin_discovery::companion_skill::VERSION
+            );
+            serde_json::from_value::<fin_discovery::companion_skill::SkillResult>(value).unwrap();
+        }
+        let path = home.path().join(agent.directory()).join("SKILL.md");
         assert_eq!(
-            value["installed_version"],
-            fin_discovery::companion_skill::VERSION
+            std::fs::read_to_string(&path).unwrap(),
+            fin_discovery::companion_skill::CONTENT
         );
-        serde_json::from_value::<fin_discovery::companion_skill::SkillResult>(value).unwrap();
+        std::fs::write(&path, "human-customized skill").unwrap();
+        let conflict = invoke(&["skill", "update", "--agent", agent.name(), "--json"]);
+        assert_eq!(conflict.status.code(), Some(1));
+        assert!(conflict.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&conflict.stdout).unwrap()["error"]["code"],
+            "SKILL_CONFLICT"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "human-customized skill"
+        );
+        let restored = invoke(&[
+            "skill",
+            "update",
+            "--agent",
+            agent.name(),
+            "--backup",
+            "--json",
+        ]);
+        assert!(restored.status.success());
+        let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(
+                std::path::Path::new(restored["backup_path"].as_str().unwrap()).join("SKILL.md")
+            )
+            .unwrap(),
+            "human-customized skill"
+        );
+        let human = invoke(&["skill", "remove", "--agent", agent.name()]);
+        assert!(human.status.success());
+        assert!(human.stderr.is_empty());
+        assert!(!human.stdout.contains(&27));
+        let text = String::from_utf8(human.stdout).unwrap();
+        assert!(text.starts_with(&format!("✓ Fin skill removed for {}.", agent.name())));
+        assert_eq!(text.lines().count(), 1);
+        assert!(!path.exists());
     }
-    let path = home.path().join(".agents/skills/fin/SKILL.md");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        fin_discovery::companion_skill::CONTENT
-    );
-    std::fs::write(&path, "human-customized skill").unwrap();
-    let conflict = invoke(&["skill", "update", "--agent", "codex", "--json"]);
-    assert_eq!(conflict.status.code(), Some(1));
-    assert!(conflict.stderr.is_empty());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&conflict.stdout).unwrap()["error"]["code"],
-        "SKILL_CONFLICT"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "human-customized skill"
-    );
-    let restored = invoke(&["skill", "update", "--agent", "codex", "--backup", "--json"]);
-    assert!(restored.status.success());
-    let restored: Value = serde_json::from_slice(&restored.stdout).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(
-            std::path::Path::new(restored["backup_path"].as_str().unwrap()).join("SKILL.md")
-        )
-        .unwrap(),
-        "human-customized skill"
-    );
-    let human = invoke(&["skill", "remove", "--agent", "codex"]);
-    assert!(human.status.success());
-    assert!(human.stderr.is_empty());
-    assert!(!human.stdout.contains(&27));
-    let text = String::from_utf8(human.stdout).unwrap();
-    assert!(text.starts_with("✓ Fin skill removed for codex."));
-    assert_eq!(text.lines().count(), 1);
-    assert!(!path.exists());
 }
 
 #[test]
@@ -1128,11 +1144,15 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
     assert_eq!(metadata["bundled"], true);
     assert_eq!(metadata["version"], fin_discovery::companion_skill::VERSION);
     assert_eq!(metadata["supported_agent_environments"][0]["name"], "codex");
+    assert_eq!(
+        metadata["supported_agent_environments"][1]["name"],
+        "claude"
+    );
     for action in ["install", "inspect", "update", "remove"] {
         let help = run(&["skill", action, "--help"]);
         assert!(help.status.success());
         let help = String::from_utf8(help.stdout).unwrap();
-        assert!(help.contains("--agent") && help.contains("codex"));
+        assert!(help.contains("--agent") && help.contains("codex") && help.contains("claude"));
         assert_eq!(help.contains("--backup"), action != "inspect");
         let name = format!("skill.{action}");
         let schema: Value =
@@ -1150,14 +1170,17 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
         assert_eq!(schema["semantics"]["financial_authorization"], false);
     }
     let setup_help = run(&["setup", "--help"]);
-    assert!(String::from_utf8_lossy(&setup_help.stdout).contains("[y/N] (default No)"));
+    assert!(
+        String::from_utf8_lossy(&setup_help.stdout)
+            .contains("select Codex and/or Claude Code with arrows and Space")
+    );
     assert!(
         include_str!("../../../packaging/install.sh")
             .contains(fin_discovery::companion_skill::SETUP_PROMPT)
     );
     let setup = run(&["setup", "--json"]);
     assert!(setup.stderr.is_empty());
-    assert!(!String::from_utf8_lossy(&setup.stdout).contains("[y/N]"));
+    assert!(!String::from_utf8_lossy(&setup.stdout).contains("Arrows move; Space selects;"));
     let setup_schema: Value =
         serde_json::from_slice(&run(&["schema", "setup", "--json"]).stdout).unwrap();
     assert_eq!(
@@ -1175,11 +1198,15 @@ fn skill_capabilities_help_schema_and_examples_are_offline_and_consistent() {
 #[test]
 fn skill_human_and_machine_output_on_disposable_ttys() {
     use std::{fs::File, io::Read, os::fd::FromRawFd, process::Stdio};
-    for (json, no_color, dumb) in [
-        (false, false, false),
-        (false, true, false),
-        (false, false, true),
-        (true, false, false),
+    for (agent, json, no_color, dumb) in [
+        ("codex", false, false, false),
+        ("codex", false, true, false),
+        ("codex", false, false, true),
+        ("codex", true, false, false),
+        ("claude", false, false, false),
+        ("claude", false, true, false),
+        ("claude", false, false, true),
+        ("claude", true, false, false),
     ] {
         let home = tempfile::tempdir().unwrap();
         let (mut master, mut slave) = (-1, -1);
@@ -1212,7 +1239,7 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
         });
         let mut command = Command::new(env!("CARGO_BIN_EXE_fin"));
         command
-            .args(["skill", "install", "--agent", "codex"])
+            .args(["skill", "install", "--agent", agent])
             .env_clear()
             .env("HOME", home.path())
             .env("TERM", if dumb { "dumb" } else { "xterm-256color" })
@@ -1247,7 +1274,10 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
                 "installed"
             );
         } else {
-            assert!(String::from_utf8_lossy(&output).contains("✓ Fin skill installed for codex."));
+            assert!(
+                String::from_utf8_lossy(&output)
+                    .contains(&format!("✓ Fin skill installed for {agent}."))
+            );
         }
     }
 }

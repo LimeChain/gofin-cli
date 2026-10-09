@@ -92,7 +92,9 @@ and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-`Install Fin's optional Codex skill? [y/N]` lets you opt in; Enter skips it.
+an optional skill selector lets you move with arrow keys, toggle Codex and
+Claude Code with Space, and press Enter to install. Nothing is preselected;
+Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `fin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
@@ -124,6 +126,11 @@ chat, flags, JSON, environment variables or an agent terminal. Later
 reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signing
 and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
+
+`fin connections list` shows enrolled connections in both human and JSON output.
+A reusable EVM wallet appears once, with its supported networks grouped under
+`details.networks`. Derived withdrawal destinations and per-chain signer records
+remain internal to plan authorization; they are not additional enrollments.
 
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
@@ -428,12 +435,15 @@ without a source checkout, administrator access, credentials or financial approv
 
 ```sh
 fin skill install --agent codex
+fin skill install --agent claude
 fin skill inspect --agent codex --json
 fin skill update --agent codex
 fin skill remove --agent codex
 ```
 
-Codex uses `~/.agents/skills/fin`. Existing or modified content is preserved;
+Codex uses `~/.agents/skills/fin`; Claude Code uses `~/.claude/skills/fin`.
+Use `--agent claude` with inspect, update and remove to manage its copy.
+Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. Fin upgrades refresh
 only existing, unmodified Fin-managed copies. See [skill maintenance](docs/companion-skill.md).
 Ensure `fin` is on the agent's PATH; restart the agent if it does not discover the skill.

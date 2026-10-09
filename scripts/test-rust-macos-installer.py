@@ -34,6 +34,8 @@ if name in ("mkdir", "cp", "rm", "mv", "mktemp", "chmod", "sleep"):
             sys.exit("Refusing non-fixture path: " + argument)
     os.execv("/bin/" + name if name != "mktemp" else "/usr/bin/mktemp",
              [name] + args)
+elif name == "stty":
+    os.execv("/bin/stty", [name] + args)
 elif name in ("awk", "shasum", "cat", "cmp"):
     os.execv(("/bin/" if name == "cat" else "/usr/bin/") + name, [name] + args)
 elif name == "uname":
@@ -105,7 +107,7 @@ class InstallerFixture(unittest.TestCase):
         driver = DRIVER.replace("ROOT", repr(str(self.root)))
         for name in ("uname", "id", "stat", "ls", "codesign", "otool", "launchctl",
                      "plutil", "chown", "mkdir", "cp", "rm", "mv", "mktemp", "chmod",
-                     "awk", "shasum", "cat", "cmp", "sleep", "sudo"):
+                     "awk", "shasum", "cat", "cmp", "sleep", "sudo", "stty"):
             executable = self.bin / name
             executable.write_text(driver)
             executable.chmod(0o755)
@@ -194,7 +196,7 @@ class InstallerFixture(unittest.TestCase):
         marker_owner = ["chown", ["root:wheel", str(marker)]]
         self.assertIn(marker_owner, events)
         self.assertLess(events.index(marker_owner), events.index(["sudo", sudo_args]))
-        self.assertNotIn("[y/N]", result.stderr)
+        self.assertNotIn("Arrows move; Space selects;", result.stderr)
         self.assertIn("✓ Preparing protected runtime files", result.stderr)
         self.assertIn("✓ Verifying signed binaries and system libraries", result.stderr)
         self.assertNotIn("\033[", result.stderr)
@@ -260,7 +262,7 @@ class InstallerFixture(unittest.TestCase):
                         if not data:
                             break
                         chunks.append(data)
-                        if not answered and b"[y/N]" in b"".join(chunks):
+                        if not answered and b"Arrows move; Space selects;" in b"".join(chunks):
                             os.write(master, b"\n")
                             answered = True
                     if process.poll() is not None:
@@ -274,8 +276,8 @@ class InstallerFixture(unittest.TestCase):
             self.assertIn("enrollment inherited three terminal descriptors", output)
             self.assertIn("Fin installed and running.", output)
             self.assertTrue(answered)
-            self.assertEqual(output.count("Install Fin's optional Codex skill? [y/N]"), 1)
-            self.assertLess(output.index("Fin installed and running."), output.index("[y/N]"))
+            self.assertEqual(output.count("Install Fin's optional skill"), 1)
+            self.assertLess(output.index("Fin installed and running."), output.index("Arrows move; Space selects;"))
             self.assertFalse(any("skill" in args for name, args in self.events() if name == "sudo"))
             self.assertIn("Registering Fin for new Terminal sessions", output)
             self.assertNotIn("… ", output)
@@ -384,17 +386,17 @@ class SkillOfferFixture(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.events = self.root / "events.txt"
         mock = self.root / "sudo"
-        mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$EVENTS"\nexit "${SKILL_RESULT:-0}"\n')
+        mock.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$EVENTS"\nexit "${SKILL_RESULT:-0}"\n')
         mock.chmod(0o700)
-        source = INSTALLER.read_text().split("offer_companion_skill() {", 1)[1].split("\nfin_active_pid=''", 1)[0]
+        source = "restore_companion_terminal() {" + INSTALLER.read_text().split("restore_companion_terminal() {", 1)[1].split("\nfin_active_pid=''", 1)[0]
         self.script = self.root / "offer.sh"
-        self.script.write_text("set -eu\nfin_uid=501\ntrap 'exit 130' INT\noffer_companion_skill() {" +
+        self.script.write_text("set -eu\nfin_uid=501\ntrap 'exit 130' INT\ntrap restore_companion_terminal EXIT\n" +
                                source.replace('/usr/bin/sudo', str(mock)) +
                                "\necho 'SYNTHETIC setup complete'\noffer_companion_skill\n")
 
-    def offer(self, answer, no_color=False, result=0, redirected=False):
+    def offer(self, answer, no_color=False, result=0, redirected=False, dumb=False):
         import signal
-        env = {"PATH":"/usr/bin:/bin", "HOME":str(self.root), "TERM":"xterm-256color",
+        env = {"PATH":"/usr/bin:/bin", "HOME":str(self.root), "TERM":"dumb" if dumb else "xterm-256color",
                "EVENTS":str(self.events), "SKILL_RESULT":str(result)}
         if no_color:
             env["NO_COLOR"] = "1"
@@ -402,6 +404,8 @@ class SkillOfferFixture(unittest.TestCase):
             run = subprocess.run(['/bin/bash', str(self.script)], input='yes\n', capture_output=True, text=True, env=env, timeout=5)
             return run.returncode, run.stdout + run.stderr
         master, slave = os.openpty()
+        import termios
+        initial_terminal = termios.tcgetattr(slave)
         process = subprocess.Popen(['/bin/bash', str(self.script)], stdin=slave, stdout=slave, stderr=slave, env=env)
         try:
             os.set_blocking(master, False)
@@ -420,7 +424,8 @@ class SkillOfferFixture(unittest.TestCase):
                         if not data:
                             break
                         chunks.append(data)
-                    if not replied and b"[y/N]" in b"".join(chunks):
+                    if (not replied and b"[ ] Claude Code" in b"".join(chunks)
+                            and not (termios.tcgetattr(slave)[3] & termios.ICANON)):
                         if answer == 'cancel':
                             process.send_signal(signal.SIGINT)
                         else:
@@ -432,8 +437,14 @@ class SkillOfferFixture(unittest.TestCase):
                         self.fail("Optional prompt timed out")
             self.assertTrue(replied)
             output = b"".join(chunks).decode()
-            self.assertEqual(output.count("[y/N]"), 1)
+            self.assertEqual(output.count("Arrows move; Space selects;"), 1)
             self.assertNotIn("\x1b[", output)
+            restored_terminal = termios.tcgetattr(slave)
+            # Darwin sets PENDIN when canonical mode is restored; it is kernel
+            # input reprocessing state, not a changed user terminal setting.
+            restored_terminal[3] &= ~getattr(termios, "PENDIN", 0)
+            initial_terminal[3] &= ~getattr(termios, "PENDIN", 0)
+            self.assertEqual(restored_terminal, initial_terminal, "Terminal settings were not restored")
             return process.returncode, output
         finally:
             if process.poll() is None:
@@ -442,28 +453,38 @@ class SkillOfferFixture(unittest.TestCase):
             os.close(slave)
             os.close(master)
 
-    def test_yes_installs_as_human_without_backup_or_additional_approval(self):
-        for answer in (b'y\n', b'Y\n', b'yes\n', b'YES\n'):
+    def test_choices_install_as_human_without_backup_or_additional_approval(self):
+        for answer, agents in ((b' \n', ['codex']),
+                               (b'\x1b[B \n', ['claude']),
+                               (b' \x1b[B \n', ['codex', 'claude']),
+                               (b' \x1bOB \x1bOA \n', ['claude']),
+                               (b'\x1b[C \x1b[D \n', ['codex', 'claude'])):
             with self.subTest(answer=answer):
+                self.events.unlink(missing_ok=True)
                 status, output = self.offer(answer, no_color=True)
                 self.assertEqual(status, 0, output)
-                self.assertEqual(self.events.read_text().splitlines(), [
-                    '-n', '-H', '-u', '#501', '/usr/bin/env', 'TERM=xterm-256color', 'NO_COLOR=1',
-                    '/Library/Fin/runtime/fin', 'skill', 'install', '--agent', 'codex'])
+                expected = []
+                for agent in agents:
+                    expected.extend([
+                        '-n', '-H', '-u', '#501', '/usr/bin/env', 'TERM=xterm-256color', 'NO_COLOR=1',
+                        '/Library/Fin/runtime/fin', 'skill', 'install', '--agent', agent])
+                self.assertEqual(self.events.read_text().splitlines(), expected)
 
     def test_default_no_invalid_and_eof_do_not_install(self):
-        for answer in (b'\n', b'n\n', b'N\n', b'no\n', b'anything\n', b'\x04'):
+        for answer in (b'\n', b'  \n', b'anything\n', b'\x04', b' \x04', b'\x1b', b' \x1b'):
             with self.subTest(answer=answer):
                 status, output = self.offer(answer)
                 self.assertEqual(status, 0, output)
                 self.assertFalse(self.events.exists())
 
     def test_optional_failure_leaves_successful_setup_intact(self):
-        status, output = self.offer(b'y\n', result=1)
+        status, output = self.offer(b' \x1b[B \n', result=1)
         self.assertEqual(status, 0, output)
         self.assertIn('SYNTHETIC setup complete', output)
         self.assertIn('Fin is installed; optional skill installation did not finish.', output)
         self.assertIn('fin skill inspect --agent codex', output)
+        self.assertIn('fin skill inspect --agent claude', output)
+        self.assertEqual(self.events.read_text().splitlines().count('install'), 2)
 
     def test_cancellation_never_installs(self):
         status, output = self.offer('cancel')
@@ -471,10 +492,17 @@ class SkillOfferFixture(unittest.TestCase):
         self.assertIn('SYNTHETIC setup complete', output)
         self.assertFalse(self.events.exists())
 
+    def test_dumb_terminal_uses_plain_lines_and_space_selection(self):
+        status, output = self.offer(b'\x1b[B \n', dumb=True)
+        self.assertEqual(status, 0, output)
+        self.assertIn('[x] Claude Code', output)
+        self.assertIn('claude', self.events.read_text().splitlines())
+        self.assertNotIn('codex', self.events.read_text().splitlines())
+
     def test_redirected_input_never_prompts_or_installs(self):
         status, output = self.offer(None, redirected=True)
         self.assertEqual(status, 0, output)
-        self.assertNotIn('[y/N]', output)
+        self.assertNotIn('Arrows move; Space selects;', output)
         self.assertFalse(self.events.exists())
 
 

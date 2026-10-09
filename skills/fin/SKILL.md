@@ -173,8 +173,10 @@ Fin does not schedule a limit-to-market switch: suggest it to the user, verify
 implemented order types and seek new approval when outside the authorized choices.
 Bounded consent is operation-specific: Binance spot LIMIT IOC/FOK and the
 declared bridge step plan have separate scopes. Use exact approval for other
-standalone operations that do not advertise bounded consent. Enrollment and
-policy changes have their own approval flow.
+standalone operations that do not advertise bounded consent. Named plans cover
+only scopes confirmed by `fin plans preview`; they support adapter-reviewed
+bridge steps and other eligible financial operations. Enrollment and policy
+changes have their own approval flow.
 
 For a bounded sequence that should share one Touch ID approval, create one named
 plan. The name is a display label and is included in approval; changing it needs
