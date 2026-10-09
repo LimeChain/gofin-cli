@@ -94,15 +94,26 @@ submitted effects. Quote freshness does not renew consent.
 
 Named sequential plans reuse the journal lifecycle with explicit plan-step authority.
 Generic exact scopes bind canonical request inputs, operation schemas, protected
-connection identities and explicit exact-asset caps. Connection metadata includes
+connection identities and explicit exact-asset caps. Adapter-reviewed scopes are
+opt-in and bind their supported inputs, route identities and variations. Bridge
+plans list each saved approval/reset/deposit as a separate `bridge.transfer`
+step; the broker binds each step to the same persisted parent transfer and exact
+step identity, while an engine-enforced cumulative scope applies source
+principal and route fee ceilings once across that group. Source-deposit proof
+may advance independent later steps, but a plan containing a bridge remains
+incomplete until finalized destination/refund proof settles the parent transfer.
+Connection metadata includes
 stable non-secret alias mappings, addresses, networks and asset configuration;
 volatile observations do not belong in that identity contract. Schema validation uses the
 maintained JSON Schema validator with external retrieval disabled. No operation
-allowlist or adapter opt-in is needed for registered agent financial operations;
+allowlist is maintained: generic exact scopes are available to registered agent
+financial operations, while adapter-specific scopes remain explicitly opt-in;
 reads can also be sequenced. Normal operation success is an explicit completion
 condition for zero-principal actions. Optional adapter variation scopes remain
-available. Live permissions, balances, prices and simulations are deferred to
-fresh execution preparation; plan review must say which checks are deferred.
+available. Plan review checks fresh Fin pricing where selected USD limits require
+it, while future balances, execution-time fees and transaction simulations are
+deferred to each fresh execution preparation; plan review must say which checks
+remain deferred.
 Binance input schemas also enforce the exact unsigned decimal syntax and
 positive principal/receipt quantities before plan approval, using shared
 adapter-owned schema helpers. Nullable optional fields and zero-valued fee/loss

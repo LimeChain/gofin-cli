@@ -820,7 +820,8 @@ mod tests {
         };
         let transfer = token_transfer(7, token, sender, recipient, 105);
         let verified =
-            verify_direct_payment_transaction(&tx, &[transfer.clone()], &expected).unwrap();
+            verify_direct_payment_transaction(&tx, std::slice::from_ref(&transfer), &expected)
+                .unwrap();
         assert_eq!(verified.amount, Quantity::from_u64(105));
         assert_eq!(verified.transfer_log_index, Some(7));
 
@@ -835,8 +836,12 @@ mod tests {
             ))
         );
         assert!(
-            verify_direct_payment_transaction(&wrong_footer, &[transfer.clone()], &expected)
-                .is_err()
+            verify_direct_payment_transaction(
+                &wrong_footer,
+                std::slice::from_ref(&transfer),
+                &expected
+            )
+            .is_err()
         );
         let mut wrong_calldata_recipient = tx.clone();
         wrong_calldata_recipient.input = format!(
@@ -850,7 +855,7 @@ mod tests {
         assert!(
             verify_direct_payment_transaction(
                 &wrong_calldata_recipient,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 &expected
             )
             .is_err()
@@ -858,16 +863,24 @@ mod tests {
         let mut extra_bytes = tx.clone();
         extra_bytes.input.push_str("00");
         assert!(
-            verify_direct_payment_transaction(&extra_bytes, &[transfer.clone()], &expected)
-                .is_err()
+            verify_direct_payment_transaction(
+                &extra_bytes,
+                std::slice::from_ref(&transfer),
+                &expected
+            )
+            .is_err()
         );
         let mut wrong_selector = tx.clone();
         let mut data = hex::decode(wrong_selector.input.trim_start_matches("0x")).unwrap();
         data[0] = 0xa8;
         wrong_selector.input = format!("0x{}", hex::encode(data));
         assert!(
-            verify_direct_payment_transaction(&wrong_selector, &[transfer.clone()], &expected)
-                .is_err()
+            verify_direct_payment_transaction(
+                &wrong_selector,
+                std::slice::from_ref(&transfer),
+                &expected
+            )
+            .is_err()
         );
         let mut noncanonical_recipient_word = tx.clone();
         let mut data =
@@ -877,7 +890,7 @@ mod tests {
         assert!(
             verify_direct_payment_transaction(
                 &noncanonical_recipient_word,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 &expected
             )
             .is_err()
@@ -885,14 +898,22 @@ mod tests {
         let mut wrong_token = tx.clone();
         wrong_token.to = format!("{:#x}", Address::from_slice(&[0x34; 20]));
         assert!(
-            verify_direct_payment_transaction(&wrong_token, &[transfer.clone()], &expected)
-                .is_err()
+            verify_direct_payment_transaction(
+                &wrong_token,
+                std::slice::from_ref(&transfer),
+                &expected
+            )
+            .is_err()
         );
         let mut nonzero_value = tx.clone();
         nonzero_value.value = Quantity::from_u64(1);
         assert!(
-            verify_direct_payment_transaction(&nonzero_value, &[transfer.clone()], &expected)
-                .is_err()
+            verify_direct_payment_transaction(
+                &nonzero_value,
+                std::slice::from_ref(&transfer),
+                &expected
+            )
+            .is_err()
         );
         let wrong_sender_log = token_transfer(7, token, recipient, recipient, 105);
         assert!(verify_direct_payment_transaction(&tx, &[wrong_sender_log], &expected).is_err());
@@ -958,7 +979,7 @@ mod tests {
         assert!(
             verify_router_payment_log(
                 &log,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 &expected.expected_transaction_sender,
                 &expected
             )
@@ -966,7 +987,7 @@ mod tests {
             "{:?}",
             verify_router_payment_log(
                 &log,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 &expected.expected_transaction_sender,
                 &expected
             )
@@ -974,7 +995,7 @@ mod tests {
         assert!(
             verify_router_payment_log(
                 &log,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 "0x1111111111111111111111111111111111111111",
                 &expected
             )
@@ -985,7 +1006,7 @@ mod tests {
         assert!(
             verify_router_payment_log(
                 &log,
-                &[transfer.clone()],
+                std::slice::from_ref(&transfer),
                 &bad.expected_transaction_sender,
                 &bad
             )

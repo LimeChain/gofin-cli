@@ -165,12 +165,9 @@ impl BridgeAdapter {
             )),
         );
         for (chain_id, rpc_url) in [(42161, ARBITRUM_RPC), (4663, ROBINHOOD_RPC)] {
-            if !observers.contains_key(&chain_id) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(chain_id) {
                 let rpc = Arc::new(fin_evm::HttpRpc::new(vec![rpc_url.into()], chain_id)?);
-                observers.insert(
-                    chain_id,
-                    Arc::new(fin_evm::EvmRuntime::new(rpc, chain_id, None)),
-                );
+                entry.insert(Arc::new(fin_evm::EvmRuntime::new(rpc, chain_id, None)));
             }
         }
         let wallet_confirmation_rules = wallet_adapters
@@ -512,7 +509,7 @@ impl BridgeAdapter {
                 .plan
                 .steps
                 .iter()
-                .map(|step| step.kind.clone())
+                .map(|step| step.kind)
                 .collect::<Vec<_>>()
         } else {
             let observer = self
@@ -683,17 +680,16 @@ impl BridgeAdapter {
                 "Discard the quote and request a new one.",
             ));
         }
-        if let Some(minimum) = &bounds.minimum_net_receipt {
-            if minimum.asset != quote.minimum_receipt.asset
-                || quote.minimum_receipt.atoms < minimum.atoms
-            {
-                return Err(error(
-                    "BRIDGE_BOUNDS_VIOLATED",
-                    "quote",
-                    "Relay's minimum net receipt is below the explicit approved floor.",
-                    "Choose a route whose guaranteed receipt meets the requested minimum.",
-                ));
-            }
+        if let Some(minimum) = &bounds.minimum_net_receipt
+            && (minimum.asset != quote.minimum_receipt.asset
+                || quote.minimum_receipt.atoms < minimum.atoms)
+        {
+            return Err(error(
+                "BRIDGE_BOUNDS_VIOLATED",
+                "quote",
+                "Relay's minimum net receipt is below the explicit approved floor.",
+                "Choose a route whose guaranteed receipt meets the requested minimum.",
+            ));
         }
         let mut priced_fees = Vec::with_capacity(quote.fees.len());
         for fee in &quote.fees {
@@ -701,15 +697,14 @@ impl BridgeAdapter {
                 .fee_caps
                 .iter()
                 .find(|cap| cap.asset == fee.amount.asset && cap.kind == fee.kind)
+                && fee.amount.atoms > cap.maximum
             {
-                if fee.amount.atoms > cap.maximum {
-                    return Err(error(
-                        "BRIDGE_BOUNDS_VIOLATED",
-                        "quote",
-                        "Relay fee exceeds the explicit atomic fee cap.",
-                        "Choose another quote or request new explicit fee bounds.",
-                    ));
-                }
+                return Err(error(
+                    "BRIDGE_BOUNDS_VIOLATED",
+                    "quote",
+                    "Relay fee exceeds the explicit atomic fee cap.",
+                    "Choose another quote or request new explicit fee bounds.",
+                ));
             }
             let (usd, _, _) = self.valuator.usd_micros(&fee.amount).await?;
             let usd = usd.as_str().parse::<u64>().map_err(|_| {
@@ -761,16 +756,16 @@ impl BridgeAdapter {
             },
             Definition {
                 name: "bridge.transfer".into(),
-                description: "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step.".into(),
+                description: "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step, either under a finite bridge grant or as one step of a named plan.".into(),
                 kind: OperationKind::Write,
                 execution_actor: fin_domain::ExecutionActor::AgentInvocable,
                 input_schema: serde_json::to_value(schema_for!(BridgeTransferInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
                 error_schema: schema_for_fin_error(),
-                examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"feeCaps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
+                examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
                 coverage: "Relay handles its reviewed native ETH and finite ERC-20 source steps. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID or one finite transfer-boundary grant","providers":["relay","arbitrum_canonical"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false},{"chain_id":8453,"name":"Base","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\"}'"}),
+                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false},{"chain_id":8453,"name":"Base","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
             },
             Definition {
                 name: "bridge.status".into(),
@@ -1020,17 +1015,14 @@ impl BridgeAdapter {
                 }
                 quote_bounds = approved.clone();
             }
-            let amount_bounds = quote_bounds
-                .input
-                .as_ref()
-                .ok_or_else(|| internal_error())?;
+            let amount_bounds = quote_bounds.input.as_ref().ok_or_else(internal_error)?;
             if intent.amount < amount_bounds.minimum
                 || intent.amount > amount_bounds.maximum
                 || intent.amount
                     > *quote_bounds
                         .maximum_source_debit
                         .as_ref()
-                        .ok_or_else(|| internal_error())?
+                        .ok_or_else(internal_error)?
             {
                 return Err(error(
                     "BRIDGE_REFRESH_AMOUNT_OUT_OF_BOUNDS",
@@ -1271,6 +1263,7 @@ impl BridgeAdapter {
                     BridgeStepLink {
                         transfer_id: id.clone(),
                         grant_id: previous.and_then(|link| link.grant_id.clone()),
+                        plan_authority: previous.and_then(|link| link.plan_authority.clone()),
                         step_id: step_ids[&step.ordinal].clone(),
                         operation_id: previous.and_then(|link| link.operation_id.clone()),
                         kind,
@@ -1331,6 +1324,7 @@ impl BridgeAdapter {
                     version: 1,
                     id: id.clone(),
                     grant_id: None,
+                    plan_scope: None,
                     metadata: json!({"wallet_alias":input.intent.wallet,"wallet_resource":resource,"intent":intent,"quote_bounds":quote_bounds}),
                     settlement_expectation: Some(settlement_expectation.clone()),
                     approved_bounds: None,
@@ -1345,10 +1339,7 @@ impl BridgeAdapter {
                 }
             };
             if existing.is_some() {
-                record.version = record
-                    .version
-                    .checked_add(1)
-                    .ok_or_else(|| internal_error())?;
+                record.version = record.version.checked_add(1).ok_or_else(internal_error)?;
             }
             if record.grant_id.is_none() && record.approved_bounds.is_none() {
                 record.prospective_debit = Some(prospective_debit);
@@ -1415,7 +1406,7 @@ impl BridgeAdapter {
             .map_err(|_| internal_error())?
             .as_ref()
             .and_then(std::sync::Weak::upgrade)
-            .ok_or_else(|| internal_error())?;
+            .ok_or_else(internal_error)?;
         {
             for step in &transfer.steps {
                 if let Some(operation_id) = &step.operation_id {
@@ -1426,7 +1417,7 @@ impl BridgeAdapter {
                 .state()?
                 .transfer(&request.transfer_id)
                 .map_err(store_error)?
-                .ok_or_else(|| internal_error())?;
+                .ok_or_else(internal_error)?;
         }
         let provider_status = if matches!(
             transfer.state,
@@ -1439,7 +1430,7 @@ impl BridgeAdapter {
                 .state()?
                 .transfer(&request.transfer_id)
                 .map_err(store_error)?
-                .ok_or_else(|| internal_error())?;
+                .ok_or_else(internal_error)?;
             Some(diagnostic)
         } else {
             None
@@ -2397,6 +2388,9 @@ impl BridgeAdapter {
             .map(format_fee_cap)
             .collect::<Vec<_>>()
             .join(", ");
+        let total_fees = aggregate_fee_caps(&saved.bounds.fee_caps)
+            .map(|amounts| format!("; Total fees up to {amounts}"))
+            .unwrap_or_default();
         let recipient = self.wallet_label(
             saved.quote.intent.destination_chain_id,
             &saved.quote.intent.recipient,
@@ -2475,7 +2469,7 @@ impl BridgeAdapter {
         let suffix = if fees.is_empty() {
             "fee caps unavailable".into()
         } else {
-            format!("Max fees {fees}")
+            format!("Max fees {fees}{total_fees}")
         };
         let refund = if refund_floor.is_empty() {
             refund
@@ -2493,15 +2487,15 @@ impl BridgeAdapter {
     }
 
     fn wallet_label(&self, chain_id: u64, address: &str) -> String {
-        if let Some(adapter) = self.wallet_adapters.get(&chain_id) {
-            if let Some(connection) = adapter.connections().into_iter().find(|connection| {
+        if let Some(adapter) = self.wallet_adapters.get(&chain_id)
+            && let Some(connection) = adapter.connections().into_iter().find(|connection| {
                 connection
                     .address
                     .as_deref()
                     .is_some_and(|configured| configured.eq_ignore_ascii_case(address))
-            }) {
-                return safe_label(&connection.name);
-            }
+            })
+        {
+            return safe_label(&connection.name);
         }
         abbreviate_address(address)
     }
@@ -2527,21 +2521,21 @@ fn bridge_settlement_status_summary(transfer: &BridgeTransferRecord) -> Option<V
     let proof = transfer.settlement_proofs.last()?;
     let mut proof_identity = serde_json::Map::new();
     for key in ["chain_id", "transaction_hash", "proof_method"] {
-        if let Some(value) = proof.evidence.get(key) {
-            if value.is_string() || value.is_number() {
-                proof_identity.insert(key.to_owned(), value.clone());
-            }
+        if let Some(value) = proof.evidence.get(key)
+            && (value.is_string() || value.is_number())
+        {
+            proof_identity.insert(key.to_owned(), value.clone());
         }
     }
-    if let Some(gas) = proof.evidence.get("native_gas_observation") {
-        if gas.is_object() {
-            proof_identity.insert("native_gas_observation".into(), gas.clone());
-        }
+    if let Some(gas) = proof.evidence.get("native_gas_observation")
+        && gas.is_object()
+    {
+        proof_identity.insert("native_gas_observation".into(), gas.clone());
     }
-    if let Some(partial) = proof.evidence.get("partial_payout_reconciled") {
-        if partial.is_boolean() {
-            proof_identity.insert("partial_payout_reconciled".into(), partial.clone());
-        }
+    if let Some(partial) = proof.evidence.get("partial_payout_reconciled")
+        && partial.is_boolean()
+    {
+        proof_identity.insert("partial_payout_reconciled".into(), partial.clone());
     }
     let mut cash_credits = Vec::new();
     let mut costs = Vec::new();
@@ -2721,6 +2715,7 @@ fn canonical_receipt_matches_candidate(receipt: &Value, transaction_hash: &str) 
         .is_some_and(|(observed, expected)| observed == expected)
 }
 
+#[expect(clippy::too_many_arguments)]
 fn canonical_progress_observation(
     phase: &str,
     receipt_observed: Option<bool>,
@@ -2875,15 +2870,15 @@ impl Adapter for BridgeAdapter {
                         "Keep this transfer unresolved and inspect its protected journal.",
                     )
                 })?;
-            if let Some(requested) = requested_bounds {
-                if normalize_authorization_bounds(Some(requested), &saved)? != approved {
-                    return Err(error(
-                        "BRIDGE_BOUNDS_ALREADY_APPROVED",
-                        "authorization",
-                        "This transfer already has immutable approved bounds.",
-                        "Continue with those exact bounds or start a new transfer for a changed intent.",
-                    ));
-                }
+            if let Some(requested) = requested_bounds
+                && normalize_authorization_bounds(Some(requested), &saved)? != approved
+            {
+                return Err(error(
+                    "BRIDGE_BOUNDS_ALREADY_APPROVED",
+                    "authorization",
+                    "This transfer already has immutable approved bounds.",
+                    "Continue with those exact bounds or start a new transfer for a changed intent.",
+                ));
             }
             approved
         } else {
@@ -2918,7 +2913,7 @@ impl Adapter for BridgeAdapter {
                 .plan
                 .steps
                 .iter()
-                .map(|step| step.kind.clone())
+                .map(|step| step.kind)
                 .collect::<Vec<_>>();
             if actual != desired {
                 return Err(error(
@@ -3097,12 +3092,9 @@ impl Adapter for BridgeAdapter {
                     .steps
                     .iter_mut()
                     .find(|candidate| candidate.ordinal == step.ordinal)
-                    .ok_or_else(|| internal_error())?;
+                    .ok_or_else(internal_error)?;
                 plan_step.call.data = replacement;
-                let latest = record
-                    .quote_revisions
-                    .last()
-                    .ok_or_else(|| internal_error())?;
+                let latest = record.quote_revisions.last().ok_or_else(internal_error)?;
                 let mut payload = latest.payload.clone();
                 payload["plan"] =
                     serde_json::to_value(&saved.plan).map_err(|_| internal_error())?;
@@ -3243,7 +3235,7 @@ impl Adapter for BridgeAdapter {
                 reference: "native".into(),
                 decimals: 18,
             },
-            &fin_evm::quantity(fee.clone()),
+            &fin_evm::quantity(fee),
         )
         .await?;
         let source_asset = saved.quote.intent.source.asset_id();
@@ -3413,6 +3405,358 @@ impl Adapter for BridgeAdapter {
             fin_domain::value_bounds::bind(&mut prepared);
         }
         Ok(prepared)
+    }
+
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        variations: &Value,
+    ) -> fin_domain::Result<fin_domain::financial_plans::PlanPermission> {
+        if operation != "bridge.transfer" {
+            return Err(error(
+                "PLAN_PERMISSION_UNSUPPORTED",
+                "authorization",
+                "Only an exact persisted bridge step can be included in a named plan.",
+                "Use bridge.transfer with its broker-returned transfer, step and bounds, or use a standalone bridge authorization.",
+            ));
+        }
+        // BridgeBounds is the entire supported variation contract. Accepting a
+        // second, free-form variation object would make the authorization
+        // review ambiguous about which layer owns amount and fee limits.
+        if !variations
+            .as_object()
+            .is_some_and(|fields| fields.is_empty())
+        {
+            return Err(error(
+                "PLAN_PERMISSION_UNSUPPORTED",
+                "authorization",
+                "Bridge plan scope is expressed by its explicit BridgeBounds input.",
+                "Set permitted_variations to an empty object and place amount, receipt and fee limits in input.bounds.",
+            ));
+        }
+        let requested = self.transfer_input(input)?;
+        let selected_bounds = requested.bounds.clone().ok_or_else(|| {
+            error(
+                "BRIDGE_BOUNDS_REQUIRED",
+                "authorization",
+                "A named plan needs explicit bridge bounds for every source write.",
+                "Include input, maximum source debit, minimum receipt and finite gas caps in bounds.",
+            )
+        })?;
+        let record = self
+            .state()?
+            .transfer(&requested.transfer_id)
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                error(
+                    "BRIDGE_TRANSFER_UNKNOWN",
+                    "authorization",
+                    "Bridge transfer identity is not present in the protected journal.",
+                    "Request a fresh bridge quote before creating the named plan.",
+                )
+            })?;
+        if record.grant_id.is_some()
+            || matches!(
+                record.state,
+                BridgeTransferState::Completed
+                    | BridgeTransferState::Refunded
+                    | BridgeTransferState::Failed
+            )
+            // A plan revision may refresh the same plan-owned transfer after
+            // settled approval/reset steps. The store checks plan/revision
+            // ownership when it claims a concrete attempt. Never adopt an
+            // independently submitted exact step into a new named plan.
+            || record.steps.iter().any(|link| {
+                link.plan_authority.is_none()
+                    && (link.state != BridgeStepState::Unsubmitted
+                        || link.operation_id.is_some())
+            })
+        {
+            return Err(error(
+                "BRIDGE_TRANSFER_NOT_PLANABLE",
+                "authorization",
+                "This bridge transfer already has an authorization, submitted step or plan owner.",
+                "Create a new quote and transfer before adding bridge writes to a named plan.",
+            ));
+        }
+        let saved = self.saved_quote(&record)?;
+        if saved.quote.class != fin_bridge::QuoteClass::Executable {
+            return Err(error(
+                "BRIDGE_QUOTE_NOT_EXECUTABLE",
+                "authorization",
+                "An indicative bridge quote cannot authorize a plan write.",
+                "Request an executable quote and create a new plan preview.",
+            ));
+        }
+        let bounds = normalize_authorization_bounds(Some(selected_bounds), &saved)?;
+        let link = record
+            .steps
+            .iter()
+            .find(|link| link.step_id == requested.step_id)
+            .ok_or_else(|| {
+                error(
+                    "BRIDGE_STEP_UNKNOWN",
+                    "authorization",
+                    "Step identity is not part of this persisted transfer.",
+                    "Use one of the exact step IDs returned by bridge.quotes.",
+                )
+            })?;
+        if link.kind != requested.step_kind {
+            return Err(error(
+                "BRIDGE_STEP_KIND_MISMATCH",
+                "authorization",
+                "Step kind differs from the protected bridge plan.",
+                "Use the kind returned for this exact step ID.",
+            ));
+        }
+
+        // Rebuild only deterministic provider calls from the protected quote.
+        // This path deliberately does not inspect balances, allowance state,
+        // estimate gas or simulate writes: all future bridge steps must be
+        // reviewable before upstream funding arrives. Actual execution still
+        // uses `prepare`, which repeats live preflight immediately before the
+        // immutable operation attempt is created.
+        let provider = self.provider(&saved.quote.provider)?;
+        let mut normalized_plan =
+            provider.prepare(&saved.quote, &bounds, &saved.quote.intent.source_address)?;
+        normalized_plan = self
+            .allowance_aware_plan(
+                &saved.quote,
+                normalized_plan,
+                &saved.quote.intent.source_address,
+                &bounds,
+                Some(&saved),
+            )
+            .await?;
+        if !same_bridge_plan_for_permission(&saved.plan.steps, &normalized_plan.steps) {
+            return Err(error(
+                "BRIDGE_PLAN_SCOPE_CHANGED",
+                "authorization",
+                "The selected bounds or saved quote no longer produce the persisted bridge step topology.",
+                "Refresh this transfer's quote, then rebuild the named plan before requesting approval.",
+            ));
+        }
+        let step = normalized_plan
+            .steps
+            .iter()
+            .find(|step| {
+                record
+                    .steps
+                    .get(step.ordinal as usize)
+                    .is_some_and(|link| link.step_id == requested.step_id)
+            })
+            .ok_or_else(|| {
+                FinError::validation("Persisted bridge step ordinal is inconsistent.")
+            })?;
+        let step_kind = domain_step_kind(&step.kind);
+        if step_kind != link.kind {
+            return Err(FinError::validation(
+                "Persisted bridge step kind differs from its normalized provider step.",
+            ));
+        }
+        let expected_dependencies =
+            step.dependencies
+                .iter()
+                .map(|ordinal| {
+                    saved.step_ids.get(ordinal).cloned().ok_or_else(|| {
+                        FinError::validation("Provider dependency identity is missing.")
+                    })
+                })
+                .collect::<fin_domain::Result<Vec<_>>>()?;
+        if expected_dependencies != link.depends_on {
+            return Err(FinError::validation(
+                "Persisted bridge dependency identities differ from the reviewed provider topology.",
+            ));
+        }
+        let priced = self.validate_quote_prices(&bounds, &saved.quote).await?;
+        self.validate_selected_usd_caps(
+            &bounds,
+            &saved.quote.intent.source,
+            &saved.quote.intent.wallet,
+        )
+        .await?;
+
+        let mut step_debits = Vec::new();
+        if matches!(step.kind, ProviderStepKind::Deposit) {
+            let source_asset = saved.quote.intent.source.asset_id();
+            if step
+                .maximum_debit
+                .iter()
+                .any(|debit| debit.asset != source_asset)
+            {
+                return Err(FinError::validation(
+                    "Bridge deposit declares a debit in an unreviewed asset.",
+                ));
+            }
+            step_debits.push(ResourceAmount {
+                resource: saved.quote.intent.wallet.clone(),
+                amount: FinAmount {
+                    asset: source_asset,
+                    atoms: bounds
+                        .maximum_source_debit
+                        .clone()
+                        .ok_or_else(|| FinError::validation("Bridge source cap is missing."))?,
+                },
+            });
+        } else if !step.maximum_debit.is_empty() {
+            return Err(FinError::validation(
+                "Bridge approval step unexpectedly declares principal debit.",
+            ));
+        }
+
+        let gas_asset = fin_domain::AssetId {
+            network: format!("ethereum:{}", step.call.chain_id),
+            reference: "native".into(),
+            decimals: 18,
+        };
+        let step_gas = CostBound {
+            location: AccountingLocation::Cash {
+                resource: saved.quote.intent.wallet.clone(),
+            },
+            amount: FinAmount {
+                asset: gas_asset.clone(),
+                atoms: maximum_gas_cap(&bounds, step.call.chain_id)?,
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let mut step_costs = vec![step_gas];
+        if matches!(step.kind, ProviderStepKind::Deposit) {
+            for fee in bounds
+                .fee_caps
+                .iter()
+                .filter(|fee| fee.kind == fin_bridge::FeeKind::AdditionalDebit)
+            {
+                push_plan_cost_cap(
+                    &mut step_costs,
+                    &saved.quote.intent.wallet,
+                    &fee.asset,
+                    &fee.maximum,
+                )?;
+            }
+        }
+
+        // The shared scope spans every concrete write in this one persisted
+        // bridge. Its principal cap and route fee ceilings are listed once;
+        // the engine sums actual/reserved use across the plan steps against
+        // this group in addition to the user's plan-wide aggregate caps.
+        let maximum_debits = vec![ResourceAmount {
+            resource: saved.quote.intent.wallet.clone(),
+            amount: FinAmount {
+                asset: saved.quote.intent.source.asset_id(),
+                atoms: bounds
+                    .maximum_source_debit
+                    .clone()
+                    .ok_or_else(|| FinError::validation("Bridge source cap is missing."))?,
+            },
+        }];
+        let mut maximum_costs =
+            cumulative_gas_cost_caps(&bounds, &normalized_plan, &saved.quote.intent.wallet)?;
+        for fee in bounds
+            .fee_caps
+            .iter()
+            .filter(|fee| fee.kind == fin_bridge::FeeKind::AdditionalDebit)
+        {
+            push_plan_cost_cap(
+                &mut maximum_costs,
+                &saved.quote.intent.wallet,
+                &fee.asset,
+                &fee.maximum,
+            )?;
+        }
+
+        let allowed_steps = normalized_plan
+            .steps
+            .iter()
+            .map(|provider_step| {
+                let step_id = saved
+                    .step_ids
+                    .get(&provider_step.ordinal)
+                    .ok_or_else(|| FinError::validation("Provider step identity is missing."))?;
+                Ok(json!({
+                    "step_id":step_id,
+                    "step_kind":domain_step_kind(&provider_step.kind),
+                    "chain_id":provider_step.call.chain_id,
+                    "to":provider_step.call.to.to_ascii_lowercase(),
+                    "dependencies":provider_step.dependencies.iter().filter_map(|ordinal| saved.step_ids.get(ordinal)).collect::<Vec<_>>()
+                }))
+            })
+            .collect::<fin_domain::Result<Vec<_>>>()?;
+        let fixed = json!({
+            "transfer_id":record.id,
+            "wallet":saved.quote.intent.wallet,
+            "source":saved.quote.intent.source,
+            "source_address":saved.quote.intent.source_address.to_ascii_lowercase(),
+            "destination_chain_id":saved.quote.intent.destination_chain_id,
+            "destination_assets":saved.quote.intent.destination_assets,
+            "recipient":saved.quote.intent.recipient.to_ascii_lowercase(),
+            "refund_to":saved.quote.intent.refund_to.to_ascii_lowercase(),
+            "allowed_refund_assets":saved.quote.intent.allowed_refund_assets,
+            "provider":saved.quote.provider,
+            "route_id":saved.quote.route_id,
+            "plan_digest":normalized_plan.fixed_scope_digest,
+            "steps":allowed_steps,
+            "plan_step_identity":{
+                "transfer_id":record.id,
+                "step_id":link.step_id,
+                "step_kind":step_kind_name(&link.kind),
+            }
+        });
+        let summary = finite_bridge_boundary_summary(
+            &format!(
+                "{} step of {}",
+                step_kind_name(&link.kind),
+                saved.quote.provider
+            ),
+            &normalized_plan,
+            &saved.quote.intent,
+            &bounds,
+        )?;
+        let expectation = settlement_expectation(
+            &saved.quote,
+            bounds
+                .minimum_net_receipt
+                .as_ref()
+                .expect("normalized minimum receipt")
+                .atoms
+                .clone(),
+        );
+        let mut possible_credits = std::collections::BTreeSet::new();
+        for target in expectation
+            .destination
+            .into_iter()
+            .chain(expectation.refund)
+        {
+            possible_credits.insert(fin_domain::financial_plans::FinancialPlanFundingIdentity {
+                resource: target.resource,
+                asset: target.asset,
+            });
+        }
+        let fee_assets = maximum_costs
+            .iter()
+            .map(|cost| cost.amount.asset.clone())
+            .chain(bounds.fee_caps.iter().map(|fee| fee.asset.clone()))
+            .chain(priced.into_iter().map(|fee| fee.fee.amount.asset))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(fin_domain::financial_plans::PlanPermission {
+            spec: fin_domain::boundaries::BoundarySpec {
+                fixed,
+                parameters: serde_json::to_value(&bounds).map_err(|_| internal_error())?,
+                maximum_debits: step_debits,
+                maximum_costs: step_costs,
+                summary,
+            },
+            possible_credits: possible_credits.into_iter().collect(),
+            fee_assets,
+            authorization_seconds: bounds.authorization_seconds.map(u64::from),
+            cumulative_scope: Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                scope_id: record.id,
+                maximum_debits,
+                maximum_costs,
+            }),
+        })
     }
 
     fn prepare_boundaries(
@@ -4201,6 +4545,7 @@ fn validate_explicit_bounds(bounds: &BridgeBounds) -> fin_domain::Result<()> {
             .source_usd_per_unit_micros
             .as_ref()
             .is_some_and(|range| range.minimum > range.maximum)
+        || bounds.authorization_seconds == Some(0)
     {
         return Err(error(
             "BRIDGE_BOUNDS_INVALID",
@@ -4396,14 +4741,36 @@ fn short_asset_name(reference: &str) -> String {
 }
 
 fn format_fee_cap(cap: &fin_bridge::FeeCap) -> String {
+    let label = match cap.kind {
+        fin_bridge::FeeKind::Gas => "gas",
+        fin_bridge::FeeKind::AdditionalDebit => "additional fees",
+        fin_bridge::FeeKind::WithheldFromOutput => "withheld from output",
+    };
     format!(
-        "{} {}",
+        "{} {label}",
         format_amount(&FinAmount {
             asset: cap.asset.clone(),
             atoms: cap.maximum.clone()
-        }),
-        format!("{:?}", cap.kind).to_ascii_lowercase()
+        })
     )
+}
+
+fn aggregate_fee_caps(caps: &[fin_bridge::FeeCap]) -> Option<String> {
+    let mut totals = BTreeMap::<fin_domain::AssetId, fin_domain::Quantity>::new();
+    for cap in caps {
+        let total = match totals.get(&cap.asset) {
+            Some(current) => current.checked_add(&cap.maximum).ok()?,
+            None => cap.maximum.clone(),
+        };
+        totals.insert(cap.asset.clone(), total);
+    }
+    (!totals.is_empty()).then(|| {
+        totals
+            .into_iter()
+            .map(|(asset, atoms)| format_amount(&FinAmount { asset, atoms }))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    })
 }
 
 fn abbreviate_address(address: &str) -> String {
@@ -4501,6 +4868,65 @@ fn cumulative_gas_cost_caps(
         });
     }
     Ok(caps)
+}
+
+fn push_plan_cost_cap(
+    costs: &mut Vec<CostBound>,
+    resource: &fin_domain::ResourceId,
+    asset: &fin_domain::AssetId,
+    amount: &Quantity,
+) -> fin_domain::Result<()> {
+    let location = AccountingLocation::Cash {
+        resource: resource.clone(),
+    };
+    if let Some(existing) = costs.iter_mut().find(|cost| {
+        cost.location == location
+            && cost.amount.asset == *asset
+            && cost.treatment == CostTreatment::AdditionalDebit
+    }) {
+        existing.amount.atoms = existing.amount.atoms.checked_add(amount)?;
+    } else {
+        costs.push(CostBound {
+            location,
+            amount: FinAmount {
+                asset: asset.clone(),
+                atoms: amount.clone(),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        });
+    }
+    Ok(())
+}
+
+/// Check that an adapter-produced normalized plan still has the saved route's
+/// ordered call topology. Approval calldata is the only allowed difference:
+/// its finite amount is regenerated from the selected maximum source debit.
+fn same_bridge_plan_for_permission(left: &[BridgeStep], right: &[BridgeStep]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.ordinal == right.ordinal
+                && left.kind == right.kind
+                && left.dependencies == right.dependencies
+                && left.call.chain_id == right.call.chain_id
+                && left.call.to.eq_ignore_ascii_case(&right.call.to)
+                && left.call.value == right.call.value
+                && left
+                    .expected_sender
+                    .eq_ignore_ascii_case(&right.expected_sender)
+                && left.maximum_debit == right.maximum_debit
+                && (left.kind == ProviderStepKind::Approval
+                    || left.call.data.eq_ignore_ascii_case(&right.call.data))
+        })
+}
+
+fn fixed_plan_step_identity_matches(fixed: &Value, binding: &Value) -> bool {
+    let Some(identity) = fixed.get("plan_step_identity") else {
+        return true;
+    };
+    identity["transfer_id"] == binding["transfer_id"]
+        && identity["step_id"] == binding["step_id"]
+        && identity["step_kind"] == binding["step_kind"]
+        && fixed["provider"] == binding["quote"]["provider"]
 }
 
 fn bridge_boundary_spec(
@@ -4770,6 +5196,7 @@ fn validate_bridge_boundary(
     if spec.fixed["transfer_id"] != prepared.binding["transfer_id"]
         || spec.fixed["route_id"] != prepared.binding["route_id"]
         || spec.fixed["plan_digest"] != prepared.binding["plan_digest"]
+        || !fixed_plan_step_identity_matches(&spec.fixed, &prepared.binding)
         || !spec.fixed["steps"].as_array().is_some_and(|steps| {
             steps.iter().any(|entry| {
                 entry["step_id"] == prepared.binding["step_id"]
@@ -5576,20 +6003,20 @@ fn receipt_logs_canonical(
         if log["removed"].as_bool() == Some(true) {
             return Ok(false);
         }
-        if let Some(hash) = log["transactionHash"].as_str() {
-            if fin_evm::hash(hash)? != expected_hash {
-                return Ok(false);
-            }
+        if let Some(hash) = log["transactionHash"].as_str()
+            && fin_evm::hash(hash)? != expected_hash
+        {
+            return Ok(false);
         }
-        if let Some(hash) = log["blockHash"].as_str() {
-            if fin_evm::hash(hash)? != receipt.block_hash {
-                return Ok(false);
-            }
+        if let Some(hash) = log["blockHash"].as_str()
+            && fin_evm::hash(hash)? != receipt.block_hash
+        {
+            return Ok(false);
         }
-        if let Some(number) = log.get("blockNumber") {
-            if fin_evm::rpc_u64(number)? != receipt.block_number {
-                return Ok(false);
-            }
+        if let Some(number) = log.get("blockNumber")
+            && fin_evm::rpc_u64(number)? != receipt.block_number
+        {
+            return Ok(false);
         }
     }
     Ok(true)
@@ -6457,16 +6884,33 @@ mod tests {
                 provider_request_id: Some("synthetic-request".into()),
             },
             bounds: BridgeBounds {
-                fee_caps: vec![fin_bridge::FeeCap {
-                    asset: fin_domain::AssetId {
+                fee_caps: {
+                    let gas_asset = fin_domain::AssetId {
                         network: "ethereum:1".into(),
                         reference: "native".into(),
                         decimals: 18,
-                    },
-                    kind: fin_bridge::FeeKind::Gas,
-                    maximum: fin_domain::Quantity::new("1000000000000000").unwrap(),
-                    maximum_usd_micros: Some(1000),
-                }],
+                    };
+                    vec![
+                        fin_bridge::FeeCap {
+                            asset: gas_asset.clone(),
+                            kind: fin_bridge::FeeKind::Gas,
+                            maximum: fin_domain::Quantity::new("100000000000000").unwrap(),
+                            maximum_usd_micros: Some(1000),
+                        },
+                        fin_bridge::FeeCap {
+                            asset: gas_asset.clone(),
+                            kind: fin_bridge::FeeKind::AdditionalDebit,
+                            maximum: fin_domain::Quantity::new("10000000000000").unwrap(),
+                            maximum_usd_micros: None,
+                        },
+                        fin_bridge::FeeCap {
+                            asset: gas_asset,
+                            kind: fin_bridge::FeeKind::WithheldFromOutput,
+                            maximum: fin_domain::Quantity::new("30000000000000").unwrap(),
+                            maximum_usd_micros: None,
+                        },
+                    ]
+                },
                 ..BridgeBounds::default()
             },
             plan: PreparedBridge {
@@ -6540,6 +6984,10 @@ mod tests {
         assert!(summary.contains("Ethereum Mainnet → Arbitrum One via Relay"));
         assert!(summary.contains("Receive ≥9.95 USDC"));
         assert!(summary.contains("Max fees"));
+        assert!(summary.contains("0.0001 ETH gas"));
+        assert!(summary.contains("0.00001 ETH additional fees"));
+        assert!(summary.contains("0.00003 ETH withheld from output"));
+        assert!(summary.contains("Total fees up to 0.00014 ETH"));
         assert!(summary.contains("recipient 0x1111…1111"));
 
         let mut canonical_review = saved.clone();
@@ -6852,5 +7300,58 @@ mod tests {
                 .transfer_input(&wire)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn plan_step_identity_is_exact_within_a_finite_bridge_topology() {
+        let fixed = json!({"provider":"relay","plan_step_identity":{
+            "transfer_id":"transfer-a","step_id":"step-deposit","step_kind":"deposit"
+        }});
+        let candidate = json!({
+            "transfer_id":"transfer-a",
+            "step_id":"step-deposit",
+            "step_kind":"deposit",
+            "quote":{"provider":"relay"}
+        });
+        assert!(fixed_plan_step_identity_matches(&fixed, &candidate));
+
+        let mut other_step = candidate.clone();
+        other_step["step_id"] = json!("step-approval");
+        other_step["step_kind"] = json!("approval");
+        assert!(!fixed_plan_step_identity_matches(&fixed, &other_step));
+
+        let mut other_transfer = candidate.clone();
+        other_transfer["transfer_id"] = json!("transfer-b");
+        assert!(!fixed_plan_step_identity_matches(&fixed, &other_transfer));
+
+        let mut other_provider = candidate;
+        other_provider["quote"]["provider"] = json!("arbitrum_canonical");
+        assert!(!fixed_plan_step_identity_matches(&fixed, &other_provider));
+        assert!(fixed_plan_step_identity_matches(&json!({}), &json!({})));
+    }
+
+    #[test]
+    fn plan_refresh_keeps_route_topology_but_floats_only_finite_approval_amount() {
+        let step = |kind, amount: &str| BridgeStep {
+            ordinal: 0,
+            kind,
+            call: EvmCall {
+                chain_id: 1,
+                to: ETHEREUM_USDC.into(),
+                value: Quantity::zero(),
+                data: format!("approve:{amount}"),
+            },
+            expected_sender: "0x1111111111111111111111111111111111111111".into(),
+            maximum_debit: vec![],
+            dependencies: vec![],
+        };
+        assert!(same_bridge_plan_for_permission(
+            &[step(ProviderStepKind::Approval, "100")],
+            &[step(ProviderStepKind::Approval, "120")],
+        ));
+        assert!(!same_bridge_plan_for_permission(
+            &[step(ProviderStepKind::Deposit, "100")],
+            &[step(ProviderStepKind::Deposit, "120")],
+        ));
     }
 }

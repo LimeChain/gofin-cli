@@ -791,12 +791,8 @@ fn parse_order_response_at(
     if let Some(maximum_deadline) = request.bounds.latest_protocol_deadline {
         validate_latest_protocol_deadline(maximum_deadline)?;
     }
-    let protocol = value
-        .pointer("/protocol/v2")
-        .ok_or_else(|| missing_protocol())?;
-    let order = protocol
-        .get("orderData")
-        .ok_or_else(|| missing_protocol())?;
+    let protocol = value.pointer("/protocol/v2").ok_or_else(missing_protocol)?;
+    let order = protocol.get("orderData").ok_or_else(missing_protocol)?;
     ensure(
         order.get("version").and_then(Value::as_str) == Some("v1"),
         "BRIDGE_PROTOCOL_UNSUPPORTED",
@@ -806,7 +802,7 @@ fn parse_order_response_at(
     let order_id = protocol
         .get("orderId")
         .and_then(Value::as_str)
-        .ok_or_else(|| missing_protocol())?;
+        .ok_or_else(missing_protocol)?;
     let stored_hash = parse_b256(order_id)?;
     let request_id = value
         .get("requestId")
@@ -1078,14 +1074,14 @@ fn parse_transaction_steps(
         .ok_or_else(|| invalid_order("missing executable source transaction steps"))?;
     let mut txs = Vec::new();
     for step in raw_steps {
-        if step.get("kind").and_then(Value::as_str) == Some("transaction") {
-            if let Some(items) = step.get("items").and_then(Value::as_array) {
-                for item in items {
-                    if item.get("status").and_then(Value::as_str) == Some("incomplete") {
-                        if let Some(data) = item.get("data") {
-                            txs.push(data);
-                        }
-                    }
+        if step.get("kind").and_then(Value::as_str) == Some("transaction")
+            && let Some(items) = step.get("items").and_then(Value::as_array)
+        {
+            for item in items {
+                if item.get("status").and_then(Value::as_str) == Some("incomplete")
+                    && let Some(data) = item.get("data")
+                {
+                    txs.push(data);
                 }
             }
         }
@@ -2017,15 +2013,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(prepared.steps.len(), 1);
-        let mut exact_deadline = BridgeBounds::default();
-        exact_deadline.latest_protocol_deadline = Some(protocol_deadline);
+        let exact_deadline = BridgeBounds {
+            latest_protocol_deadline: Some(protocol_deadline),
+            ..BridgeBounds::default()
+        };
         assert!(
             provider
                 .prepare(&quote, &exact_deadline, &prepared.steps[0].expected_sender)
                 .is_ok()
         );
-        let mut past_cap = BridgeBounds::default();
-        past_cap.latest_protocol_deadline = Some(protocol_deadline - 1);
+        let past_cap = BridgeBounds {
+            latest_protocol_deadline: Some(protocol_deadline - 1),
+            ..BridgeBounds::default()
+        };
         assert!(
             provider
                 .prepare(&quote, &past_cap, &prepared.steps[0].expected_sender)

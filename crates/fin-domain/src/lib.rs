@@ -152,12 +152,36 @@ pub enum BridgeStepState {
 pub struct BridgeStepLink {
     pub transfer_id: String,
     pub grant_id: Option<String>,
+    /// Named-plan ownership is separate from a finite boundary grant. It is
+    /// assigned only alongside the plan attempt and concrete operation row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_authority: Option<BridgePlanAuthority>,
     pub step_id: String,
     /// Bound by Engine when it durably creates the concrete attempt.
     pub operation_id: Option<String>,
     pub kind: BridgeStepKind,
     pub depends_on: Vec<String>,
     pub state: BridgeStepState,
+}
+
+/// Identity of the approved plan step that owns one concrete bridge write.
+/// Keeping this distinct from `grant_id` prevents plan consent from becoming
+/// a standalone bridge grant or authorizing other links in the same transfer.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgePlanAuthority {
+    pub plan_id: String,
+    pub revision_id: String,
+    pub plan_step_id: String,
+}
+
+/// Immutable plan/revision scope for a bridge parent. Individual finite writes
+/// retain their own `BridgePlanAuthority` on the corresponding step link.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgePlanScope {
+    pub plan_id: String,
+    pub revision_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -254,6 +278,10 @@ pub struct BridgeTransferRecord {
     pub id: String,
     /// Bound once after the human approves a finite bridge authorization.
     pub grant_id: Option<String>,
+    /// Optional named-plan ownership, distinct from a boundary grant. A
+    /// parent cannot be adopted by another plan or revision after dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_scope: Option<BridgePlanScope>,
     /// Exact original intent, fixed route identity and accepted bounds.
     #[serde(default)]
     pub metadata: Value,

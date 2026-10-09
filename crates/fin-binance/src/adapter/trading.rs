@@ -308,13 +308,22 @@ impl BinanceProfile {
                 "Binance does not advertise LIMIT orders for this spot market.",
             ));
         }
-        let supported_times = market.metadata["timeInForce"].as_array().ok_or_else(|| {
-            error(
-                "VENUE_RESPONSE_INVALID",
-                "authorization",
-                "Binance spot market metadata omitted supported time-in-force values.",
-            )
-        })?;
+        // Spot exchangeInfo advertises orderTypes, but does not include the
+        // Futures-only per-symbol timeInForce list. The Spot API contract
+        // supports IOC/FOK for LIMIT orders; standing GTC orders stay excluded.
+        let documented_times = json!(["IOC", "FOK"]);
+        let supported_times = market
+            .metadata
+            .get("timeInForce")
+            .unwrap_or(&documented_times)
+            .as_array()
+            .ok_or_else(|| {
+                error(
+                    "VENUE_RESPONSE_INVALID",
+                    "authorization",
+                    "Binance spot time-in-force metadata must be an array when supplied.",
+                )
+            })?;
         if params["allowed_time_in_force"]
             .as_array()
             .is_none_or(|allowed| {
@@ -427,6 +436,8 @@ impl BinanceProfile {
             spec,
             possible_credits,
             fee_assets: fees,
+            cumulative_scope: None,
+            authorization_seconds: None,
         })
     }
 

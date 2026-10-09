@@ -55,14 +55,25 @@ grant. USD/price intervals are optional unless requested; when supplied, Fin
 prices independently with exact asset identity. Read the installed schema
 before forming a request.
 
-Preview the first declared step with its selected bounds. The same bounds must
-be passed as `--bounds` to finite authorization and included in the transfer
-input. A single bridge grant has fresh Touch ID and covers only the exact
-persisted approval, optional allowance reset and source deposit steps for this
-transfer, with cumulative debit and gas limits. It does not cover another
-transfer or ordinary wallet writes. Each concrete step still has its own stable
-operation `--id` and is executed under the same grant while valid. If the grant
-expires, obtain fresh authorization; refreshing a quote does not extend it.
+For a standalone bridge, preview the first declared step with its selected
+bounds. The same bounds must be passed to finite authorization and included in
+the transfer input. One bridge grant covers only that transfer's exact saved
+approval, optional allowance reset and source deposit steps, with cumulative
+debit and gas limits. For a workflow that also includes Binance funding or
+other linked actions, put the bridge writes in the same named plan instead:
+list one `bridge.transfer` plan step per exact saved approval/reset/deposit ID,
+all using the same transfer ID and selected bounds. A bridge transfer cannot be
+covered by both a named plan and a separate bridge grant. In either flow, each
+concrete write keeps its own stable operation `--id`; quote refresh does not
+extend consent.
+
+Make funding dependencies cover every debit at that exact resource and asset.
+For a native-ETH bridge paid entirely from a Binance withdrawal, its verified
+net receipt must include both bridge principal and a native-gas buffer; otherwise
+principal plus gas exceeds the producer's credited amount. If gas comes from an
+existing wallet balance instead, keep that baseline funding outside the withdrawal
+dependency. A USDC withdrawal can fund USDC principal while ETH gas is separately
+covered by the wallet's reviewed native-asset scope.
 
 ```sh
 fin preview bridge.transfer --input '{"transferId":"TRANSFER_ID","stepId":"STEP_ID","stepKind":"approval","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}' --json
@@ -169,17 +180,33 @@ For a bounded sequence that should share one Touch ID approval, create one named
 plan. The name is a display label and is included in approval; changing it needs
 a revised approval. Keep step IDs stable and ordered, declare completion targets,
 exact predecessor funding dependencies and aggregate debit/fee caps, and use
-only operation scopes that `fin plans preview` confirms. Named plans accept all
-registered financial operations, including wallet transfers, protocol
-withdrawals, and exchange orders; reads do not establish financial evidence.
+only operation scopes that `fin plans preview` confirms. Named plans accept
+adapter-reviewed bridge steps as well as supported transfers, withdrawals,
+orders and other eligible writes. For each bridge approval, allowance reset and
+deposit, add a separate plan step with its exact `transferId`, `stepId`,
+`stepKind` and selected `bounds`; do not use one generic plan step for the whole
+bridge. The adapter binds all of those steps to the same persisted provider,
+route, parent transfer, and cumulative source/fee ceiling. A prior Binance
+withdrawal may fund a later bridge step only through an exact wallet resource
+and asset dependency. A bridge source receipt is not destination settlement:
+the plan stays incomplete until `bridge.status` verifies the finalized
+destination credit or refund. Reads do not establish financial evidence.
 The reviewed scope binds each exact operation input template, its registered
 schema and protected connection identities, plus declared debit, fee and
 possible-credit limits. A trusted operation definition may explicitly declare
 string fields, such as a venue request ID, that Fin assigns separately for each
 attempt. The template remains bound, and human review labels those fields as
 Fin-assigned instead of showing the template value as the venue ID.
-Authorization does not check live balances, quotes or simulations.
-Preview never reserves funds or approves:
+Plan authorization checks fresh Fin pricing for selected USD bounds, but does
+not check future balances, execution-time fees or transaction simulations.
+Before requesting plan approval, preview each feasible concrete operation with
+`fin preview OPERATION --input INPUT_JSON --json` where supported. This can catch
+input formatting and fee-treatment issues. For bridge plans, obtain a fresh
+`bridge.quotes` result first and use its persisted parent and step IDs; plan
+preview validates the route and selected bounds without requiring future
+funding. It does not assure that balances, fees or simulations will pass when
+each step is prepared for execution.
+Neither preview reserves funds or approves:
 
 ```text
 fin plans preview --input PLAN_JSON --json

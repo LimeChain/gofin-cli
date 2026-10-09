@@ -1477,6 +1477,27 @@ impl Engine {
             boundary.as_ref().map(|b| b.authorization.id.as_str()),
         )?;
         if let Some(plan) = &plan {
+            let plan_step_id = plan
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == record.id)
+                .map(|attempt| attempt.step_id.as_str())
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "The bridge plan attempt has no durable plan-step identity.",
+                        "Preserve the original operation record and reconcile its saved plan link.",
+                    )
+                })?;
+            self.validate_bridge_plan_binding(
+                &refreshed,
+                &record.id,
+                &plan.revision.plan_id,
+                &plan.revision.revision_id,
+                plan_step_id,
+            )?;
+        }
+        if let Some(plan) = &plan {
             let current = self.load_financial_plan(&plan.revision.plan_id)?;
             if current.revision.revision_id != plan.revision.revision_id
                 || current.revision.status != FinancialPlanAuthorizationStatus::Active
@@ -1862,6 +1883,71 @@ impl Engine {
         Ok(())
     }
 
+    fn validate_bridge_plan_binding(
+        &self,
+        prepared: &PreparedOperation,
+        operation_id: &str,
+        plan_id: &str,
+        revision_id: &str,
+        plan_step_id: &str,
+    ) -> Result<()> {
+        let Some(marker) = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY) else {
+            return Ok(());
+        };
+        let transfer_id = marker
+            .get("transfer_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks its transfer ID."))?;
+        let step_id = marker
+            .get("step_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks its step ID."))?;
+        let bounds = marker
+            .get("bounds")
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks selected bounds."))?;
+        let expectation: fin_domain::BridgeSettlementExpectation = serde_json::from_value(
+            marker
+                .get("settlement_expectation")
+                .cloned()
+                .ok_or_else(|| FinError::validation("Bridge marker lacks settlement scope."))?,
+        )
+        .map_err(|_| FinError::validation("Bridge settlement scope is malformed."))?;
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .validate_bridge_plan_scope(
+                transfer_id,
+                revision_id,
+                plan_step_id,
+                step_id,
+                operation_id,
+                bounds,
+                &expectation,
+            )
+            .map_err(map_store)?;
+        let transfer = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .bridge_transfer(transfer_id)
+            .map_err(map_store)?
+            .ok_or_else(|| FinError::validation("Bridge transfer record disappeared."))?;
+        if transfer
+            .plan_scope
+            .as_ref()
+            .is_none_or(|scope| scope.plan_id != plan_id)
+        {
+            return Err(plan_error(
+                "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
+                "The transfer is not owned by this named plan.",
+                "Preserve the transfer's original plan owner and reconcile its saved operation.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply a final, adapter-verified correlated destination/refund proof to
     /// a durable bridge transfer. The typed receipt effects and the transfer's
     /// terminal state commit together; principal cannot be debited a second time.
@@ -2023,9 +2109,150 @@ impl Engine {
         transfer.applied_proofs.push(proof.proof_digest.clone());
         transfer.settlement_proofs.push(proof.clone());
         transfer.transit = None;
-        store
-            .commit_bridge_transfer_settlement(&transfer, &proof, &now())
-            .map_err(map_store)?;
+        let timestamp = now();
+        if let Some(scope) = transfer.plan_scope.as_ref() {
+            let (expected_plan, updated_plan) = if proof.outcome
+                == fin_domain::BridgeSettlementOutcome::Destination
+            {
+                let raw_plan = store
+                    .financial_plan(&scope.plan_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_BRIDGE_OWNER_MISSING",
+                            "The plan-owned bridge has no durable named-plan record.",
+                            "Preserve the proved transfer and restore its original plan journal.",
+                        )
+                    })?;
+                let mut plan: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+                    from_value(raw_plan.clone())?;
+                let deposit_authority = transfer
+                    .steps
+                    .iter()
+                    .filter(|step| step.kind == fin_domain::BridgeStepKind::Deposit)
+                    .filter_map(|step| step.plan_authority.as_ref())
+                    .find(|authority| authority.plan_id == scope.plan_id)
+                    .ok_or_else(|| plan_error(
+                        "PLAN_BRIDGE_DEPOSIT_AUTHORITY_MISSING",
+                        "The plan-owned bridge has no persisted deposit step authority.",
+                        "Keep the final receipt recorded and restore the exact plan-link provenance.",
+                    ))?;
+                let raw_revision = store
+                    .financial_plan_revision(&scope.plan_id, &deposit_authority.revision_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| plan_error(
+                        "PLAN_BRIDGE_REVISION_MISSING",
+                        "The deposit step's approved plan revision is missing.",
+                        "Preserve the transfer proof and restore its immutable approval revision.",
+                    ))?;
+                let revision: fin_domain::financial_plans::FinancialPlanRevision =
+                    from_value(raw_revision)?;
+                let permission = revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == deposit_authority.plan_step_id)
+                    .ok_or_else(|| plan_error(
+                        "PLAN_BRIDGE_PERMISSION_MISSING",
+                        "The deposit step has no saved approved permission.",
+                        "Restore the immutable plan revision before applying its verified proceeds.",
+                    ))?;
+                let (resource, amount) = proof
+                    .effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        FinancialEffect::UsableCredit { to, amount } => Some((to, amount)),
+                        _ => None,
+                    })
+                    .ok_or_else(|| internal("validated bridge proof has no receipt credit"))?;
+                let may_credit = if let Some(exact) = &permission.exact {
+                    exact.scope.possible_credits.iter().any(|identity| {
+                        identity.resource == *resource && identity.asset == amount.asset
+                    })
+                } else {
+                    permission.permission.as_ref().is_some_and(|permission| {
+                        permission.possible_credits.iter().any(|identity| {
+                            identity.resource == *resource && identity.asset == amount.asset
+                        })
+                    })
+                };
+                if !may_credit || deposit_authority.plan_id != scope.plan_id {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_CREDIT_OUT_OF_SCOPE",
+                        "Final bridge receipt is not an approved credit identity for the plan's deposit step.",
+                        "Keep the verified receipt on the transfer and do not use it to fund a dependent plan step.",
+                    ));
+                }
+                let deducted_fees = proof
+                    .effects
+                    .iter()
+                    .filter_map(|effect| match effect {
+                        FinancialEffect::Cost {
+                            location,
+                            amount: fee,
+                            treatment: CostTreatment::DeductedFromCredit,
+                            ..
+                        } if location.resource() == resource && fee.asset == amount.asset => {
+                            Some(fee.atoms.integer())
+                        }
+                        _ => None,
+                    })
+                    .fold(num_bigint::BigUint::default(), |sum, fee| sum + fee);
+                let credit_atoms = amount.atoms.integer();
+                if deducted_fees >= credit_atoms {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_CREDIT_INVALID",
+                        "The verified bridge fee exceeds its receipt credit.",
+                        "Keep the transfer proof and reconcile the exact net receipt.",
+                    ));
+                }
+                let net_atoms = credit_atoms - deducted_fees;
+                let net = fin_domain::Quantity::new(net_atoms.to_string())?;
+                if let Some(proceeds) = plan.usage.verified_proceeds.iter_mut().find(|proceeds| {
+                    proceeds.producing_step_id == deposit_authority.plan_step_id
+                        && proceeds.resource == *resource
+                        && proceeds.asset == amount.asset
+                }) {
+                    proceeds.available = proceeds.available.checked_add(&net)?;
+                } else {
+                    plan.usage.verified_proceeds.push(
+                        fin_domain::financial_plans::FinancialPlanProceeds {
+                            producing_step_id: deposit_authority.plan_step_id.clone(),
+                            resource: resource.clone(),
+                            asset: amount.asset.clone(),
+                            available: net,
+                            consumed: fin_domain::Quantity::zero(),
+                        },
+                    );
+                }
+                (raw_plan, to_value(&plan)?)
+            } else {
+                let raw_plan = store
+                    .financial_plan(&scope.plan_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_BRIDGE_OWNER_MISSING",
+                            "The plan-owned bridge has no durable named-plan record.",
+                            "Preserve the proved refund and restore its original plan journal.",
+                        )
+                    })?;
+                (raw_plan.clone(), raw_plan)
+            };
+            store
+                .commit_financial_plan_bridge_transfer_settlement(
+                    &transfer,
+                    &proof,
+                    &timestamp,
+                    &scope.plan_id,
+                    &expected_plan,
+                    &updated_plan,
+                )
+                .map_err(map_store)?;
+        } else {
+            store
+                .commit_bridge_transfer_settlement(&transfer, &proof, &timestamp)
+                .map_err(map_store)?;
+        }
         Ok(transfer)
     }
 
@@ -2728,19 +2955,192 @@ impl Engine {
                     .retain(|reservation| reservation.attempt_id != record.id);
                 financial_plans::account_financial_plan_effects(&mut plan, &record)?;
             }
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .commit_financial_plan_settlement(
-                    &settlement,
-                    &plan_id,
-                    &to_value(&expected)?,
-                    &to_value(&plan)?,
-                    &record.id,
-                    "settled",
-                    &record.updated_at,
-                )
-                .map_err(map_store)
+            if let Some((transfer_id, bridge_step_id, grant_id, kind)) =
+                bridge_step_binding(&record)?
+            {
+                if grant_id.is_some() {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_GRANT_MISMATCH",
+                        "A named-plan bridge step cannot use a standalone boundary grant.",
+                        "Keep the step under the active named plan authorization only.",
+                    ));
+                }
+                let transit = transfer_principal(&record)?;
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                let mut transfer = store
+                    .bridge_transfer(&transfer_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_BRIDGE_TRANSFER_MISSING",
+                            "The plan-linked bridge transfer disappeared before settlement.",
+                            "Keep the operation journal and restore its original transfer record.",
+                        )
+                    })?;
+                let expected_transfer = to_value(&transfer)?;
+                let authority = fin_domain::BridgePlanAuthority {
+                    plan_id: plan_id.clone(),
+                    revision_id: revision_id.clone(),
+                    plan_step_id: step_id.clone(),
+                };
+                if transfer
+                    .plan_scope
+                    .as_ref()
+                    .is_none_or(|scope| scope.plan_id != plan_id)
+                    || transfer.grant_id.is_some()
+                {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
+                        "The bridge transfer is not owned by this plan attempt.",
+                        "Preserve the original transfer owner and reconcile its saved operation.",
+                    ));
+                }
+                let planned_step = transfer
+                    .steps
+                    .iter_mut()
+                    .find(|link| link.step_id == bridge_step_id)
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_BRIDGE_STEP_NOT_FOUND",
+                            "The bridge link is missing from its durable parent.",
+                            "Preserve the original operation and transfer records.",
+                        )
+                    })?;
+                if planned_step.kind != kind
+                    || planned_step.operation_id.as_deref() != Some(record.id.as_str())
+                    || planned_step.plan_authority.as_ref() != Some(&authority)
+                    || planned_step.state != fin_domain::BridgeStepState::Submitted
+                {
+                    return Err(plan_error(
+                        "PLAN_BRIDGE_STEP_CONFLICT",
+                        "The settled bridge operation does not match its claimed plan link.",
+                        "Keep the original operation unresolved and reconcile its exact bridge identity.",
+                    ));
+                }
+                if let Some(principal) = &transit {
+                    if record.status != Status::Completed {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_FAILURE_HAS_PRINCIPAL",
+                            "A failed bridge operation cannot hand principal into transit.",
+                            "Preserve the source proof and reconcile its exact effects before another action.",
+                        ));
+                    }
+                    if kind != fin_domain::BridgeStepKind::Deposit {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_STEP_CONFLICT",
+                            "Only a declared deposit may hand principal into bridge transit.",
+                            "Keep the operation unresolved and verify its typed source proof.",
+                        ));
+                    }
+                    planned_step.state = fin_domain::BridgeStepState::Settled;
+                    transfer.state = fin_domain::BridgeTransferState::InTransit;
+                    transfer.allocation_owner = fin_domain::BridgeAllocationOwner::Transfer {
+                        transfer_id: transfer.id.clone(),
+                    };
+                    transfer.applied_proofs.push(principal.proof_digest.clone());
+                    transfer.transit = Some(principal.clone());
+                } else if record.status == Status::Completed {
+                    if kind == fin_domain::BridgeStepKind::Deposit {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_SOURCE_PROOF_MISSING",
+                            "A completed bridge deposit lacks its exact source-proof transit handoff.",
+                            "Keep the operation unresolved until the source receipt is verified.",
+                        ));
+                    }
+                    planned_step.state = fin_domain::BridgeStepState::Settled;
+                    transfer.state = fin_domain::BridgeTransferState::ApprovalPending;
+                } else if record.submission.is_none() {
+                    if record.effects.is_some() {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_UNSUBMITTED_EFFECTS",
+                            "An unsubmitted bridge candidate cannot settle financial effects.",
+                            "Preserve the journal and investigate the adapter result before retrying.",
+                        ));
+                    }
+                    planned_step.operation_id = None;
+                    planned_step.state = fin_domain::BridgeStepState::Unsubmitted;
+                    transfer.state = if transfer.steps.iter().any(|step| {
+                        step.step_id != bridge_step_id
+                            && step.state == fin_domain::BridgeStepState::Settled
+                    }) {
+                        fin_domain::BridgeTransferState::ApprovalPending
+                    } else {
+                        fin_domain::BridgeTransferState::Prepared
+                    };
+                } else {
+                    if record.status != Status::Failed || record.effects.is_none() {
+                        return Err(plan_error(
+                            "PLAN_BRIDGE_FAILURE_UNPROVEN",
+                            "A submitted bridge write cannot be released without a verified terminal failure.",
+                            "Reconcile the exact original submission and preserve its step identity.",
+                        ));
+                    }
+                    planned_step.state = fin_domain::BridgeStepState::NeedsAttention;
+                    transfer.state = fin_domain::BridgeTransferState::Failed;
+                }
+                transfer.version = transfer
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| internal("bridge transfer version overflow"))?;
+                if record.status == Status::Completed {
+                    let charge = transit
+                        .as_ref()
+                        .map(|_| {
+                            ordinary_policy::record_charge(&record).map(|amount| amount.to_string())
+                        })
+                        .transpose()?;
+                    store
+                        .commit_financial_plan_bridge_settlement(
+                            &settlement,
+                            &plan_id,
+                            &revision_id,
+                            &step_id,
+                            &to_value(&expected)?,
+                            &to_value(&plan)?,
+                            &record.id,
+                            &expected_transfer,
+                            &transfer,
+                            &bridge_step_id,
+                            transit.as_ref(),
+                            charge.as_deref(),
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                } else {
+                    store
+                        .commit_financial_plan_bridge_failure(
+                            &settlement,
+                            &plan_id,
+                            &revision_id,
+                            &step_id,
+                            &to_value(&expected)?,
+                            &to_value(&plan)?,
+                            &record.id,
+                            &expected_transfer,
+                            &transfer,
+                            &bridge_step_id,
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                }
+            } else {
+                self.store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .commit_financial_plan_settlement(
+                        &settlement,
+                        &plan_id,
+                        &to_value(&expected)?,
+                        &to_value(&plan)?,
+                        &record.id,
+                        "settled",
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)
+            }
         } else {
             let handoff = transfer_principal(&record)?;
             if let Some(principal) = handoff {
@@ -3913,9 +4313,9 @@ fn valid_bridge_target(target: &fin_domain::BridgeSettlementTarget) -> bool {
         && address == address.to_ascii_lowercase()
 }
 
-fn bridge_step_binding(
-    record: &OperationRecord,
-) -> Result<Option<(String, String, Option<String>, fin_domain::BridgeStepKind)>> {
+type BridgeStepBinding = (String, String, Option<String>, fin_domain::BridgeStepKind);
+
+fn bridge_step_binding(record: &OperationRecord) -> Result<Option<BridgeStepBinding>> {
     let Some(marker) = record
         .preview
         .as_ref()
@@ -10724,6 +11124,7 @@ mod tests {
             version: 1,
             id: transfer_id.into(),
             grant_id: None,
+            plan_scope: None,
             metadata: json!({"route":"SYNTHETIC-frozen-route","intent":"SYNTHETIC-frozen-intent"}),
             settlement_expectation: None,
             approved_bounds: None,
@@ -10744,6 +11145,7 @@ mod tests {
                 .link_bridge_step(&fin_domain::BridgeStepLink {
                     transfer_id: transfer_id.into(),
                     grant_id: None,
+                    plan_authority: None,
                     step_id,
                     operation_id: None,
                     kind: kind.clone(),
@@ -15475,6 +15877,7 @@ mod tests {
             version: 1,
             id: principal.transfer_id.clone(),
             grant_id: None,
+            plan_scope: None,
             metadata: json!({"fixture":"synthetic frozen bridge scope"}),
             settlement_expectation: Some(fin_domain::BridgeSettlementExpectation {
                 destination: vec![fin_domain::BridgeSettlementTarget {
@@ -15754,6 +16157,7 @@ mod tests {
         let step = fin_domain::BridgeStepLink {
             transfer_id: transfer_id.into(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-camel-case-step".into(),
             operation_id: None,
             kind: fin_domain::BridgeStepKind::ResetAllowance,
@@ -15764,6 +16168,7 @@ mod tests {
             version: 1,
             id: transfer_id.into(),
             grant_id: None,
+            plan_scope: None,
             metadata: json!({"synthetic":"camel-case wire test"}),
             settlement_expectation: None,
             approved_bounds: None,

@@ -18,6 +18,7 @@ impl Engine {
         self.validate_plan_request(&request)?;
         let permissions = self.prepare_plan_permissions(&request.plan).await?;
         validate_plan_permissions(&request.plan, &permissions)?;
+        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
         let carried_forward_usage = prior
             .as_ref()
@@ -118,6 +119,7 @@ impl Engine {
 
         let permissions = self.prepare_plan_permissions(&request.plan).await?;
         validate_plan_permissions(&request.plan, &permissions)?;
+        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
         let carried_usage = prior
             .as_ref()
@@ -663,6 +665,28 @@ impl Engine {
                 costs: prepared.intent.maximum_costs.clone(),
             });
         let updated_plan = to_value(&plan)?;
+        let bridge_claim = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            prepare_plan_bridge_attempt_claim(
+                &execution_request,
+                &prepared,
+                plan_id,
+                &plan.revision.revision_id,
+                step_id,
+                &id,
+                &store,
+            )?
+        };
+        if bridge_claim.is_some() && previous_operation.is_some() {
+            return Err(plan_error(
+                "PLAN_BRIDGE_CANDIDATE_REPLACEMENT_UNSUPPORTED",
+                "A claimed bridge operation cannot be replaced through the generic plan-candidate path.",
+                "Reconcile the original operation and preserve its bridge link before authorizing a new plan revision.",
+            ));
+        }
         let created = if let Some(mut previous) = previous_operation {
             previous.status = Status::Rejected;
             previous.updated_at = timestamp.clone();
@@ -692,23 +716,48 @@ impl Engine {
                 )
                 .map_err(map_store)?
         } else {
-            self.store
+            let mut store = self
+                .store
                 .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .create_financial_plan_attempt(
-                    plan_id,
-                    &plan.revision.revision_id,
-                    step_id,
-                    &to_value(&initial_plan)?,
-                    &updated_plan,
-                    &id,
-                    &request.request_id,
-                    &fingerprint,
-                    &request.operation,
-                    &to_value(&operation)?,
-                    &timestamp,
-                )
-                .map_err(map_store)?
+                .map_err(|_| internal("store lock poisoned"))?;
+            if let Some(claim) = bridge_claim.as_ref() {
+                store
+                    .create_financial_plan_bridge_attempt(
+                        plan_id,
+                        &plan.revision.revision_id,
+                        step_id,
+                        &to_value(&initial_plan)?,
+                        &updated_plan,
+                        &id,
+                        &request.request_id,
+                        &fingerprint,
+                        &request.operation,
+                        &to_value(&operation)?,
+                        &timestamp,
+                        &claim.transfer_id,
+                        &claim.bridge_step_id,
+                        &claim.kind,
+                        &claim.expected_transfer,
+                        &claim.updated_transfer,
+                    )
+                    .map_err(map_store)?
+            } else {
+                store
+                    .create_financial_plan_attempt(
+                        plan_id,
+                        &plan.revision.revision_id,
+                        step_id,
+                        &to_value(&initial_plan)?,
+                        &updated_plan,
+                        &id,
+                        &request.request_id,
+                        &fingerprint,
+                        &request.operation,
+                        &to_value(&operation)?,
+                        &timestamp,
+                    )
+                    .map_err(map_store)?
+            }
         };
         if !created.created {
             return from_value(created.record);
@@ -1356,6 +1405,20 @@ impl Engine {
             &revision.spec.aggregate_bounds.maximum_costs,
             Some(&reserved_costs),
         )?;
+        let bridge_transfers = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .bridge_transfers()
+            .map_err(map_store)?
+            .into_iter()
+            .filter(|transfer| {
+                transfer
+                    .plan_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.plan_id == revision.plan_id)
+            })
+            .collect::<Vec<_>>();
         for step in &revision.spec.steps {
             let attempts = record
                 .attempts
@@ -1364,10 +1427,26 @@ impl Engine {
                 .collect::<Vec<_>>();
             let mut step_effects = Vec::new();
             let mut attempt_summaries = Vec::new();
+            let mut completed_bridge_deposit_attempts = Vec::new();
             for attempt in &attempts {
                 let operation = self.load_record(&attempt.attempt_id)?;
                 if let Some(verified) = &operation.effects {
                     step_effects.extend(verified.effects.clone());
+                }
+                if operation.status == Status::Completed && operation.operation == "bridge.transfer"
+                {
+                    completed_bridge_deposit_attempts.extend(
+                        bridge_transfers
+                            .iter()
+                            .filter(|transfer| {
+                                plan_bridge_deposit_link(transfer, &revision.plan_id, &step.step_id)
+                                    .is_some_and(|link| {
+                                        link.operation_id.as_deref() == Some(operation.id.as_str())
+                                            && link.state == fin_domain::BridgeStepState::Settled
+                                    })
+                            })
+                            .map(|transfer| transfer.id.clone()),
+                    );
                 }
                 attempt_summaries.push(financial_plans::FinancialPlanAttemptSummary {
                     attempt_id: operation.id.clone(),
@@ -1382,7 +1461,29 @@ impl Engine {
             let operation_succeeded = attempt_summaries
                 .iter()
                 .any(|attempt| attempt.status == Status::Completed);
-            let completed = completion_met(&step.completion, &step_effects, operation_succeeded)?;
+            let mut completion_effects = step_effects.clone();
+            let has_committed_destination_proof =
+                completed_bridge_deposit_attempts.iter().any(|transfer_id| {
+                    bridge_transfers.iter().any(|transfer| {
+                        transfer.id == *transfer_id
+                            && committed_plan_bridge_destination_proof(
+                                transfer,
+                                &revision.plan_id,
+                                &step.step_id,
+                                &attempt_summaries,
+                            )
+                    })
+                });
+            if has_committed_destination_proof {
+                include_committed_plan_receipt(
+                    &step.completion,
+                    &mut completion_effects,
+                    &record.usage,
+                    &step.step_id,
+                )?;
+            }
+            let completed =
+                completion_met(&step.completion, &completion_effects, operation_succeeded)?;
             let unresolved = record
                 .active_attempt_id
                 .as_ref()
@@ -1392,6 +1493,34 @@ impl Engine {
             let mut blockers = Vec::new();
             if unresolved {
                 blockers.push("A previous attempt must be reconciled.".into());
+            }
+            let awaiting_bridge_destination = !completed
+                && step.completion.minimum_net_receipt.is_some()
+                && completed_bridge_deposit_attempts.iter().any(|transfer_id| {
+                    bridge_transfers.iter().any(|transfer| {
+                        transfer.id == *transfer_id
+                            && plan_bridge_deposit_link(transfer, &revision.plan_id, &step.step_id)
+                                .is_some()
+                            && transfer.state != fin_domain::BridgeTransferState::Completed
+                    })
+                });
+            if awaiting_bridge_destination {
+                let recovery_required = bridge_transfers.iter().any(|transfer| {
+                    completed_bridge_deposit_attempts
+                        .iter()
+                        .any(|transfer_id| transfer_id == &transfer.id)
+                        && matches!(
+                            transfer.state,
+                            fin_domain::BridgeTransferState::Refunded
+                                | fin_domain::BridgeTransferState::Failed
+                                | fin_domain::BridgeTransferState::NeedsAttention
+                        )
+                });
+                blockers.push(if recovery_required {
+                    "The bridge source write is complete; its parent has a refund or failure outcome, so the destination target requires recovery instead of resubmission.".into()
+                } else {
+                    "The bridge source write is complete; wait for its verified destination receipt instead of submitting it again.".into()
+                });
             }
             let permission = permission_for_step(revision, &step.step_id)?;
             let exhausted = !completed
@@ -1431,10 +1560,45 @@ impl Engine {
         }
         let authorization_active = revision.status == FinancialPlanAuthorizationStatus::Active
             && parse_time(&revision.expires_at)? > Utc::now();
-        if !authorization_active {
-            blockers.push("Plan authorization is expired, revoked, or superseded.".into());
+        let pending_bridge_settlements = bridge_transfers
+            .iter()
+            .filter(|transfer| {
+                !matches!(
+                    transfer.state,
+                    fin_domain::BridgeTransferState::Completed
+                        | fin_domain::BridgeTransferState::Refunded
+                        | fin_domain::BridgeTransferState::Failed
+                )
+            })
+            .count();
+        if pending_bridge_settlements > 0 {
+            blockers.push(format!(
+                "{pending_bridge_settlements} plan-linked bridge transfer(s) still need finalized destination settlement."
+            ));
+        }
+        let recovery_bridge_count = bridge_transfers
+            .iter()
+            .filter(|transfer| {
+                matches!(
+                    transfer.state,
+                    fin_domain::BridgeTransferState::Refunded
+                        | fin_domain::BridgeTransferState::Failed
+                        | fin_domain::BridgeTransferState::NeedsAttention
+                )
+            })
+            .count();
+        if recovery_bridge_count > 0 {
+            blockers.push(format!(
+                "{recovery_bridge_count} plan-linked bridge transfer(s) require recovery; their principal is not successful destination proceeds."
+            ));
         }
         let next = select_next_eligible_step(&steps);
+        // Expiry stops dispatching unfinished work. It does not invalidate
+        // source operations that already settled or block proof-only bridge
+        // reconciliation after all writable steps are done.
+        if !authorization_active && next.is_some() {
+            blockers.push("Plan authorization is expired, revoked, or superseded.".into());
+        }
         Ok(FinancialPlanStatus {
             plan_id: revision.plan_id.clone(),
             revision: revision.clone(),
@@ -1496,15 +1660,56 @@ fn select_next_eligible_step(steps: &[FinancialPlanStepProgress]) -> Option<Stri
         .iter()
         .find(|step| step.state != FinancialPlanStepProgressState::Completed)?;
     if first_incomplete.state == FinancialPlanStepProgressState::Blocked
-        || first_incomplete
-            .blockers
-            .iter()
-            .any(|blocker| blocker == "A previous attempt must be reconciled.")
+        || first_incomplete.blockers.iter().any(|blocker| {
+            blocker == "A previous attempt must be reconciled."
+                || blocker.starts_with("The bridge source write is complete;")
+        })
     {
         None
     } else {
         Some(first_incomplete.step_id.clone())
     }
+}
+
+fn plan_bridge_deposit_link<'a>(
+    transfer: &'a fin_domain::BridgeTransferRecord,
+    plan_id: &str,
+    step_id: &str,
+) -> Option<&'a fin_domain::BridgeStepLink> {
+    if !transfer
+        .plan_scope
+        .as_ref()
+        .is_some_and(|scope| scope.plan_id == plan_id)
+    {
+        return None;
+    }
+    transfer.steps.iter().find(|link| {
+        link.kind == fin_domain::BridgeStepKind::Deposit
+            && link.plan_authority.as_ref().is_some_and(|authority| {
+                authority.plan_id == plan_id && authority.plan_step_id == step_id
+            })
+    })
+}
+
+fn committed_plan_bridge_destination_proof(
+    transfer: &fin_domain::BridgeTransferRecord,
+    plan_id: &str,
+    step_id: &str,
+    attempts: &[financial_plans::FinancialPlanAttemptSummary],
+) -> bool {
+    transfer.state == fin_domain::BridgeTransferState::Completed
+        && plan_bridge_deposit_link(transfer, plan_id, step_id).is_some_and(|link| {
+            link.state == fin_domain::BridgeStepState::Settled
+                && link.operation_id.as_ref().is_some_and(|operation_id| {
+                    attempts.iter().any(|attempt| {
+                        attempt.attempt_id == *operation_id && attempt.status == Status::Completed
+                    })
+                })
+        })
+        && transfer.settlement_proofs.iter().any(|proof| {
+            proof.transfer_id == transfer.id
+                && proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
+        })
 }
 
 pub(super) fn permission_for_step<'a>(
@@ -1643,7 +1848,132 @@ fn validate_plan_permissions(
             }
         }
     }
+    validate_cumulative_plan_scopes(spec, permissions)?;
     validate_aggregate_permission_bounds(spec, permissions)
+}
+
+fn validate_plan_authorization_duration(
+    requested_seconds: u64,
+    permissions: &[FinancialPlanStepPermission],
+) -> Result<()> {
+    for permission in permissions {
+        let Some(maximum) = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.authorization_seconds)
+        else {
+            continue;
+        };
+        if maximum == 0 || requested_seconds > maximum {
+            return Err(plan_error(
+                "PLAN_AUTHORIZATION_DURATION_EXCEEDED",
+                "The requested plan authorization lasts longer than an adapter-reviewed step allows.",
+                "Choose a plan duration within every step's approved authorization limit and review again.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cumulative_plan_scopes(
+    spec: &financial_plans::FinancialPlanSpec,
+    permissions: &[FinancialPlanStepPermission],
+) -> Result<()> {
+    let mut scopes = std::collections::BTreeMap::new();
+    for permission in permissions {
+        let Some(scope) = permission
+            .permission
+            .as_ref()
+            .and_then(|permission| permission.cumulative_scope.as_ref())
+        else {
+            continue;
+        };
+        if scope.scope_id.trim().is_empty() || scope.scope_id.len() > 256 {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_INVALID",
+                "An adapter cumulative scope must have a stable nonempty identity.",
+                "Regenerate the plan review with a valid shared parent scope.",
+            ));
+        }
+        let mut debit_ids = std::collections::BTreeSet::new();
+        if scope.maximum_debits.is_empty() && scope.maximum_costs.is_empty()
+            || scope.maximum_debits.iter().any(|debit| {
+                debit.amount.atoms.is_zero()
+                    || !debit_ids.insert((debit.resource.clone(), debit.amount.asset.clone()))
+            })
+        {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_INVALID",
+                "An adapter cumulative scope must contain valid positive unique debit and cost caps.",
+                "Regenerate the plan review with exact parent limits.",
+            ));
+        }
+        let mut cost_ids = Vec::new();
+        if scope.maximum_costs.iter().any(|cost| {
+            let identity = (
+                cost.location.clone(),
+                cost.amount.asset.clone(),
+                cost.treatment.clone(),
+            );
+            if cost.amount.atoms.is_zero() || cost_ids.contains(&identity) {
+                true
+            } else {
+                cost_ids.push(identity);
+                false
+            }
+        }) {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_INVALID",
+                "An adapter cumulative scope contains an invalid or duplicate fee cap.",
+                "Regenerate the plan review with exact parent limits.",
+            ));
+        }
+        if scopes
+            .insert(scope.scope_id.clone(), scope.clone())
+            .is_some_and(|previous| previous != *scope)
+        {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_CONFLICT",
+                "Steps sharing a cumulative scope disagree about the parent cap.",
+                "Use one identical cumulative parent scope across every linked step.",
+            ));
+        }
+    }
+    for scope in scopes.values() {
+        for debit in &scope.maximum_debits {
+            if !spec
+                .aggregate_bounds
+                .maximum_debits
+                .iter()
+                .any(|aggregate| {
+                    aggregate.resource == debit.resource
+                        && aggregate.amount.asset == debit.amount.asset
+                        && aggregate.amount.atoms >= debit.amount.atoms
+                })
+            {
+                return Err(plan_error(
+                    "PLAN_CUMULATIVE_SCOPE_OUTSIDE_AGGREGATE",
+                    "A shared adapter debit cap exceeds the plan's aggregate debit cap.",
+                    "Raise the aggregate plan limit only if the complete plan should authorize it.",
+                ));
+            }
+        }
+        for cost in &scope.maximum_costs {
+            if !spec.aggregate_bounds.maximum_costs.iter().any(|aggregate| {
+                aggregate.location == cost.location
+                    && aggregate.amount.asset == cost.amount.asset
+                    && aggregate.treatment == cost.treatment
+                    && aggregate.amount.atoms >= cost.amount.atoms
+            }) {
+                return Err(plan_error(
+                    "PLAN_CUMULATIVE_SCOPE_OUTSIDE_AGGREGATE",
+                    "A shared adapter fee cap exceeds the plan's aggregate fee cap.",
+                    "Raise the aggregate plan limit only if the complete plan should authorize it.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_plan_json_schema(schema: &Value, input: &Value) -> Result<()> {
@@ -2199,6 +2529,362 @@ pub(super) fn validate_candidate_plan_caps(
         spent_costs,
         replaces: None,
     };
+    validate_candidate_caps(&authorization, prepared)?;
+    validate_cumulative_scope_caps(record, step_id, prepared, store)
+}
+
+struct PlanBridgeAttemptClaim {
+    transfer_id: String,
+    bridge_step_id: String,
+    kind: fin_domain::BridgeStepKind,
+    expected_transfer: Value,
+    updated_transfer: fin_domain::BridgeTransferRecord,
+}
+
+fn prepare_plan_bridge_attempt_claim(
+    request: &OperationRequest,
+    prepared: &PreparedOperation,
+    plan_id: &str,
+    revision_id: &str,
+    plan_step_id: &str,
+    operation_id: &str,
+    store: &Store,
+) -> Result<Option<PlanBridgeAttemptClaim>> {
+    let marker = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY);
+    if request.operation != "bridge.transfer" {
+        if marker.is_some() {
+            return Err(plan_error(
+                "PLAN_BRIDGE_BINDING_INVALID",
+                "A non-bridge plan step contains a bridge identity marker.",
+                "Review the adapter-prepared candidate and use the matching operation.",
+            ));
+        }
+        return Ok(None);
+    }
+    let marker = marker.ok_or_else(|| {
+        plan_error(
+            "PLAN_BRIDGE_BINDING_MISSING",
+            "The prepared bridge plan step lacks its durable transfer and link identity.",
+            "Use a saved quote and a declared bridge step from the active plan revision.",
+        )
+    })?;
+    let marker_text = |key: &str| {
+        marker
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                plan_error(
+                    "PLAN_BRIDGE_BINDING_INVALID",
+                    "The prepared bridge step identity is incomplete.",
+                    "Use the exact stored transfer and provider step selected in the plan.",
+                )
+            })
+    };
+    let transfer_id = marker_text("transfer_id")?;
+    let bridge_step_id = marker_text("step_id")?;
+    let kind: fin_domain::BridgeStepKind = serde_json::from_value(
+        marker.get("kind").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(|_| {
+        plan_error(
+            "PLAN_BRIDGE_BINDING_INVALID",
+            "The prepared bridge step kind is unknown.",
+            "Use an approval, allowance reset, or deposit link declared by the stored quote.",
+        )
+    })?;
+    let public_kind: Value =
+        serde_json::to_value(&kind).map_err(|_| internal("bridge kind serialization failed"))?;
+    let input_field = |snake: &str, camel: &str| {
+        let left = request.input.get(snake);
+        let right = request.input.get(camel);
+        if left.is_some() && right.is_some() && left != right {
+            return Err(plan_error(
+                "PLAN_BRIDGE_BINDING_INVALID",
+                "The public bridge request contains conflicting step identities.",
+                "Use one canonical transferId, stepId, and stepKind triplet.",
+            ));
+        }
+        Ok(left.or(right))
+    };
+    if input_field("transfer_id", "transferId")?.and_then(Value::as_str)
+        != Some(transfer_id.as_str())
+        || input_field("step_id", "stepId")?.and_then(Value::as_str)
+            != Some(bridge_step_id.as_str())
+        || input_field("step_kind", "stepKind")? != Some(&public_kind)
+        || marker.get("grant_id").is_some_and(|grant| !grant.is_null())
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_BINDING_INVALID",
+            "The public bridge request is not the exact ungranted step bound to this plan candidate.",
+            "Use the exact transfer, step and kind from the saved quote without a separate bridge grant.",
+        ));
+    }
+    let bounds = marker
+        .get("bounds")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_SCOPE_MISSING",
+                "The bridge plan candidate lacks its selected bounds.",
+                "Review explicit bridge amount and fee bounds before authorizing the plan.",
+            )
+        })?;
+    let expectation: fin_domain::BridgeSettlementExpectation = serde_json::from_value(
+        marker
+            .get("settlement_expectation")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|_| {
+        plan_error(
+            "PLAN_BRIDGE_SCOPE_INVALID",
+            "The bridge settlement expectation is malformed.",
+            "Review the exact destination and approved minimum in the plan permission.",
+        )
+    })?;
+    let mut store_transfer = store
+        .bridge_transfer(&transfer_id)
+        .map_err(map_store)?
+        .ok_or_else(|| {
+            plan_error(
+                "PLAN_BRIDGE_TRANSFER_MISSING",
+                "The prepared bridge step has no durable quote record.",
+                "Restore the original quote record and do not submit a replacement transfer.",
+            )
+        })?;
+    if store_transfer.grant_id.is_some()
+        || store_transfer.transit.is_some()
+        || store_transfer
+            .plan_scope
+            .as_ref()
+            .is_some_and(|scope| scope.plan_id != plan_id)
+        || !matches!(
+            store_transfer.state,
+            fin_domain::BridgeTransferState::Prepared
+                | fin_domain::BridgeTransferState::ApprovalPending
+                | fin_domain::BridgeTransferState::SourcePending
+        )
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
+            "This transfer is already owned by a standalone authorization, another plan, or a submitted settlement.",
+            "Keep its original authority and use a separate unclaimed quote for this plan.",
+        ));
+    }
+    let expected_transfer = to_value(&store_transfer)?;
+    let scope = store_transfer
+        .plan_scope
+        .clone()
+        .unwrap_or(fin_domain::BridgePlanScope {
+            plan_id: plan_id.to_owned(),
+            revision_id: revision_id.to_owned(),
+        });
+    if scope.plan_id != plan_id {
+        return Err(plan_error(
+            "PLAN_BRIDGE_OWNERSHIP_CONFLICT",
+            "This transfer is anchored to a different named plan.",
+            "Keep the saved transfer with its original plan identity.",
+        ));
+    }
+    match (
+        &store_transfer.approved_bounds,
+        &store_transfer.settlement_expectation,
+    ) {
+        (Some(saved_bounds), Some(saved_expectation))
+            if saved_bounds == bounds && saved_expectation == &expectation => {}
+        (None, None) => {
+            store_transfer.approved_bounds = Some(bounds.clone());
+            store_transfer.settlement_expectation = Some(expectation);
+        }
+        (None, Some(quote_expectation))
+            if bridge_expectation_preserves_quote_floor(quote_expectation, &expectation) =>
+        {
+            store_transfer.approved_bounds = Some(bounds.clone());
+            store_transfer.settlement_expectation = Some(expectation);
+        }
+        _ => {
+            return Err(plan_error(
+                "PLAN_BRIDGE_SCOPE_CONFLICT",
+                "Bridge bounds or settlement targets differ from the scope already frozen to this parent.",
+                "Preserve the original selected route and bounds or create a new plan and quote before dispatch.",
+            ));
+        }
+    }
+    let authority = fin_domain::BridgePlanAuthority {
+        plan_id: plan_id.to_owned(),
+        revision_id: revision_id.to_owned(),
+        plan_step_id: plan_step_id.to_owned(),
+    };
+    let Some(link_index) = store_transfer
+        .steps
+        .iter()
+        .position(|link| link.step_id == bridge_step_id)
+    else {
+        return Err(plan_error(
+            "PLAN_BRIDGE_STEP_NOT_FOUND",
+            "The bridge link is not declared in its saved transfer.",
+            "Use only exact approval, reset, or deposit steps from the stored quote.",
+        ));
+    };
+    let link_snapshot = store_transfer.steps[link_index].clone();
+    let dependencies_settled = link_snapshot.depends_on.iter().all(|dependency| {
+        store_transfer.steps.iter().any(|prior| {
+            prior.step_id == *dependency && prior.state == fin_domain::BridgeStepState::Settled
+        })
+    });
+    let link = &mut store_transfer.steps[link_index];
+    if link.kind != kind
+        || link.grant_id.is_some()
+        || link.operation_id.is_some()
+        || link.state != fin_domain::BridgeStepState::Unsubmitted
+        || link.plan_authority.as_ref().is_some_and(|existing| {
+            existing.plan_id != authority.plan_id || existing.plan_step_id != authority.plan_step_id
+        })
+        || !dependencies_settled
+    {
+        return Err(plan_error(
+            "PLAN_BRIDGE_STEP_UNAVAILABLE",
+            "The bridge step is claimed, outside plan scope, or its declared prerequisites are unsettled.",
+            "Reconcile the original operation or complete the exact prerequisite steps before continuing.",
+        ));
+    }
+    link.operation_id = Some(operation_id.to_owned());
+    link.plan_authority = Some(authority);
+    link.state = fin_domain::BridgeStepState::Submitted;
+    store_transfer.plan_scope = Some(scope);
+    store_transfer.state = if kind == fin_domain::BridgeStepKind::Deposit {
+        fin_domain::BridgeTransferState::SourcePending
+    } else {
+        fin_domain::BridgeTransferState::ApprovalPending
+    };
+    store_transfer.version = store_transfer
+        .version
+        .checked_add(1)
+        .ok_or_else(|| internal("bridge transfer version overflow"))?;
+    Ok(Some(PlanBridgeAttemptClaim {
+        transfer_id,
+        bridge_step_id,
+        kind,
+        expected_transfer,
+        updated_transfer: store_transfer,
+    }))
+}
+
+fn bridge_expectation_preserves_quote_floor(
+    quote: &fin_domain::BridgeSettlementExpectation,
+    selected: &fin_domain::BridgeSettlementExpectation,
+) -> bool {
+    let targets_preserve =
+        |quoted: &[fin_domain::BridgeSettlementTarget],
+         chosen: &[fin_domain::BridgeSettlementTarget]| {
+            quoted.len() == chosen.len()
+                && quoted.iter().all(|target| {
+                    chosen.iter().any(|candidate| {
+                        candidate.resource == target.resource
+                            && candidate.asset == target.asset
+                            && candidate.minimum_atoms >= target.minimum_atoms
+                    })
+                })
+        };
+    targets_preserve(&quote.destination, &selected.destination)
+        && targets_preserve(&quote.refund, &selected.refund)
+}
+
+fn validate_cumulative_scope_caps(
+    record: &FinancialPlanAuthorizationRecord,
+    step_id: &str,
+    prepared: &PreparedOperation,
+    store: &Store,
+) -> Result<()> {
+    let Some(scope) = permission_for_step(&record.revision, step_id)?
+        .permission
+        .as_ref()
+        .and_then(|permission| permission.cumulative_scope.as_ref())
+    else {
+        return Ok(());
+    };
+    let mut revisions = store
+        .financial_plan_revisions(&record.revision.plan_id)
+        .map_err(map_store)?
+        .into_iter()
+        .map(from_value::<FinancialPlanRevision>)
+        .collect::<Result<Vec<_>>>()?;
+    if !revisions
+        .iter()
+        .any(|revision| revision.revision_id == record.revision.revision_id)
+    {
+        revisions.push(record.revision.clone());
+    }
+    let mut spent_debits = Vec::new();
+    let mut spent_costs = Vec::new();
+    for attempt in &record.attempts {
+        if record.active_attempt_id.as_deref() == Some(attempt.attempt_id.as_str()) {
+            continue;
+        }
+        let belongs_to_scope = revisions
+            .iter()
+            .find(|revision| revision.revision_id == attempt.revision_id)
+            .and_then(|revision| {
+                revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == attempt.step_id)
+            })
+            .and_then(|permission| permission.permission.as_ref())
+            .and_then(|permission| permission.cumulative_scope.as_ref())
+            .is_some_and(|candidate| candidate.scope_id == scope.scope_id);
+        if !belongs_to_scope {
+            continue;
+        }
+        let Some(raw) = store.get_record(&attempt.attempt_id).map_err(map_store)? else {
+            return Err(plan_error(
+                "PLAN_ATTEMPT_MISSING",
+                "A cumulative-scope attempt record is missing.",
+                "Restore the original plan attempt before continuing.",
+            ));
+        };
+        let operation: OperationRecord = from_value(raw)?;
+        if let Some(verified) = operation.effects {
+            let (debits, costs, _) =
+                summarize_plan_effects(&verified.effects, &attempt.step_id, &record.usage)?;
+            spent_debits = add_amounts(&spent_debits, &debits)?;
+            spent_costs = add_cost_bounds(&spent_costs, &costs)?;
+        } else if let Some(reservation) = record
+            .usage
+            .reservations
+            .iter()
+            .find(|reservation| reservation.attempt_id == attempt.attempt_id)
+        {
+            spent_debits = add_amounts(&spent_debits, &reservation.debits)?;
+            spent_costs = add_cost_bounds(&spent_costs, &reservation.costs)?;
+        }
+    }
+    let remaining_debits = remaining_debits(&scope.maximum_debits, Some(&spent_debits))?;
+    let remaining_costs = remaining_costs(&scope.maximum_costs, Some(&spent_costs))?;
+    let authorization = BoundaryAuthorization {
+        id: scope.scope_id.clone(),
+        intent_id: scope.scope_id.clone(),
+        operation: prepared.operation.clone(),
+        bounds: Value::Null,
+        spec: BoundarySpec {
+            fixed: Value::Null,
+            parameters: Value::Null,
+            maximum_debits: scope.maximum_debits.clone(),
+            maximum_costs: scope.maximum_costs.clone(),
+            summary: "shared adapter cumulative scope".into(),
+        },
+        approved_at: record.revision.approved_at.clone(),
+        expires_at: record.revision.expires_at.clone(),
+        valid_for_seconds: record.revision.valid_for_seconds,
+        status: BoundaryAuthorizationStatus::Active,
+        remaining_debits,
+        remaining_costs,
+        spent_debits,
+        spent_costs,
+        replaces: None,
+    };
     validate_candidate_caps(&authorization, prepared)
 }
 
@@ -2423,7 +3109,7 @@ fn completion_met(
         return Ok(false);
     }
     let mut spent = BTreeMap::<String, BigUint>::new();
-    let mut receipts = BTreeMap::<String, BigUint>::new();
+    let receipts = completion_receipt_totals(effects)?;
     for effect in effects {
         match effect {
             FinancialEffect::CashDebit { resource, amount } => {
@@ -2432,11 +3118,10 @@ fn completion_met(
             FinancialEffect::Transfer {
                 from,
                 debit,
-                to,
-                credit,
+                to: _,
+                credit: _,
             } => {
                 add_big_amount(&mut spent, from, &debit.asset, debit.atoms.integer())?;
-                add_big_amount(&mut receipts, to, &credit.asset, credit.atoms.integer())?;
             }
             FinancialEffect::Conversion {
                 resource,
@@ -2444,6 +3129,38 @@ fn completion_met(
                 received,
             } => {
                 add_big_amount(&mut spent, resource, &debit.asset, debit.atoms.integer())?;
+                let _ = received;
+            }
+            FinancialEffect::UsableCredit { .. } => {}
+            FinancialEffect::Cost { .. } => {}
+            _ => {}
+        }
+    }
+    let spend_ok = match &completion.principal_spend {
+        Some(target) => spent
+            .get(&resource_asset_key(target)?)
+            .is_some_and(|actual| actual >= &target.amount.atoms.integer()),
+        None => true,
+    };
+    let receipt_ok = match &completion.minimum_net_receipt {
+        Some(target) => receipts
+            .get(&resource_asset_key(target)?)
+            .is_some_and(|actual| actual >= &target.amount.atoms.integer()),
+        None => true,
+    };
+    Ok(spend_ok && receipt_ok && (!completion.operation_succeeded || operation_succeeded))
+}
+
+fn completion_receipt_totals(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let mut receipts = BTreeMap::<String, BigUint>::new();
+    for effect in effects {
+        match effect {
+            FinancialEffect::Transfer { to, credit, .. } => {
+                add_big_amount(&mut receipts, to, &credit.asset, credit.atoms.integer())?;
+            }
+            FinancialEffect::Conversion {
+                resource, received, ..
+            } => {
                 add_big_amount(
                     &mut receipts,
                     resource,
@@ -2452,9 +3169,8 @@ fn completion_met(
                 )?;
             }
             FinancialEffect::UsableCredit { to, amount } => {
-                add_big_amount(&mut receipts, to, &amount.asset, amount.atoms.integer())?
+                add_big_amount(&mut receipts, to, &amount.asset, amount.atoms.integer())?;
             }
-            FinancialEffect::Cost { .. } => {}
             _ => {}
         }
     }
@@ -2491,19 +3207,55 @@ fn completion_met(
             *actual -= fee;
         }
     }
-    let spend_ok = match &completion.principal_spend {
-        Some(target) => spent
-            .get(&resource_asset_key(target)?)
-            .is_some_and(|actual| actual >= &target.amount.atoms.integer()),
-        None => true,
+    Ok(receipts)
+}
+
+/// External bridge settlement is persisted as plan proceeds, not rewritten
+/// into the source operation's immutable proof. For progress/completion only,
+/// expose a synthetic typed receipt for the portion of committed proceeds not
+/// already represented by the operation effects. Include proceeds later
+/// consumed by dependent steps: receipt completion records what was received,
+/// not what remains spendable.
+fn include_committed_plan_receipt(
+    completion: &financial_plans::FinancialStepCompletion,
+    effects: &mut Vec<FinancialEffect>,
+    usage: &FinancialPlanUsage,
+    step_id: &str,
+) -> Result<()> {
+    let Some(target) = completion.minimum_net_receipt.as_ref() else {
+        return Ok(());
     };
-    let receipt_ok = match &completion.minimum_net_receipt {
-        Some(target) => receipts
-            .get(&resource_asset_key(target)?)
-            .is_some_and(|actual| actual >= &target.amount.atoms.integer()),
-        None => true,
-    };
-    Ok(spend_ok && receipt_ok && (!completion.operation_succeeded || operation_succeeded))
+    let key = resource_asset_key(target)?;
+    let observed = completion_receipt_totals(effects)?
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    let mut committed = BigUint::zero();
+    for proceeds in usage.verified_proceeds.iter().filter(|proceeds| {
+        proceeds.producing_step_id == step_id
+            && proceeds.resource == target.resource
+            && proceeds.asset == target.amount.asset
+    }) {
+        let available = proceeds.available.integer();
+        if proceeds.consumed.integer() > available {
+            return Err(plan_error(
+                "PLAN_PROCEEDS_INVALID",
+                "Consumed plan proceeds exceed the verified receipt total.",
+                "Reconcile the durable financial journal before continuing.",
+            ));
+        }
+        committed += available;
+    }
+    if committed > observed {
+        effects.push(FinancialEffect::UsableCredit {
+            to: target.resource.clone(),
+            amount: Amount {
+                asset: target.amount.asset.clone(),
+                atoms: fin_domain::Quantity::new((committed - observed).to_string())?,
+            },
+        });
+    }
+    Ok(())
 }
 
 fn summarize_plan_effects(
@@ -2894,6 +3646,8 @@ fn validate_revision_transition(
     let Some(prior) = prior else {
         return Ok(());
     };
+    validate_cumulative_revision_scopes(prior, next_permissions, store)?;
+    validate_active_bridge_revision_scopes(prior, next_permissions, store)?;
     if prior.active_attempt_id.is_some() {
         return Err(plan_error(
             "PLAN_ATTEMPT_UNRESOLVED",
@@ -3058,6 +3812,115 @@ fn validate_revision_transition(
                 "PLAN_REVISION_BELOW_USAGE",
                 "A revised fee bound is below already consumed authority.",
                 "Keep revised limits at or above verified consumption.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cumulative_revision_scopes(
+    prior: &FinancialPlanAuthorizationRecord,
+    next_permissions: &[FinancialPlanStepPermission],
+    store: &Store,
+) -> Result<()> {
+    let mut historical = std::collections::BTreeMap::<
+        String,
+        fin_domain::financial_plans::FinancialPlanCumulativeScope,
+    >::new();
+    let mut revisions = store
+        .financial_plan_revisions(&prior.revision.plan_id)
+        .map_err(map_store)?
+        .into_iter()
+        .map(from_value::<FinancialPlanRevision>)
+        .collect::<Result<Vec<_>>>()?;
+    if !revisions
+        .iter()
+        .any(|revision| revision.revision_id == prior.revision.revision_id)
+    {
+        revisions.push(prior.revision.clone());
+    }
+    for scope in revisions
+        .iter()
+        .flat_map(|revision| revision.permissions.iter())
+        .filter_map(|permission| permission.permission.as_ref()?.cumulative_scope.as_ref())
+    {
+        if historical
+            .insert(scope.scope_id.clone(), scope.clone())
+            .is_some_and(|previous| previous != *scope)
+        {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_CONFLICT",
+                "Prior plan revisions disagree about a shared adapter parent cap.",
+                "Keep the original cumulative scope definition across revisions.",
+            ));
+        }
+    }
+    for permission in next_permissions {
+        let Some(scope) = permission
+            .permission
+            .as_ref()
+            .and_then(|value| value.cumulative_scope.as_ref())
+        else {
+            continue;
+        };
+        if historical
+            .get(&scope.scope_id)
+            .is_some_and(|old| old != scope)
+        {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_CHANGED",
+                "A plan revision cannot reset or widen a previously reviewed cumulative parent cap.",
+                "Preserve the original cumulative scope identity and exact limits.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_active_bridge_revision_scopes(
+    prior: &FinancialPlanAuthorizationRecord,
+    next_permissions: &[FinancialPlanStepPermission],
+    store: &Store,
+) -> Result<()> {
+    let transfers = store.bridge_transfers().map_err(map_store)?;
+    for transfer in transfers.into_iter().filter(|transfer| {
+        transfer
+            .plan_scope
+            .as_ref()
+            .is_some_and(|scope| scope.plan_id == prior.revision.plan_id)
+            && !matches!(
+                transfer.state,
+                fin_domain::BridgeTransferState::Completed
+                    | fin_domain::BridgeTransferState::Refunded
+                    | fin_domain::BridgeTransferState::Failed
+            )
+    }) {
+        let prior_permissions = prior.revision.permissions.iter().filter(|permission| {
+            permission
+                .permission
+                .as_ref()
+                .and_then(|permission| permission.cumulative_scope.as_ref())
+                .is_some_and(|scope| scope.scope_id == transfer.id)
+        });
+        let mut found = false;
+        for old in prior_permissions {
+            found = true;
+            let replacement = next_permissions
+                .iter()
+                .find(|permission| permission.step_id == old.step_id);
+            if replacement != Some(old) {
+                return Err(plan_error(
+                    "PLAN_BRIDGE_PARENT_SCOPE_CHANGED",
+                    "A live plan-linked bridge parent cannot lose or change any declared step permission during plan renewal.",
+                    "Preserve the complete bridge parent topology and selected bounds while renewing the remaining plan authorization.",
+                ));
+            }
+        }
+        if !found {
+            return Err(plan_error(
+                "PLAN_BRIDGE_PARENT_SCOPE_MISSING",
+                "A live plan-linked bridge parent is absent from the current authorized revision.",
+                "Restore its exact bridge steps and cumulative parent scope before authorizing further plan work.",
             ));
         }
     }
@@ -3741,6 +4604,186 @@ mod tests {
     }
 
     #[test]
+    fn committed_external_receipt_completes_target_without_rewriting_source_proof() {
+        let completion = financial_plans::FinancialStepCompletion {
+            principal_spend: Some(resource_amount("source", "USDT", "10")),
+            minimum_net_receipt: Some(resource_amount("destination", "ETH", "100")),
+            operation_succeeded: true,
+        };
+        let source_proof = vec![FinancialEffect::CashDebit {
+            resource: ResourceId("source".into()),
+            amount: Amount {
+                asset: asset("USDT"),
+                atoms: Quantity::new("10").unwrap(),
+            },
+        }];
+        assert!(!completion_met(&completion, &source_proof, true).unwrap());
+        let immutable_source_proof = source_proof.clone();
+        let usage = FinancialPlanUsage {
+            verified_proceeds: vec![FinancialPlanProceeds {
+                producing_step_id: "bridge-deposit".into(),
+                resource: ResourceId("destination".into()),
+                asset: asset("ETH"),
+                available: Quantity::new("100").unwrap(),
+                consumed: Quantity::new("97").unwrap(),
+            }],
+            ..FinancialPlanUsage::default()
+        };
+        let mut status_effects = source_proof.clone();
+        include_committed_plan_receipt(&completion, &mut status_effects, &usage, "bridge-deposit")
+            .unwrap();
+        assert!(completion_met(&completion, &status_effects, true).unwrap());
+        assert_eq!(source_proof, immutable_source_proof);
+        assert_eq!(
+            status_effects.last(),
+            Some(&FinancialEffect::UsableCredit {
+                to: ResourceId("destination".into()),
+                amount: Amount {
+                    asset: asset("ETH"),
+                    atoms: Quantity::new("100").unwrap(),
+                },
+            })
+        );
+
+        let short_usage = FinancialPlanUsage {
+            verified_proceeds: vec![FinancialPlanProceeds {
+                producing_step_id: "bridge-deposit".into(),
+                resource: ResourceId("destination".into()),
+                asset: asset("ETH"),
+                available: Quantity::new("99").unwrap(),
+                consumed: Quantity::new("96").unwrap(),
+            }],
+            ..FinancialPlanUsage::default()
+        };
+        let mut short_effects = source_proof.clone();
+        include_committed_plan_receipt(
+            &completion,
+            &mut short_effects,
+            &short_usage,
+            "bridge-deposit",
+        )
+        .unwrap();
+        assert!(!completion_met(&completion, &short_effects, true).unwrap());
+
+        let unrelated_usage = FinancialPlanUsage {
+            verified_proceeds: vec![FinancialPlanProceeds {
+                producing_step_id: "different-step".into(),
+                resource: ResourceId("destination".into()),
+                asset: asset("ETH"),
+                available: Quantity::new("100").unwrap(),
+                consumed: Quantity::zero(),
+            }],
+            ..FinancialPlanUsage::default()
+        };
+        let mut unrelated_effects = source_proof;
+        include_committed_plan_receipt(
+            &completion,
+            &mut unrelated_effects,
+            &unrelated_usage,
+            "bridge-deposit",
+        )
+        .unwrap();
+        assert!(!completion_met(&completion, &unrelated_effects, true).unwrap());
+    }
+
+    #[test]
+    fn only_completed_plan_linked_destination_proof_unblocks_receipt_projection() {
+        let mut transfer = fin_domain::BridgeTransferRecord {
+            version: 1,
+            id: "transfer-1".into(),
+            grant_id: None,
+            plan_scope: Some(fin_domain::BridgePlanScope {
+                plan_id: "plan-1".into(),
+                revision_id: "revision-1".into(),
+            }),
+            metadata: Value::Null,
+            settlement_expectation: None,
+            approved_bounds: None,
+            prospective_debit: None,
+            state: fin_domain::BridgeTransferState::InTransit,
+            quote_revisions: Vec::new(),
+            steps: vec![fin_domain::BridgeStepLink {
+                transfer_id: "transfer-1".into(),
+                grant_id: None,
+                plan_authority: Some(fin_domain::BridgePlanAuthority {
+                    plan_id: "plan-1".into(),
+                    revision_id: "revision-1".into(),
+                    plan_step_id: "bridge-deposit".into(),
+                }),
+                step_id: "provider-deposit".into(),
+                operation_id: Some("operation-1".into()),
+                kind: fin_domain::BridgeStepKind::Deposit,
+                depends_on: Vec::new(),
+                state: fin_domain::BridgeStepState::Settled,
+            }],
+            allocation_owner: fin_domain::BridgeAllocationOwner::Transfer {
+                transfer_id: "transfer-1".into(),
+            },
+            transit: None,
+            applied_proofs: Vec::new(),
+            settlement_proofs: Vec::new(),
+        };
+        let completed_attempt = vec![financial_plans::FinancialPlanAttemptSummary {
+            attempt_id: "operation-1".into(),
+            request_id: "request-1".into(),
+            step_id: "bridge-deposit".into(),
+            status: Status::Completed,
+            submission: None,
+            error: None,
+            result: None,
+        }];
+
+        assert!(!committed_plan_bridge_destination_proof(
+            &transfer,
+            "plan-1",
+            "bridge-deposit",
+            &completed_attempt
+        ));
+
+        transfer.state = fin_domain::BridgeTransferState::Completed;
+        transfer
+            .settlement_proofs
+            .push(fin_domain::BridgeSettlementProof {
+                transfer_id: "transfer-1".into(),
+                outcome: fin_domain::BridgeSettlementOutcome::Refund,
+                evidence_id: "refund-proof".into(),
+                effects: Vec::new(),
+                evidence: Value::Null,
+                observed_at: "2026-01-01T00:00:00Z".into(),
+                proof_digest: "proof-digest".into(),
+            });
+        assert!(!committed_plan_bridge_destination_proof(
+            &transfer,
+            "plan-1",
+            "bridge-deposit",
+            &completed_attempt
+        ));
+
+        transfer.state = fin_domain::BridgeTransferState::Failed;
+        transfer.settlement_proofs[0].outcome = fin_domain::BridgeSettlementOutcome::Destination;
+        assert!(!committed_plan_bridge_destination_proof(
+            &transfer,
+            "plan-1",
+            "bridge-deposit",
+            &completed_attempt
+        ));
+
+        transfer.state = fin_domain::BridgeTransferState::Completed;
+        assert!(committed_plan_bridge_destination_proof(
+            &transfer,
+            "plan-1",
+            "bridge-deposit",
+            &completed_attempt
+        ));
+        assert!(!committed_plan_bridge_destination_proof(
+            &transfer,
+            "another-plan",
+            "bridge-deposit",
+            &completed_attempt
+        ));
+    }
+
+    #[test]
     fn exact_plan_schema_validation_is_complete_and_offline() {
         let schema = json!({
             "$schema":"https://json-schema.org/draft/2020-12/schema",
@@ -3944,8 +4987,65 @@ mod tests {
                 },
                 possible_credits: vec![],
                 fee_assets: vec![],
+                authorization_seconds: None,
+                cumulative_scope: None,
             }),
         }
+    }
+
+    #[test]
+    fn cumulative_parent_scope_cannot_be_widened_by_a_plan_revision() {
+        let mut prior = prior_record();
+        let mut scoped = permission(json!({"route":"fixed"}), json!({}), "20");
+        scoped.permission.as_mut().unwrap().cumulative_scope =
+            Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                scope_id: "SYNTHETIC-bridge-parent".into(),
+                maximum_debits: vec![resource_amount("acct", "USDT", "20")],
+                maximum_costs: vec![],
+            });
+        prior.revision.permissions = vec![scoped.clone()];
+        let store = Store::in_memory().unwrap();
+
+        validate_cumulative_revision_scopes(&prior, &[scoped.clone()], &store).unwrap();
+        let mut widened = scoped;
+        widened
+            .permission
+            .as_mut()
+            .unwrap()
+            .cumulative_scope
+            .as_mut()
+            .unwrap()
+            .maximum_debits[0]
+            .amount
+            .atoms = Quantity::new("21").unwrap();
+        assert_eq!(
+            validate_cumulative_revision_scopes(&prior, &[widened], &store)
+                .unwrap_err()
+                .code,
+            "PLAN_CUMULATIVE_SCOPE_CHANGED"
+        );
+    }
+
+    #[test]
+    fn adapter_plan_duration_ceiling_is_enforced_before_authorization() {
+        let mut permitted = permission(json!({}), json!({}), "30");
+        permitted.permission.as_mut().unwrap().authorization_seconds = Some(30);
+        assert!(validate_plan_authorization_duration(30, &[permitted.clone()]).is_ok());
+        assert_eq!(
+            validate_plan_authorization_duration(31, &[permitted])
+                .unwrap_err()
+                .code,
+            "PLAN_AUTHORIZATION_DURATION_EXCEEDED"
+        );
+
+        let mut invalid = permission(json!({}), json!({}), "30");
+        invalid.permission.as_mut().unwrap().authorization_seconds = Some(0);
+        assert_eq!(
+            validate_plan_authorization_duration(1, &[invalid])
+                .unwrap_err()
+                .code,
+            "PLAN_AUTHORIZATION_DURATION_EXCEEDED"
+        );
     }
 
     fn prior_record() -> FinancialPlanAuthorizationRecord {

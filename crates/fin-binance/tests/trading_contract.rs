@@ -147,12 +147,20 @@ impl Venue {
         })
     }
     fn market(&self, futures: bool) -> Value {
-        json!({"symbols":[{
+        let mut metadata = json!({"symbols":[{
             "symbol":"ETHUSDT","status":"TRADING","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","contractType":"PERPETUAL","isSpotTradingAllowed":true,"orderTypes":["LIMIT"],"timeInForce":["IOC","FOK"],
             "filters":[{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":if self.filters_changed.load(Ordering::SeqCst){"0.1"}else{"0.01"}},
             {"filterType":"LOT_SIZE","minQty":"0.000000000000000001","maxQty":"100","stepSize":"0.000000000000000001"},
             {"filterType":"MIN_NOTIONAL","minNotional":"5","notional":"5","applyToMarket":true}],"futures":futures
-        }]})
+        }]});
+        if !futures {
+            // The real Spot exchangeInfo contract omits Futures timeInForce.
+            metadata["symbols"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("timeInForce");
+        }
+        metadata
     }
     fn position(&self, symbol: Option<&str>) -> Value {
         assert!(symbol.is_none() || symbol == Some("ETHUSDT"));

@@ -5,7 +5,12 @@ use fin_broker::{BridgeAdapter, SharedUsdValuator};
 use fin_domain::{
     Adapter, ApprovalAudit, AuthorizationChallenge, Authorizer, BridgeStepKind as DomainStepKind,
     BridgeStepLink, OperationRequest, Quantity, Result, Status,
-    boundaries::BoundaryAuthorizationRequest, now,
+    boundaries::BoundaryAuthorizationRequest,
+    financial_plans::{
+        FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
+        FinancialPlanStepSpec, FinancialStepCompletion,
+    },
+    now,
 };
 use fin_engine::{Engine, EngineOptions};
 use fin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection};
@@ -236,15 +241,10 @@ impl Harness {
         step: &BridgeStepLink,
         bounds: Option<BridgeBounds>,
     ) -> Value {
-        let kind = match step.kind {
-            DomainStepKind::Approval => DomainStepKind::Approval,
-            DomainStepKind::ResetAllowance => DomainStepKind::ResetAllowance,
-            DomainStepKind::Deposit => DomainStepKind::Deposit,
-        };
         let mut value = serde_json::to_value(BridgeTransferInput {
             transfer_id: transfer.into(),
             step_id: step.step_id.clone(),
-            step_kind: kind,
+            step_kind: step.kind.clone(),
             bounds,
         })
         .unwrap();
@@ -490,6 +490,459 @@ async fn direct_erc20_wrong_token_or_missing_transfer_log_stays_in_transit() {
         assert_eq!(record.state, fin_domain::BridgeTransferState::InTransit);
         assert!(record.transit.is_some());
         assert!(record.settlement_proofs.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_or_simulation() {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let h =
+            Harness::with_source_allowance(fin_evm::alloy::primitives::U256::from(5_000_000u64));
+        let quote = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(None))
+            .await
+            .unwrap();
+        let transfer = quote["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut links: Vec<BridgeStepLink> =
+            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
+        links.sort_by_key(|link| match link.kind {
+            DomainStepKind::ResetAllowance => 0,
+            DomainStepKind::Approval => 1,
+            DomainStepKind::Deposit => 2,
+        });
+        assert_eq!(links.len(), 3);
+
+        // A future-funded plan must be reviewable while this wallet has no
+        // source USDC. Quote construction reads allowance but does not inspect
+        // token balances; plan permission must not estimate/simulate a tx.
+        *h.source.token_balance.lock().unwrap() = fin_evm::alloy::primitives::U256::ZERO;
+        assert_eq!(h.source.token_balance_reads(), 0);
+        assert_eq!(h.source.estimate_gas_calls(), 0);
+        let bounds = h.bounds();
+        let inputs = links
+            .iter()
+            .map(|link| h.step_input(&transfer, link, Some(bounds.clone())))
+            .collect::<Vec<_>>();
+
+        let mut wrong_identity = inputs[0].clone();
+        wrong_identity["stepKind"] = json!("deposit");
+        let error = h
+            .bridge
+            .prepare_plan_permission("bridge.transfer", &wrong_identity, &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "BRIDGE_STEP_KIND_MISMATCH");
+
+        let plan_steps = links
+            .iter()
+            .zip(inputs.iter())
+            .enumerate()
+            .map(|(index, (_link, input))| FinancialPlanStepSpec {
+                step_id: format!("bridge-step-{index}"),
+                operation: "bridge.transfer".into(),
+                input: input.clone(),
+                permitted_variations: json!({}),
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: None,
+                    minimum_net_receipt: None,
+                },
+                funding_dependencies: vec![],
+            })
+            .collect::<Vec<_>>();
+        let wallet_resource = fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet));
+        let source_asset = fin_domain::AssetId {
+            network: "ethereum:1".into(),
+            reference: ETH_USDC.into(),
+            decimals: 6,
+        };
+        let gas_asset = fin_domain::AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        };
+        let plan = FinancialPlanSpec {
+            version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
+            name: "Bridge route review".into(),
+            steps: plan_steps,
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: vec![fin_domain::ResourceAmount {
+                    resource: wallet_resource.clone(),
+                    amount: fin_domain::Amount {
+                        asset: source_asset,
+                        atoms: q("12000000"),
+                    },
+                }],
+                // Each concrete EVM step has a finite per-step preview cap;
+                // the transfer cumulative scope below separately limits their
+                // combined paid cost to one route cap.
+                maximum_costs: vec![fin_domain::CostBound {
+                    location: fin_domain::AccountingLocation::Cash {
+                        resource: wallet_resource,
+                    },
+                    amount: fin_domain::Amount {
+                        asset: gas_asset,
+                        atoms: q("3000000000000000"),
+                    },
+                    treatment: fin_domain::CostTreatment::AdditionalDebit,
+                }],
+            },
+        };
+        let request = FinancialPlanAuthorizationRequest {
+            request_id: "synthetic-bridge-plan-preview".into(),
+            plan,
+            valid_for_seconds: 600,
+            replaces_revision_id: None,
+            expected_review_hash: None,
+        };
+        let review = h.engine.preview_financial_plan(request).await.unwrap();
+        assert_eq!(review.permissions.len(), 3);
+        for (permission, link) in review.permissions.iter().zip(links.iter()) {
+            let adapter = permission.permission.as_ref().unwrap();
+            assert_eq!(
+                adapter.spec.fixed["plan_step_identity"]["transfer_id"],
+                transfer
+            );
+            assert_eq!(
+                adapter.spec.fixed["plan_step_identity"]["step_id"],
+                link.step_id
+            );
+            assert_eq!(
+                adapter.spec.fixed["plan_step_identity"]["step_kind"],
+                serde_json::to_value(&link.kind).unwrap()
+            );
+            let cumulative = adapter.cumulative_scope.as_ref().unwrap();
+            assert_eq!(cumulative.scope_id, transfer);
+            assert_eq!(cumulative.maximum_debits.len(), 1);
+            assert_eq!(cumulative.maximum_debits[0].amount.atoms, q("12000000"));
+            assert_eq!(cumulative.maximum_costs.len(), 1);
+            assert_eq!(
+                cumulative.maximum_costs[0].amount.atoms,
+                q("1000000000000000")
+            );
+        }
+        assert_eq!(h.source.token_balance_reads(), 0);
+        assert_eq!(h.source.estimate_gas_calls(), 0);
+        assert_eq!(h.source.broadcasts(), 0);
+    })
+    .await
+    .expect("future-funded bridge permissions should be read-only");
+}
+
+#[tokio::test]
+async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destination_proof() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let h =
+            Harness::with_source_allowance(fin_evm::alloy::primitives::U256::from(5_000_000u64));
+        let quote = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(None))
+            .await
+            .unwrap();
+        let transfer = quote["transfers"][0]["transfer_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut links: Vec<BridgeStepLink> =
+            serde_json::from_value(quote["transfers"][0]["steps"].clone()).unwrap();
+        links.sort_by_key(|link| match link.kind {
+            DomainStepKind::ResetAllowance => 0,
+            DomainStepKind::Approval => 1,
+            DomainStepKind::Deposit => 2,
+        });
+        let bounds = h.bounds();
+        let inputs = links
+            .iter()
+            .map(|link| h.step_input(&transfer, link, Some(bounds.clone())))
+            .collect::<Vec<_>>();
+        let mut plan = bridge_plan_spec(&h, &links, &inputs);
+        plan.steps[2].completion.minimum_net_receipt = Some(fin_domain::ResourceAmount {
+            resource: fin_domain::ResourceId(format!("ethereum:42161:{}", h.wallet)),
+            amount: bounds.minimum_net_receipt.clone().unwrap(),
+        });
+        plan.steps.push(FinancialPlanStepSpec {
+            step_id: "bridge-status-after-settlement".into(),
+            operation: "bridge.status".into(),
+            input: json!({"transferId":transfer}),
+            permitted_variations: json!({
+                "mode":"exact",
+                "maximum_debits":[],
+                "maximum_costs":[],
+                "possible_credits":[]
+            }),
+            completion: FinancialStepCompletion {
+                operation_succeeded: true,
+                principal_spend: None,
+                minimum_net_receipt: None,
+            },
+            funding_dependencies: vec![],
+        });
+        let preview_request = FinancialPlanAuthorizationRequest {
+            request_id: format!("plan-preview-{transfer}"),
+            plan: plan.clone(),
+            valid_for_seconds: 600,
+            replaces_revision_id: None,
+            expected_review_hash: None,
+        };
+        let review = h
+            .engine
+            .preview_financial_plan(preview_request)
+            .await
+            .unwrap();
+        let plan_id = h
+            .engine
+            .authorize_financial_plan(FinancialPlanAuthorizationRequest {
+                request_id: format!("plan-authorize-{transfer}"),
+                plan,
+                valid_for_seconds: 600,
+                replaces_revision_id: None,
+                expected_review_hash: Some(review.review_hash),
+            })
+            .await
+            .unwrap()
+            .plan_id;
+        assert_eq!(
+            h.approval.0.load(Ordering::SeqCst),
+            1,
+            "one Touch ID authorizes the named plan"
+        );
+
+        // Simulate an independently completed upstream funding step after plan
+        // review. The plan permission itself succeeded while the balance was 0.
+        *h.source.token_balance.lock().unwrap() =
+            fin_evm::alloy::primitives::U256::from(20_000_000u64);
+
+        // Model a provider quote expiring while an upstream funding step is
+        // being completed. Refresh after plan approval, before the first
+        // bridge claim, and retain the exact selected bounds and step IDs.
+        let latest = h.state.transfer(&transfer).unwrap().unwrap();
+        let mut expired = latest.quote_revisions.last().unwrap().clone();
+        expired.revision += 1;
+        expired.observed_at = "2026-10-01T00:00:00Z".into();
+        expired.valid_until = "2026-10-01T00:01:00Z".into();
+        expired.payload["quote"]["observed_at"] = json!(expired.observed_at);
+        expired.payload["quote"]["valid_until"] = json!(expired.valid_until);
+        h.state.append_quote_revision(&transfer, &expired).unwrap();
+        let preclaim_refresh = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(Some(transfer.clone())))
+            .await
+            .unwrap();
+        let preclaim_links: Vec<BridgeStepLink> =
+            serde_json::from_value(preclaim_refresh["transfers"][0]["steps"].clone()).unwrap();
+        assert_eq!(
+            preclaim_links
+                .iter()
+                .map(|link| link.step_id.clone())
+                .collect::<Vec<_>>(),
+            links
+                .iter()
+                .map(|link| link.step_id.clone())
+                .collect::<Vec<_>>(),
+            "refresh after plan approval retains exact provider step identities"
+        );
+        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+
+        let execute_plan_step = |index: usize, attempt: String| {
+            let engine = h.engine.clone();
+            let plan_id = plan_id.clone();
+            let input = inputs[index].clone();
+            async move {
+                engine
+                    .execute_financial_plan_step(
+                        &plan_id,
+                        &format!("bridge-step-{index}"),
+                        OperationRequest {
+                            request_id: attempt,
+                            operation: "bridge.transfer".into(),
+                            input,
+                            run_id: None,
+                        },
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let reset = execute_plan_step(0, "plan-erc20-reset".into()).await;
+        assert_eq!(
+            reset.status,
+            Status::Completed,
+            "reset error={:?}",
+            reset.error
+        );
+        let approve = execute_plan_step(1, "plan-erc20-approve".into()).await;
+        assert_eq!(
+            approve.status,
+            Status::Completed,
+            "approval error={:?}",
+            approve.error
+        );
+        assert_eq!(
+            h.approval.0.load(Ordering::SeqCst),
+            1,
+            "plan steps reuse the revision approval without child grants"
+        );
+
+        // A quote refresh before principal dispatch is still on the same
+        // protected parent and preserves each exact step and plan authority.
+        let refreshed = h
+            .bridge
+            .read("bridge.quotes", &h.quote_input(Some(transfer.clone())))
+            .await
+            .unwrap();
+        let refreshed_links: Vec<BridgeStepLink> =
+            serde_json::from_value(refreshed["transfers"][0]["steps"].clone()).unwrap();
+        assert_eq!(
+            refreshed_links
+                .iter()
+                .map(|link| link.step_id.clone())
+                .collect::<Vec<_>>(),
+            links
+                .iter()
+                .map(|link| link.step_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(refreshed_links[..2].iter().all(|link| {
+            link.state == fin_domain::BridgeStepState::Settled
+                && link
+                    .plan_authority
+                    .as_ref()
+                    .is_some_and(|authority| authority.plan_id == plan_id)
+        }));
+        assert!(refreshed_links[2].plan_authority.is_none());
+        let saved = h.state.transfer(&transfer).unwrap().unwrap();
+        assert_eq!(
+            saved.grant_id, None,
+            "named plans do not synthesize a bridge boundary grant"
+        );
+        assert_eq!(saved.plan_scope.as_ref().unwrap().plan_id, plan_id);
+
+        let deposit = execute_plan_step(2, "plan-erc20-deposit".into()).await;
+        assert_eq!(
+            deposit.status,
+            Status::Completed,
+            "deposit error={:?}",
+            deposit.error
+        );
+        let source_only_status = h.engine.financial_plan_status(&plan_id).await.unwrap();
+        assert!(
+            !source_only_status.blockers.is_empty(),
+            "source proof cannot satisfy the parent-level destination settlement obligation"
+        );
+        assert_eq!(
+            source_only_status.steps[2].state,
+            fin_domain::financial_plans::FinancialPlanStepProgressState::InProgress,
+            "an explicit destination receipt floor remains pending after source proof"
+        );
+        assert!(
+            source_only_status.usage.verified_proceeds.is_empty(),
+            "no destination proceeds become spendable before final receipt proof"
+        );
+        assert!(
+            source_only_status.next_eligible_step_id.is_none(),
+            "pending destination floor must block later plan steps: {:?}",
+            source_only_status.next_eligible_step_id
+        );
+        assert_eq!(
+            h.source.broadcasts(),
+            3,
+            "status must not replay source writes"
+        );
+        let in_transit = h.state.transfer(&transfer).unwrap().unwrap();
+        assert!(
+            in_transit
+                .transit
+                .as_ref()
+                .is_some_and(|transit| !transit.spendable),
+            "source settlement records nonspendable transit while destination remains pending"
+        );
+        assert_eq!(h.approval.0.load(Ordering::SeqCst), 1);
+
+        let status = h
+            .bridge
+            .read("bridge.status", &json!({"transferId":transfer}))
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "completed", "final status={status}");
+        let settled = h.engine.financial_plan_status(&plan_id).await.unwrap();
+        assert!(
+            settled.blockers.is_empty(),
+            "final proof clears bridge blocker: {:?}",
+            settled.blockers
+        );
+        assert!(settled.steps.iter().take(3).all(|step| {
+            step.state == fin_domain::financial_plans::FinancialPlanStepProgressState::Completed
+        }));
+        assert_eq!(
+            settled.next_eligible_step_id.as_deref(),
+            Some("bridge-status-after-settlement"),
+            "destination proof completes the receipt-bound deposit and exposes the next independent step"
+        );
+        assert_eq!(
+            h.approval.0.load(Ordering::SeqCst),
+            1,
+            "proof-only status reconciliation needs no extra approval"
+        );
+    })
+    .await
+    .expect("named bridge plan should retain its parent until final destination proof");
+}
+
+fn bridge_plan_spec(h: &Harness, links: &[BridgeStepLink], inputs: &[Value]) -> FinancialPlanSpec {
+    assert_eq!(links.len(), inputs.len());
+    let steps = links
+        .iter()
+        .zip(inputs)
+        .enumerate()
+        .map(|(index, (_, input))| FinancialPlanStepSpec {
+            step_id: format!("bridge-step-{index}"),
+            operation: "bridge.transfer".into(),
+            input: input.clone(),
+            permitted_variations: json!({}),
+            completion: FinancialStepCompletion {
+                operation_succeeded: true,
+                principal_spend: None,
+                minimum_net_receipt: None,
+            },
+            funding_dependencies: vec![],
+        })
+        .collect();
+    FinancialPlanSpec {
+        version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
+        name: "Synthetic bridge plan".into(),
+        steps,
+        aggregate_bounds: FinancialPlanBounds {
+            maximum_debits: vec![fin_domain::ResourceAmount {
+                resource: fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
+                amount: fin_domain::Amount {
+                    asset: fin_domain::AssetId {
+                        network: "ethereum:1".into(),
+                        reference: ETH_USDC.into(),
+                        decimals: 6,
+                    },
+                    atoms: q("12000000"),
+                },
+            }],
+            maximum_costs: vec![fin_domain::CostBound {
+                location: fin_domain::AccountingLocation::Cash {
+                    resource: fin_domain::ResourceId(format!("ethereum:1:{}", h.wallet)),
+                },
+                amount: fin_domain::Amount {
+                    asset: fin_domain::AssetId {
+                        network: "ethereum:1".into(),
+                        reference: "native".into(),
+                        decimals: 18,
+                    },
+                    atoms: q("3000000000000000"),
+                },
+                treatment: fin_domain::CostTreatment::AdditionalDebit,
+            }],
+        },
     }
 }
 

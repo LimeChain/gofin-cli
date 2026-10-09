@@ -194,20 +194,20 @@ impl Engine {
                     },
                 ));
             }
-            if let Some(maximum) = selected {
-                if request.valid_for_seconds > maximum {
-                    return Err(boundaries::violation_error(
-                        "The requested bridge authorization duration exceeds its selected maximum.",
-                        BoundaryViolation {
-                            constraint: "authorization_duration_seconds".into(),
-                            approved_bound: json!(maximum),
-                            candidate_value: json!(request.valid_for_seconds),
-                            evidence_time: Some(prepared.observed_at.clone()),
-                            reauthorization_required: false,
-                            reconciliation_required: false,
-                        },
-                    ));
-                }
+            if let Some(maximum) = selected
+                && request.valid_for_seconds > maximum
+            {
+                return Err(boundaries::violation_error(
+                    "The requested bridge authorization duration exceeds its selected maximum.",
+                    BoundaryViolation {
+                        constraint: "authorization_duration_seconds".into(),
+                        approved_bound: json!(maximum),
+                        candidate_value: json!(request.valid_for_seconds),
+                        evidence_time: Some(prepared.observed_at.clone()),
+                        reauthorization_required: false,
+                        reconciliation_required: false,
+                    },
+                ));
             }
             selected
         } else {

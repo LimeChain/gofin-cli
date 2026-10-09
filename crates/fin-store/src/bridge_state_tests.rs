@@ -11,6 +11,7 @@ fn transfer() -> BridgeTransferRecord {
         version: 1,
         id: "SYNTHETIC-transfer-1".into(),
         grant_id: Some("SYNTHETIC-grant-1".into()),
+        plan_scope: None,
         metadata: json!({"intent":"SYNTHETIC exact route and bounds"}),
         settlement_expectation: Some(BridgeSettlementExpectation {
             destination: vec![BridgeSettlementTarget {
@@ -88,6 +89,175 @@ fn legacy_transit_json_without_destination_locator_still_round_trips() {
     let decoded: TransitResource = serde_json::from_value(old.clone()).unwrap();
     assert_eq!(decoded.destination_locator, None);
     assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+}
+
+#[test]
+fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("SYNTHETIC-v8-bridge.sqlite");
+    let mut store = Store::open(&path).unwrap();
+    let mut pending = transfer();
+    pending.grant_id = None;
+    pending.steps = vec![BridgeStepLink {
+        transfer_id: pending.id.clone(),
+        step_id: "SYNTHETIC-plan-deposit-link".into(),
+        kind: BridgeStepKind::Deposit,
+        depends_on: vec![],
+        operation_id: None,
+        grant_id: None,
+        plan_authority: None,
+        state: BridgeStepState::Unsubmitted,
+    }];
+    store.save_bridge_transfer(&pending).unwrap();
+    pending.plan_scope = Some(fin_domain::BridgePlanScope {
+        plan_id: "SYNTHETIC-plan-owner".into(),
+        revision_id: "SYNTHETIC-plan-revision".into(),
+    });
+    store
+        .conn
+        .execute(
+            "UPDATE bridge_transfers SET record_json=?2 WHERE transfer_id=?1",
+            params![pending.id, serde_json::to_string(&pending).unwrap()],
+        )
+        .unwrap();
+    let plan_revision = json!({
+        "plan_id":"SYNTHETIC-plan-owner",
+        "revision_id":"SYNTHETIC-plan-revision",
+        "spec":{"steps":[{"step_id":"bridge-deposit","operation":"bridge.transfer"}]},
+        "permissions":[{"step_id":"bridge-deposit","permission":{"spec":{"fixed":{}},"possible_credits":[],"fee_assets":[]}}]
+    });
+    let plan_record = json!({
+        "revision":plan_revision,
+        "approval":{"mechanism":"synthetic"},
+        "attempts":[],
+        "usage":{"reservations":[]},
+        "active_attempt_id":null
+    });
+    store.conn.execute(
+        "INSERT INTO financial_plans(plan_id,active_revision_id,record_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?4)",
+        params!["SYNTHETIC-plan-owner", "SYNTHETIC-plan-revision", plan_record.to_string(), "t0"],
+    ).unwrap();
+    store.conn.execute(
+        "INSERT INTO financial_plan_revisions(plan_id,revision_id,request_id,revision_json,created_at) VALUES (?1,?2,?3,?4,?5)",
+        params!["SYNTHETIC-plan-owner", "SYNTHETIC-plan-revision", "SYNTHETIC-plan-request", plan_revision.to_string(), "t0"],
+    ).unwrap();
+    let operation = json!({
+        "id":"SYNTHETIC-pending-op",
+        "request_id":"SYNTHETIC-pending-request",
+        "fingerprint":"SYNTHETIC-pending-fingerprint",
+        "operation":"synthetic.write",
+        "status":"submitted",
+        "submission":{"kind":"SYNTHETIC","reference":"SYNTHETIC-external"}
+    });
+    store
+        .create_request(
+            "SYNTHETIC-pending-op",
+            "SYNTHETIC-pending-request",
+            "SYNTHETIC-pending-fingerprint",
+            "synthetic.write",
+            None,
+            "submitted",
+            &operation,
+            "t0",
+        )
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO submissions(operation_id,kind,reference,data_json) VALUES (?1,?2,?3,?4)",
+            params![
+                "SYNTHETIC-pending-op",
+                "SYNTHETIC",
+                "SYNTHETIC-external",
+                "{}"
+            ],
+        )
+        .unwrap();
+    store.conn.pragma_update(None, "user_version", 8).unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .conn
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        reopened.bridge_transfer(&pending.id).unwrap(),
+        Some(pending.clone())
+    );
+    assert_eq!(
+        reopened.financial_plan("SYNTHETIC-plan-owner").unwrap(),
+        Some(plan_record.clone())
+    );
+    assert_eq!(
+        reopened
+            .financial_plan_revision("SYNTHETIC-plan-owner", "SYNTHETIC-plan-revision")
+            .unwrap(),
+        Some(plan_revision)
+    );
+    assert_eq!(
+        reopened
+            .bridge_transfer(&pending.id)
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .state,
+        BridgeStepState::Unsubmitted
+    );
+    assert_eq!(
+        reopened.get_record("SYNTHETIC-pending-op").unwrap(),
+        Some(operation)
+    );
+    assert_eq!(
+        reopened
+            .conn
+            .query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM submissions WHERE operation_id='SYNTHETIC-pending-op'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(reopened);
+
+    let future = Connection::open(&path).unwrap();
+    future.pragma_update(None, "user_version", 10).unwrap();
+    drop(future);
+    assert!(
+        Store::open(&path).is_err(),
+        "older store code must reject a newer authorization schema"
+    );
+    let readback = Connection::open(&path).unwrap();
+    assert_eq!(
+        readback
+            .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        10
+    );
+    assert_eq!(
+        readback
+            .query_row::<String, _, _>(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id='SYNTHETIC-transfer-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        serde_json::to_string(&pending).unwrap()
+    );
+    assert_eq!(
+        readback
+            .query_row::<String, _, _>(
+                "SELECT record_json FROM financial_plans WHERE plan_id='SYNTHETIC-plan-owner'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        plan_record.to_string()
+    );
 }
 
 #[test]
@@ -251,6 +421,7 @@ fn bridge_quote_refresh_and_step_link_are_append_only_and_restart_safe() {
     let step = BridgeStepLink {
         transfer_id: record.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-deposit-step".into(),
         operation_id: Some("SYNTHETIC-deposit-operation".into()),
         kind: BridgeStepKind::Deposit,
@@ -406,7 +577,7 @@ fn v3_upgrade_adds_bridge_tables_without_touching_pending_operation_or_submissio
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-pending").unwrap(),
@@ -496,6 +667,7 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
     let deposit_step = BridgeStepLink {
         transfer_id: transfer.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-deposit-step".into(),
         operation_id: None,
         kind: BridgeStepKind::Deposit,
@@ -705,6 +877,7 @@ fn bridge_attempt_atomically_claims_only_declared_ready_step_once() {
     let deposit = BridgeStepLink {
         transfer_id: transfer.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-deposit-step".into(),
         operation_id: None,
         kind: BridgeStepKind::Deposit,
@@ -825,6 +998,7 @@ fn boundary_grant_scope_and_transfer_binding_commit_together() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-approval".into(),
             operation_id: None,
             kind: BridgeStepKind::Approval,
@@ -834,6 +1008,7 @@ fn boundary_grant_scope_and_transfer_binding_commit_together() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-deposit".into(),
             operation_id: None,
             kind: BridgeStepKind::Deposit,
@@ -933,6 +1108,7 @@ fn selected_prospective_cap_can_replace_quote_hint_only_before_a_step_claim() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-approval-before-cap".into(),
             operation_id: None,
             kind: BridgeStepKind::Approval,
@@ -942,6 +1118,7 @@ fn selected_prospective_cap_can_replace_quote_hint_only_before_a_step_claim() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-deposit-before-cap".into(),
             operation_id: None,
             kind: BridgeStepKind::Deposit,
@@ -1014,6 +1191,7 @@ fn selected_cap_after_reset_requires_the_exact_awaiting_approval_selection() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-reset-approved-cap".into(),
             operation_id: None,
             kind: BridgeStepKind::ResetAllowance,
@@ -1023,6 +1201,7 @@ fn selected_cap_after_reset_requires_the_exact_awaiting_approval_selection() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-approval-approved-cap".into(),
             operation_id: None,
             kind: BridgeStepKind::Approval,
@@ -1032,6 +1211,7 @@ fn selected_cap_after_reset_requires_the_exact_awaiting_approval_selection() {
         BridgeStepLink {
             transfer_id: transfer.id.clone(),
             grant_id: None,
+            plan_authority: None,
             step_id: "SYNTHETIC-deposit-approved-cap".into(),
             operation_id: None,
             kind: BridgeStepKind::Deposit,
@@ -1171,6 +1351,7 @@ fn definite_pre_submission_failure_releases_only_the_claimed_bridge_step() {
     let step = BridgeStepLink {
         transfer_id: transfer.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-exact-approval-step".into(),
         operation_id: None,
         kind: BridgeStepKind::Approval,
@@ -1275,6 +1456,7 @@ fn proven_reverted_deposit_keeps_identity_and_never_creates_transit() {
     let step = BridgeStepLink {
         transfer_id: transfer.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-reverted-deposit".into(),
         operation_id: None,
         kind: BridgeStepKind::Deposit,
@@ -1360,6 +1542,7 @@ fn proved_approval_settles_only_its_submitted_step_atomically() {
     let step = BridgeStepLink {
         transfer_id: transfer.id.clone(),
         grant_id: None,
+        plan_authority: None,
         step_id: "SYNTHETIC-approval-step".into(),
         operation_id: None,
         kind: BridgeStepKind::Approval,

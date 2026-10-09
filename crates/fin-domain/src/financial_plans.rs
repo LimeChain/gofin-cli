@@ -116,6 +116,24 @@ pub struct PlanPermission {
     pub spec: BoundarySpec,
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
     pub fee_assets: Vec<AssetId>,
+    /// Optional adapter-imposed upper bound on the parent plan consent life.
+    /// It is reviewed with the permission and applies to every step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_seconds: Option<u64>,
+    /// Optional cap shared across multiple concrete steps in one adapter-owned
+    /// parent action. Each step retains its own `spec`; the engine applies
+    /// these cumulative caps once to the aggregate verified/reserved use for
+    /// the stable scope ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cumulative_scope: Option<FinancialPlanCumulativeScope>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FinancialPlanCumulativeScope {
+    pub scope_id: String,
+    pub maximum_debits: Vec<ResourceAmount>,
+    pub maximum_costs: Vec<CostBound>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

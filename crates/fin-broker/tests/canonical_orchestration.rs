@@ -66,10 +66,10 @@ fn safe_fork_operation_evidence(operation: &fin_domain::OperationRecord) -> Valu
         if let Some(Value::Object(fields)) = source {
             let mut safe = serde_json::Map::new();
             for key in SAFE_KEYS {
-                if let Some(value) = fields.get(*key) {
-                    if value.is_string() || value.is_number() || value.is_boolean() {
-                        safe.insert((*key).to_owned(), value.clone());
-                    }
+                if let Some(value) = fields.get(*key)
+                    && (value.is_string() || value.is_number() || value.is_boolean())
+                {
+                    safe.insert((*key).to_owned(), value.clone());
                 }
             }
             if !safe.is_empty() {
@@ -149,7 +149,7 @@ impl Rpc {
     ) -> Vec<Value> {
         let mut packed = Vec::new();
         packed.extend_from_slice(
-            &Address::from_slice(&hex::decode(&recipient[2..]).unwrap()).as_slice(),
+            Address::from_slice(&hex::decode(&recipient[2..]).unwrap()).as_slice(),
         );
         packed.extend_from_slice(&amount.to_be_bytes::<32>());
         let mut inbox_data = Vec::new();

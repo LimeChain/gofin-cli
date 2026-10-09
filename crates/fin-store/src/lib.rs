@@ -10,13 +10,16 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
+/// Persisted allocation-owner ledger row, in the order returned by SQLite.
+pub type BridgeAllocationOwnerRow = (String, String, String, String, Option<String>);
+
 #[cfg(test)]
 mod boundary_migration_tests;
 #[cfg(test)]
 mod bridge_state_tests;
 pub mod legacy;
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -197,9 +200,7 @@ impl BridgeStateRepository {
             .map_err(|_| StoreError::Poisoned)?
             .settle_bridge_allocation(transfer_id, settled_at)
     }
-    pub fn allocation_owners(
-        &self,
-    ) -> Result<Vec<(String, String, String, String, Option<String>)>> {
+    pub fn allocation_owners(&self) -> Result<Vec<BridgeAllocationOwnerRow>> {
         self.store
             .lock()
             .map_err(|_| StoreError::Poisoned)?
@@ -230,6 +231,7 @@ impl BridgeStateRepository {
                 timestamp,
             )
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_boundary_source_handoff(
         &self,
         settlement: &Settlement,
@@ -864,6 +866,15 @@ impl Store {
                  PRAGMA user_version = 8;",
             )?;
             tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 8 {
+            // Version 9 introduces durable named-plan ownership fields in
+            // bridge JSON and cumulative adapter-scope caps in plan records.
+            // No rows need rewriting; the version prevents older binaries
+            // from opening and ignoring those authorization semantics.
+            conn.pragma_update(None, "user_version", 9)?;
         }
         Ok(())
     }
@@ -1609,7 +1620,13 @@ impl Store {
             return Err(StoreError::BridgeConflict);
         }
         match existing {
-            None if transfer.version == 1 => {
+            None if transfer.version == 1
+                && transfer.plan_scope.is_none()
+                && transfer
+                    .steps
+                    .iter()
+                    .all(|step| step.plan_authority.is_none()) =>
+            {
                 tx.execute(
                     "INSERT INTO bridge_transfers(transfer_id,version,record_json) VALUES (?1,?2,?3)",
                     params![transfer.id, transfer.version, record],
@@ -1627,6 +1644,7 @@ impl Store {
                     || ((old.grant_id.is_some() || transfer.grant_id.is_some())
                         && old.steps.len() != transfer.steps.len())
                     || !optional_identity_transition_allowed(&old.grant_id, &transfer.grant_id)
+                    || old.plan_scope != transfer.plan_scope
                     || old.metadata != transfer.metadata
                     || !bridge_owner_transition_allowed(
                         &old.allocation_owner,
@@ -1652,6 +1670,7 @@ impl Store {
                                     &prior.grant_id,
                                     &next.grant_id,
                                 )
+                                && prior.plan_authority == next.plan_authority
                                 && next.kind == prior.kind
                                 && next.depends_on == prior.depends_on
                         })
@@ -1731,6 +1750,53 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(transfer)
+    }
+
+    /// Verify the immutable plan authority selected for the exact submitted
+    /// bridge link before Engine starts dispatch. The boundary-grant ID must
+    /// stay absent for named-plan attempts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_bridge_plan_scope(
+        &self,
+        transfer_id: &str,
+        revision_id: &str,
+        plan_step_id: &str,
+        step_id: &str,
+        operation_id: &str,
+        bounds: &Value,
+        expectation: &fin_domain::BridgeSettlementExpectation,
+    ) -> Result<()> {
+        let transfer = self
+            .bridge_transfer(transfer_id)?
+            .ok_or(StoreError::BridgeConflict)?;
+        let authority = fin_domain::BridgePlanAuthority {
+            plan_id: transfer
+                .plan_scope
+                .as_ref()
+                .ok_or(StoreError::BridgeConflict)?
+                .plan_id
+                .clone(),
+            revision_id: revision_id.to_owned(),
+            plan_step_id: plan_step_id.to_owned(),
+        };
+        if transfer.grant_id.is_some()
+            || transfer
+                .plan_scope
+                .as_ref()
+                .is_none_or(|scope| scope.plan_id != authority.plan_id)
+            || transfer.approved_bounds.as_ref() != Some(bounds)
+            || transfer.settlement_expectation.as_ref() != Some(expectation)
+            || !transfer.steps.iter().any(|step| {
+                step.step_id == step_id
+                    && step.grant_id.is_none()
+                    && step.plan_authority.as_ref() == Some(&authority)
+                    && step.operation_id.as_deref() == Some(operation_id)
+                    && step.state == fin_domain::BridgeStepState::Submitted
+            })
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        Ok(())
     }
 
     pub fn bridge_transfer(
@@ -1815,6 +1881,9 @@ impl Store {
         if !optional_identity_transition_allowed(&step.grant_id, &transfer.grant_id) {
             return Err(StoreError::BridgeConflict);
         }
+        if step.plan_authority.is_some() {
+            return Err(StoreError::BridgeConflict);
+        }
         if let Some(existing) = transfer
             .steps
             .iter_mut()
@@ -1824,6 +1893,7 @@ impl Store {
                 || existing.kind != step.kind
                 || existing.depends_on != step.depends_on
                 || !optional_identity_transition_allowed(&existing.grant_id, &step.grant_id)
+                || existing.plan_authority != step.plan_authority
             {
                 return Err(StoreError::BridgeConflict);
             }
@@ -1910,9 +1980,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn bridge_allocation_owners(
-        &self,
-    ) -> Result<Vec<(String, String, String, String, Option<String>)>> {
+    pub fn bridge_allocation_owners(&self) -> Result<Vec<BridgeAllocationOwnerRow>> {
         let mut statement = self.conn.prepare(
             "SELECT operation_id,transfer_id,charge_usd_micros,source_proved_at,transfer_settled_at FROM bridge_allocation_owners ORDER BY operation_id",
         )?;
@@ -2044,6 +2112,7 @@ impl Store {
         let previous: fin_domain::BridgeTransferRecord = serde_json::from_str(&old_json)?;
         if version + 1 != transfer.version as i64
             || !optional_identity_transition_allowed(&previous.grant_id, &transfer.grant_id)
+            || previous.plan_scope != transfer.plan_scope
             || !bridge_operation_owner_matches(&previous.allocation_owner, &settlement.operation_id)
             || !bridge_state_transition_allowed(&previous.state, &transfer.state)
             || !is_prefix(&previous.quote_revisions, &transfer.quote_revisions)
@@ -2052,6 +2121,7 @@ impl Store {
                     old.step_id == step.step_id
                         && operation_binding_allowed(&old.operation_id, &step.operation_id)
                         && optional_identity_transition_allowed(&old.grant_id, &step.grant_id)
+                        && old.plan_authority == step.plan_authority
                         && old.kind == step.kind
                         && old.depends_on == step.depends_on
                 })
@@ -2165,6 +2235,7 @@ impl Store {
         let previous: fin_domain::BridgeTransferRecord = serde_json::from_str(&old_json)?;
         if version + 1 != transfer.version as i64
             || previous.grant_id != transfer.grant_id
+            || previous.plan_scope != transfer.plan_scope
             || !bridge_operation_owner_matches(&previous.allocation_owner, &settlement.operation_id)
             || !bridge_state_transition_allowed(&previous.state, &transfer.state)
             || !is_prefix(&previous.quote_revisions, &transfer.quote_revisions)
@@ -2173,6 +2244,7 @@ impl Store {
                     old.step_id == step.step_id
                         && operation_binding_allowed(&old.operation_id, &step.operation_id)
                         && optional_identity_transition_allowed(&old.grant_id, &step.grant_id)
+                        && old.plan_authority == step.plan_authority
                         && old.kind == step.kind
                         && old.depends_on == step.depends_on
                 })
@@ -2231,6 +2303,33 @@ impl Store {
         proof: &fin_domain::BridgeSettlementProof,
         settled_at: &str,
     ) -> Result<()> {
+        self.commit_bridge_transfer_settlement_inner(transfer, proof, settled_at, None)
+    }
+
+    pub fn commit_financial_plan_bridge_transfer_settlement(
+        &mut self,
+        transfer: &fin_domain::BridgeTransferRecord,
+        proof: &fin_domain::BridgeSettlementProof,
+        settled_at: &str,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+    ) -> Result<()> {
+        self.commit_bridge_transfer_settlement_inner(
+            transfer,
+            proof,
+            settled_at,
+            Some((plan_id, expected_plan, updated_plan)),
+        )
+    }
+
+    fn commit_bridge_transfer_settlement_inner(
+        &mut self,
+        transfer: &fin_domain::BridgeTransferRecord,
+        proof: &fin_domain::BridgeSettlementProof,
+        settled_at: &str,
+        plan: Option<(&str, &Value, &Value)>,
+    ) -> Result<()> {
         if !matches!(
             transfer.state,
             fin_domain::BridgeTransferState::Completed | fin_domain::BridgeTransferState::Refunded
@@ -2251,6 +2350,31 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((plan_id, expected_plan, updated_plan)) = plan {
+            let current_plan: Option<String> = tx
+                .query_row(
+                    "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                    [plan_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current_plan
+                .as_deref()
+                .map(serde_json::from_str::<Value>)
+                .transpose()?
+                != Some(expected_plan.clone())
+                || json_string(
+                    expected_plan.get("revision").unwrap_or(&Value::Null),
+                    "plan_id",
+                ) != Some(plan_id)
+                || json_string(
+                    updated_plan.get("revision").unwrap_or(&Value::Null),
+                    "plan_id",
+                ) != Some(plan_id)
+            {
+                return Err(StoreError::ConcurrentReservation);
+            }
+        }
         let current: Option<(i64, String)> = tx
             .query_row(
                 "SELECT version,record_json FROM bridge_transfers WHERE transfer_id=?1",
@@ -2276,6 +2400,7 @@ impl Store {
         let previous: fin_domain::BridgeTransferRecord = serde_json::from_str(&current_json)?;
         if version + 1 != transfer.version as i64
             || previous.grant_id != transfer.grant_id
+            || previous.plan_scope != transfer.plan_scope
             || previous.allocation_owner != transfer.allocation_owner
             || previous.transit.is_none()
             || !settlement_locator_matches(previous.transit.as_ref(), proof)
@@ -2285,6 +2410,26 @@ impl Store {
             || !is_prefix(&previous.settlement_proofs, &transfer.settlement_proofs)
         {
             return Err(StoreError::BridgeConflict);
+        }
+        if let Some((plan_id, _, _)) = plan {
+            let plan_owned_deposit = previous.steps.iter().any(|step| {
+                step.kind == fin_domain::BridgeStepKind::Deposit
+                    && step.state == fin_domain::BridgeStepState::Settled
+                    && step
+                        .plan_authority
+                        .as_ref()
+                        .is_some_and(|authority| authority.plan_id == plan_id)
+                    && step.grant_id.is_none()
+            });
+            if previous
+                .plan_scope
+                .as_ref()
+                .is_none_or(|scope| scope.plan_id != plan_id)
+                || previous.grant_id.is_some()
+                || !plan_owned_deposit
+            {
+                return Err(StoreError::BridgeConflict);
+            }
         }
         let transit_row: Option<String> = tx
             .query_row(
@@ -2326,6 +2471,17 @@ impl Store {
         )?;
         if changed != 1 {
             return Err(StoreError::BridgeConflict);
+        }
+        if let Some((plan_id, _, updated_plan)) = plan {
+            let revision_id = json_string(
+                updated_plan.get("revision").unwrap_or(&Value::Null),
+                "revision_id",
+            )
+            .ok_or(StoreError::RequestConflict)?;
+            tx.execute(
+                "UPDATE financial_plans SET active_revision_id=?1,record_json=?2,updated_at=?3 WHERE plan_id=?4",
+                params![revision_id, updated_plan.to_string(), settled_at, plan_id],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -2856,6 +3012,27 @@ impl Store {
         }).optional().map_err(StoreError::from)
     }
 
+    /// Return immutable plan revisions in creation order. This is used when
+    /// validating adapter-owned cumulative scopes: a new revision must not
+    /// silently redefine a parent scope already used by an earlier revision.
+    pub fn financial_plan_revisions(&self, plan_id: &str) -> Result<Vec<Value>> {
+        let mut statement = self.conn.prepare(
+            "SELECT revision_json FROM financial_plan_revisions WHERE plan_id=?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = statement.query_map([plan_id], |row| {
+            let text: String = row.get(0)?;
+            serde_json::from_str(&text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn financial_plan_revision_owner(
         &self,
         revision_id: &str,
@@ -2988,6 +3165,172 @@ impl Store {
             params![updated_plan.to_string(), timestamp, plan_id],
         )?;
         tx.execute("INSERT INTO financial_plan_attempts(plan_id, revision_id, step_id, operation_id, request_id, candidate_state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'unresolved', ?6)", params![plan_id, revision_id, step_id, operation_id, request_id, timestamp])?;
+        tx.commit()?;
+        Ok(RequestRow {
+            operation_id: operation_id.to_owned(),
+            request_id: request_id.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            operation: operation.to_owned(),
+            record: record.clone(),
+            created: true,
+        })
+    }
+
+    /// Create a plan operation and claim its exact durable bridge link in one
+    /// transaction. This gives plan consent bridge authority without creating
+    /// or borrowing a standalone boundary grant.
+    #[expect(clippy::too_many_arguments)]
+    pub fn create_financial_plan_bridge_attempt(
+        &mut self,
+        plan_id: &str,
+        revision_id: &str,
+        plan_step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        record: &Value,
+        timestamp: &str,
+        transfer_id: &str,
+        bridge_step_id: &str,
+        bridge_kind: &fin_domain::BridgeStepKind,
+        expected_transfer: &Value,
+        updated_transfer: &fin_domain::BridgeTransferRecord,
+    ) -> Result<RequestRow> {
+        if operation != "bridge.transfer"
+            || transfer_id.trim().is_empty()
+            || bridge_step_id.trim().is_empty()
+            || plan_step_id.trim().is_empty()
+            || updated_transfer.id != transfer_id
+            || updated_transfer
+                .plan_scope
+                .as_ref()
+                .is_none_or(|scope| scope.plan_id != plan_id)
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_plan: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_plan
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        validate_financial_plan_attempt_transition(
+            expected_plan,
+            updated_plan,
+            revision_id,
+            plan_step_id,
+            operation_id,
+        )?;
+        let expected_expiry = expected_plan
+            .get("revision")
+            .and_then(|revision| json_string(revision, "expires_at"))
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        if json_string(
+            expected_plan.get("revision").unwrap_or(&Value::Null),
+            "status",
+        ) != Some("active")
+            || expected_expiry.is_none_or(|expires| expires <= chrono::Utc::now())
+            || json_string(expected_plan, "active_attempt_id").is_some()
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let unresolved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved')", [plan_id], |row| row.get(0))?;
+        if unresolved {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if let Some(existing) = get_request_tx(&tx, request_id)? {
+            if existing.fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok(RequestRow {
+                created: false,
+                ..existing
+            });
+        }
+
+        let raw_transfer: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [transfer_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(raw_transfer) = raw_transfer else {
+            return Err(StoreError::BridgeConflict);
+        };
+        if serde_json::from_str::<Value>(&raw_transfer)? != *expected_transfer {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let previous: fin_domain::BridgeTransferRecord = serde_json::from_str(&raw_transfer)?;
+        validate_plan_bridge_claim_transition(
+            &previous,
+            updated_transfer,
+            plan_id,
+            revision_id,
+            plan_step_id,
+            operation_id,
+            bridge_step_id,
+            bridge_kind,
+            record,
+        )?;
+
+        tx.execute("INSERT INTO operations(id, request_id, fingerprint, operation, status, run_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'awaiting_approval', NULL, ?5, ?6, ?6)", params![operation_id, request_id, fingerprint, operation, record.to_string(), timestamp])?;
+        tx.execute(
+            "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
+            params![updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.execute("INSERT INTO financial_plan_attempts(plan_id, revision_id, step_id, operation_id, request_id, candidate_state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'unresolved', ?6)", params![plan_id, revision_id, plan_step_id, operation_id, request_id, timestamp])?;
+        let Some(previous_step) = previous
+            .steps
+            .iter()
+            .find(|step| step.step_id == bridge_step_id)
+        else {
+            return Err(StoreError::BridgeConflict);
+        };
+        let Some(updated_step) = updated_transfer
+            .steps
+            .iter()
+            .find(|step| step.step_id == bridge_step_id)
+        else {
+            return Err(StoreError::BridgeConflict);
+        };
+        let stored_step: Option<String> = tx
+            .query_row(
+                "SELECT step_json FROM bridge_step_links WHERE transfer_id=?1 AND step_id=?2 AND operation_id IS NULL",
+                params![transfer_id, bridge_step_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stored_step.as_deref() != Some(serde_json::to_string(previous_step)?.as_str()) {
+            return Err(StoreError::BridgeConflict);
+        }
+        let changed = tx.execute(
+            "UPDATE bridge_step_links SET operation_id=?3,step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id IS NULL",
+            params![transfer_id, bridge_step_id, operation_id, serde_json::to_string(updated_step)?],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1 AND version=?4",
+            params![transfer_id, updated_transfer.version, serde_json::to_string(updated_transfer)?, previous.version],
+        )?;
         tx.commit()?;
         Ok(RequestRow {
             operation_id: operation_id.to_owned(),
@@ -3303,6 +3646,352 @@ impl Store {
         commit_settlement_tx(&tx, settlement, timestamp)?;
         tx.execute("UPDATE financial_plans SET active_revision_id=?1, record_json=?2, updated_at=?3 WHERE plan_id=?4", params![updated_plan.get("revision").and_then(|revision| json_string(revision, "revision_id")).ok_or(StoreError::RequestConflict)?, updated_plan.to_string(), timestamp, plan_id])?;
         tx.execute("UPDATE financial_plan_attempts SET candidate_state=?1 WHERE operation_id=?2 AND plan_id=?3 AND candidate_state='unresolved'", params![candidate_state, operation_id, plan_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Commit a named-plan bridge step's terminal operation and transfer state
+    /// together. `transit` is present only for a proved source deposit; it is
+    /// nonspendable and becomes the transfer's rolling allocation owner in
+    /// this same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_financial_plan_bridge_settlement(
+        &mut self,
+        settlement: &Settlement,
+        plan_id: &str,
+        revision_id: &str,
+        plan_step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        expected_transfer: &Value,
+        updated_transfer: &fin_domain::BridgeTransferRecord,
+        bridge_step_id: &str,
+        transit: Option<&fin_domain::TransitResource>,
+        charge_usd_micros: Option<&str>,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_plan: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_plan
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(
+                expected_plan.get("revision").unwrap_or(&Value::Null),
+                "revision_id",
+            ) != Some(revision_id)
+            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            || json_string(updated_plan, "active_attempt_id").is_some()
+            || json_string(
+                updated_plan.get("revision").unwrap_or(&Value::Null),
+                "revision_id",
+            ) != Some(revision_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_transfer: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [updated_transfer.id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_transfer
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_transfer.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let previous: fin_domain::BridgeTransferRecord =
+            serde_json::from_value(expected_transfer.clone())?;
+        validate_plan_bridge_terminal_transition(
+            &previous,
+            updated_transfer,
+            plan_id,
+            revision_id,
+            plan_step_id,
+            bridge_step_id,
+            operation_id,
+            settlement,
+            transit,
+            charge_usd_micros,
+        )?;
+        let has_submission: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        if !has_submission {
+            return Err(StoreError::SubmissionConflict);
+        }
+        commit_settlement_tx(&tx, settlement, timestamp)?;
+        let updated_step = updated_transfer
+            .steps
+            .iter()
+            .find(|step| step.step_id == bridge_step_id)
+            .ok_or(StoreError::BridgeConflict)?;
+        let changed = tx.execute(
+            "UPDATE bridge_step_links SET step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id=?3",
+            params![updated_transfer.id, bridge_step_id, operation_id, serde_json::to_string(updated_step)?],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1 AND version=?4",
+            params![updated_transfer.id, updated_transfer.version, serde_json::to_string(updated_transfer)?, previous.version],
+        )?;
+        if let Some(transit) = transit {
+            let duplicate: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bridge_evidence_ids WHERE evidence_id=?1)",
+                [&transit.evidence_id],
+                |row| row.get(0),
+            )?;
+            if duplicate {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.execute(
+                "INSERT INTO bridge_transit(transfer_id,proof_digest,transit_json,evidence_id) VALUES (?1,?2,?3,?4)",
+                params![updated_transfer.id, transit.proof_digest, serde_json::to_string(transit)?, transit.evidence_id],
+            )?;
+            tx.execute(
+                "INSERT INTO bridge_evidence_ids(evidence_id,transfer_id,role) VALUES (?1,?2,'source')",
+                params![transit.evidence_id, updated_transfer.id],
+            )?;
+            let charge = charge_usd_micros.ok_or(StoreError::BridgeConflict)?;
+            if charge.is_empty() || !charge.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(StoreError::BridgeConflict);
+            }
+            tx.execute(
+                "INSERT INTO bridge_allocation_owners(operation_id,transfer_id,charge_usd_micros,source_proved_at,transfer_settled_at) VALUES (?1,?2,?3,?4,NULL)",
+                params![operation_id, updated_transfer.id, charge, timestamp],
+            )?;
+        } else if charge_usd_micros.is_some() {
+            return Err(StoreError::BridgeConflict);
+        }
+        let updated_revision = json_string(
+            updated_plan.get("revision").unwrap_or(&Value::Null),
+            "revision_id",
+        )
+        .ok_or(StoreError::RequestConflict)?;
+        tx.execute(
+            "UPDATE financial_plans SET active_revision_id=?1,record_json=?2,updated_at=?3 WHERE plan_id=?4",
+            params![updated_revision, updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        let changed = tx.execute(
+            "UPDATE financial_plan_attempts SET candidate_state='settled' WHERE operation_id=?1 AND plan_id=?2 AND revision_id=?3 AND step_id=?4 AND candidate_state='unresolved'",
+            params![operation_id, plan_id, revision_id, plan_step_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Close a named-plan bridge operation that did not complete successfully.
+    /// A definite no-submission terminal result releases the finite step claim
+    /// for a later explicit attempt; a submitted proved failure preserves its
+    /// operation identity and permanently marks the parent for recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_financial_plan_bridge_failure(
+        &mut self,
+        settlement: &Settlement,
+        plan_id: &str,
+        revision_id: &str,
+        plan_step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        expected_transfer: &Value,
+        updated_transfer: &fin_domain::BridgeTransferRecord,
+        bridge_step_id: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_plan: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_plan
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(
+                expected_plan.get("revision").unwrap_or(&Value::Null),
+                "revision_id",
+            ) != Some(revision_id)
+            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            || json_string(updated_plan, "active_attempt_id").is_some()
+            || json_string(
+                updated_plan.get("revision").unwrap_or(&Value::Null),
+                "revision_id",
+            ) != Some(revision_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_transfer: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+                [updated_transfer.id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current_transfer
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_transfer.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let previous: fin_domain::BridgeTransferRecord =
+            serde_json::from_value(expected_transfer.clone())?;
+        let status =
+            json_string(&settlement.terminal_record, "status").ok_or(StoreError::BridgeConflict)?;
+        let submitted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            [operation_id],
+            |row| row.get(0),
+        )?;
+        let link = previous
+            .steps
+            .iter()
+            .find(|step| step.step_id == bridge_step_id)
+            .ok_or(StoreError::BridgeConflict)?;
+        let updated_link = updated_transfer
+            .steps
+            .iter()
+            .find(|step| step.step_id == bridge_step_id)
+            .ok_or(StoreError::BridgeConflict)?;
+        let no_submission_release = !submitted
+            && settlement
+                .terminal_record
+                .get("submission")
+                .is_none_or(Value::is_null)
+            && settlement
+                .terminal_record
+                .get("effects")
+                .is_none_or(Value::is_null)
+            && matches!(status, "failed" | "rejected" | "cancelled" | "expired")
+            && updated_link.operation_id.is_none()
+            && updated_link.state == fin_domain::BridgeStepState::Unsubmitted
+            && updated_transfer.state
+                == if previous.steps.iter().any(|step| {
+                    step.step_id != bridge_step_id
+                        && step.state == fin_domain::BridgeStepState::Settled
+                }) {
+                    fin_domain::BridgeTransferState::ApprovalPending
+                } else {
+                    fin_domain::BridgeTransferState::Prepared
+                };
+        let submitted_failure = submitted
+            && status == "failed"
+            && settlement
+                .terminal_record
+                .get("submission")
+                .is_some_and(|value| !value.is_null())
+            && settlement
+                .terminal_record
+                .get("effects")
+                .is_some_and(|value| !value.is_null())
+            && updated_link.operation_id.as_deref() == Some(operation_id)
+            && updated_link.state == fin_domain::BridgeStepState::NeedsAttention
+            && updated_transfer.state == fin_domain::BridgeTransferState::Failed;
+        if !matches!(
+            (no_submission_release, submitted_failure),
+            (true, false) | (false, true)
+        ) || previous
+            .plan_scope
+            .as_ref()
+            .is_none_or(|scope| scope.plan_id != plan_id)
+            || previous.grant_id.is_some()
+            || updated_transfer.plan_scope != previous.plan_scope
+            || updated_transfer.grant_id.is_some()
+            || updated_transfer.id != previous.id
+            || updated_transfer.version
+                != previous
+                    .version
+                    .checked_add(1)
+                    .ok_or(StoreError::BridgeConflict)?
+            || updated_transfer.metadata != previous.metadata
+            || updated_transfer.approved_bounds != previous.approved_bounds
+            || updated_transfer.settlement_expectation != previous.settlement_expectation
+            || updated_transfer.prospective_debit != previous.prospective_debit
+            || updated_transfer.quote_revisions != previous.quote_revisions
+            || updated_transfer.transit != previous.transit
+            || updated_transfer.applied_proofs != previous.applied_proofs
+            || updated_transfer.settlement_proofs != previous.settlement_proofs
+            || updated_transfer.allocation_owner != previous.allocation_owner
+            || link.grant_id.is_some()
+            || link.operation_id.as_deref() != Some(operation_id)
+            || link.state != fin_domain::BridgeStepState::Submitted
+            || link.plan_authority.as_ref().is_none_or(|authority| {
+                authority.plan_id != plan_id
+                    || authority.revision_id != revision_id
+                    || authority.plan_step_id != plan_step_id
+            })
+            || updated_link.transfer_id != link.transfer_id
+            || updated_link.kind != link.kind
+            || updated_link.depends_on != link.depends_on
+            || updated_link.grant_id.is_some()
+            || updated_link.plan_authority != link.plan_authority
+            || previous.steps.iter().enumerate().any(|(index, step)| {
+                step.step_id != bridge_step_id && updated_transfer.steps.get(index) != Some(step)
+            })
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let unresolved: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM financial_plan_attempts WHERE plan_id=?1 AND revision_id=?2 AND step_id=?3 AND operation_id=?4 AND candidate_state='unresolved')",
+            params![plan_id, revision_id, plan_step_id, operation_id],
+            |row| row.get(0),
+        )?;
+        if !unresolved {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        commit_settlement_tx(&tx, settlement, timestamp)?;
+        let changed = tx.execute(
+            "UPDATE bridge_step_links SET operation_id=?3,step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id=?5",
+            params![updated_transfer.id, bridge_step_id, updated_link.operation_id, serde_json::to_string(updated_link)?, operation_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1 AND version=?4",
+            params![updated_transfer.id, updated_transfer.version, serde_json::to_string(updated_transfer)?, previous.version],
+        )?;
+        tx.execute(
+            "UPDATE financial_plans SET active_revision_id=?1,record_json=?2,updated_at=?3 WHERE plan_id=?4",
+            params![revision_id, updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        let candidate_state = if submitted_failure { "failed" } else { status };
+        let changed = tx.execute(
+            "UPDATE financial_plan_attempts SET candidate_state=?1 WHERE plan_id=?2 AND revision_id=?3 AND step_id=?4 AND operation_id=?5 AND candidate_state='unresolved'",
+            params![candidate_state, plan_id, revision_id, plan_step_id, operation_id],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentReservation);
+        }
         tx.commit()?;
         Ok(())
     }
@@ -4814,7 +5503,9 @@ fn persist_bridge_step_rows_tx(
         match old {
             None => {
                 if transfer.grant_id.is_some()
+                    || transfer.plan_scope.is_some()
                     || step.grant_id.is_some()
+                    || step.plan_authority.is_some()
                     || step.operation_id.is_some()
                     || step.state != fin_domain::BridgeStepState::Unsubmitted
                 {
@@ -4828,6 +5519,7 @@ fn persist_bridge_step_rows_tx(
             Some(old) => {
                 if old.operation_id != step.operation_id
                     || !optional_identity_transition_allowed(&old.grant_id, &step.grant_id)
+                    || old.plan_authority != step.plan_authority
                     || old.kind != step.kind
                     || old.depends_on != step.depends_on
                 {
@@ -4876,6 +5568,7 @@ fn update_bridge_step_claims_tx(
         };
         if new.operation_id.as_deref() == Some(operation_id)
             && new.state == fin_domain::BridgeStepState::Settled
+            && old.plan_authority == new.plan_authority
             && ((old.operation_id.is_none()
                 && old.state == fin_domain::BridgeStepState::Unsubmitted)
                 || (old.operation_id.as_deref() == Some(operation_id)
@@ -5170,6 +5863,286 @@ fn validate_dispatch_evidence_transition(current: &Value, updated: &Value) -> Re
 
 fn json_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+fn validate_financial_plan_attempt_transition(
+    expected_plan: &Value,
+    updated_plan: &Value,
+    revision_id: &str,
+    plan_step_id: &str,
+    operation_id: &str,
+) -> Result<()> {
+    let expected_revision = expected_plan.get("revision").unwrap_or(&Value::Null);
+    if json_string(expected_revision, "revision_id") != Some(revision_id)
+        || json_string(
+            updated_plan.get("revision").unwrap_or(&Value::Null),
+            "revision_id",
+        ) != Some(revision_id)
+        || json_string(updated_plan, "active_attempt_id") != Some(operation_id)
+        || expected_plan
+            .get("active_attempt_id")
+            .is_some_and(|id| !id.is_null())
+    {
+        return Err(StoreError::RequestConflict);
+    }
+    let has_link = updated_plan
+        .get("attempts")
+        .and_then(Value::as_array)
+        .is_some_and(|attempts| {
+            attempts.iter().any(|attempt| {
+                json_string(attempt, "revision_id") == Some(revision_id)
+                    && json_string(attempt, "attempt_id") == Some(operation_id)
+                    && json_string(attempt, "step_id") == Some(plan_step_id)
+            })
+        });
+    if !has_link {
+        return Err(StoreError::RequestConflict);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_plan_bridge_claim_transition(
+    previous: &fin_domain::BridgeTransferRecord,
+    next: &fin_domain::BridgeTransferRecord,
+    plan_id: &str,
+    revision_id: &str,
+    plan_step_id: &str,
+    operation_id: &str,
+    bridge_step_id: &str,
+    bridge_kind: &fin_domain::BridgeStepKind,
+    operation_record: &Value,
+) -> Result<()> {
+    if previous.grant_id.is_some()
+        || previous.transit.is_some()
+        || !matches!(
+            previous.state,
+            fin_domain::BridgeTransferState::Prepared
+                | fin_domain::BridgeTransferState::ApprovalPending
+                | fin_domain::BridgeTransferState::SourcePending
+        )
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    let authority = fin_domain::BridgePlanAuthority {
+        plan_id: plan_id.to_owned(),
+        revision_id: revision_id.to_owned(),
+        plan_step_id: plan_step_id.to_owned(),
+    };
+    let expected_scope = previous
+        .plan_scope
+        .clone()
+        .unwrap_or(fin_domain::BridgePlanScope {
+            plan_id: plan_id.to_owned(),
+            revision_id: revision_id.to_owned(),
+        });
+    if expected_scope.plan_id != plan_id
+        || next.plan_scope.as_ref() != Some(&expected_scope)
+        || next.id != previous.id
+        || next.grant_id.is_some()
+        || next.transit != previous.transit
+        || next.metadata != previous.metadata
+        || next.prospective_debit != previous.prospective_debit
+        || next.quote_revisions != previous.quote_revisions
+        || next.applied_proofs != previous.applied_proofs
+        || next.settlement_proofs != previous.settlement_proofs
+        || next.allocation_owner != previous.allocation_owner
+        || next.version
+            != previous
+                .version
+                .checked_add(1)
+                .ok_or(StoreError::BridgeConflict)?
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    let input = operation_record.get("input").unwrap_or(&Value::Null);
+    let transfer_matches = input.get("transferId").or_else(|| input.get("transfer_id"))
+        == Some(&Value::String(previous.id.clone()));
+    let step_matches = input.get("stepId").or_else(|| input.get("step_id"))
+        == Some(&Value::String(bridge_step_id.to_owned()));
+    let kind_string = match bridge_kind {
+        fin_domain::BridgeStepKind::Approval => "approval",
+        fin_domain::BridgeStepKind::ResetAllowance => "reset_allowance",
+        fin_domain::BridgeStepKind::Deposit => "deposit",
+    };
+    let kind_matches = input.get("stepKind").or_else(|| input.get("step_kind"))
+        == Some(&Value::String(kind_string.to_owned()));
+    if json_string(operation_record, "operation") != Some("bridge.transfer")
+        || !transfer_matches
+        || !step_matches
+        || !kind_matches
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+
+    let mut expected = previous.clone();
+    expected.plan_scope = Some(expected_scope);
+    expected.version = expected
+        .version
+        .checked_add(1)
+        .ok_or(StoreError::BridgeConflict)?;
+    if expected.approved_bounds.is_none() {
+        expected.approved_bounds = next.approved_bounds.clone();
+        expected.settlement_expectation = next.settlement_expectation.clone();
+    }
+    if expected.approved_bounds.is_none()
+        || expected.approved_bounds != next.approved_bounds
+        || expected.settlement_expectation.is_none()
+        || expected.settlement_expectation != next.settlement_expectation
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    let Some(previous_step_snapshot) = expected
+        .steps
+        .iter()
+        .find(|step| step.step_id == bridge_step_id)
+        .cloned()
+    else {
+        return Err(StoreError::BridgeConflict);
+    };
+    if previous_step_snapshot.kind != *bridge_kind
+        || previous_step_snapshot.grant_id.is_some()
+        || previous_step_snapshot.operation_id.is_some()
+        || previous_step_snapshot.state != fin_domain::BridgeStepState::Unsubmitted
+        || previous_step_snapshot.depends_on.iter().any(|dependency| {
+            !expected.steps.iter().any(|step| {
+                step.step_id == *dependency && step.state == fin_domain::BridgeStepState::Settled
+            })
+        })
+        || previous_step_snapshot
+            .plan_authority
+            .as_ref()
+            .is_some_and(|old| {
+                old.plan_id != authority.plan_id || old.plan_step_id != authority.plan_step_id
+            })
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    let Some(previous_step) = expected
+        .steps
+        .iter_mut()
+        .find(|step| step.step_id == bridge_step_id)
+    else {
+        return Err(StoreError::BridgeConflict);
+    };
+    previous_step.operation_id = Some(operation_id.to_owned());
+    previous_step.plan_authority = Some(authority);
+    previous_step.state = fin_domain::BridgeStepState::Submitted;
+    expected.state = if *bridge_kind == fin_domain::BridgeStepKind::Deposit {
+        fin_domain::BridgeTransferState::SourcePending
+    } else {
+        fin_domain::BridgeTransferState::ApprovalPending
+    };
+    if expected != *next {
+        return Err(StoreError::BridgeConflict);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_plan_bridge_terminal_transition(
+    previous: &fin_domain::BridgeTransferRecord,
+    next: &fin_domain::BridgeTransferRecord,
+    plan_id: &str,
+    revision_id: &str,
+    plan_step_id: &str,
+    bridge_step_id: &str,
+    operation_id: &str,
+    settlement: &Settlement,
+    transit: Option<&fin_domain::TransitResource>,
+    charge_usd_micros: Option<&str>,
+) -> Result<()> {
+    let authority = fin_domain::BridgePlanAuthority {
+        plan_id: plan_id.to_owned(),
+        revision_id: revision_id.to_owned(),
+        plan_step_id: plan_step_id.to_owned(),
+    };
+    if previous
+        .plan_scope
+        .as_ref()
+        .is_none_or(|scope| scope.plan_id != plan_id)
+        || next.plan_scope != previous.plan_scope
+        || next.grant_id.is_some()
+        || previous.grant_id.is_some()
+        || next.version
+            != previous
+                .version
+                .checked_add(1)
+                .ok_or(StoreError::BridgeConflict)?
+        || next.id != previous.id
+        || next.metadata != previous.metadata
+        || next.approved_bounds != previous.approved_bounds
+        || next.settlement_expectation != previous.settlement_expectation
+        || next.prospective_debit != previous.prospective_debit
+        || next.quote_revisions != previous.quote_revisions
+        || next.applied_proofs.len()
+            != previous.applied_proofs.len() + usize::from(transit.is_some())
+        || !next.applied_proofs.starts_with(&previous.applied_proofs)
+        || next.settlement_proofs != previous.settlement_proofs
+        || settlement
+            .terminal_record
+            .get("status")
+            .and_then(Value::as_str)
+            != Some("completed")
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    let Some(index) = previous
+        .steps
+        .iter()
+        .position(|step| step.step_id == bridge_step_id)
+    else {
+        return Err(StoreError::BridgeConflict);
+    };
+    let before = &previous.steps[index];
+    let after = next.steps.get(index).ok_or(StoreError::BridgeConflict)?;
+    if before.step_id != after.step_id
+        || before.transfer_id != after.transfer_id
+        || before.kind != after.kind
+        || before.grant_id.is_some()
+        || after.grant_id.is_some()
+        || before.depends_on != after.depends_on
+        || before.plan_authority.as_ref() != Some(&authority)
+        || after.plan_authority.as_ref() != Some(&authority)
+        || before.operation_id.as_deref() != Some(operation_id)
+        || after.operation_id.as_deref() != Some(operation_id)
+        || before.state != fin_domain::BridgeStepState::Submitted
+        || after.state != fin_domain::BridgeStepState::Settled
+        || previous.steps.iter().enumerate().any(|(step_index, step)| {
+            step_index != index && next.steps.get(step_index) != Some(step)
+        })
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    if let Some(transit) = transit {
+        if before.kind != fin_domain::BridgeStepKind::Deposit
+            || transit.transfer_id != previous.id
+            || transit.spendable
+            || transit.evidence_id.is_empty()
+            || !valid_transit_locator(transit)
+            || next.state != fin_domain::BridgeTransferState::InTransit
+            || next.transit.as_ref() != Some(transit)
+            || !next.applied_proofs.contains(&transit.proof_digest)
+            || next.allocation_owner
+                != (fin_domain::BridgeAllocationOwner::Transfer {
+                    transfer_id: next.id.clone(),
+                })
+            || charge_usd_micros.is_none_or(|charge| {
+                charge.is_empty() || !charge.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+    } else if before.kind == fin_domain::BridgeStepKind::Deposit
+        || next.state != fin_domain::BridgeTransferState::ApprovalPending
+        || next.transit != previous.transit
+        || next.applied_proofs != previous.applied_proofs
+        || next.allocation_owner != previous.allocation_owner
+        || charge_usd_micros.is_some()
+    {
+        return Err(StoreError::BridgeConflict);
+    }
+    Ok(())
 }
 
 fn get_request_tx(tx: &Transaction<'_>, request_id: &str) -> Result<Option<RequestRow>> {

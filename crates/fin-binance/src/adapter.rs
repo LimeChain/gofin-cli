@@ -4684,12 +4684,10 @@ impl BinanceProfile {
             asset.decimals,
         )
         .map_err(domain_error)?;
-        if received_atoms < minimum || received_atoms > maximum {
-            if received_atoms > maximum || received_atoms.is_zero() {
-                return Ok(unknown(
-                    json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Ethereum recipient amount exceeds the approved maximum or is not positive."}),
-                ));
-            }
+        if received_atoms > maximum || (received_atoms < minimum && received_atoms.is_zero()) {
+            return Ok(unknown(
+                json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Ethereum recipient amount exceeds the approved maximum or is not positive."}),
+            ));
         }
         let debit_asset: AssetId =
             serde_json::from_value(binding["debitAsset"].clone()).map_err(|_| {

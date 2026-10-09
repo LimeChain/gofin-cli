@@ -165,14 +165,20 @@ struct ApprovalPresentationTests {
         assert(!depositReason.contains("native/18") && !depositReason.contains("42161") && !depositReason.contains("0x"))
         var bridge = write
         bridge["operation"] = "bridge.transfer"
-        let bridgeSummary = "Bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50."
+        let bridgeSummary = "Bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; recipient dev-wallet; Receive ≥9.95 USDC; Max fees $0.50."
         let bridgeReason = financialAuthenticationReason(bridge, summary: bridgeSummary)!
-        assert(bridgeReason == "bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50.")
-        assert(bridgeReason.contains("Relay") && bridgeReason.contains("9.95 USDC") && bridgeReason.contains("$0.50"))
+        assert(bridgeReason == "bridge 10 USDC from Ethereum to Arbitrum. You’ll get at least 9.95 USDC. Total fees won’t exceed $0.50.")
+        assert(!bridgeReason.contains("Relay") && !bridgeReason.contains("dev-wallet"))
+        assert(bridgeReason.contains("9.95 USDC") && bridgeReason.contains("$0.50"))
+        let otherRecipient = bridgeSummary.replacingOccurrences(of: "recipient dev-wallet", with: "recipient savings-wallet")
+        assert(financialAuthenticationReason(bridge, summary: otherRecipient)!.contains("recipient savings-wallet"))
+        let refundSummary = "Bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; recipient dev-wallet; Receive ≥9.95 USDC; Max fees $0.50; Total fees up to $0.50; Refund recipient 0x2222…2222; Refund paths Arbitrum One 0x2222…2222 ≥9.8 USDC."
+        let refundReason = financialAuthenticationReason(bridge, summary: refundSummary)!
+        assert(refundReason.contains("refund to 0x2222…2222") && refundReason.contains("refund path Arbitrum One 0x2222…2222 ≥9.8 USDC"))
         let oversizedBridge = "Bridge 10 USDC; " + String(repeating: "long-alias", count: 30) + " Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50."
         let compactBridge = financialAuthenticationReason(bridge, summary: oversizedBridge)!
-        assert(compactBridge.count <= 180 && compactBridge.contains("See terminal review for full details."))
-        assert(compactBridge.contains("bridge 10 USDC;"))
+        assert(compactBridge.count <= 180 && !compactBridge.contains("full details"))
+        assert(compactBridge.contains("bridge 10 USDC from Ethereum to Arbitrum"))
         let oversizedDeposit = "Deposit 0.0000003 ETH: " + String(repeating: "long-alias", count: 30) + " on Arbitrum One. Max fee 0.00001 ETH."
         let oversizedReason = financialAuthenticationReason(deposit, summary: oversizedDeposit)!
         assert(oversizedReason.count <= 180 && oversizedReason.contains("See terminal review for full details."))
@@ -192,6 +198,25 @@ struct ApprovalPresentationTests {
         let boundarySummary = "Sell up to 2 SYNTHETIC; minimum price 10 USD; repricing allowed; valid for 10 minutes."
         assert(boundaryAuthenticationReason(boundary, summary:boundarySummary) == "approve these boundaries: \(boundarySummary)")
         assert(financialAuthenticationReason(boundary, summary:boundarySummary) == nil)
+        var bridgeBoundary = boundary
+        bridgeBoundary["operation"] = "bridge.transfer"
+        let walletAddress = "0x251500000000000000000000000000000000bd1c"
+        bridgeBoundary["fixed"] = ["source_address": walletAddress, "refund_to": walletAddress]
+        let bridgeGrantSummary = "Bridge 0.004 ETH; evm-dev Ethereum Mainnet → Arbitrum One via Relay; recipient evm-dev; Receive ≥0.0039 ETH; Cumulative max fees 0.0001 ETH gas, 0.00004 ETH withheld from output; Total fees up to 0.00014 ETH. Finite grant covers these declared steps: deposit source input 0.004 ETH."
+        let bridgeGrantReason = boundaryAuthenticationReason(bridgeBoundary, summary: bridgeGrantSummary)!
+        assert(bridgeGrantReason == "bridge 0.004 ETH from Ethereum to Arbitrum. You’ll get at least 0.0039 ETH. Total fees won’t exceed 0.00014 ETH.")
+        assert(!bridgeGrantReason.contains("boundaries") && !bridgeGrantReason.contains("evm-dev") && !bridgeGrantReason.contains("Relay"))
+        let sameWalletRefundSummary = "Bridge 0.004 ETH; evm-dev Ethereum Mainnet → Arbitrum One via Relay; recipient evm-dev; Receive ≥0.0039 ETH; Cumulative max fees 0.0001 ETH gas, 0.00004 ETH withheld from output; Total fees up to 0.00014 ETH; Refund recipient 0x2515…bd1c; Refund paths Ethereum Mainnet 0x2515…bd1c ≥0 ETH, Arbitrum One 0x2515…bd1c ≥0 ETH. Finite grant covers these declared steps: deposit source input 0.004 ETH."
+        let sameWalletRefundReason = boundaryAuthenticationReason(bridgeBoundary, summary: sameWalletRefundSummary)!
+        assert(sameWalletRefundReason.contains("refunds may be zero"))
+        assert(!sameWalletRefundReason.contains("0x2515") && sameWalletRefundReason.contains("0.0039 ETH") && sameWalletRefundReason.contains("0.00014 ETH"))
+        var differentRefundBoundary = bridgeBoundary
+        differentRefundBoundary["fixed"] = ["source_address": walletAddress, "refund_to": "0x2222000000000000000000000000000000002222"]
+        let differentRefundReason = boundaryAuthenticationReason(differentRefundBoundary, summary: sameWalletRefundSummary)!
+        assert(differentRefundReason.contains("refund to 0x2515…bd1c") && differentRefundReason.contains("refund path Ethereum Mainnet 0x2515…bd1c ≥0 ETH, Arbitrum One 0x2515…bd1c ≥0 ETH"))
+        let resetBridgeGrant = "Reset token allowance to 0 USDC for Relay spender 0xccc88a9d1b4ed6b0eaba998850414b24f1c315be; bridge 10 USDC; evm-dev Ethereum Mainnet → Arbitrum One via Relay; recipient evm-dev; Receive ≥9.95 USDC; Cumulative max fees 0.001 ETH gas; Total fees up to 0.001 ETH. Finite grant covers these declared steps: reset token allowance to 0 USDC; approve up to 12 USDC for Relay spender 0xccc88a9d1b4ed6b0eaba998850414b24f1c315be; deposit source input 10 USDC."
+        let resetBridgeReason = boundaryAuthenticationReason(bridgeBoundary, summary: resetBridgeGrant)!
+        assert(resetBridgeReason == "bridge 10 USDC from Ethereum to Arbitrum; includes allowance up to 12 USDC. You’ll get at least 9.95 USDC. Total fees won’t exceed 0.001 ETH.")
         for operation in ["configuration:initialize", "policy.set", "connections.add"] {
             var administrative = boundary; administrative["operation"] = operation
             assert(boundaryAuthenticationReason(administrative, summary:boundarySummary) == nil)

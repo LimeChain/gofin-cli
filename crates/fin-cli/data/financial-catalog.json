@@ -10729,7 +10729,7 @@
   },
   {
     "name": "bridge.transfer",
-    "description": "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step.",
+    "description": "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step, either under a finite bridge grant or as one step of a named plan.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -11025,7 +11025,7 @@
     "examples": [
       {
         "bounds": {
-          "feeCaps": [
+          "fee_caps": [
             {
               "asset": {
                 "decimals": 18,
@@ -11035,7 +11035,20 @@
               "kind": "gas",
               "maximum": "1000000000000000"
             }
-          ]
+          ],
+          "input": {
+            "maximum": "10000000",
+            "minimum": "10000000"
+          },
+          "maximum_source_debit": "10000000",
+          "minimum_net_receipt": {
+            "asset": {
+              "decimals": 6,
+              "network": "ethereum:42161",
+              "reference": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+            },
+            "atoms": "9500000"
+          }
         },
         "stepId": "SYNTHETIC-step-id",
         "stepKind": "deposit",
@@ -11046,8 +11059,9 @@
     "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
     "semantics": {
       "agent_supplied_calldata": false,
-      "command_line_example": "fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\"}'",
-      "financial_authorization": "fresh per-write Touch ID or one finite transfer-boundary grant",
+      "command_line_example": "fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'",
+      "financial_authorization": "fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately",
+      "named_plan_support": "adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced",
       "observer_only_chains": [
         {
           "chain_id": 537713,

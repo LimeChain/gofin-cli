@@ -301,7 +301,7 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
     assert_eq!(
         sql.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        8
+        9
     );
     let exact: String = sql
         .query_row(

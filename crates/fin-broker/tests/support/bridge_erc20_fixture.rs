@@ -114,21 +114,21 @@ impl BridgeProvider for Erc20Provider {
         } else {
             q("4800000000000000")
         };
-        if let Some(destination_rpc) = &self.destination_rpc {
-            if self.direct_payout != DestinationPayout::Router {
-                let tag = if self.direct_payout == DestinationPayout::DirectWrongOrderTag {
-                    PROVIDER_REQUEST_ID
-                } else {
-                    &order
-                };
-                destination_rpc.set_direct_destination(
-                    destination,
-                    &request.intent.recipient,
-                    tag,
-                    &expected_receipt,
-                    self.direct_payout,
-                );
-            }
+        if let Some(destination_rpc) = &self.destination_rpc
+            && self.direct_payout != DestinationPayout::Router
+        {
+            let tag = if self.direct_payout == DestinationPayout::DirectWrongOrderTag {
+                PROVIDER_REQUEST_ID
+            } else {
+                &order
+            };
+            destination_rpc.set_direct_destination(
+                destination,
+                &request.intent.recipient,
+                tag,
+                &expected_receipt,
+                self.direct_payout,
+            );
         }
         let token = addr(source.token.as_deref().unwrap());
         let depositor = addr(&request.intent.source_address);
@@ -256,6 +256,8 @@ pub struct Rpc {
     block_number: AtomicU64,
     sent: Mutex<BTreeMap<String, (Value, Value)>>,
     broadcasts: AtomicUsize,
+    token_balance_reads: AtomicUsize,
+    estimate_gas_calls: AtomicUsize,
     transaction_mutation: Mutex<Option<&'static str>>,
     destination_override: Mutex<Option<(Value, Value)>>,
     empty_code: Mutex<BTreeSet<String>>,
@@ -281,6 +283,8 @@ impl Rpc {
             block_number: AtomicU64::new(if chain_id == 1 { 100 } else { 101 }),
             sent: Mutex::new(BTreeMap::new()),
             broadcasts: AtomicUsize::new(0),
+            token_balance_reads: AtomicUsize::new(0),
+            estimate_gas_calls: AtomicUsize::new(0),
             transaction_mutation: Mutex::new(None),
             destination_override: Mutex::new(None),
             empty_code: Mutex::new(BTreeSet::new()),
@@ -359,6 +363,12 @@ impl Rpc {
     }
     pub fn broadcasts(&self) -> usize {
         self.broadcasts.load(Ordering::SeqCst)
+    }
+    pub fn token_balance_reads(&self) -> usize {
+        self.token_balance_reads.load(Ordering::SeqCst)
+    }
+    pub fn estimate_gas_calls(&self) -> usize {
+        self.estimate_gas_calls.load(Ordering::SeqCst)
     }
     pub fn mutate_reported_transaction(&self, mutation: &'static str) {
         *self.transaction_mutation.lock().unwrap() = Some(mutation);
@@ -603,12 +613,14 @@ impl EvmRpc for Rpc {
                     }
                     json!(format!("0x{:064x}", U256::from(1)))
                 } else if data.starts_with("70a08231") {
+                    self.token_balance_reads.fetch_add(1, Ordering::SeqCst);
                     json!(format!("0x{:064x}", *self.token_balance.lock().unwrap()))
                 } else {
                     json!("0x")
                 }
             }
             "eth_estimateGas" => {
+                self.estimate_gas_calls.fetch_add(1, Ordering::SeqCst);
                 let to = params[0]["to"].as_str().unwrap_or("");
                 json!(if to.eq_ignore_ascii_case(ETH_USDC) {
                     "0x9c40"

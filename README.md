@@ -820,8 +820,10 @@ A named plan authorizes ordered financial steps with one fresh Touch ID approval
 The agent submits each step explicitly. Exact-input plans sequence the current
 operation registry, including transfers, withdrawals, deposits, orders, wallet
 operations, swaps, lending operations and reads. Future registered financial
-operations use the same path without a separate plan adapter. Credential and
-protected policy changes retain their separate human configuration approval.
+operations use the same path when the adapter exposes an exact or reviewed plan
+permission. Bridge steps are adapter-reviewed and remain tied to one persisted
+provider, route and transfer. Credential and protected policy changes retain
+their separate human configuration approval.
 
 ```sh
 fin plans preview --input PLAN_JSON --json
@@ -857,6 +859,35 @@ operation's successful verified outcome; combine it with a spend or net-receipt
 target when the economic outcome must also be met. Read results are retained but
 cannot establish financial proceeds. Existing spot-order variation scopes remain
 available separately.
+
+Bridge transfers can join the same plan as their funding steps. A plan has one
+separate `bridge.transfer` step for each saved approval, optional allowance
+reset and deposit. Repeat the quote-returned `transferId` and each exact
+`stepId`/`stepKind`, with the same selected `bounds`. Use an empty
+`permitted_variations` object because BridgeBounds inside the input defines the
+scope. The adapter binds every bridge step to one persisted parent transfer and
+applies its source-principal and route-fee limits once across those steps, in
+addition to the plan's aggregate caps. A bridge deposit plan step completes
+when its source debit is proven, so independent funding legs can continue, but
+the plan itself stays blocked until exact destination/refund proof reaches
+configured finality. A dependency on bridge proceeds names the exact destination
+wallet resource and asset; source receipt and projected quote do not unlock it.
+Do not also create a finite bridge grant for a transfer owned by the plan.
+
+Obtain `bridge.quotes` first and build every bridge plan input from its persisted
+IDs. For a Binance-funded USDC route, declare exact funding dependencies on the
+withdrawal steps for source USDC and any native gas needed by the approval and
+deposit, using the destination wallet's chain-qualified resource and exact token
+identity. If a native-ETH bridge uses the Binance withdrawal to fund both
+principal and gas, its verified net receipt must include a gas buffer; otherwise
+the combined debit exceeds that producer credit. Gas paid from an existing wallet
+balance remains outside the withdrawal dependency. Plan preview can review these
+future-funded bridge steps without a balance check or write simulation. It checks
+fresh Fin pricing for selected USD bounds but does not assure execution-time
+balances, fees or simulations. Actual bridge preparation repeats those checks
+when each step becomes eligible. Overall
+plan completion still waits for `bridge.status` to verify destination settlement;
+source-deposit success alone does not finish the plan.
 
 Future steps may depend on proceeds that do not exist at approval time. Generic
 exact approval validates the registered schema and binds connection identities,

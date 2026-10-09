@@ -376,7 +376,7 @@ impl BridgeProvider for CanonicalProvider {
         };
         ensure(
             locator.scheme == "arbitrum_eth_deposit_v1"
-                && locator.source_evidence_id.len() > 0
+                && !locator.source_evidence_id.is_empty()
                 && B256::from_str(&locator.transaction_hash).is_ok()
                 && transfer.source_chain_id == SOURCE_CHAIN_ID
                 && locator.destination_chain_id == transfer.destination_chain_id

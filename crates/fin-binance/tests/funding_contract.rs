@@ -3554,6 +3554,7 @@ fn withdrawal_destination(coin: &str, asset: fin_domain::AssetId) -> fin_binance
     config
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_eth_withdrawal_fixture(
     request_id: &str,
     gross: &str,

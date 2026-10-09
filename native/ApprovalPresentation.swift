@@ -75,10 +75,8 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
         // Exceptionally long aliases use the explicit full-review fallback.
         return compactAuthenticationReason(prefix: "deposit ", summary: String(concise.dropFirst("Deposit ".count)), maximumCharacters: 180)
     }
-    if operation == "bridge.transfer", summary.hasPrefix("Bridge ") {
-        // Keep the route, Relay, receipt floor and fee cap in the native reason
-        // when they fit. Longer trusted reviews use complete-clause shortening.
-        return compactAuthenticationReason(prefix: "bridge ", summary: String(summary.dropFirst("Bridge ".count)), maximumCharacters: 180)
+    if operation == "bridge.transfer" {
+        return bridgeAuthenticationReason(summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
@@ -99,7 +97,111 @@ func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> 
           let duration = binding["valid_for_seconds"] as? NSNumber,
           CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
           !summary.isEmpty, summary.count <= 4096 else { return nil }
+    if operation == "bridge.transfer" {
+        let fixed = binding["fixed"] as? [String: Any]
+        return bridgeAuthenticationReason(
+            summary: summary,
+            sourceAddress: fixed?["source_address"] as? String,
+            refundAddress: fixed?["refund_to"] as? String)
+    }
     return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
+}
+
+// Bridge boundary reviews contain additional step and scope detail for the
+// terminal. The system prompt keeps the action and its material route bounds.
+private func bridgeAuthenticationReason(
+    summary: String,
+    sourceAddress: String? = nil,
+    refundAddress: String? = nil
+) -> String {
+    let clauses = summary.components(separatedBy: "; ")
+    let amountPattern = #"(?i)\bbridge ([^;]+)"#
+    let minimumPattern = #"(?i)Receive ≥([^;]+)"#
+    let totalFeesPattern = #"(?i)Total fees up to (.+?)(?=;| Finite grant|$)"#
+    let feesPattern = #"(?i)(?:Max fees|Cumulative max fees) (.+?)(?=;| Finite grant|$)"#
+    let amount = firstCapture(amountPattern, in: summary)
+    let minimum = firstCapture(minimumPattern, in: summary)
+    let fees = firstCapture(totalFeesPattern, in: summary) ?? firstCapture(feesPattern, in: summary)
+    let route = clauses.first(where: { $0.contains("→") })
+    let routeDetails = route.flatMap(bridgeNetworkRoute)
+
+    guard let amount, let routeDetails else {
+        let remainder = summary.hasPrefix("Bridge ")
+            ? String(summary.dropFirst("Bridge ".count)) : summary
+        return compactAuthenticationReason(prefix: "bridge ", summary: remainder, maximumCharacters: 180)
+    }
+
+    var reason = "bridge \(bridgeClauseValue(amount)) from \(routeDetails.text)"
+    let sameRefundWallet = sourceAddress != nil && refundAddress != nil
+        && sourceAddress!.caseInsensitiveCompare(refundAddress!) == .orderedSame
+    if let recipient = firstCapture(#"(?i)recipient ([^;]+)"#, in: summary),
+       bridgeClauseValue(recipient).caseInsensitiveCompare(routeDetails.sourceAlias) != .orderedSame {
+        reason += "; recipient \(bridgeClauseValue(recipient))"
+    }
+    if let approval = firstCapture(#"(?i)approve up to (.+?) for Relay spender"#, in: summary) {
+        reason += "; includes allowance up to \(bridgeClauseValue(approval))"
+    }
+    if !sameRefundWallet,
+       let refund = firstCapture(#"(?i)Refund recipient ([^;\.]+)"#, in: summary),
+       bridgeClauseValue(refund).caseInsensitiveCompare(routeDetails.sourceAlias) != .orderedSame {
+        reason += "; refund to \(bridgeClauseValue(refund))"
+    }
+    if let refundPaths = firstCapture(#"(?i)Refund paths (.+?)(?=\. Finite grant|$)"#, in: summary) {
+        if isSameWalletZeroRefundPaths(refundPaths, sourceAddress: sourceAddress, refundAddress: refundAddress) {
+            reason += "; refunds may be zero"
+        } else {
+            reason += "; refund path \(bridgeClauseValue(refundPaths))"
+        }
+    }
+    if let minimum { reason += ". You’ll get at least \(bridgeClauseValue(minimum))" }
+    if let fees { reason += ". Total fees won’t exceed \(bridgeClauseValue(fees))" }
+    if !reason.hasSuffix(".") { reason += "." }
+    return compactAuthenticationReason(prefix: "", summary: reason, maximumCharacters: 220)
+}
+
+private func isSameWalletZeroRefundPaths(
+    _ paths: String,
+    sourceAddress: String?,
+    refundAddress: String?
+) -> Bool {
+    guard let sourceAddress, let refundAddress,
+          sourceAddress.caseInsensitiveCompare(refundAddress) == .orderedSame else { return false }
+    let shortAddress = "\(refundAddress.prefix(6))…\(refundAddress.suffix(4))".lowercased()
+    let pathPattern = #"(?i)^(?:Ethereum Mainnet|Arbitrum One|Robinhood Chain) (0x[0-9a-f]{4}…[0-9a-f]{4}) ≥0 [A-Za-z0-9]+$"#
+    let entries = paths.split(separator: ",").map {
+        String($0).trimmingCharacters(in: .whitespaces)
+    }
+    guard !entries.isEmpty else { return false }
+    return entries.allSatisfy { entry in
+        guard let address = firstCapture(pathPattern, in: entry) else { return false }
+        return address.lowercased() == shortAddress
+    }
+}
+
+private func bridgeClauseValue(_ value: String) -> String {
+    value.trimmingCharacters(in: CharacterSet(charactersIn: " .\t\n\r"))
+}
+
+private func firstCapture(_ pattern: String, in value: String) -> String? {
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+          let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+          match.numberOfRanges > 1,
+          let range = Range(match.range(at: 1), in: value) else { return nil }
+    return String(value[range])
+}
+
+private func bridgeNetworkRoute(_ clause: String) -> (text: String, sourceAlias: String)? {
+    let route = clause.components(separatedBy: " via ").first ?? clause
+    let pieces = route.components(separatedBy: " → ")
+    guard pieces.count == 2 else { return nil }
+    let networks = ["Ethereum Mainnet", "Arbitrum One", "Robinhood Chain"]
+    guard let source = networks.first(where: { pieces[0].hasSuffix($0) }),
+          let destination = networks.first(where: { pieces[1].hasPrefix($0) }) else { return nil }
+    let alias = String(pieces[0].dropLast(source.count))
+        .trimmingCharacters(in: .whitespaces)
+    let shortSource = source == "Ethereum Mainnet" ? "Ethereum" : source
+    let shortDestination = destination == "Arbitrum One" ? "Arbitrum" : destination
+    return ("\(shortSource) to \(shortDestination)", alias)
 }
 
 // One biometric action authorizes the complete named revision. Preserve the

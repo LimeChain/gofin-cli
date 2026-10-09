@@ -85,7 +85,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-op").unwrap().unwrap(),
@@ -219,7 +219,7 @@ fn named_plans_v4_upgrades_with_bridge_schema_without_replaying_rows() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        8
+        9
     );
     assert_eq!(
         upgraded.financial_plan("SYNTHETIC-plan").unwrap(),

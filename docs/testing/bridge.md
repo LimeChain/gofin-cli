@@ -186,7 +186,36 @@ fee, was below its unchanged `0.0125 ETH` minimum. Fin preserved the positive
 verified credit and did not misreport the transfer as a no-effect failure or as
 Completed. Those funds were also retained; no restoration was authorized.
 
-## Human installation and Touch ID checklist — pending
+## Recorded protected installation run
+
+The installed Rust runtime completed the human-authorized Ethereum-to-Arbitrum
+scenario using real Touch ID. One named plan bought ETH in the Binance
+subaccount, transferred funding to the main account, and withdrew `0.004 ETH`
+and `10 USDC` net to the enrolled Ethereum wallet. The completed purchase was
+preserved through two plan revisions correcting agent input fee treatment and
+decimal formatting; no rejected preview submitted a transfer.
+
+Relay was cheaper than the canonical native-ETH quote among the two implemented
+providers. Relay was the only supported exact native-Arbitrum-USDC route. Two
+separate finite bridge grants were approved; the USDC grant covered its exact
+allowance and deposit steps without another biometric prompt. Fin first proved
+the source debits, kept principal in transit, and completed only after exact
+finalized destination receipts:
+
+| Route | Result | Verified destination credit |
+| --- | --- | --- |
+| Relay: Ethereum ETH → Arbitrum ETH | Completed | `0.003989405663839518 ETH` |
+| Relay: Ethereum USDC → Arbitrum USDC | Completed | `9.974788 USDC` |
+
+The funds were intentionally retained. The human reported confusing approval
+wording (`boundaries` and a machine fee label), so approval UX is not marked
+passed. The updated wording and a single plan covering funding plus bridges
+need their own human verification after installation. This run does not prove
+the later unified-plan integration, cancellation, expiry, or protected
+canonical-bridge Touch ID paths.
+
+## Remaining human installation and Touch ID checklist
+
 
 Run this only after the disposable-development live scenario has been
 recorded. Automated development approval does not establish any item
@@ -208,5 +237,5 @@ below.
    recipient, or reverse route is covered.
 
 Record installation, each observed Touch ID path, and source/destination
-settlement separately. These remain pending until the human observes them; a
-Swift presentation test is not a biometric or installed-isolation result.
+settlement separately. Unobserved paths remain pending; a Swift presentation
+test is not a biometric or installed-isolation result.
