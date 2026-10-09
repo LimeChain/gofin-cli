@@ -90,7 +90,9 @@ and 0 means no personal limit for that field. Both setup entry points start the
 broker and verify its reply and running process before reporting success. Setup
 moves no funds. It registers the runtime on PATH and automatically enables persistent completion for your login
 shell (Zsh, Bash or Fish). After successful setup,
-`Install Fin's optional Codex skill? [y/N]` lets you opt in; Enter skips it.
+an optional skill selector lets you move with arrow keys, toggle Codex and
+Claude Code with Space, and press Enter to install. Nothing is preselected;
+Enter with no selection or Esc skips.
 Open a new Terminal afterward and run `fin doctor`.
 For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
@@ -284,12 +286,15 @@ without a source checkout, administrator access, credentials or financial approv
 
 ```sh
 fin skill install --agent codex
+fin skill install --agent claude
 fin skill inspect --agent codex --json
 fin skill update --agent codex
 fin skill remove --agent codex
 ```
 
-Codex uses `~/.agents/skills/fin`. Existing or modified content is preserved;
+Codex uses `~/.agents/skills/fin`; Claude Code uses `~/.claude/skills/fin`.
+Use `--agent claude` with inspect, update and remove to manage its copy.
+Existing or modified content is preserved;
 inspect it before using explicit `--backup` conflict handling. Fin upgrades refresh
 only existing, unmodified Fin-managed copies. See [skill maintenance](docs/companion-skill.md).
 Ensure `fin` is on the agent's PATH; restart the agent if it does not discover the skill.

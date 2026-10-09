@@ -31,7 +31,7 @@ fn failure() -> FinError {
         "SKILL_STORAGE_ERROR",
         "companion-skill",
         "Skill files could not be safely accessed; inspect before retrying.",
-        "Run fin skill inspect --agent codex; check file permissions, symlinks and the Fin skill record. Preserve any backups.",
+        "Use fin skill inspect --agent codex or fin skill inspect --agent claude for the affected copy; check permissions, symlinks and its Fin skill record. Preserve backups.",
     )
 }
 fn conflict() -> FinError {
@@ -39,7 +39,7 @@ fn conflict() -> FinError {
         "SKILL_CONFLICT",
         "companion-skill",
         "Existing or modified skill content was preserved.",
-        "Inspect with fin skill inspect --agent codex. Move conflicting content aside, or repeat the command with --backup to preserve it before replacement/removal.",
+        "Inspect the affected copy with fin skill inspect --agent codex or fin skill inspect --agent claude. Move conflicting content aside, or repeat the command with --backup to preserve it before replacement/removal.",
     )
 }
 fn io<T>(result: std::io::Result<T>) -> Result<T> {
@@ -90,7 +90,7 @@ fn home() -> Result<PathBuf> {
             "SKILL_USER_REQUIRED",
             "companion-skill",
             "Manage the optional skill as your own user, without sudo.",
-            "Run fin skill install --agent codex without administrator access.",
+            "Run fin skill install --agent codex or fin skill install --agent claude without administrator access.",
         ));
     }
     let home = std::env::var_os("HOME")
@@ -278,7 +278,7 @@ fn apply(
             "SKILL_NOT_MANAGED",
             "companion-skill",
             "No Fin-managed skill is recorded for this environment.",
-            "Use fin skill install --agent codex to opt in.",
+            &format!("Use fin skill install --agent {} to opt in.", agent.name()),
         ));
     }
     if exists && !matches {
@@ -501,6 +501,55 @@ mod tests {
         assert!(!file(home.path()).exists());
     }
     #[test]
+    fn environments_refresh_independently_and_preserve_claude_edits() {
+        let home = fixture();
+        let home = home.path().canonicalize().unwrap();
+        for agent in AgentEnvironment::ALL {
+            apply(&home, Action::Install, *agent, false, "old", "0").unwrap();
+        }
+        let claude = home
+            .join(AgentEnvironment::Claude.directory())
+            .join("SKILL.md");
+        fs::write(&claude, "human Claude edits").unwrap();
+        let results = refresh_at(&home).unwrap();
+        assert_eq!(results["results"][0]["agent"], "codex");
+        assert_eq!(results["results"][0]["status"], "updated");
+        assert_eq!(results["results"][1]["agent"], "claude");
+        assert_eq!(results["results"][1]["status"], "modified");
+        assert_eq!(fs::read_to_string(&claude).unwrap(), "human Claude edits");
+        apply(
+            &home,
+            Action::Update,
+            AgentEnvironment::Claude,
+            true,
+            "old",
+            "0",
+        )
+        .unwrap();
+        assert_eq!(
+            refresh_at(&home).unwrap()["results"][1]["status"],
+            "updated"
+        );
+        apply(
+            &home,
+            Action::Remove,
+            AgentEnvironment::Claude,
+            false,
+            CONTENT,
+            VERSION,
+        )
+        .unwrap();
+        assert_eq!(
+            refresh_at(&home).unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!claude.exists());
+        assert!(file(&home).exists());
+    }
+    #[test]
     fn malformed_record_and_busy_writer_preserve_content() {
         let home = fixture();
         apply_test(home.path(), Action::Install, false, CONTENT, VERSION).unwrap();
@@ -550,5 +599,22 @@ mod tests {
             }
             assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
         }
+        let home = fixture();
+        let outside = fixture();
+        symlink(outside.path(), home.path().join(".claude")).unwrap();
+        for action in [Action::Install, Action::Update, Action::Remove] {
+            assert!(
+                apply(
+                    home.path(),
+                    action,
+                    AgentEnvironment::Claude,
+                    true,
+                    CONTENT,
+                    VERSION
+                )
+                .is_err()
+            );
+        }
+        assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 }

@@ -43,26 +43,86 @@ run_stage() {
     return "$status"
   fi
 }
+# Single-key reads temporarily alter terminal settings. Restore the saved state
+# both before dispatching skill installers and from the installer's EXIT trap.
+restore_companion_terminal() {
+  if [ -n "${fin_skill_terminal_state:-}" ]; then
+    /bin/stty "$fin_skill_terminal_state" || return 1
+    fin_skill_terminal_state=''
+  fi
+}
 # Optional user-file work after protected setup has succeeded. No default opt-in,
 # no spinner during input, and no privileged writes to the agent's skill files.
 offer_companion_skill() {
-  local fin_skill_answer=''
   [ -t 0 ] && [ -t 1 ] && [ -t 2 ] || return 0
-  printf "Install Fin's optional Codex skill? [y/N] " >&2
-  if ! IFS= read -r fin_skill_answer; then
-    printf '\n' >&2
-    return 0
-  fi
-  case "$fin_skill_answer" in
-    y|Y|yes|YES|Yes)
-      local fin_skill_env=("TERM=${TERM:-dumb}")
-      if [ "${NO_COLOR+x}" = x ]; then fin_skill_env+=("NO_COLOR=$NO_COLOR"); fi
-      if ! /usr/bin/sudo -n -H -u "#$fin_uid" /usr/bin/env "${fin_skill_env[@]}" \
-        /Library/Fin/runtime/fin skill install --agent codex; then
-        echo 'Fin is installed; optional skill installation did not finish. Run fin skill inspect --agent codex.' >&2
-      fi
-      ;;
-  esac
+  fin_skill_terminal_state=$(/bin/stty -g) || return 0
+  local fin_skill_key='' fin_skill_escape='' fin_skill_focus=0
+  local fin_skill_marks=(' ' ' ') fin_skill_cursors=('>' ' ')
+  local fin_skill_agents=()
+  printf "Install Fin's optional skill\n" >&2
+  printf 'Arrows move; Space selects; Enter installs; Esc skips. None selected skips.\n' >&2
+  while :; do
+    fin_skill_cursors=(' ' ' ')
+    fin_skill_cursors[$fin_skill_focus]='>'
+    # Fixed-width, input-driven redraw needs no ANSI or color. Dumb terminals
+    # receive a fresh line instead of cursor movement.
+    if [ "${TERM:-dumb}" != dumb ]; then printf '\r' >&2; fi
+    printf '%s [%s] Codex   %s [%s] Claude Code' \
+      "${fin_skill_cursors[0]}" "${fin_skill_marks[0]}" \
+      "${fin_skill_cursors[1]}" "${fin_skill_marks[1]}" >&2
+    if [ "${TERM:-dumb}" = dumb ]; then printf '\n' >&2; fi
+    fin_skill_key=''
+    if ! IFS= read -r -s -n 1 fin_skill_key; then
+      printf '\n' >&2
+      restore_companion_terminal || return 1
+      return 0
+    fi
+    case "$fin_skill_key" in
+      '') break ;;
+      $'\004') printf '\n' >&2; restore_companion_terminal || return 1; return 0 ;;
+      ' ')
+        if [ "${fin_skill_marks[$fin_skill_focus]}" = ' ' ]; then
+          fin_skill_marks[$fin_skill_focus]='x'
+        else
+          fin_skill_marks[$fin_skill_focus]=' '
+        fi
+        ;;
+      $'\033')
+        fin_skill_escape=''
+        if ! IFS= read -r -s -n 1 -t 1 fin_skill_escape; then
+          printf '\n' >&2
+          restore_companion_terminal || return 1
+          return 0
+        fi
+        case "$fin_skill_escape" in
+          '['|'O')
+            fin_skill_escape=''
+            if IFS= read -r -s -n 1 -t 1 fin_skill_escape; then
+              case "$fin_skill_escape" in
+                A|B|C|D) fin_skill_focus=$((1 - fin_skill_focus)) ;;
+              esac
+            fi
+            ;;
+          *) printf '\n' >&2; restore_companion_terminal || return 1; return 0 ;;
+        esac
+        ;;
+    esac
+  done
+  printf '\n' >&2
+  restore_companion_terminal || return 1
+  if [ "${fin_skill_marks[0]}" = x ]; then fin_skill_agents+=(codex); fi
+  if [ "${fin_skill_marks[1]}" = x ]; then fin_skill_agents+=(claude); fi
+  # Bash 3.2 treats an empty array as unset under nounset.
+  [ "${#fin_skill_agents[@]}" -gt 0 ] || return 0
+  local fin_skill_env=("TERM=${TERM:-dumb}")
+  if [ "${NO_COLOR+x}" = x ]; then fin_skill_env+=("NO_COLOR=$NO_COLOR"); fi
+  local fin_skill_agent
+  for fin_skill_agent in "${fin_skill_agents[@]}"; do
+    if ! /usr/bin/sudo -n -H -u "#$fin_uid" /usr/bin/env "${fin_skill_env[@]}" \
+      /Library/Fin/runtime/fin skill install --agent "$fin_skill_agent"; then
+      echo "Fin is installed; optional skill installation did not finish. Run fin skill inspect --agent $fin_skill_agent." >&2
+    fi
+  done
 }
 fin_active_pid=''
 fin_active_log=''
@@ -126,6 +186,7 @@ fin_stage=$(/usr/bin/mktemp -d /Library/.fin-rust-install.XXXXXX)
 fin_installed=0
 fin_configured=0
 cleanup() {
+  restore_companion_terminal || true
   /bin/rm -rf "$fin_stage"
   # Initialization can commit configuration and then report a sync/store failure.
   # Preserve that uncertain durable result; never erase it as cancellation.
