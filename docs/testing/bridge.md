@@ -214,6 +214,16 @@ need their own human verification after installation. This run does not prove
 the later unified-plan integration, cancellation, expiry, or protected
 canonical-bridge Touch ID paths.
 
+After updating the protected runtime, an eight-step named plan covering the
+Binance purchase, funding transfers, Ethereum withdrawals and both bridge
+routes was approved with one real Touch ID review. The human confirmed that
+the single-plan prompt was clear. The unused plan was then revoked; status
+proved every step unstarted, with no attempts, reservations or spending. This
+establishes the updated unified approval/revocation path, not a second live
+execution of the eight-step plan. Standalone bridge prompt wording, cancellation
+of the biometric dialog, expiry and canonical protected writes remain separate
+unobserved cases.
+
 ## Remaining human installation and Touch ID checklist
 
 
