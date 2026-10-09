@@ -1947,6 +1947,13 @@ impl Adapter for CompositeObserver {
             .collect()
     }
 
+    fn authorization_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        self.adapters
+            .iter()
+            .flat_map(|adapter| adapter.authorization_identities())
+            .collect()
+    }
+
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
@@ -3458,6 +3465,137 @@ mod tests {
         config
     }
 
+    #[tokio::test]
+    async fn public_connections_group_evm_wallet_while_broker_keeps_all_authorization_identities() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let mut config = config();
+        config.networks = NetworkConfig::reviewed_evm_networks();
+        config.deployments = vec![DeploymentConfig::ethereum_mainnet()];
+        config.connections = vec![
+            ConnectionConfig::Binance {
+                name: "main".into(),
+                resource: ResourceId("binance:uid:1001:SPOT".into()),
+                credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
+                role: "main".into(),
+                parent: None,
+                email: None,
+                wallet_type: "SPOT".into(),
+                physical_identity: "1001".into(),
+                physical_identity_verified: true,
+            },
+            ConnectionConfig::Binance {
+                name: "sub".into(),
+                resource: ResourceId("binance:uid:1002:SPOT".into()),
+                credential_ref: "550e8400-e29b-41d4-a716-446655440002".into(),
+                role: "sub".into(),
+                parent: Some("main".into()),
+                email: Some("sub@example.invalid".into()),
+                wallet_type: "SPOT".into(),
+                physical_identity: "1002".into(),
+                physical_identity_verified: true,
+            },
+            ConnectionConfig::Evm {
+                name: "wallet".into(),
+                resource: ResourceId(format!("evm:{address}")),
+                address: address.into(),
+                credential_ref: None,
+                signing_enabled: false,
+            },
+        ];
+        config.validate().unwrap();
+        let applications = build_protected_applications(&config, Arc::new(UnusedCredentials))
+            .expect("synthetic production composition should build without credential access");
+        let runtime = compose_runtime(
+            config,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: applications.adapters,
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: applications.valuator,
+            },
+        )
+        .unwrap();
+
+        let response = runtime.handle(BrokerRequest::Connections).await;
+        assert!(response.ok, "{:?}", response.error);
+        let rows = response.result.unwrap().as_array().unwrap().clone();
+        assert_eq!(
+            rows.len(),
+            3,
+            "only two accounts and one EVM wallet are public"
+        );
+        let human = fin_presentation::render_human("connections", &json!(rows), false);
+        assert!(human.contains("main") && human.contains("sub") && human.contains("wallet"));
+        assert!(!human.contains("binance-ethereum-destination"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["provider"] == "binance")
+                .count(),
+            2
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["provider"] != "binance-ethereum-destination")
+        );
+        let wallet = rows
+            .iter()
+            .find(|row| row["provider"] == "evm")
+            .expect("one grouped EVM wallet is public");
+        let networks = wallet["details"]["networks"].as_array().unwrap();
+        let chain_ids = networks
+            .iter()
+            .map(|network| network["chain_id"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(chain_ids, [1, 42161, 4663].into_iter().collect());
+        assert!(wallet["network"].is_null());
+        assert!(networks.iter().all(|network| {
+            network
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|key| key == "network" || key == "chain_id")
+        }));
+
+        let identities = runtime.observer.authorization_identities();
+        assert!(identities.len() > rows.len());
+        let destination_rows = identities
+            .iter()
+            .filter(|identity| identity.provider == "binance-ethereum-destination")
+            .collect::<Vec<_>>();
+        assert!(destination_rows.len() >= 3);
+        for destination in &destination_rows {
+            assert!(
+                destination
+                    .address
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(address))
+            );
+            assert!(destination.details["assets"].is_object());
+            assert!(destination.details["chain_id"].as_u64().is_some());
+            assert!(destination.details["confirmations"].as_u64().is_some());
+        }
+        let wallet_identities = identities
+            .iter()
+            .filter(|identity| identity.provider == "evm")
+            .collect::<Vec<_>>();
+        assert!(wallet_identities.len() >= 3);
+        assert_eq!(
+            wallet_identities
+                .iter()
+                .map(|identity| identity.details["chain_id"].as_u64().unwrap())
+                .collect::<BTreeSet<_>>(),
+            [1, 42161, 4663].into_iter().collect()
+        );
+        assert!(wallet_identities.iter().all(|identity| {
+            !identity.signing_enabled
+                && identity.details["confirmations"].as_u64().is_some()
+                && identity
+                    .address
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(address))
+        }));
+    }
+
     struct FixtureRuntimeLoader {
         database: PathBuf,
         loads: AtomicUsize,
@@ -4337,10 +4475,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_view_deduplicates_exact_rows_without_changing_plan_identity_metadata() {
+    async fn connection_view_deduplicates_only_exact_public_rows_not_shared_names() {
         let connection = |provider: &str, network: Option<&str>, details: Value| {
             fin_domain::ConnectionMetadata {
-                name: "shared-wallet".into(),
+                name: "shared-name".into(),
                 provider: provider.into(),
                 resource: ResourceId("shared:resource".into()),
                 role: None,
@@ -4352,21 +4490,21 @@ mod tests {
                 details,
             }
         };
-        let binance = connection("binance", None, json!({"account":"main"}));
+        let account = connection("fixture-account", None, json!({"account":"main"}));
         let ethereum = connection(
-            "ethereum",
+            "fixture-wallet",
             Some("ethereum:1"),
-            json!({"chain_id":1,"wallet":"shared-wallet"}),
+            json!({"chain_id":1,"wallet":"shared-name"}),
         );
         let arbitrum = connection(
-            "ethereum",
+            "fixture-wallet",
             Some("arbitrum:42161"),
-            json!({"chain_id":42161,"wallet":"shared-wallet"}),
+            json!({"chain_id":42161,"wallet":"shared-name"}),
         );
-        let destination = connection(
-            "binance-ethereum-destination",
+        let route = connection(
+            "fixture-route",
             Some("ethereum:1"),
-            json!({"destination":"deposit-route"}),
+            json!({"route":"configured-destination"}),
         );
         let captures = Arc::new(AtomicUsize::new(0));
         let runtime = compose_runtime(
@@ -4379,11 +4517,11 @@ mod tests {
                     pricing_preflight: None,
                     identity_probe: None,
                     connection_metadata: vec![
-                        binance.clone(),
-                        binance.clone(),
+                        account.clone(),
+                        account.clone(),
                         ethereum.clone(),
                         arbitrum.clone(),
-                        destination.clone(),
+                        route.clone(),
                     ],
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
@@ -4392,31 +4530,27 @@ mod tests {
         )
         .unwrap();
 
-        // The shared composite's connection view is also used in exact plan
-        // identity hashes, so it retains its full source metadata sequence.
         assert_eq!(runtime.observer.connections().len(), 5);
+        assert_eq!(runtime.observer.authorization_identities().len(), 5);
         let response = runtime.handle(BrokerRequest::Connections).await;
         assert!(response.ok, "{:?}", response.error);
         let rows = response.result.unwrap().as_array().unwrap().clone();
         assert_eq!(rows.len(), 4);
         assert_eq!(
             rows.iter()
-                .filter(|row| row["provider"] == "binance")
+                .filter(|row| row["provider"] == "fixture-account")
                 .count(),
             1
         );
         assert!(
-            rows.iter()
-                .any(|row| { row["provider"] == "ethereum" && row["network"] == "ethereum:1" })
+            rows.iter().any(|row| {
+                row["provider"] == "fixture-wallet" && row["network"] == "ethereum:1"
+            })
         );
-        assert!(
-            rows.iter()
-                .any(|row| { row["provider"] == "ethereum" && row["network"] == "arbitrum:42161" })
-        );
-        assert!(
-            rows.iter()
-                .any(|row| row["provider"] == "binance-ethereum-destination")
-        );
+        assert!(rows.iter().any(|row| {
+            row["provider"] == "fixture-wallet" && row["network"] == "arbitrum:42161"
+        }));
+        assert!(rows.iter().any(|row| row["provider"] == "fixture-route"));
     }
 
     #[tokio::test]

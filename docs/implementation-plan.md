@@ -85,6 +85,10 @@ retain their ordinary conservative USD charge, including non-cash exposure such
 as derivative notional. Credits cannot erase gross usage. Revisions retain usage
 and started steps; historical restoration-run models are not reused. The LLM names
 the plan and submits each step; there is no scheduler or automatic renewal.
+Public grouped EVM-wallet discovery stays concise while authorization hashes the
+complete per-chain signer/confirmation and configured deposit-destination
+metadata. Existing generic EVM plan bindings that used the earlier public row may
+fail closed and need a freshly approved revision.
 
 Keep administrative approval separate from financial authority. Credential and
 protected policy changes belong to the human's private Terminal and independent

@@ -123,6 +123,11 @@ reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signin
 and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
 
+`fin connections list` shows enrolled connections in both human and JSON output.
+A reusable EVM wallet appears once, with its supported networks grouped under
+`details.networks`. Derived withdrawal destinations and per-chain signer records
+remain internal to plan authorization; they are not additional enrollments.
+
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
 address with its exact memo/tag. Completion requires independent recipient

@@ -213,6 +213,9 @@ impl Adapter for BinanceAdapter {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.0.connections()
     }
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        self.0.authorization_identities()
+    }
     fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
@@ -2206,8 +2209,7 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     fn connections(&self) -> Vec<ConnectionMetadata> {
-        let mut connections = self
-            .config
+        self.config
             .accounts
             .iter()
             .map(|account| ConnectionMetadata {
@@ -2228,12 +2230,15 @@ impl ExchangeProfile for BinanceProfile {
                 signing_enabled: true,
                 details: json!({"walletType":"SPOT", "credentialEnrolled":true}),
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        let mut identities = self.connections();
         // Named withdrawal aliases are protected routing configuration too.
-        // Publish them as ordinary connection metadata so a plan binds the
-        // alias, exact EVM route/address, and token identity map along with
-        // the Binance account identity. The engine hashes stable `details`.
-        connections.extend(self.config.destinations.iter().map(|destination| {
+        // Keep them out of public discovery, but bind the alias, exact EVM
+        // route/address, and token identity map with the Binance account.
+        identities.extend(self.config.destinations.iter().map(|destination| {
             ConnectionMetadata {
                 name: destination.name.clone(),
                 provider: "binance-ethereum-destination".into(),
@@ -2255,7 +2260,7 @@ impl ExchangeProfile for BinanceProfile {
                 }),
             }
         }));
-        connections
+        identities
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {

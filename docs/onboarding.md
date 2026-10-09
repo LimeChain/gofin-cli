@@ -65,6 +65,11 @@ fin connections update --provider PROVIDER --name CONNECTION
 fin connections remove CONNECTION
 ```
 
+Connection discovery lists enrolled accounts and wallets. One reusable EVM
+wallet has one row with all supported networks in `details.networks`; internal
+destination and per-chain authorization identities do not add public rows.
+Human and JSON output use the same connection collection and existing schema.
+
 Daemon status inspects launchd directly and never opens the broker socket. Start
 requests explicit resume and reports observed running state; stop persists
 protected stop intent, waits for process exit, and remains stopped until explicit

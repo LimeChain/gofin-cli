@@ -35,6 +35,12 @@ pub trait ExchangeProfile: Send + Sync {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
     }
+    /// Stable protected identities used by exact financial-plan approval.
+    /// Keep identities here even when they are omitted from public discovery
+    /// metadata, and do not collapse entries by display name.
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        self.connections()
+    }
     fn prepare_boundaries(
         &self,
         _prepared: &PreparedOperation,
@@ -224,6 +230,9 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.profile.connections()
     }
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        self.profile.authorization_identities()
+    }
     fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
@@ -389,7 +398,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use fin_domain::{ExecutionActor, FinancialIntent, now};
+    use fin_domain::{ConnectionMetadata, ExecutionActor, FinancialIntent, ResourceId, now};
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -434,6 +443,20 @@ mod tests {
                 coverage: "synthetic".into(),
                 completion: "evidence".into(),
                 semantics: json!({}),
+            }]
+        }
+        fn connections(&self) -> Vec<ConnectionMetadata> {
+            vec![ConnectionMetadata {
+                name: "fixture account".into(),
+                provider: "fixture".into(),
+                resource: ResourceId("fixture:account:1".into()),
+                role: Some("exchange-account".into()),
+                parent: None,
+                network: Some("fixture-net".into()),
+                address: Some("account-1".into()),
+                credential_ref: Some("fixture:key".into()),
+                signing_enabled: true,
+                details: json!({"stable_uid":"fixture-uid-1"}),
             }]
         }
         async fn read(&self, _: &str, _: &Value) -> Result<Value, FinError> {
@@ -550,6 +573,17 @@ mod tests {
             }),
         )
     }
+
+    #[test]
+    fn exchange_adapter_forwards_profile_default_authorization_identities() {
+        let (adapter, _) = fixture(false, false, false);
+        assert_eq!(
+            adapter.authorization_identities(),
+            adapter.connections(),
+            "the profile default should use its stable enrolled identities"
+        );
+    }
+
     #[tokio::test]
     async fn common_lifecycle_persists_exact_identity_before_one_dispatch() {
         let (adapter, journal) = fixture(false, false, false);

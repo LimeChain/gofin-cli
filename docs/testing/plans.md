@@ -42,6 +42,13 @@ string pointers are replaced per attempt, the original template remains bound,
 each attempt gets a deterministic distinct venue request ID, and terminal
 review never presents the template placeholder as an actual venue ID.
 
+Connection-contract regression: `fin connections` exposes enrolled Binance
+accounts and one grouped wallet row for chains 1, 42161 and 4663. Broker-only
+authorization identities retain each chain's signer/confirmation metadata and
+all Binance deposit destination address/asset mappings. A change to this richer
+identity set must invalidate saved generic plans that bind the older public
+projection, failing closed until a fresh revision is approved.
+
 Required synthetic scenarios also include one approval for multiple steps, a second
 step funded solely by verified proceeds, partial/no fills, cumulative targets,
 fees, aggregate caps, replacement, revocation/expiry at dispatch, concurrent

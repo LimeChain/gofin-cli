@@ -349,6 +349,7 @@ impl Engine {
         let record = self.load_financial_plan(plan_id)?;
         self.validate_plan_step(&record, step_id, operation, input)?;
         let (adapter, kind) = self.resolve(operation)?;
+        validate_plan_operation_identity(&*adapter, &record.revision, step_id)?;
         if kind == OperationKind::Read {
             let permission = permission_for_step(&record.revision, step_id)?;
             let exact = permission.exact.as_ref().ok_or_else(|| {
@@ -371,7 +372,8 @@ impl Engine {
                 "semantics": definition.semantics,
             }))?;
             if definition_hash != exact.definition_hash
-                || stable_connection_hash(&adapter.connections())? != exact.connections_hash
+                || stable_connection_hash(&adapter.authorization_identities())?
+                    != exact.connections_hash
             {
                 return Err(plan_error(
                     "PLAN_OPERATION_CONTRACT_CHANGED",
@@ -564,6 +566,7 @@ impl Engine {
                 "Use a supported operation from discovery.",
             ));
         }
+        validate_plan_operation_identity(&*adapter, &plan.revision, step_id)?;
         if kind == OperationKind::Read {
             return self
                 .execute_financial_plan_read(
@@ -788,7 +791,8 @@ impl Engine {
             "semantics": definition.semantics,
         }))?;
         if definition_hash != exact.definition_hash
-            || stable_connection_hash(&adapter.connections())? != exact.connections_hash
+            || stable_connection_hash(&adapter.authorization_identities())?
+                != exact.connections_hash
         {
             return Err(plan_error(
                 "PLAN_OPERATION_CONTRACT_CHANGED",
@@ -1095,7 +1099,7 @@ impl Engine {
                     "input_schema": definition.input_schema,
                     "semantics": definition.semantics,
                 }))?;
-                let connections_hash = stable_connection_hash(&adapter.connections())?;
+                let connections_hash = stable_connection_hash(&adapter.authorization_identities())?;
                 permissions.push(FinancialPlanStepPermission {
                     step_id: step.step_id.clone(),
                     generated_input_fields,
@@ -1473,6 +1477,37 @@ pub(super) fn validate_exact_plan_candidate(
         .find(|definition| definition.name == operation)
         .ok_or_else(|| internal("registry definition disappeared"))?;
     validate_plan_json_schema(&definition.input_schema, raw_input)?;
+    validate_exact_plan_identity(adapter, operation, exact)
+}
+
+fn validate_plan_operation_identity(
+    adapter: &dyn fin_domain::Adapter,
+    revision: &FinancialPlanRevision,
+    step_id: &str,
+) -> Result<()> {
+    let permission = permission_for_step(revision, step_id)?;
+    let Some(exact) = &permission.exact else {
+        return Ok(());
+    };
+    let step = revision
+        .spec
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .ok_or_else(|| internal("plan step disappeared"))?;
+    validate_exact_plan_identity(adapter, &step.operation, exact)
+}
+
+fn validate_exact_plan_identity(
+    adapter: &dyn fin_domain::Adapter,
+    operation: &str,
+    exact: &FinancialPlanExactPermission,
+) -> Result<()> {
+    let definition = adapter
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == operation)
+        .ok_or_else(|| internal("registry definition disappeared"))?;
     let definition_hash = binding_hash(&json!({
         "operation": definition.name,
         "kind": definition.kind,
@@ -1480,7 +1515,7 @@ pub(super) fn validate_exact_plan_candidate(
         "input_schema": definition.input_schema,
         "semantics": definition.semantics,
     }))?;
-    let connections_hash = stable_connection_hash(&adapter.connections())?;
+    let connections_hash = stable_connection_hash(&adapter.authorization_identities())?;
     if definition_hash != exact.definition_hash || connections_hash != exact.connections_hash {
         return Err(plan_error(
             "PLAN_OPERATION_CONTRACT_CHANGED",
@@ -3206,6 +3241,7 @@ mod tests {
         reads: AtomicUsize,
         prepares: AtomicUsize,
         changed_connection: AtomicBool,
+        changed_authorization_identity: AtomicBool,
         fail_read: AtomicBool,
         read_gate: Option<(Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>)>,
     }
@@ -3251,8 +3287,31 @@ mod tests {
                 credential_ref: Some("synthetic:credential".into()),
                 signing_enabled: false,
                 details: json!({
-                    "stable_connection_aliases": {
-                        "wallet": if self.changed_connection.load(Ordering::SeqCst) { "0x222" } else { "0x111" }
+                    "display_summary": if self.changed_connection.load(Ordering::SeqCst) {
+                        "Primary synthetic account"
+                    } else {
+                        "Synthetic account"
+                    }
+                }),
+            }
+        }
+
+        fn authorization_identity(&self) -> fin_domain::ConnectionMetadata {
+            fin_domain::ConnectionMetadata {
+                name: "protected account UID".into(),
+                provider: "synthetic-provider".into(),
+                resource: ResourceId("synthetic:account:one".into()),
+                role: Some("protected-account-identity".into()),
+                parent: None,
+                network: Some("synthetic".into()),
+                address: Some("account-1".into()),
+                credential_ref: Some("synthetic:credential".into()),
+                signing_enabled: false,
+                details: json!({
+                    "account_uid": if self.changed_authorization_identity.load(Ordering::SeqCst) {
+                        "hidden-uid-2"
+                    } else {
+                        "hidden-uid-1"
                     }
                 }),
             }
@@ -3267,6 +3326,10 @@ mod tests {
 
         fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
             vec![self.connection()]
+        }
+
+        fn authorization_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            vec![self.authorization_identity()]
         }
 
         async fn read(&self, _operation: &str, _input: &Value) -> Result<Value> {
@@ -3365,6 +3428,7 @@ mod tests {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(false),
             read_gate: None,
         });
@@ -3422,6 +3486,7 @@ mod tests {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(false),
             read_gate: None,
         });
@@ -3446,6 +3511,7 @@ mod tests {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(false),
             read_gate: None,
         });
@@ -3458,7 +3524,9 @@ mod tests {
         .unwrap();
         let request = generic_read_request("generic-read-metadata-auth");
         let authorized = engine.authorize_financial_plan(request).await.unwrap();
-        adapter.changed_connection.store(true, Ordering::SeqCst);
+        adapter
+            .changed_authorization_identity
+            .store(true, Ordering::SeqCst);
         let error = engine
             .execute_financial_plan_step(
                 &authorized.plan_id,
@@ -3476,12 +3544,108 @@ mod tests {
         assert_eq!(adapter.reads.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test]
+    async fn hidden_authorization_identity_change_blocks_exact_step_before_read() {
+        let adapter = Arc::new(GenericReadAdapter {
+            reads: AtomicUsize::new(0),
+            prepares: AtomicUsize::new(0),
+            changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
+            fail_read: AtomicBool::new(false),
+            read_gate: None,
+        });
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let authorized = engine
+            .authorize_financial_plan(generic_read_request("hidden-identity-auth"))
+            .await
+            .unwrap();
+        let public_connections = adapter.connections();
+        let approved_authorization_identities = adapter.authorization_identities();
+        adapter
+            .changed_authorization_identity
+            .store(true, Ordering::SeqCst);
+        assert_eq!(adapter.connections(), public_connections);
+        assert_ne!(
+            adapter.authorization_identities(),
+            approved_authorization_identities
+        );
+
+        let error = engine
+            .execute_financial_plan_step(
+                &authorized.plan_id,
+                "read-account",
+                OperationRequest {
+                    request_id: "hidden-identity-attempt".into(),
+                    operation: "future.read".into(),
+                    input: json!({"account":"account-1"}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "PLAN_OPERATION_CONTRACT_CHANGED");
+        assert_eq!(adapter.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.prepares.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn public_summary_change_does_not_invalidate_unchanged_authorization_identity() {
+        let adapter = Arc::new(GenericReadAdapter {
+            reads: AtomicUsize::new(0),
+            prepares: AtomicUsize::new(0),
+            changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
+            fail_read: AtomicBool::new(false),
+            read_gate: None,
+        });
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let authorized = engine
+            .authorize_financial_plan(generic_read_request("public-summary-auth"))
+            .await
+            .unwrap();
+        let original_public = adapter.connections();
+        let approved_identities = adapter.authorization_identities();
+        adapter.changed_connection.store(true, Ordering::SeqCst);
+        assert_ne!(adapter.connections(), original_public);
+        assert_eq!(adapter.authorization_identities(), approved_identities);
+
+        let result = engine
+            .execute_financial_plan_step(
+                &authorized.plan_id,
+                "read-account",
+                OperationRequest {
+                    request_id: "public-summary-attempt".into(),
+                    operation: "future.read".into(),
+                    input: json!({"account":"account-1"}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, Status::Completed);
+        assert_eq!(adapter.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(adapter.prepares.load(Ordering::SeqCst), 0);
+    }
+
     #[test]
     fn exact_connection_hash_binds_stable_details_and_ignores_connection_order() {
         let adapter = GenericReadAdapter {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(false),
             read_gate: None,
         };
@@ -3524,6 +3688,7 @@ mod tests {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(true),
             read_gate: None,
         });
@@ -3576,6 +3741,7 @@ mod tests {
             reads: AtomicUsize::new(0),
             prepares: AtomicUsize::new(0),
             changed_connection: AtomicBool::new(false),
+            changed_authorization_identity: AtomicBool::new(false),
             fail_read: AtomicBool::new(false),
             read_gate: Some((started.clone(), release.clone())),
         });

@@ -246,9 +246,15 @@ all permissions. Names are labels, never authority or unique identifiers.
 Exact scopes use ordinary registered operation schemas and protected connection
 identity snapshots. They fix every input field and per-step debit/cost cap;
 current and future registry operations require no special plan implementation.
-Connection metadata must expose stable, non-secret protected configuration,
+Authorization identity metadata must retain stable, non-secret protected configuration,
 including destination alias address/network/asset mappings. The complete metadata
 is bound; live balances and other volatile observations are excluded.
+Public `fin connections` output remains the enrolled accounts and one grouped
+EVM-wallet summary. Broker-only `authorization_identities()` retains exact
+per-chain signer/confirmation metadata and Binance destination asset maps for
+plan binding. This metadata split is intentional; saved generic EVM plans made
+with the earlier public identity set may fail closed and require a newly
+approved revision after the identity contract changes.
 Reads retain ordinary results and cannot create verified financial funding.
 Administration and credential enrollment keep their separate human-only path.
 `operation_succeeded` completion reuses normal verified operation success,

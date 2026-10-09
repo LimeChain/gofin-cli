@@ -335,6 +335,7 @@ impl BinanceTransport for AliasPlanTransport {
                 self.posts.fetch_add(1, Ordering::SeqCst);
                 Ok(json!({"id":"synthetic-alias-withdrawal"}))
             }
+            E::WithdrawalHistory => Ok(json!([])),
             endpoint => panic!("unexpected alias-plan endpoint {endpoint:?}"),
         }
     }
@@ -361,12 +362,69 @@ fn alias_plan_engine(
     .with_cost_origin_price_provider(prices)
 }
 
+#[test]
+fn public_connections_exclude_destinations_but_plan_identities_keep_full_route() {
+    use fin_domain::Adapter;
+
+    let address = "0x1111111111111111111111111111111111111111";
+    let adapter = BinanceAdapter::new(
+        destination_config(address),
+        Arc::new(AliasPlanTransport {
+            posts: AtomicUsize::new(0),
+        }),
+        Some(prices()),
+        None,
+    )
+    .unwrap();
+
+    let public = adapter.connections();
+    assert_eq!(public.len(), 1);
+    assert_eq!(public[0].provider, "binance");
+    assert_eq!(public[0].name, ACCOUNT);
+
+    let identities = adapter.authorization_identities();
+    assert_eq!(identities.len(), 2);
+    assert_eq!(identities[0], public[0]);
+    let destination = &identities[1];
+    assert_eq!(destination.name, "dev-wallet");
+    assert_eq!(destination.provider, "binance-ethereum-destination");
+    assert_eq!(destination.resource.0, "ethereum:synthetic-dev-wallet");
+    assert_eq!(destination.role.as_deref(), Some("deposit-destination"));
+    assert_eq!(destination.network.as_deref(), Some("ethereum:1"));
+    assert_eq!(destination.address.as_deref(), Some(address));
+    assert!(!destination.signing_enabled);
+    assert_eq!(destination.details["chain_id"], 1);
+    assert_eq!(destination.details["confirmations"], 2);
+    assert_eq!(
+        destination.details["assets"]["ETH"]["network"],
+        "ethereum:1"
+    );
+    assert_eq!(destination.details["assets"]["ETH"]["reference"], "native");
+    assert_eq!(destination.details["assets"]["ETH"]["decimals"], 18);
+}
+
 #[tokio::test]
 async fn exact_withdrawal_plan_rejects_a_remapped_named_destination_before_dispatch() {
     let original_address = "0x1111111111111111111111111111111111111111";
     let changed_address = "0x2222222222222222222222222222222222222222";
     let original_config = destination_config(original_address);
     let mut remapped_config = destination_config(changed_address);
+    let public_rows = |config| {
+        BinanceAdapter::new(
+            config,
+            Arc::new(AliasPlanTransport {
+                posts: AtomicUsize::new(0),
+            }),
+            Some(prices()),
+            None,
+        )
+        .unwrap()
+        .connections()
+    };
+    use fin_domain::Adapter;
+    let original_public_rows = public_rows(original_config.clone());
+    assert_eq!(original_public_rows.len(), 1);
+    assert_eq!(public_rows(remapped_config.clone()), original_public_rows);
 
     let venue = Arc::new(AliasPlanTransport {
         posts: AtomicUsize::new(0),
@@ -380,7 +438,7 @@ async fn exact_withdrawal_plan_rejects_a_remapped_named_destination_before_dispa
         venue.clone(),
         approvals.clone(),
         Store::open(&database).unwrap(),
-        original_config,
+        original_config.clone(),
     );
     let mut authorization = plan_request();
     authorization.plan = withdrawal_plan();
@@ -425,17 +483,46 @@ async fn exact_withdrawal_plan_rejects_a_remapped_named_destination_before_dispa
     assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
     assert_eq!(approvals.calls.load(Ordering::SeqCst), 1);
 
+    // A chain-only remap is also private authorization identity, even though
+    // the public account list and operation input are unchanged.
+    remapped_config.destinations[0].address = original_address.into();
+    remapped_config.destinations[0].chain_id = 5;
+    assert_eq!(public_rows(remapped_config.clone()), original_public_rows);
+    let changed_chain = alias_plan_engine(
+        venue.clone(),
+        approvals.clone(),
+        Store::open(&database).unwrap(),
+        remapped_config.clone(),
+    );
+    let result = changed_chain
+        .execute_financial_plan_step(
+            &approved.plan_id,
+            "withdraw",
+            OperationRequest {
+                request_id: format!("{request_id}-chain-change"),
+                operation: "binance.withdraw".into(),
+                input: withdrawal_plan().steps[0].input.clone(),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(result.code, "PLAN_OPERATION_CONTRACT_CHANGED");
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+
     // Asset mapping is stored in the hashed stable details too, not just the
     // alias name/address fields.
+    remapped_config.destinations[0].chain_id = 1;
     remapped_config.destinations[0].address = original_address.into();
     remapped_config.destinations[0]
         .assets
         .get_mut("ETH")
         .unwrap()
         .decimals = 17;
+    assert_eq!(public_rows(remapped_config.clone()), original_public_rows);
     let changed_asset = alias_plan_engine(
         venue.clone(),
-        approvals,
+        approvals.clone(),
         Store::open(&database).unwrap(),
         remapped_config,
     );
@@ -454,6 +541,29 @@ async fn exact_withdrawal_plan_rejects_a_remapped_named_destination_before_dispa
         .unwrap_err();
     assert_eq!(result.code, "PLAN_OPERATION_CONTRACT_CHANGED");
     assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+
+    // With the unchanged protected routing configuration, the same saved
+    // authorization remains usable through BinanceAdapter -> ExchangeAdapter
+    // -> BinanceProfile forwarding.
+    let unchanged = alias_plan_engine(
+        venue.clone(),
+        approvals,
+        Store::open(&database).unwrap(),
+        original_config,
+    );
+    let _ = unchanged
+        .execute_financial_plan_step(
+            &approved.plan_id,
+            "withdraw",
+            OperationRequest {
+                request_id: format!("{request_id}-unchanged-config"),
+                operation: "binance.withdraw".into(),
+                input: withdrawal_plan().steps[0].input.clone(),
+                run_id: None,
+            },
+        )
+        .await;
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

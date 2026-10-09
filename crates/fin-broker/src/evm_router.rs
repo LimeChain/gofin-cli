@@ -80,6 +80,12 @@ impl Adapter for EvmNetworkRouter {
         }
         connections.into_values().collect()
     }
+    fn authorization_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        self.adapters
+            .values()
+            .flat_map(|adapter| adapter.authorization_identities())
+            .collect()
+    }
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
@@ -315,6 +321,20 @@ mod tests {
             connections[0].details["networks"].as_array().unwrap().len(),
             2
         );
+        let authorization_identities = router.authorization_identities();
+        assert_eq!(authorization_identities.len(), 2);
+        assert_eq!(
+            authorization_identities
+                .iter()
+                .map(|identity| identity.details["chain_id"].as_u64().unwrap())
+                .collect::<BTreeSet<_>>(),
+            [42161, 4663].into_iter().collect()
+        );
+        assert!(authorization_identities.iter().all(|identity| {
+            identity.provider == "evm"
+                && !identity.signing_enabled
+                && identity.details["confirmations"].as_u64().is_some()
+        }));
         for chain in [42161, 4663] {
             let result = router
                 .read(
