@@ -6665,50 +6665,111 @@
           "type": "string"
         },
         "limit_price": {
+          "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "maximum_fees": {
           "additionalProperties": {
+            "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+            "not": {
+              "pattern": "^0(\\.0+)?$"
+            },
+            "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
             "type": "string"
           },
-          "description": "Exact per-asset fee caps. Output-asset commission and optional BNB fee.",
+          "description": "Exact per-asset caps: spot output commission is deducted_from_credit;\nseparately paid BNB commission is additional_debit.",
+          "minProperties": 1,
           "type": "object"
         },
         "maximum_funding_loss": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_funding_profit": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_loss": {
-          "description": "USD-M realized collateral loss bound, separate from funding and commission.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD-M realized collateral loss bound, separate from funding and commission."
         },
         "maximum_profit": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_quantity": {
-          "description": "Required upper bound when quantity is `all`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "not": {
+                "pattern": "^0(\\.0+)?$"
+              },
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required upper bound when quantity is `all`."
         },
         "quantity": {
-          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg.",
-          "type": "string"
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "not": {
+                "pattern": "^0(\\.0+)?$"
+              },
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "const": "all"
+            }
+          ],
+          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg."
         },
         "reduce_only": {
           "default": false,
@@ -7755,18 +7816,32 @@
           "type": "string"
         },
         "limitPrice": {
+          "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "maxFee": {
           "description": "Absolute fee cap in the received asset (base for BUY, quote for SELL).",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "minReceiveAmount": {
           "description": "Exact received-asset minimum after fees for the full FOK fill.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "quantity": {
           "description": "Exact base-asset quantity; BUY maximum quote spend is quantity × limitPrice.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "requestId": {
@@ -8442,50 +8517,111 @@
           "type": "string"
         },
         "limit_price": {
+          "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "maximum_fees": {
           "additionalProperties": {
+            "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+            "not": {
+              "pattern": "^0(\\.0+)?$"
+            },
+            "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
             "type": "string"
           },
-          "description": "Exact per-asset fee caps. Output-asset commission and optional BNB fee.",
+          "description": "Exact per-asset caps: spot output commission is deducted_from_credit;\nseparately paid BNB commission is additional_debit.",
+          "minProperties": 1,
           "type": "object"
         },
         "maximum_funding_loss": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_funding_profit": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_loss": {
-          "description": "USD-M realized collateral loss bound, separate from funding and commission.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD-M realized collateral loss bound, separate from funding and commission."
         },
         "maximum_profit": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "maximum_quantity": {
-          "description": "Required upper bound when quantity is `all`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "not": {
+                "pattern": "^0(\\.0+)?$"
+              },
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required upper bound when quantity is `all`."
         },
         "quantity": {
-          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg.",
-          "type": "string"
+          "anyOf": [
+            {
+              "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+              "not": {
+                "pattern": "^0(\\.0+)?$"
+              },
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
+              "type": "string"
+            },
+            {
+              "const": "all"
+            }
+          ],
+          "description": "Exact base quantity; `all` is allowed only for a scoped closing leg."
         },
         "reduce_only": {
           "default": false,
@@ -8732,6 +8868,12 @@
         "/request_id"
       ],
       "concurrentPositions": null,
+      "fees": {
+        "maximum_fees": "Exact per-asset caps, using unsigned decimal strings such as 0.00002, not .00002.",
+        "output_asset": "Base asset for BUY, quote asset for SELL; its commission is deducted_from_credit and reduces the net receipt.",
+        "plan_scope": "Derive maximum_costs asset, location and treatment from the ordinary preview intent; do not guess or treat every fee as additional_debit.",
+        "separate_asset": "A separately paid BNB commission is additional_debit."
+      },
       "orderType": "LIMIT",
       "plan_authorization": {
         "approval_requires_future_balances": false,
@@ -9217,6 +9359,11 @@
       "additionalProperties": false,
       "properties": {
         "amount": {
+          "description": "Exact unsigned decimal string with a whole-number digit, for example 0.00415, not .00415. No signs, exponents or leading zeros; at most 36 fractional digits.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "authority": {
@@ -9635,7 +9782,7 @@
   },
   {
     "name": "binance.withdraw",
-    "description": "Binance SPOT withdrawal on any advertised coin/network to a named wallet or explicit public address, with exact memo/tag, limits and fees.",
+    "description": "Binance SPOT withdrawal on any advertised coin/network to a named wallet or explicit public address. amount is the gross debit including the fee; minReceiveAmount is the net receipt floor. Use exact decimals such as 0.00415, not .00415.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -9679,6 +9826,11 @@
           "type": "string"
         },
         "amount": {
+          "description": "Gross source debit including the network fee; use 0.00415, not .00415.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "coin": {
@@ -9689,6 +9841,8 @@
           "type": "string"
         },
         "maxFee": {
+          "description": "Maximum network fee included in amount (plan treatment: included_in_debit).",
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "memo": {
@@ -9696,6 +9850,11 @@
           "type": "string"
         },
         "minReceiveAmount": {
+          "description": "Minimum net destination receipt, at most amount minus maxFee.",
+          "not": {
+            "pattern": "^0(\\.0+)?$"
+          },
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,36})?$",
           "type": "string"
         },
         "network": {
@@ -9774,18 +9933,41 @@
         "network": "XRP",
         "requestId": "example-tagged-withdraw",
         "walletType": "SPOT"
+      },
+      {
+        "account": "master",
+        "amount": "10.5",
+        "coin": "USDC",
+        "destination": "wallet",
+        "maxFee": "0.5",
+        "minReceiveAmount": "10",
+        "network": "ETH",
+        "requestId": "example-usdc-net-withdraw",
+        "walletType": "SPOT"
       }
     ],
     "coverage": "Endpoint fixtures and synthetic transport; production account permissions and live financial acceptance remain unverified.",
     "completion": "Matching venue withdrawal plus bounded source debit/fee and independently verified destination receipt. Unobserved routes remain pending after venue completion.",
     "semantics": {
-      "amount": "exact decimal string",
+      "amount": "Gross SPOT debit including the withdrawal fee, not the destination receipt. Use unsigned decimal strings with a whole-number digit: 0.00415, not .00415.",
       "broker_generated_attempt_input_fields": [
         "/requestId"
       ],
       "coinNetworkSelection": "live Binance metadata; no coin/network allowlist",
       "credentialValues": "never exposed",
       "destinationReceipt": "independent observer required for terminal financial settlement; otherwise explicitly pending. The configured Arbitrum One and Robinhood Chain observers accept successful canonical sequencer inclusion with exact recipient and amount proof, without waiting for parent-chain finality. Venue route availability remains separate.",
+      "fees": {
+        "example": {
+          "amount": "10.5",
+          "coin": "USDC",
+          "maxFee": "0.5",
+          "minReceiveAmount": "10"
+        },
+        "freshness": "Fees depend on coin/network and may change; inspect binance.networks and preview before submission.",
+        "maxFee": "Maximum network fee included in amount; do not reserve it again as an additional debit.",
+        "minReceiveAmount": "Minimum net destination receipt; must not exceed amount minus maxFee.",
+        "treatment": "included_in_debit"
+      },
       "ordinaryExecution": "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced",
       "plan_authorization": {
         "approval_requires_future_balances": false,

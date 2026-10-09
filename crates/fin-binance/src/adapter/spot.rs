@@ -9,11 +9,15 @@ pub(super) struct SpotInput {
     symbol: String,
     side: String,
     /// Exact base-asset quantity; BUY maximum quote spend is quantity × limitPrice.
+    #[schemars(schema_with = "super::decimal_schema::positive")]
     quantity: String,
+    #[schemars(schema_with = "super::decimal_schema::positive")]
     limit_price: String,
     /// Absolute fee cap in the received asset (base for BUY, quote for SELL).
+    #[schemars(schema_with = "super::decimal_schema::unsigned")]
     max_fee: String,
     /// Exact received-asset minimum after fees for the full FOK fill.
+    #[schemars(schema_with = "super::decimal_schema::positive")]
     min_receive_amount: String,
 }
 

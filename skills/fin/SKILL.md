@@ -94,6 +94,19 @@ described above. Use installed capabilities to discover any additional providers
 
 Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
 
+Binance quantities and fee caps are unsigned decimal strings with a whole-number
+digit: use `0.00415`, not `.00415`; avoid signs, exponents, leading zeros and
+more than 36 fractional digits. Withdrawal `amount` is the gross debit including
+the fee (`included_in_debit`); `minReceiveAmount` is the net destination floor.
+For example, 10.5 USDC gross with a 0.5 fee yields 10 USDC net. Spot commission
+paid from the received asset is `deducted_from_credit`; a separately paid BNB
+fee is `additional_debit`. Derive plan `maximum_costs` identities and treatments
+from an ordinary operation preview's `intent.maximum_costs` when the operation
+can be prepared, rather than guessing. For future-funded steps that cannot yet
+be prepared, use the installed operation's documented fee semantics; preview
+each concrete step once its funds are available. Plan schema review checks every
+step's input format before approval, while live balances and fees remain deferred.
+
 For a user's coherent intent that requires multiple linked financial actions, strongly recommend one bounded named plan. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
 
 For a genuinely standalone write, use one operation per write: prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass. If the installed Fin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.

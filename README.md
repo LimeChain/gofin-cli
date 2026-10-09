@@ -868,6 +868,13 @@ receipts can fund a declared dependency. Partial/no-fill IOC attempts can end
 without completing their step; cumulative verified effects determine progress.
 An uncertain attempt must reconcile before the next attempt or step.
 
+Plan review validates the input schema for every step before Touch ID, including
+Binance decimal formats. Use `0.00415`, not `.00415`; signs, exponents, leading
+zeros and more than 36 fractional digits are invalid. Derive exact plan cost
+identities and treatments from operation previews where preparation is possible,
+or from operation discovery for future-funded steps; validate each actual step
+again after its funds arrive.
+
 Step and plan limits are cumulative exact asset quantities and costs, not net
 wealth changes. Intermediate proceeds never replenish gross spending authority.
 Status exposes usage, reservations, remaining authority and the next eligible
@@ -921,6 +928,12 @@ cannot satisfy a planned zero-position return: refresh the remaining route.
 Loss, funding and commission bounds use exact decimals; no default fee estimate
 or USDT peg substitutes for observed evidence.
 
+For spot orders, commission in the received asset (ETH for an ETH purchase,
+USDC for an ETH/USDC sale) reduces the receipt and uses `deducted_from_credit`
+in a plan's `maximum_costs`. A separately paid BNB fee uses `additional_debit`.
+Copy the exact fee identities and treatments from `intent.maximum_costs` in the
+ordinary preview rather than assuming all fees are additional debits.
+
 Binance SPOT withdrawals select any enabled coin/network from live Binance metadata,
 using either a named wallet or an explicit public `address`, plus `memo` where
 required. The adapter checks venue formats, exact increments, limits, fee bounds,
@@ -944,6 +957,12 @@ for a 20 USDC net receipt request `amount` 20.5, set
 `maxFee` to 0.5, and `minReceiveAmount` to 20. The source needs 20.5 USDC, not
 21; fees are dynamic, so inspect fresh metadata and prepare a new preview before
 any later write.
+
+In named plans, the withdrawal fee uses `included_in_debit`; reserve the gross
+amount once. For 10 USDC net with a 0.5 USDC fee cap, use `amount: "10.5"`,
+`maxFee: "0.5"` and `minReceiveAmount: "10"`. Amounts and fee caps are exact
+decimal strings: `0.00415` is valid, `.00415` is not. Discovery exposes these
+meanings through `fin explain binance.withdraw --json` and its input schema.
 
 Inspect the exact withdrawal contract before preparing a real amount:
 

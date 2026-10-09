@@ -406,6 +406,175 @@ impl fin_domain::Authorizer for CountingApproval {
     }
 }
 
+struct OfflinePlanTransport;
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for OfflinePlanTransport {
+    async fn request(
+        &self,
+        _credential: &fin_binance::CredentialHandle,
+        _request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        panic!("Exact plan input review must not call Binance or depend on future funds")
+    }
+}
+
+#[tokio::test]
+async fn malformed_decimal_in_a_later_step_blocks_the_entire_plan_before_approval() {
+    let approvals = Arc::new(CountingApproval(AtomicUsize::new(0)));
+    let engine = engine_with(Arc::new(OfflinePlanTransport), approvals.clone());
+    let invalid = [
+        ".00415",
+        "1e-8",
+        "+1",
+        "-1",
+        "01.2",
+        "1.",
+        " 1",
+        "1\n",
+        "1.0000000000000000000000000000000000000",
+    ];
+    for (step_index, field) in [
+        (0, "amount"),
+        (1, "amount"),
+        (1, "maxFee"),
+        (1, "minReceiveAmount"),
+    ] {
+        for value in invalid {
+            let mut candidate = plan();
+            candidate.steps[step_index].input[field] = json!(value);
+            let authorization = request(candidate);
+            let preview_error = engine
+                .preview_financial_plan(authorization.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(preview_error.code, "PLAN_INPUT_INVALID", "{field}={value}");
+            let approval_error = engine
+                .authorize_financial_plan(authorization)
+                .await
+                .unwrap_err();
+            assert_eq!(approval_error.code, "PLAN_INPUT_INVALID", "{field}={value}");
+        }
+    }
+    for field in ["amount", "minReceiveAmount"] {
+        let mut candidate = plan();
+        candidate.steps[1].input[field] = json!("0.000");
+        assert_eq!(
+            engine
+                .preview_financial_plan(request(candidate))
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_INPUT_INVALID"
+        );
+    }
+    let mut valid = plan();
+    valid.steps[0].input["amount"] = json!("0.00415");
+    valid.steps[1].input["maxFee"] = json!("0");
+    valid.steps[1].input["minReceiveAmount"] = json!("0.000000000000000000000000000000000001");
+    engine.preview_financial_plan(request(valid)).await.unwrap();
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn order_decimal_schema_keeps_null_zero_bounds_and_all_while_rejecting_malformed_inputs() {
+    let approvals = Arc::new(CountingApproval(AtomicUsize::new(0)));
+    let engine = engine_with(Arc::new(OfflinePlanTransport), approvals.clone());
+    let mut candidate = plan();
+    let order = &mut candidate.steps[1];
+    order.operation = "binance.spot.order-place".into();
+    order.input = json!({
+        "request_id":"SYNTHETIC-offline-order", "account":"main-fixture", "symbol":"ETHUSDC",
+        "side":"BUY", "quantity":"0.0042", "limit_price":"2500", "time_in_force":"FOK",
+        "maximum_fees":{"ETH":"0.00002", "BNB":"0.00005"},
+        "maximum_quantity":null, "maximum_loss":null, "maximum_profit":null,
+        "maximum_funding_loss":null, "maximum_funding_profit":null
+    });
+    engine
+        .preview_financial_plan(request(candidate.clone()))
+        .await
+        .unwrap();
+    let mut omitted_optional_fields = candidate.clone();
+    for field in [
+        "maximum_quantity",
+        "maximum_loss",
+        "maximum_profit",
+        "maximum_funding_loss",
+        "maximum_funding_profit",
+    ] {
+        omitted_optional_fields.steps[1]
+            .input
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+    }
+    engine
+        .preview_financial_plan(request(omitted_optional_fields))
+        .await
+        .unwrap();
+    for field in [
+        "quantity",
+        "limit_price",
+        "maximum_quantity",
+        "maximum_loss",
+        "maximum_profit",
+        "maximum_funding_loss",
+        "maximum_funding_profit",
+    ] {
+        for value in [".00415", "1e-8", "01.2", "-1"] {
+            let mut malformed = candidate.clone();
+            malformed.steps[1].input[field] = json!(value);
+            let authorization = request(malformed);
+            assert_eq!(
+                engine
+                    .preview_financial_plan(authorization.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "PLAN_INPUT_INVALID"
+            );
+            assert_eq!(
+                engine
+                    .authorize_financial_plan(authorization)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "PLAN_INPUT_INVALID"
+            );
+        }
+    }
+    for value in [".00002", "0", "0.0", "1e-8"] {
+        let mut malformed = candidate.clone();
+        malformed.steps[1].input["maximum_fees"]["ETH"] = json!(value);
+        assert_eq!(
+            engine
+                .preview_financial_plan(request(malformed))
+                .await
+                .unwrap_err()
+                .code,
+            "PLAN_INPUT_INVALID"
+        );
+    }
+    let order = &mut candidate.steps[1].input;
+    order["quantity"] = json!("all");
+    order["maximum_quantity"] = json!("0.0042");
+    for field in [
+        "maximum_loss",
+        "maximum_profit",
+        "maximum_funding_loss",
+        "maximum_funding_profit",
+    ] {
+        order[field] = json!("0");
+    }
+    // Syntax review preserves documented sentinels and zero limits. Runtime
+    // preparation still enforces scoped closing eligibility and market checks.
+    engine
+        .preview_financial_plan(request(candidate))
+        .await
+        .unwrap();
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn one_named_plan_uses_verified_subaccount_proceeds_before_dev_wallet_withdrawal() {
     let transport = Arc::new(PlanFundingTransport::new());

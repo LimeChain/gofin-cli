@@ -1,6 +1,7 @@
 use super::*;
 mod address_book;
 mod boundaries;
+mod decimal_schema;
 mod spot;
 mod trading;
 mod transfer_rejection;
@@ -1822,6 +1823,7 @@ struct TransferInput {
     from: String,
     to: String,
     coin: String,
+    #[schemars(schema_with = "decimal_schema::positive")]
     amount: String,
     from_wallet: String,
     to_wallet: String,
@@ -1840,10 +1842,16 @@ struct WithdrawInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memo: Option<String>,
     coin: String,
+    /// Gross source debit including the network fee; use 0.00415, not .00415.
+    #[schemars(schema_with = "decimal_schema::positive")]
     amount: String,
     network: String,
     wallet_type: String,
+    /// Maximum network fee included in amount (plan treatment: included_in_debit).
+    #[schemars(schema_with = "decimal_schema::unsigned")]
     max_fee: String,
+    /// Minimum net destination receipt, at most amount minus maxFee.
+    #[schemars(schema_with = "decimal_schema::positive")]
     min_receive_amount: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -1852,6 +1860,7 @@ struct FundingSourceInput {
     authority: String,
     from: String,
     coin: String,
+    #[schemars(schema_with = "decimal_schema::positive")]
     amount: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1860,6 +1869,7 @@ pub struct ConditionalFundingSource {
     pub authority: String,
     pub from: String,
     pub coin: String,
+    #[schemars(schema_with = "decimal_schema::positive")]
     pub amount: String,
 }
 
@@ -1947,7 +1957,7 @@ fn definitions() -> Vec<Definition> {
         ),
         (
             "binance.withdraw",
-            "Binance SPOT withdrawal on any advertised coin/network to a named wallet or explicit public address, with exact memo/tag, limits and fees.",
+            "Binance SPOT withdrawal on any advertised coin/network to a named wallet or explicit public address. amount is the gross debit including the fee; minReceiveAmount is the net receipt floor. Use exact decimals such as 0.00415, not .00415.",
             OperationKind::Write,
             schema_for!(WithdrawInput),
             "Matching venue withdrawal plus bounded source debit/fee and independently verified destination receipt. Unobserved routes remain pending after venue completion.",
@@ -2023,9 +2033,20 @@ fn definitions() -> Vec<Definition> {
         definition.semantics["ordinaryExecution"] = json!(
             "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced"
         );
+        definition.semantics["amount"] = json!(
+            "Gross SPOT debit including the withdrawal fee, not the destination receipt. Use unsigned decimal strings with a whole-number digit: 0.00415, not .00415."
+        );
+        definition.semantics["fees"] = json!({
+            "treatment":"included_in_debit",
+            "maxFee":"Maximum network fee included in amount; do not reserve it again as an additional debit.",
+            "minReceiveAmount":"Minimum net destination receipt; must not exceed amount minus maxFee.",
+            "example":{"amount":"10.5","maxFee":"0.5","minReceiveAmount":"10","coin":"USDC"},
+            "freshness":"Fees depend on coin/network and may change; inspect binance.networks and preview before submission."
+        });
         definition.examples = vec![
             json!({"requestId":"example-arbitrum-withdraw","account":"master","destination":"wallet","coin":"ETH","amount":"0.001","network":"ARBITRUM","walletType":"SPOT","maxFee":"0.00005","minReceiveAmount":"0.00095"}),
             json!({"requestId":"example-tagged-withdraw","account":"master","address":"rEXAMPLE_SYNTHETIC_ADDRESS","memo":"000123","coin":"XRP","amount":"10","network":"XRP","walletType":"SPOT","maxFee":"0.2","minReceiveAmount":"9.8"}),
+            json!({"requestId":"example-usdc-net-withdraw","account":"master","destination":"wallet","coin":"USDC","amount":"10.5","network":"ETH","walletType":"SPOT","maxFee":"0.5","minReceiveAmount":"10"}),
         ];
     }
     result.extend(crate::trading_reads::trading_read_definitions());

@@ -103,6 +103,14 @@ reads can also be sequenced. Normal operation success is an explicit completion
 condition for zero-principal actions. Optional adapter variation scopes remain
 available. Live permissions, balances, prices and simulations are deferred to
 fresh execution preparation; plan review must say which checks are deferred.
+Binance input schemas also enforce the exact unsigned decimal syntax and
+positive principal/receipt quantities before plan approval, using shared
+adapter-owned schema helpers. Nullable optional fields and zero-valued fee/loss
+bounds retain their runtime meanings. This catches malformed later steps without
+requiring future balances or adapter network calls. Fee discovery distinguishes
+withdrawal fees included in the gross debit, output-asset spot commissions
+deducted from credit, and separately paid commissions; the consumer skill uses
+preview cost treatments instead of inferring them.
 Broker plan metadata remains engine-owned and is removed before adapter calls,
 so strict current and future adapter bindings retain their ordinary contract. Plan and step consumption, net funding credits,
 reservations and completion progress settle together. A plan uses exact per-asset

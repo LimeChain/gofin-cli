@@ -96,6 +96,18 @@ See [plan verification and human handoff](plans.md) for cumulative completion,
 future funding, durable authority, native named approval and update checks.
 Synthetic approval is not biometric or live-write evidence.
 
+Binance plan input regressions run without venue requests or approval:
+
+```sh
+cargo test --locked -p fin-binance --test funding_contract generic_plan_tests
+```
+
+These cover malformed decimal strings in later steps rejecting both plan review
+and authorization before Touch ID, as well as valid 36-digit fractional
+precision, omitted/null optional fields, zero fee/loss limits where supported,
+and the scoped order `all` sentinel. Runtime balances, fees and closing
+eligibility remain separate execution checks.
+
 ## Local development loop
 
 Use [isolated development environments](development-environments.md) to run

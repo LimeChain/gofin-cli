@@ -28,19 +28,33 @@ pub struct OrderInput {
     pub symbol: String,
     pub side: Side,
     /// Exact base quantity; `all` is allowed only for a scoped closing leg.
+    #[schemars(schema_with = "super::decimal_schema::positive_or_all")]
     pub quantity: String,
     /// Required upper bound when quantity is `all`.
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_positive")]
     pub maximum_quantity: Option<String>,
+    #[schemars(schema_with = "super::decimal_schema::positive")]
     pub limit_price: String,
     pub time_in_force: ImmediateTime,
-    /// Exact per-asset fee caps. Output-asset commission and optional BNB fee.
+    /// Exact per-asset caps: spot output commission is deducted_from_credit;
+    /// separately paid BNB commission is additional_debit.
+    #[schemars(schema_with = "super::decimal_schema::fee_map")]
     pub maximum_fees: BTreeMap<String, String>,
     #[serde(default)]
     pub reduce_only: bool,
     /// USD-M realized collateral loss bound, separate from funding and commission.
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_loss: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_profit: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_loss: Option<String>,
+    #[serde(default)]
+    #[schemars(schema_with = "super::decimal_schema::optional_unsigned")]
     pub maximum_funding_profit: Option<String>,
 }
 
@@ -73,6 +87,12 @@ pub(super) fn definitions() -> Vec<Definition> {
             "Fresh standalone approval, or remaining authority under an explicitly approved operation-boundary grant."
         );
         spot.semantics["boundary_authorization"] = super::boundaries::discovery();
+        spot.semantics["fees"] = json!({
+            "maximum_fees":"Exact per-asset caps, using unsigned decimal strings such as 0.00002, not .00002.",
+            "output_asset":"Base asset for BUY, quote asset for SELL; its commission is deducted_from_credit and reduces the net receipt.",
+            "separate_asset":"A separately paid BNB commission is additional_debit.",
+            "plan_scope":"Derive maximum_costs asset, location and treatment from the ordinary preview intent; do not guess or treat every fee as additional_debit."
+        });
     }
     result.extend(cancellation::definitions());
     result
