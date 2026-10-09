@@ -231,6 +231,38 @@ execution of the eight-step plan. Standalone bridge prompt wording, cancellation
 of the biometric dialog, expiry and canonical protected writes remain separate
 unobserved cases.
 
+## Protected full plan to Robinhood — October 9, 2026
+
+The human authorized one complete retained-funds plan: buy about $25 of ETH in
+an enrolled Binance subaccount, transfer to its main account, withdraw to the
+Ethereum evm-dev wallet, and bridge native ETH to the same wallet on Robinhood.
+Relay was the cheaper eligible quote. One real Touch ID approval covered all
+four writes; each step has exactly one operation attempt and verified completion.
+
+The purchase filled `0.0103 ETH` for `25.627327 USDC`, with `0.00001429 BNB`
+commission. The main account withdrew `0.01026 ETH` gross, including its
+`0.00015 ETH` fee, and Fin verified `0.01011 ETH` received on Ethereum. Relay
+bridged `0.0101 ETH`; source gas was `0.000007995030845132 ETH`. Fin proved the
+exact order-correlated Robinhood receipt of `0.010085182150970094 ETH`, above the
+approved `0.00984 ETH` floor. Funds remain at their requested destinations.
+
+Execution exposed and fixed first-claim handling of a selected plan receipt floor
+below the provisional provider floor. A later human-requested policy update makes
+one successful transaction in a canonical sequencer-produced block sufficient
+on Arbitrum and Robinhood, without waiting for RPC finality. Both protected
+runtime updates preserved the original plan, consent, and completed steps; the
+bridge resumed without reapproval or funding replay. Final receipt reconciliation
+and repeated status reads returned the same completed settlement proof. All four
+steps are complete, with no plan blockers or active reservations. The installed
+consumer skill is current and describes the sequencer policy.
+
+This verifies the full protected four-step native-ETH plan. It does not execute
+the earlier eight-step ETH-plus-USDC review plan, nor establish the remaining
+cancellation, expiry, or protected canonical live-write cases. For the sequencer
+change, root verification passed 375 focused engine, broker, wallet, bridge and
+CLI tests, plus strict Clippy and formatting. The explicit canonical fork case
+was not rerun; its existing ignored case remains separate from synthetic tests.
+
 ## Remaining human installation and Touch ID checklist
 
 
