@@ -10,12 +10,12 @@ The first release requires **backlog items 1–23 inclusive**. Integration entri
 - Each integration must use Fin's protected credentials, plan/authorization, exact financial types, durable submission identities and verified settlement as applicable.
 - “Available onboarded dapps” means extending already integrated protocols where their actual deployments and operations are supported on the requested network. It does not automatically authorize integrating every dapp on that chain.
 - Verify current official deployments, asset identities and routes during scoping. Do not infer dapp, bridging, deposit or withdrawal support solely from network compatibility.
-- CCXT full-suite scope and extensive ask-ogi use were explicitly requested for item 9. Do not silently apply that scope to these new exchange entries; agree their operation coverage when selected.
+- CCXT full-suite scope and extensive ask-ogi use apply to items 9 (Hyperliquid) and 11 (Kraken). Do not silently apply that scope to other exchange entries; agree their operation coverage when selected.
 - These additions authorize backlog capture, not live financial testing. Verification and live-test budgets/restoration remain governed by the repository contract.
 
 ## 11. Kraken support
 
-Extend and verify Kraken integration. Inspect existing public reads and define account, trading, funding and recovery coverage before implementation. Exact products, order capabilities and deposit/withdrawal routes remain open.
+Implement and verify the full Kraken action suite supported by the selected CCXT version, including applicable market/account reads, trading, order management, funding, deposits and withdrawals. Use ask-ogi extensively for implementation and verification assistance, following the approach selected for Hyperliquid. See the [detailed Kraken draft](kraken-support.md). Inventory Kraken product/API distinctions explicitly; supported deposit assets/networks and live-test parameters require verification and selection rather than inheriting Hyperliquid's Arbitrum USDC route.
 
 ## 12. Coinbase support
 

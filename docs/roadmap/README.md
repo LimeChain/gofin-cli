@@ -16,7 +16,7 @@ First-release scope: **items 1–23 inclusive**, as specified by the user on 202
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | In progress — user reported; full CCXT-supported suite plus Arbitrum USDC deposits; extensive ask-ogi consultation |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
-| 11 | [Kraken support](integration-roadmap.md#11-kraken-support) | Roadmap — scope to define |
+| 11 | [Kraken support](kraken-support.md) | Scoped — full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
 | 13 | [OKX support](integration-roadmap.md#13-okx-support) | Roadmap — scope to define |
 | 14 | [Solana wallet and transactions](integration-roadmap.md#14-solana-wallet-and-transactions) | Roadmap — foundation for Solana integrations |
