@@ -733,7 +733,14 @@ impl Engine {
         }
         let mut record = initial;
         let result = self
-            .execute_new(adapter, &request, &mut record, Some(authorization.clone()))
+            .execute_new(
+                adapter,
+                &request,
+                &mut record,
+                Some(authorization.clone()),
+                None,
+                None,
+            )
             .await;
         let result_record = match result {
             Ok(done) => done,

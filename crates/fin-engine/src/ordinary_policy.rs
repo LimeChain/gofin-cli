@@ -40,8 +40,25 @@ fn record_charge(record: &OperationRecord) -> Result<BigUint> {
     let bounded = prepared
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
-        .is_some();
+        .is_some()
+        || prepared
+            .binding
+            .get(fin_domain::financial_plans::PLAN_METADATA_KEY)
+            .is_some();
     if !bounded || !record.status.terminal() {
+        return charge(prepared);
+    }
+    let exact_plan_input = prepared
+        .binding
+        .get(fin_domain::financial_plans::PLAN_METADATA_KEY)
+        .and_then(|metadata| metadata.get("exact_input"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if exact_plan_input {
+        // Generic exact scopes can represent position, debt, collateral, and
+        // derivative notional effects that are not cash debits. Keep the
+        // approved conservative valuation rather than inferring exposure
+        // from one subset of typed effects.
         return charge(prepared);
     }
     let Some(verified) = &record.effects else {
@@ -53,21 +70,44 @@ fn record_charge(record: &OperationRecord) -> Result<BigUint> {
             "A bounded attempt has no recorded pricing evidence.",
         )
     })?;
+    actual_effect_charge(&verified.effects, &valuation.prices)
+}
+
+fn actual_effect_charge(
+    effects: &[fin_domain::FinancialEffect],
+    prices: &[fin_domain::AssetPrice],
+) -> Result<BigUint> {
     let mut total = BigUint::zero();
-    for effect in &verified.effects {
+    for effect in effects {
         match effect {
-            fin_domain::FinancialEffect::CashDebit { amount, .. }
-            | fin_domain::FinancialEffect::Cost { amount, .. } => {
-                total += amount_usd(amount, &valuation.prices)?;
+            fin_domain::FinancialEffect::CashDebit { amount, .. } => {
+                total += amount_usd(amount, prices)?;
+            }
+            fin_domain::FinancialEffect::Cost {
+                treatment: CostTreatment::IncludedInDebit,
+                ..
+            } => {} // Already included in a typed gross debit.
+            fin_domain::FinancialEffect::Cost { amount, .. } => {
+                total += amount_usd(amount, prices)?;
             }
             fin_domain::FinancialEffect::Transfer { debit, .. } => {
-                total += amount_usd(debit, &valuation.prices)?;
+                total += amount_usd(debit, prices)?;
             }
             fin_domain::FinancialEffect::Conversion { spent, .. } => {
-                total += amount_usd(spent, &valuation.prices)?;
+                total += amount_usd(spent, prices)?;
             }
-            fin_domain::FinancialEffect::OriginMovement { debit, .. } => {
-                total += amount_usd(debit, &valuation.prices)?;
+            fin_domain::FinancialEffect::DebtChange { asset, delta, .. }
+                if !delta.is_negative() && !delta.is_zero() =>
+            {
+                // Borrowed principal increases the protected allocation even
+                // though it is a credit to the wallet, not a cash debit.
+                total += amount_usd(
+                    &fin_domain::Amount {
+                        asset: asset.clone(),
+                        atoms: delta.magnitude(),
+                    },
+                    prices,
+                )?;
             }
             _ => {}
         }
@@ -356,4 +396,103 @@ pub(super) fn validate_boundary_candidate_policy(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fin_domain::{AccountingLocation, Amount, AssetId, Quantity, ResourceId, SignedQuantity};
+
+    fn asset() -> AssetId {
+        AssetId {
+            network: "synthetic".into(),
+            reference: "USD".into(),
+            decimals: 0,
+        }
+    }
+
+    fn amount(value: &str) -> Amount {
+        Amount {
+            asset: asset(),
+            atoms: Quantity::new(value).unwrap(),
+        }
+    }
+
+    fn prices() -> Vec<fin_domain::AssetPrice> {
+        vec![fin_domain::AssetPrice {
+            asset: asset(),
+            usd_micros_per_unit: Quantity::new("1").unwrap(),
+            unit_atoms: Quantity::new("1").unwrap(),
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            source: "synthetic test price".into(),
+        }]
+    }
+
+    #[test]
+    fn protected_allocation_counts_cash_once_and_keeps_borrowed_principal() {
+        let cash = ResourceId("synthetic:wallet".into());
+        let market = ResourceId("synthetic:market".into());
+        let transfer_provenance = fin_domain::FinancialEffect::OriginMovement {
+            from: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            to: AccountingLocation::Position {
+                resource: market.clone(),
+                position: "supply".into(),
+                position_kind: fin_domain::PositionKind::Supply,
+            },
+            debit: amount("100"),
+            credit: amount("100"),
+        };
+        let cash_effects = vec![
+            fin_domain::FinancialEffect::CashDebit {
+                resource: cash.clone(),
+                amount: amount("100"),
+            },
+            transfer_provenance,
+        ];
+        assert_eq!(
+            actual_effect_charge(&cash_effects, &prices()).unwrap(),
+            BigUint::from(100u32)
+        );
+
+        let borrowed = vec![
+            fin_domain::FinancialEffect::DebtChange {
+                resource: market,
+                debt: "variableDebtUSD".into(),
+                asset: asset(),
+                delta: SignedQuantity::new("75").unwrap(),
+                anchor: None,
+            },
+            fin_domain::FinancialEffect::UsableCredit {
+                to: cash,
+                amount: amount("75"),
+            },
+        ];
+        assert_eq!(
+            actual_effect_charge(&borrowed, &prices()).unwrap(),
+            BigUint::from(75u32)
+        );
+    }
+
+    #[test]
+    fn included_repayment_fee_is_not_charged_twice() {
+        let resource = ResourceId("synthetic:wallet".into());
+        let effects = vec![
+            fin_domain::FinancialEffect::CashDebit {
+                resource: resource.clone(),
+                amount: amount("100"),
+            },
+            fin_domain::FinancialEffect::Cost {
+                location: AccountingLocation::Cash { resource },
+                amount: amount("5"),
+                category: "included repayment fee".into(),
+                treatment: CostTreatment::IncludedInDebit,
+            },
+        ];
+        assert_eq!(
+            actual_effect_charge(&effects, &prices()).unwrap(),
+            BigUint::from(100u32)
+        );
+    }
 }

@@ -5,6 +5,7 @@
 pub mod daemon;
 
 use fin_domain::boundaries::BoundaryAuthorizationRequest;
+use fin_domain::financial_plans::FinancialPlanAuthorizationRequest;
 use fin_domain::{FinError, OperationRequest, PlanStep, ResourceAmount};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +39,42 @@ pub enum BrokerRequest {
     /// Grant bounded authority for a logical financial intent after fresh human approval.
     AuthorizeBoundary {
         request: BoundaryAuthorizationRequest,
+    },
+    /// Read-only review of a named plan and the permissions it would request.
+    PreviewPlan {
+        request: FinancialPlanAuthorizationRequest,
+    },
+    /// Create or replace one named plan revision after fresh human approval.
+    AuthorizePlan {
+        request: FinancialPlanAuthorizationRequest,
+    },
+    /// Read plan authority and execution progress; may reconcile but never execute.
+    PlanStatus {
+        plan_id: String,
+    },
+    /// Revoke future dispatch under a named plan without cancelling submitted work.
+    RevokePlan {
+        plan_id: String,
+    },
+    /// Evaluate one candidate against the next eligible plan step.
+    PreviewPlanStep {
+        plan_id: String,
+        step_id: String,
+        operation: String,
+        input: Value,
+    },
+    /// Execute one explicit attempt under the named plan's active revision.
+    ExecutePlanStep {
+        plan_id: String,
+        step_id: String,
+        request: OperationRequest,
+    },
+    /// Replace a durable candidate only while its prior attempt is unsubmitted.
+    ReplacePlanCandidate {
+        plan_id: String,
+        step_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
     },
     /// Check and reconcile one bounded authorization and its attempts.
     BoundaryStatus {
@@ -268,6 +305,54 @@ mod tests {
             read_request(&mut replan).await.unwrap(),
             Some(BrokerRequest::RunReplan { id, remaining })
                 if id == "synthetic-run" && remaining.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn named_plan_requests_and_step_authority_are_typed() {
+        let request = serde_json::json!({
+            "method": "authorize_plan",
+            "request": {
+                "request_id": "request-1",
+                "valid_for_seconds": 600,
+                "plan": {
+                    "version": 1,
+                    "name": "sample two step plan",
+                    "steps": [{
+                        "step_id": "sell",
+                        "operation": "binance.spot-order",
+                        "input": {"symbol":"ETH/USDT"},
+                        "permitted_variations": {"price":"bounded"},
+                        "completion": {"principal_spend": null, "minimum_net_receipt": {
+                            "resource":"binance:account:synthetic",
+                            "amount":{"asset":{"network":"binance","reference":"USDT","decimals":6},"atoms":"1"}
+                        }},
+                        "funding_dependencies": []
+                    }],
+                    "aggregate_bounds": {"maximum_debits":[],"maximum_costs":[]}
+                }
+            }
+        });
+        let frame = format!("{request}\n");
+        assert!(matches!(
+            read_request(&mut BufReader::new(frame.as_bytes())).await.unwrap(),
+            Some(BrokerRequest::AuthorizePlan { request })
+                if request.request_id == "request-1"
+                    && request.plan.name == "sample two step plan"
+                    && request.valid_for_seconds == 600
+        ));
+
+        let attempt = serde_json::json!({
+            "method":"execute_plan_step",
+            "plan_id":"plan-1",
+            "step_id":"sell",
+            "request":{"request_id":"attempt-1","operation":"binance.spot-order","input":{},"run_id":null}
+        });
+        let frame = format!("{attempt}\n");
+        assert!(matches!(
+            read_request(&mut BufReader::new(frame.as_bytes())).await.unwrap(),
+            Some(BrokerRequest::ExecutePlanStep { plan_id, step_id, request })
+                if plan_id == "plan-1" && step_id == "sell" && request.request_id == "attempt-1"
         ));
     }
 

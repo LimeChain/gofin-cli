@@ -193,6 +193,31 @@ struct ApprovalPresentationTests {
         var noLifetime = boundary; noLifetime["valid_for_seconds"] = true
         assert(boundaryAuthenticationReason(noLifetime, summary:boundarySummary) == nil)
         assert(boundaryAuthenticationReason(boundary, summary:"Sell\n\u{202e}hidden") == "approve these boundaries: Sell\\u000a\\u202ehidden")
+        let planStep: [String: Any] = ["step_id":"transfer", "operation":"wallet.transfer", "input":[String:Any](), "permitted_variations":["mode":"exact", "maximum_debits":[[String:Any]](), "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()], "completion":["operation_succeeded":true]]
+        let planPermission: [String: Any] = ["step_id":"transfer", "exact":["scope":["mode":"exact", "maximum_debits":[[String:Any]](), "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()], "definition_hash":"schema", "connections_hash":"connections"]]
+        let planBinding: [String: Any] = ["version":1, "kind":"financial_plan", "plan_id":"synthetic-plan", "revision_id":"synthetic-revision", "name":"Synthetic rotation", "plan":["name":"Synthetic rotation", "steps":[planStep]], "permissions":[planPermission], "valid_for_seconds":600]
+        assert(financialPlanAuthenticationReason(planBinding, summary:"Full scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 steps, 600 seconds)")
+        var generatedPermission = planPermission; generatedPermission["generated_input_fields"] = ["/requestId"]
+        var generatedPlan = planBinding; generatedPlan["permissions"] = [generatedPermission]
+        assert(financialPlanAuthenticationReason(generatedPlan, summary:"Full scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 steps, 600 seconds)")
+        generatedPermission["generated_input_fields"] = "requestId"
+        generatedPlan["permissions"] = [generatedPermission]
+        assert(financialPlanAuthenticationReason(generatedPlan, summary:"review") == nil)
+        var revisedPlan = planBinding; revisedPlan["replaces_revision_id"] = "synthetic-prior-revision"
+        assert(financialPlanAuthenticationReason(revisedPlan, summary:"Full scope is in the terminal review.") == "approve the revised plan “Synthetic rotation” (1 steps, 600 seconds)")
+        var incompletePlan = planBinding; incompletePlan["permissions"] = [[String:Any]]()
+        assert(financialPlanAuthenticationReason(incompletePlan, summary:"review") == nil)
+        incompletePlan = planBinding; incompletePlan["name"] = "spoofed"
+        assert(financialPlanAuthenticationReason(incompletePlan, summary:"review") == nil)
+        incompletePlan = planBinding; incompletePlan["name"] = "Bad\u{2028}name"; incompletePlan["plan"] = ["name":"Bad\u{2028}name", "steps":[planStep]]
+        assert(financialPlanAuthenticationReason(incompletePlan, summary:"review") == nil)
+        let longPlanName = String(repeating: "界", count: 80)
+        var longPlan = planBinding; longPlan["name"] = longPlanName; longPlan["plan"] = ["name":longPlanName, "steps":[planStep]]
+        let longPlanReason = financialPlanAuthenticationReason(longPlan, summary:"review")!
+        assert(longPlanReason.hasPrefix("approve the plan “\(longPlanName)”") && longPlanReason.count <= authenticationReasonMaximumCharacters)
+        let manyScalarsName = String(repeating: "🧑🏽‍💻", count: 20)
+        var manyScalarsPlan = planBinding; manyScalarsPlan["name"] = manyScalarsName; manyScalarsPlan["plan"] = ["name":manyScalarsName, "steps":[planStep]]
+        assert(financialPlanAuthenticationReason(manyScalarsPlan, summary:"review") == nil)
         let address = "0x1111111111111111111111111111111111111111"
         let withdrawal = "Withdraw API quantity 0.00765 ETH from SYNTHETIC-main SPOT to SYNTHETIC-wallet (\(address)) on ARBITRUM; published fee 0.00005, approved maximum fee 0.00005, maximum gross debit 0.0077, minimum net receipt 0.0076. USD ceilings: $19.67 movement, $0.13 fees."
         let withdrawalReason = financialAuthenticationReason(write, summary: withdrawal)!

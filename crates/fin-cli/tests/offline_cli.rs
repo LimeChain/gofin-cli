@@ -876,7 +876,7 @@ fn trading_discovery_is_offline_and_distinguishes_scoped_order_support() {
         let result = run(&["schema", name, "--json"]);
         assert!(result.status.success(), "{name}");
         let schema: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(schema["execution_actor"], "agent_invocable");
+        assert_eq!(schema["execution_actor"], "agent_readable");
     }
 }
 

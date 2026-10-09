@@ -67,6 +67,54 @@ pub fn validate_challenge(challenge: &AuthorizationChallenge, current_time: &str
             ));
         }
     }
+    if challenge.purpose == "financial_plan" {
+        let binding = &challenge.binding;
+        let spec = serde_json::from_value::<fin_domain::financial_plans::FinancialPlanSpec>(
+            binding["plan"].clone(),
+        );
+        let permissions = binding["permissions"].as_array();
+        let valid_structure = binding["version"] == 1
+            && binding["kind"] == "financial_plan"
+            && binding["plan_id"].as_str().is_some_and(|id| !id.is_empty())
+            && binding["revision_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+            && binding["name"].as_str().is_some_and(|name| {
+                fin_domain::financial_plans::validate_financial_plan_name(name).is_ok()
+                    && name == binding["plan"]["name"].as_str().unwrap_or_default()
+            })
+            && binding["valid_for_seconds"]
+                .as_u64()
+                .is_some_and(|seconds| seconds > 0)
+            && (binding["replaces_revision_id"].is_null()
+                || binding["replaces_revision_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.trim().is_empty() && id.len() <= 256))
+            && spec.as_ref().is_ok_and(|spec| spec.validate().is_ok())
+            && permissions.is_some_and(|rows| {
+                let Ok(rows) = serde_json::from_value::<
+                    Vec<fin_domain::financial_plans::FinancialPlanStepPermission>,
+                >(Value::Array(rows.clone())) else {
+                    return false;
+                };
+                let Some(spec) = spec.as_ref().ok() else {
+                    return false;
+                };
+                rows.len() == spec.steps.len()
+                    && rows.iter().zip(&spec.steps).all(|(permission, step)| {
+                        permission.step_id == step.step_id
+                            && !step.operation.starts_with("configuration:")
+                            && !step.operation.starts_with("policy.")
+                            && !step.operation.starts_with("connections.")
+                    })
+            });
+        if !valid_structure {
+            return Err(denied(
+                "INVALID_APPROVAL",
+                "The named financial plan approval is malformed or includes an administrative step.",
+            ));
+        }
+    }
     let current = parse_time(current_time)?;
     let expiry = parse_time(&challenge.expires_at)?;
     if expiry <= current || expiry.signed_duration_since(current).num_milliseconds() > 90_000 {
@@ -656,6 +704,64 @@ mod tests {
                 "INVALID_APPROVAL"
             );
         }
+    }
+    #[test]
+    fn named_plan_challenge_requires_complete_ordered_financial_scope() {
+        let mut c = challenge();
+        c.purpose = "financial_plan".into();
+        c.binding = json!({
+            "version":1,"kind":"financial_plan","plan_id":"synthetic-plan",
+            "revision_id":"synthetic-revision","name":"Synthetic sale",
+            "plan":{"version":1,"name":"Synthetic sale","steps":[{
+                "step_id":"sell","operation":"binance.spot-order","input":{},
+                "permitted_variations":{},"funding_dependencies":[],
+                "completion":{"principal_spend":null,"minimum_net_receipt":{
+                    "resource":"binance:account:synthetic",
+                    "amount":{"asset":{"network":"binance","reference":"USDT","decimals":6},"atoms":"1"}
+                }}
+            }],"aggregate_bounds":{"maximum_debits":[{"resource":"binance:account:synthetic","amount":{"asset":{"network":"binance","reference":"BTC","decimals":36},"atoms":"1"}}],"maximum_costs":[]}},
+            "permissions":[{"step_id":"sell","permission":{"spec":{
+                "fixed":{},"parameters":{},"maximum_debits":[],"maximum_costs":[],"summary":"Synthetic scope"
+            },"possible_credits":[],"fee_assets":[]}}],
+            "valid_for_seconds":600,"replaces_revision_id":null,"carried_forward_usage":{}
+        });
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        validate_challenge(&c, ISSUED).unwrap();
+        c.binding["plan"]["name"] = json!("Misleading\u{2028}name");
+        c.binding["name"] = c.binding["plan"]["name"].clone();
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&c, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
+    }
+
+    #[test]
+    fn named_plan_challenge_accepts_generic_exact_operation_scope() {
+        let mut c = challenge();
+        c.purpose = "financial_plan".into();
+        c.binding = json!({
+            "version":1,"kind":"financial_plan","plan_id":"synthetic-plan",
+            "revision_id":"synthetic-revision","name":"Synthetic transfer",
+            "plan":{"version":1,"name":"Synthetic transfer","steps":[{
+                "step_id":"transfer","operation":"wallet.transfer","input":{"amount":"1"},
+                "permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},
+                "funding_dependencies":[],"completion":{"operation_succeeded":true}
+            }],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}},
+            "permissions":[{"step_id":"transfer","exact":{
+                "scope":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},
+                "definition_hash":"synthetic-schema-hash","connections_hash":"synthetic-connection-hash"
+            }}],
+            "valid_for_seconds":600,"replaces_revision_id":null,"carried_forward_usage":{}
+        });
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        validate_challenge(&c, ISSUED).unwrap();
+        c.binding["plan"]["steps"][0]["operation"] = json!("connections.remove");
+        c.binding_hash = binding_hash(&c.binding).unwrap();
+        assert_eq!(
+            validate_challenge(&c, ISSUED).unwrap_err().code,
+            "INVALID_APPROVAL"
+        );
     }
     #[test]
     fn ordinary_authorization_does_not_fabricate_protected_terminal_review() {

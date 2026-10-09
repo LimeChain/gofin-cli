@@ -1,5 +1,6 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 pub mod boundaries;
+pub mod financial_plans;
 pub mod money;
 pub mod policy;
 pub mod price_freshness;
@@ -672,8 +673,17 @@ pub trait SubmissionJournal: Send + Sync {
 #[async_trait]
 pub trait Adapter: Send + Sync {
     fn definitions(&self) -> Vec<Definition>;
+    /// Public, user-facing enrolled connections for discovery and snapshots.
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
+    }
+    /// Stable protected identities whose change can alter an approved
+    /// operation's authority, such as account UIDs or resolved destination
+    /// aliases. This collection is broker-only and must never be reduced by
+    /// display name. The default preserves adapters whose public connection
+    /// metadata already contains every stable identity relevant to writes.
+    fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
+        self.connections()
     }
     async fn snapshot(&self) -> Result<StateSnapshot> {
         Err(FinError::new(
@@ -697,6 +707,23 @@ pub trait Adapter: Send + Sync {
             "authorization",
             "This integration does not support boundary-based authorization.",
             "Use the ordinary exact-operation approval flow.",
+        ))
+    }
+    /// Derive a reusable, balance-independent permission scope for one plan
+    /// step. Implementations validate operation support, static identities,
+    /// permissions and market metadata without requiring balances or freezing
+    /// short-lived prices. The default fails closed.
+    async fn prepare_plan_permission(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _bounds: &Value,
+    ) -> Result<financial_plans::PlanPermission> {
+        Err(FinError::new(
+            "PLAN_PERMISSION_UNSUPPORTED",
+            "authorization",
+            "This integration does not support named financial plan permissions.",
+            "Use an operation with an explicitly supported plan permission scope.",
         ))
     }
     /// Independently validate a concrete candidate against the approved
@@ -840,6 +867,9 @@ pub struct ConnectionMetadata {
     pub address: Option<String>,
     pub credential_ref: Option<String>,
     pub signing_enabled: bool,
+    /// Stable, non-secret identity/configuration attributes for this
+    /// connection. Adapters must omit volatile observations and secrets; the
+    /// engine includes this value in exact-plan connection bindings.
     pub details: Value,
 }
 

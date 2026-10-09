@@ -97,6 +97,11 @@ enum Command {
         #[command(subcommand)]
         command: AuthorizationsCommand,
     },
+    /// Review, authorize and track named sequential financial plans.
+    Plans {
+        #[command(subcommand)]
+        command: PlansCommand,
+    },
     /// Check and reconcile an existing operation.
     Status { id: String },
     /// List recorded operations and unresolved submissions.
@@ -204,6 +209,7 @@ struct OperationArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(group(clap::ArgGroup::new("execution_authority").args(["authorization", "plan"]).multiple(false)))]
 struct ExecuteArgs {
     operation: String,
     #[arg(long)]
@@ -217,8 +223,14 @@ struct ExecuteArgs {
     /// Existing bounded authorization created by `fin authorizations authorize`.
     #[arg(long)]
     authorization: Option<String>,
-    /// Atomically replace a prior unsubmitted candidate under the same authorization.
-    #[arg(long, requires = "authorization")]
+    /// Named plan whose active revision authorizes this ordered step.
+    #[arg(long, requires = "step")]
+    plan: Option<String>,
+    /// Stable step ID in --plan.
+    #[arg(long, requires = "plan")]
+    step: Option<String>,
+    /// Atomically replace a prior unsubmitted candidate under the selected authority.
+    #[arg(long, requires = "execution_authority")]
     replaces_attempt: Option<String>,
 }
 
@@ -250,6 +262,50 @@ enum AuthorizationsCommand {
     /// Check and reconcile a bounded authorization and its attempts.
     Status { id: String },
     /// Revoke future dispatch under a bounded authorization.
+    Cancel { id: String },
+}
+
+#[derive(Args, Debug)]
+struct PlanInputArgs {
+    /// Complete versioned named plan JSON.
+    #[arg(long)]
+    input: String,
+    /// Consent lifetime to include in the read-only review.
+    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
+    valid_for: u64,
+    /// Review a proposed replacement revision and its carried-forward usage.
+    #[arg(long)]
+    replaces: Option<String>,
+}
+
+#[derive(Args, Debug)]
+struct PlanAuthorizeArgs {
+    /// Complete versioned named plan JSON.
+    #[arg(long)]
+    input: String,
+    /// Stable request identity used to recover approval response loss.
+    #[arg(long)]
+    id: String,
+    /// Consent duration from successful approval (for example 10m; default 10m).
+    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
+    valid_for: u64,
+    /// Replace this active immutable plan revision.
+    #[arg(long)]
+    replaces: Option<String>,
+    /// Bind authorization to the exact review_hash returned by plans preview.
+    #[arg(long)]
+    review_hash: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum PlansCommand {
+    /// Regenerate and display read-only plan review material.
+    Preview(PlanInputArgs),
+    /// Approve or replace a named plan revision after fresh Touch ID.
+    Authorize(PlanAuthorizeArgs),
+    /// Check authorization, attempts and sequential progress.
+    Status { id: String },
+    /// Revoke future dispatch under a named plan without Touch ID.
     Cancel { id: String },
 }
 
@@ -501,6 +557,118 @@ async fn replace_boundary_candidate_with_recovery(
     }
 }
 
+async fn execute_plan_step_with_recovery(
+    transport: &dyn Transport,
+    plan_id: String,
+    step_id: String,
+    request: OperationRequest,
+) -> Result<Value, FinError> {
+    match transport
+        .call(BrokerRequest::ExecutePlanStep {
+            plan_id: plan_id.clone(),
+            step_id,
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            if let Ok(status) = transport
+                .call(BrokerRequest::PlanStatus {
+                    plan_id: plan_id.clone(),
+                })
+                .await
+                && let Some(attempt) = find_plan_attempt(&status, &request.request_id)
+                && let Some(attempt_id) = attempt
+                    .get("attempt_id")
+                    .or_else(|| attempt.get("id"))
+                    .and_then(Value::as_str)
+            {
+                return transport
+                    .call(BrokerRequest::Status {
+                        id: attempt_id.to_owned(),
+                    })
+                    .await;
+            }
+            Err(FinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; Fin did not submit the plan step again.",
+                "Run fin plans status with the same plan ID and reconcile before creating another attempt.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn replace_plan_candidate_with_recovery(
+    transport: &dyn Transport,
+    plan_id: String,
+    step_id: String,
+    previous_attempt_id: String,
+    request: OperationRequest,
+) -> Result<Value, FinError> {
+    match transport
+        .call(BrokerRequest::ReplacePlanCandidate {
+            plan_id: plan_id.clone(),
+            step_id,
+            previous_attempt_id,
+            request: request.clone(),
+        })
+        .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) if error.stage == "transport" => {
+            if let Ok(status) = transport
+                .call(BrokerRequest::PlanStatus {
+                    plan_id: plan_id.clone(),
+                })
+                .await
+                && let Some(attempt) = find_plan_attempt(&status, &request.request_id)
+                && let Some(attempt_id) = attempt
+                    .get("attempt_id")
+                    .or_else(|| attempt.get("id"))
+                    .and_then(Value::as_str)
+            {
+                return transport
+                    .call(BrokerRequest::Status {
+                        id: attempt_id.to_owned(),
+                    })
+                    .await;
+            }
+            Err(FinError::new(
+                "OUTCOME_UNKNOWN",
+                "transport",
+                "The broker response was interrupted; Fin did not submit the replacement again.",
+                "Run fin plans status with the same plan ID and reconcile before creating another attempt.",
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn find_plan_attempt<'a>(status: &'a Value, request_id: &str) -> Option<&'a Value> {
+    status
+        .get("attempts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            status
+                .get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .flat_map(|step| {
+                    step.get("attempts")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                }),
+        )
+        .find(|attempt| attempt.get("request_id").and_then(Value::as_str) == Some(request_id))
+}
+
 fn find_original_operation(records: &Value, request_id: &str) -> Option<String> {
     let records = records
         .as_array()
@@ -559,26 +727,37 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         BrokerRequest::Execute { .. }
         | BrokerRequest::AuthorizeBoundary { .. }
         | BrokerRequest::ExecuteBoundary { .. }
-        | BrokerRequest::ReplaceBoundaryCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
+        | BrokerRequest::ReplaceBoundaryCandidate { .. }
+        | BrokerRequest::AuthorizePlan { .. }
+        | BrokerRequest::ExecutePlanStep { .. }
+        | BrokerRequest::ReplacePlanCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
         BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
-        | BrokerRequest::Snapshot => OBSERVER_TIMEOUT,
+        | BrokerRequest::Snapshot
+        | BrokerRequest::PlanStatus { .. } => OBSERVER_TIMEOUT,
         BrokerRequest::Preview { .. }
         | BrokerRequest::PreviewBoundaryAuthorization { .. }
-        | BrokerRequest::PreviewBoundary { .. } => FINANCIAL_WRITE_TIMEOUT,
+        | BrokerRequest::PreviewBoundary { .. }
+        | BrokerRequest::PreviewPlan { .. }
+        | BrokerRequest::PreviewPlanStep { .. } => FINANCIAL_WRITE_TIMEOUT,
         _ => BROKER_TIMEOUT,
     }
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn broker_timeout(request: &BrokerRequest) -> FinError {
-    let next_action = if matches!(request, BrokerRequest::AuthorizeBoundary { .. }) {
+    let next_action = if matches!(
+        request,
+        BrokerRequest::AuthorizeBoundary { .. } | BrokerRequest::AuthorizePlan { .. }
+    ) {
         "Repeat authorization with the same request ID and parameters to recover its result; do not create another grant."
     } else if matches!(
         request,
         BrokerRequest::Execute { .. }
             | BrokerRequest::ExecuteBoundary { .. }
             | BrokerRequest::ReplaceBoundaryCandidate { .. }
+            | BrokerRequest::ExecutePlanStep { .. }
+            | BrokerRequest::ReplacePlanCandidate { .. }
     ) {
         "Check status with the same request ID; do not create another financial request."
     } else {
@@ -748,6 +927,34 @@ pub trait Client: Send + Sync {
         })
         .await
     }
+    async fn execute_plan_step(
+        &self,
+        plan_id: String,
+        step_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        self.call(BrokerRequest::ExecutePlanStep {
+            plan_id,
+            step_id,
+            request,
+        })
+        .await
+    }
+    async fn replace_plan_candidate(
+        &self,
+        plan_id: String,
+        step_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        self.call(BrokerRequest::ReplacePlanCandidate {
+            plan_id,
+            step_id,
+            previous_attempt_id,
+            request,
+        })
+        .await
+    }
 }
 #[async_trait]
 impl<T: Transport> Client for T {
@@ -784,9 +991,36 @@ impl<T: Transport> Client for T {
         )
         .await
     }
+    async fn execute_plan_step(
+        &self,
+        plan_id: String,
+        step_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        execute_plan_step_with_recovery(self, plan_id, step_id, request).await
+    }
+    async fn replace_plan_candidate(
+        &self,
+        plan_id: String,
+        step_id: String,
+        previous_attempt_id: String,
+        request: OperationRequest,
+    ) -> Result<Value, FinError> {
+        replace_plan_candidate_with_recovery(self, plan_id, step_id, previous_attempt_id, request)
+            .await
+    }
 }
 
+#[cfg(test)]
 async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
+    dispatch_with_review_hash(cli, client, None).await
+}
+
+async fn dispatch_with_review_hash(
+    cli: Cli,
+    client: &dyn Client,
+    expected_review_hash: Option<String>,
+) -> Result<Value, FinError> {
     let json = cli.json;
     let verbose = cli.verbose;
     if json && human_only(&cli.command) {
@@ -796,7 +1030,9 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
     // Keep execution identities/run flags on reusable commands, but do not
     // consume them, reserve funds or enter write recovery for a preview.
     let command = match cli.command {
-        Command::Execute(args) if args.dry_run && args.authorization.is_none() => {
+        Command::Execute(args)
+            if args.dry_run && args.authorization.is_none() && args.plan.is_none() =>
+        {
             Command::Preview(OperationArgs {
                 operation: args.operation,
                 input: args.input,
@@ -893,8 +1129,39 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                 .await
         }
         Command::Execute(args) => {
+            if args.dry_run && args.replaces_attempt.is_some() {
+                return Err(FinError::validation(
+                    "--replaces-attempt cannot be combined with --dry-run.",
+                ));
+            }
             let input = parse_input(&args.input)?;
-            if let Some(authorization_id) = args.authorization {
+            if let Some(plan_id) = args.plan {
+                let step_id = args.step.ok_or_else(generic_input_error)?;
+                if args.dry_run {
+                    client
+                        .call(BrokerRequest::PreviewPlanStep {
+                            plan_id,
+                            step_id,
+                            operation: args.operation,
+                            input,
+                        })
+                        .await
+                } else {
+                    let request = OperationRequest {
+                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        operation: args.operation,
+                        input,
+                        run_id: None,
+                    };
+                    if let Some(previous_attempt_id) = args.replaces_attempt {
+                        client
+                            .replace_plan_candidate(plan_id, step_id, previous_attempt_id, request)
+                            .await
+                    } else {
+                        client.execute_plan_step(plan_id, step_id, request).await
+                    }
+                }
+            } else if let Some(authorization_id) = args.authorization {
                 if args.dry_run {
                     client
                         .call(BrokerRequest::PreviewBoundary {
@@ -923,6 +1190,11 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
                     }
                 }
             } else {
+                if args.replaces_attempt.is_some() {
+                    return Err(FinError::validation(
+                        "--replaces-attempt requires --authorization or --plan.",
+                    ));
+                }
                 client
                     .execute(OperationRequest {
                         request_id: args.id.ok_or_else(generic_input_error)?,
@@ -945,6 +1217,34 @@ async fn dispatch(cli: Cli, client: &dyn Client) -> Result<Value, FinError> {
             }
             AuthorizationsCommand::Cancel { id } => {
                 client.call(BrokerRequest::RevokeBoundary { id }).await
+            }
+        },
+        Command::Plans { command } => match command {
+            PlansCommand::Preview(args) => {
+                let request = financial_plan_request(
+                    &args.input,
+                    "preview",
+                    args.valid_for,
+                    args.replaces,
+                    None,
+                )?;
+                client.call(BrokerRequest::PreviewPlan { request }).await
+            }
+            PlansCommand::Authorize(args) => {
+                let request = financial_plan_request(
+                    &args.input,
+                    &args.id,
+                    args.valid_for,
+                    args.replaces,
+                    args.review_hash.or(expected_review_hash),
+                )?;
+                client.call(BrokerRequest::AuthorizePlan { request }).await
+            }
+            PlansCommand::Status { id } => {
+                client.call(BrokerRequest::PlanStatus { plan_id: id }).await
+            }
+            PlansCommand::Cancel { id } => {
+                client.call(BrokerRequest::RevokePlan { plan_id: id }).await
             }
         },
         Command::Status { id } => client.call(BrokerRequest::Status { id }).await,
@@ -1049,6 +1349,27 @@ fn boundary_authorization_request(
     })
 }
 
+fn financial_plan_request(
+    input: &str,
+    request_id: &str,
+    valid_for_seconds: u64,
+    replaces_revision_id: Option<String>,
+    expected_review_hash: Option<String>,
+) -> Result<fin_domain::financial_plans::FinancialPlanAuthorizationRequest, FinError> {
+    let raw = parse_input(input)?;
+    let plan: fin_domain::financial_plans::FinancialPlanSpec =
+        serde_json::from_value(raw).map_err(|_| generic_input_error())?;
+    let request = fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
+        request_id: request_id.to_owned(),
+        plan,
+        valid_for_seconds,
+        replaces_revision_id,
+        expected_review_hash,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
 async fn review_boundary_authorization(
     cli: &Cli,
     client: &dyn Client,
@@ -1094,6 +1415,90 @@ async fn review_boundary_authorization(
             "Restore terminal output before retrying.",
         )
     })
+}
+
+async fn review_plan_authorization(
+    cli: &Cli,
+    client: &dyn Client,
+    ui: &Ui,
+) -> Result<Option<String>, FinError> {
+    let Command::Plans {
+        command: PlansCommand::Authorize(args),
+    } = &cli.command
+    else {
+        return Ok(None);
+    };
+    if cli.json {
+        return Ok(None);
+    }
+    let request = financial_plan_request(
+        &args.input,
+        &args.id,
+        args.valid_for,
+        args.replaces.clone(),
+        None,
+    )?;
+    let expected_plan = request.plan.clone();
+    let progress = ui.progress("Preparing named plan review...");
+    let result = client.call(BrokerRequest::PreviewPlan { request }).await;
+    drop(progress);
+    let preview = result?;
+    let valid_permissions = preview["permissions"].as_array().is_some_and(|rows| {
+        rows.len() == expected_plan.steps.len()
+            && rows
+                .iter()
+                .zip(&expected_plan.steps)
+                .all(|(row, step)| row["step_id"].as_str() == Some(step.step_id.as_str()))
+    });
+    if preview["review_hash"].as_str().is_none_or(str::is_empty)
+        || preview["plan"] != serde_json::to_value(&expected_plan).unwrap_or(Value::Null)
+        || !valid_permissions
+        || preview["valid_for_seconds"].as_u64() != Some(args.valid_for)
+    {
+        return Err(FinError::new(
+            "PREVIEW_INVALID",
+            "authorization",
+            "The named plan review is incomplete; no authorization was requested.",
+            "Inspect plan status and retry after the broker can prepare every step.",
+        ));
+    }
+    if args
+        .review_hash
+        .as_ref()
+        .is_some_and(|expected| preview["review_hash"].as_str() != Some(expected))
+    {
+        return Err(FinError::new(
+            "PLAN_REVIEW_CHANGED",
+            "authorization",
+            "The supplied review hash no longer matches freshly prepared plan permissions.",
+            "Inspect the latest fin plans preview output, then authorize with its review hash if the change is intended.",
+        ));
+    }
+    // This is display-only metadata. It is not forwarded to the broker and is
+    // not part of the canonical review hash or authorization binding.
+    let display_review = plan_review_for_display(&preview, &args.id);
+    let output = if client.live_development_mode() {
+        ui.live_development_review(&display_review, true)
+    } else if client.development_mode() {
+        ui.synthetic_review(&display_review, true)
+    } else {
+        ui.plan_authorization_review(&display_review)
+    };
+    output.map_err(|_| {
+        FinError::new(
+            "REVIEW_OUTPUT_FAILED",
+            "cli",
+            "The named plan summary could not be displayed. No authorization was requested.",
+            "Restore terminal output before retrying.",
+        )
+    })?;
+    Ok(preview["review_hash"].as_str().map(str::to_owned))
+}
+
+fn plan_review_for_display(preview: &Value, request_id: &str) -> Value {
+    let mut review = preview.clone();
+    review["authorization_request_id"] = json!(request_id);
+    review
 }
 
 // clap_complete includes hidden subcommands in some generated shells. Keep
@@ -1385,6 +1790,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Execute(args) if args.dry_run => "preview",
         Command::Execute(_) => "execute",
         Command::Authorizations { .. } => "authorizations",
+        Command::Plans { .. } => "plans",
         Command::Status { .. } => "status",
         Command::Operations => "operations",
         Command::Doctor => "doctor",
@@ -1421,7 +1827,10 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
                     | "--bounds"
                     | "--valid-for"
                     | "--replaces"
+                    | "--review-hash"
                     | "--authorization"
+                    | "--plan"
+                    | "--step"
                     | "--replaces-attempt"
                     | "--id"
                     | "--agent"
@@ -1560,6 +1969,12 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 Command::Authorizations {
                     command: AuthorizationsCommand::Authorize(_)
                 }
+            )
+            || matches!(
+                &cli.command,
+                Command::Plans {
+                    command: PlansCommand::Authorize(_)
+                }
             ));
     let progress = if !offline && !human_only(&cli.command) && !human_execution {
         Some(ui.progress(match &cli.command {
@@ -1584,6 +1999,15 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             Command::Authorizations {
                 command: AuthorizationsCommand::Authorize(_),
             } => "Requesting boundary authorization...",
+            Command::Plans {
+                command: PlansCommand::Authorize(_),
+            } if !cli.json => "Preparing named plan review...",
+            Command::Plans {
+                command: PlansCommand::Authorize(_),
+            } => "Requesting plan authorization...",
+            Command::Plans {
+                command: PlansCommand::Preview(_),
+            } => "Preparing named plan preview...",
             _ => "Checking Fin...",
         }))
     } else {
@@ -1591,7 +2015,10 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
     };
     let result = match review_human_execution(&cli, client, &ui).await {
         Ok(()) => match review_boundary_authorization(&cli, client, &ui).await {
-            Ok(()) => dispatch(cli, client).await,
+            Ok(()) => match review_plan_authorization(&cli, client, &ui).await {
+                Ok(review_hash) => dispatch_with_review_hash(cli, client, review_hash).await,
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         },
         Err(error) => Err(error),
@@ -1611,6 +2038,7 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Preview(_)
             | Command::Execute(_)
             | Command::Authorizations { .. }
+            | Command::Plans { .. }
             | Command::Status { .. }
             | Command::Operations
             | Command::Doctor
@@ -1637,6 +2065,179 @@ mod tests {
     use serde_json::json;
     #[cfg(target_os = "macos")]
     use tokio::net::UnixListener;
+
+    fn sample_plan_json() -> &'static str {
+        r#"{"version":1,"name":"Synthetic transfer","steps":[{"step_id":"transfer","operation":"wallet.transfer","input":{"request_id":"synthetic-input","wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},"permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},"completion":{"operation_succeeded":true},"funding_dependencies":[]}],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}}"#
+    }
+
+    #[tokio::test]
+    async fn plan_cli_routes_review_authority_and_step_candidates_without_child_grants() {
+        struct PlanClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for PlanClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"ok":true}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("plan authority must not use standalone exact approval")
+            }
+        }
+        let client = PlanClient(Default::default());
+        let plan_input = sample_plan_json();
+        let preview =
+            Cli::try_parse_from(["fin", "plans", "preview", "--input", plan_input]).unwrap();
+        dispatch(preview, &client).await.unwrap();
+        assert!(
+            matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::PreviewPlan { request })
+            if request.plan.name == "Synthetic transfer" && request.request_id == "preview")
+        );
+
+        let authorize = Cli::try_parse_from([
+            "fin",
+            "plans",
+            "authorize",
+            "--input",
+            plan_input,
+            "--id",
+            "request-1",
+            "--valid-for",
+            "10m",
+            "--review-hash",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        dispatch_with_review_hash(authorize, &client, Some("review-hash".into()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::AuthorizePlan { request })
+            if request.request_id == "request-1" && request.valid_for_seconds == 600
+                && request.expected_review_hash.as_deref()
+                    == Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+        );
+
+        let dry_run = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--plan",
+            "plan-1",
+            "--step",
+            "transfer",
+            "--dry-run",
+        ])
+        .unwrap();
+        dispatch(dry_run, &client).await.unwrap();
+        assert!(
+            matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::PreviewPlanStep { plan_id, step_id, .. })
+            if plan_id == "plan-1" && step_id == "transfer")
+        );
+
+        let execute = Cli::try_parse_from([
+            "fin",
+            "execute",
+            "wallet.transfer",
+            "--input",
+            "{}",
+            "--id",
+            "attempt-1",
+            "--plan",
+            "plan-1",
+            "--step",
+            "transfer",
+        ])
+        .unwrap();
+        dispatch(execute, &client).await.unwrap();
+        assert!(
+            matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::ExecutePlanStep { plan_id, step_id, request })
+            if plan_id == "plan-1" && step_id == "transfer" && request.request_id == "attempt-1")
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "fin",
+                "execute",
+                "wallet.transfer",
+                "--input",
+                "{}",
+                "--id",
+                "attempt-1",
+                "--plan",
+                "plan-1",
+                "--step",
+                "sell",
+                "--authorization",
+                "boundary-1"
+            ])
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_explicit_plan_review_hash_fails_before_authorization() {
+        struct PreviewClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for PreviewClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                let BrokerRequest::PreviewPlan { request: preview } = &request else {
+                    panic!("a human plan review may only prepare a read-only preview");
+                };
+                let steps = preview
+                    .plan
+                    .steps
+                    .iter()
+                    .map(|step| json!({"step_id":step.step_id}))
+                    .collect::<Vec<_>>();
+                let result = json!({
+                    "review_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "plan":preview.plan,
+                    "permissions":steps,
+                    "valid_for_seconds":preview.valid_for_seconds,
+                });
+                self.0.lock().unwrap().push(request);
+                Ok(result)
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("plan preview must never submit an operation");
+            }
+        }
+
+        let client = PreviewClient(Default::default());
+        let input = sample_plan_json();
+        let cli = Cli::try_parse_from([
+            "fin",
+            "plans",
+            "authorize",
+            "--input",
+            input,
+            "--id",
+            "request-1",
+            "--review-hash",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        .unwrap();
+        let error = review_plan_authorization(&cli, &client, &Ui::new(false, false))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "PLAN_REVIEW_CHANGED");
+        assert_eq!(client.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn plan_review_request_identity_is_display_only() {
+        let preview = json!({"plan_id":"existing-plan","review_hash":"review-hash"});
+        let display = plan_review_for_display(&preview, "authorization-request-1");
+        assert_eq!(display["plan_id"], "existing-plan");
+        assert_eq!(
+            display["authorization_request_id"],
+            "authorization-request-1"
+        );
+        assert_eq!(display["review_hash"], preview["review_hash"]);
+        assert!(preview.get("authorization_request_id").is_none());
+    }
 
     #[tokio::test]
     async fn terminal_execution_reviews_without_writing_and_machine_dry_runs_do_not() {
@@ -2040,6 +2641,75 @@ mod tests {
             Some("record-123")
         );
         assert_eq!(find_original_operation(&records, "other"), None);
+    }
+
+    #[tokio::test]
+    async fn plan_response_loss_recovers_the_original_operation_shape_without_resubmission() {
+        struct LostPlanResponse(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Transport for LostPlanResponse {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                let mut requests = self.0.lock().unwrap();
+                match &request {
+                    BrokerRequest::ExecutePlanStep { .. }
+                    | BrokerRequest::ReplacePlanCandidate { .. } => {
+                        requests.push(request);
+                        Err(FinError::new(
+                            "CONNECTION_RESET",
+                            "transport",
+                            "Synthetic response loss.",
+                            "Inspect the same request identity.",
+                        ))
+                    }
+                    BrokerRequest::PlanStatus { plan_id } => {
+                        requests.push(request.clone());
+                        assert_eq!(plan_id, "plan-1");
+                        Ok(
+                            json!({"attempts":[{"attempt_id":"operation-1","request_id":"attempt-1","step_id":"sell"}]}),
+                        )
+                    }
+                    BrokerRequest::Status { id } => {
+                        requests.push(request.clone());
+                        assert_eq!(id, "operation-1");
+                        Ok(json!({"id":id,"request_id":"attempt-1","status":"completed"}))
+                    }
+                    _ => {
+                        panic!("plan response recovery must only inspect plan and operation status")
+                    }
+                }
+            }
+        }
+
+        for replace in [false, true] {
+            let transport = LostPlanResponse(Default::default());
+            let request = OperationRequest {
+                request_id: "attempt-1".into(),
+                operation: "binance.spot.order-place".into(),
+                input: json!({"request_id":"attempt-1"}),
+                run_id: None,
+            };
+            let recovered = if replace {
+                replace_plan_candidate_with_recovery(
+                    &transport,
+                    "plan-1".into(),
+                    "sell".into(),
+                    "old-candidate".into(),
+                    request,
+                )
+                .await
+            } else {
+                execute_plan_step_with_recovery(&transport, "plan-1".into(), "sell".into(), request)
+                    .await
+            }
+            .unwrap();
+            assert_eq!(recovered["id"], "operation-1");
+            assert_eq!(recovered["request_id"], "attempt-1");
+            assert_eq!(recovered["status"], "completed");
+            let calls = transport.0.lock().unwrap();
+            assert_eq!(calls.len(), 3);
+            assert!(matches!(calls[1], BrokerRequest::PlanStatus { .. }));
+            assert!(matches!(calls[2], BrokerRequest::Status { .. }));
+        }
     }
 
     #[test]

@@ -227,7 +227,12 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
         *journal.evidence.lock().unwrap(),
         Some(json!({"route":"sub_to_master","venueId":"123456789"}))
     );
-    let history_transport = Arc::new(HistoryTransport::success());
+    let submitted_at_ms = chrono::Utc::now().timestamp_millis();
+    let history_time_ms = submitted_at_ms.div_euclid(1_000) * 1_000;
+    let submitted_at = chrono::DateTime::from_timestamp_millis(history_time_ms + 390).unwrap();
+    let mut submission = submission;
+    submission.data["submittedAt"] = json!(submitted_at.to_rfc3339());
+    let history_transport = Arc::new(HistoryTransport::success_at(history_time_ms as u64));
     let receipt_adapter = adapter(history_transport.clone());
     let record = fin_domain::OperationRecord {
         id: "sub-success-op".into(),
@@ -262,6 +267,19 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
     let mismatch = mismatch_adapter.reconcile(&record).await.unwrap();
     assert_eq!(mismatch.status, fin_domain::Status::Unknown);
     assert!(mismatch.verified.is_none());
+
+    let unlinked_history = Arc::new(HistoryTransport {
+        wrong_id: true,
+        ..HistoryTransport::success()
+    });
+    let unlinked_adapter = adapter(unlinked_history);
+    let unlinked = unlinked_adapter.reconcile(&record).await.unwrap();
+    assert_eq!(unlinked.status, fin_domain::Status::Unknown);
+    assert!(unlinked.verified.is_none());
+    assert_eq!(
+        unlinked.evidence["reason"],
+        "No unique child history row matches the persisted venue receipt."
+    );
 }
 
 struct HistoryTransport {
@@ -270,6 +288,8 @@ struct HistoryTransport {
     child_free: Mutex<String>,
     master_free: Mutex<String>,
     wrong: bool,
+    wrong_id: bool,
+    history_time_ms: Option<u64>,
 }
 impl HistoryTransport {
     fn success() -> Self {
@@ -279,6 +299,15 @@ impl HistoryTransport {
             child_free: Mutex::new("0.25".into()),
             master_free: Mutex::new("1.25".into()),
             wrong: false,
+            wrong_id: false,
+            history_time_ms: None,
+        }
+    }
+
+    fn success_at(history_time_ms: u64) -> Self {
+        Self {
+            history_time_ms: Some(history_time_ms),
+            ..Self::success()
         }
     }
 }
@@ -304,8 +333,14 @@ impl BinanceTransport for HistoryTransport {
             E::ApiRestrictions => Ok(json!({"enableSpotAndMarginTrading":true})),
             E::SubAccountTransferHistory => {
                 self.history_reads.fetch_add(1, Ordering::SeqCst);
+                if let Some(expected_start) = self.history_time_ms {
+                    assert_eq!(
+                        request.get("startTime"),
+                        Some(expected_start.to_string().as_str())
+                    );
+                }
                 Ok(
-                    json!([{"counterParty":"master","email":"master@example.invalid","type":2,"asset":if self.wrong {"BTC"} else {"ETH"},"qty":"0.25","fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS","tranId":123456789,"time":chrono::Utc::now().timestamp_millis()}]),
+                    json!([{"counterParty":"master","email":"master@example.invalid","type":2,"asset":if self.wrong {"BTC"} else {"ETH"},"qty":"0.25","fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS","tranId":if self.wrong_id {123456790} else {123456789},"time":self.history_time_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis().div_euclid(1_000) as u64 * 1_000)}]),
                 )
             }
             endpoint => panic!("unexpected recovery endpoint {endpoint:?}"),

@@ -34,9 +34,9 @@ The broker enforces approval, policy and credential access independently.
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
-  Terminal, administrator access and working Touch ID. Every financial write
-  requires fresh Touch ID, including cleanup. Reads, previews and status do not
-  require financial approval.
+  Terminal, administrator access and working Touch ID. Standalone writes require
+  fresh Touch ID. Explicitly supported boundary grants and named plans approve
+  bounded attempts once; reads, previews and status need no financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
   capability discovery. Protected setup, credential enrollment and financial
   execution are unavailable; no Linux authorization provider is implemented.
@@ -124,6 +124,11 @@ chat, flags, JSON, environment variables or an agent terminal. Later
 reinstalling. Binance supports HMAC, RSA and Ed25519; EVM wallets support signing
 and read-only connections. Inspect provider-specific prerequisites with
 `fin connections add --help`.
+
+`fin connections list` shows enrolled connections in both human and JSON output.
+A reusable EVM wallet appears once, with its supported networks grouped under
+`details.networks`. Derived withdrawal destinations and per-chain signer records
+remain internal to plan authorization; they are not additional enrollments.
 
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public
@@ -674,6 +679,78 @@ The shared `exchange.order-book` read supports Binance spot and
 USDⓈ-M perpetual, Kraken spot, Hyperliquid primary perpetual, and OKX, Coinbase
 Advanced and Bybit spot. It returns exact bid/ask levels, verified market
 identity and separate request/venue timestamps.
+
+## Named sequential plans
+
+A named plan authorizes ordered financial steps with one fresh Touch ID approval.
+The agent submits each step explicitly. Exact-input plans sequence the current
+operation registry, including transfers, withdrawals, deposits, orders, wallet
+operations, swaps, lending operations and reads. Future registered financial
+operations use the same path without a separate plan adapter. Credential and
+protected policy changes retain their separate human configuration approval.
+
+```sh
+fin plans preview --input PLAN_JSON --json
+fin plans authorize --input PLAN_JSON --id APPROVAL_REQUEST_ID --valid-for 10m
+fin plans status PLAN_ID --json
+fin execute binance.spot.order-place --input ORDER_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --dry-run --json
+# Remove --dry-run only when deliberately submitting that step.
+fin plans cancel PLAN_ID
+```
+
+Use `fin schema plans.authorize --json` for the plan contract. Machine callers can
+pass the preview's `review_hash` using `--review-hash HASH` when authorizing; a
+changed review is rejected before approval. Human authorization previews and
+binds its displayed review automatically. A plan contains a
+required name, stable ordered step IDs, exact input scopes or supported
+operation-specific variations, completion conditions, exact funding dependencies
+and aggregate debit/fee bounds.
+The name is a display label, not authority: full scope is bound to approval.
+Names contain 1–80 Unicode characters and no control or bidirectional formatting
+characters. Touch ID leads with **approve the plan “NAME”**; the full terminal
+review shows permissions, completion targets, conditional funding and limits.
+
+For any registered operation, select `permitted_variations.mode: "exact"` and
+provide exact per-step `maximum_debits`, `maximum_costs` and `possible_credits`.
+Every input field is fixed except string fields that the trusted operation
+definition explicitly declares as broker-generated per-attempt identifiers.
+Fin assigns those fields for each attempt; the named plan still binds the exact
+input template, and terminal review labels generated fields instead of showing
+the template value as a venue ID. The outer attempt ID remains separate. Empty
+debit/fee caps are valid for operations that consume no funds.
+`completion.operation_succeeded: true` requires the ordinary
+operation's successful verified outcome; combine it with a spend or net-receipt
+target when the economic outcome must also be met. Read results are retained but
+cannot establish financial proceeds. Existing spot-order variation scopes remain
+available separately.
+
+Future steps may depend on proceeds that do not exist at approval time. Generic
+exact approval validates the registered schema and binds connection identities,
+inputs and caps. Venue permissions, balances, live fees/prices and simulations
+are explicitly deferred until each step executes. Declared possible credits are
+conditional, not evidence of balances or guaranteed route support. At execution it
+refreshes actual balances, fees, prices and protected policy. Only verified net
+receipts can fund a declared dependency. Partial/no-fill IOC attempts can end
+without completing their step; cumulative verified effects determine progress.
+An uncertain attempt must reconcile before the next attempt or step.
+
+Step and plan limits are cumulative exact asset quantities and costs, not net
+wealth changes. Intermediate proceeds never replenish gross spending authority.
+Status exposes usage, reservations, remaining authority and the next eligible
+step. Reuse an attempt ID to recover its outcome; a changed candidate needs a
+new ID. `--replaces-attempt OPERATION_ID` can supersede only an unsubmitted
+candidate. Plan authority cannot be used as a standalone boundary grant.
+
+Consent defaults to ten minutes from successful approval, survives restart with
+its original expiry and never renews automatically. Cancellation requires no
+Touch ID and blocks future dispatch; expiry and cancellation do not cancel venue
+orders or prevent reconciliation. To revise a plan, authorize the complete new
+plan using a new request ID and `--replaces REVISION_ID`. Fresh approval preserves
+prior effects and usage. Started steps retain their identities, order, fixed scope
+and completion conditions; only the unstarted suffix may be restructured.
+
+See [plan verification and human handoff](docs/testing/plans.md). Ordinary plans
+support permanent portfolio changes and do not require restoration runs.
 
 ## Binance spot and USDⓈ-M trading
 

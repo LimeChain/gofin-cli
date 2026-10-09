@@ -13,7 +13,7 @@ use thiserror::Error;
 mod boundary_migration_tests;
 pub mod legacy;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -48,6 +48,7 @@ pub enum StoreError {
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+pub type FinancialPlanRequestStatus = Option<(String, String, String, Option<String>)>;
 
 /// Durable request metadata returned by [`Store::create_request`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +250,58 @@ impl Store {
                     .as_slice(),
                 ));
             }
+            if version >= 4 {
+                expected.extend([
+                    (
+                        "financial_plans",
+                        [
+                            "plan_id",
+                            "active_revision_id",
+                            "record_json",
+                            "created_at",
+                            "updated_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "financial_plan_revisions",
+                        [
+                            "plan_id",
+                            "revision_id",
+                            "request_id",
+                            "revision_json",
+                            "created_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "financial_plan_requests",
+                        [
+                            "request_id",
+                            "fingerprint",
+                            "status",
+                            "plan_id",
+                            "revision_id",
+                            "created_at",
+                            "updated_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "financial_plan_attempts",
+                        [
+                            "plan_id",
+                            "revision_id",
+                            "step_id",
+                            "operation_id",
+                            "request_id",
+                            "candidate_state",
+                            "created_at",
+                        ]
+                        .as_slice(),
+                    ),
+                ]);
+            }
             if names.len() != expected.len()
                 || expected.iter().any(|(table, columns)| {
                     if !names.iter().any(|name| name == table) {
@@ -373,6 +426,50 @@ impl Store {
                     updated_at TEXT NOT NULL
                  );
                  PRAGMA user_version = 3;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 3 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE financial_plans (
+                    plan_id TEXT PRIMARY KEY NOT NULL,
+                    active_revision_id TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE financial_plan_revisions (
+                    plan_id TEXT NOT NULL REFERENCES financial_plans(plan_id),
+                    revision_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    revision_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, revision_id)
+                 );
+                 CREATE TABLE financial_plan_requests (
+                    request_id TEXT PRIMARY KEY NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    revision_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE financial_plan_attempts (
+                    plan_id TEXT NOT NULL REFERENCES financial_plans(plan_id),
+                    revision_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL UNIQUE REFERENCES operations(id),
+                    request_id TEXT NOT NULL UNIQUE,
+                    candidate_state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(plan_id, revision_id, step_id, operation_id)
+                 );
+                 CREATE INDEX financial_plan_attempts_active_idx ON financial_plan_attempts(plan_id, candidate_state);
+                 PRAGMA user_version = 4;",
             )?;
             tx.commit()?;
         }
@@ -801,6 +898,7 @@ impl Store {
     /// reservations are retained for original-identity reconciliation.
     pub fn recover_interrupted(&mut self) -> Result<RecoveryReport> {
         self.recover_boundary_authorization_requests(&chrono::Utc::now().to_rfc3339())?;
+        self.recover_financial_plan_requests(&chrono::Utc::now().to_rfc3339())?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -839,6 +937,22 @@ impl Store {
                         params![record.to_string(), id],
                     )?;
                     tx.execute("DELETE FROM reservations WHERE operation_id=?1", [&id])?;
+                    if let Some((plan_id, _revision_id, _step_id)) = tx.query_row(
+                        "SELECT plan_id, revision_id, step_id FROM financial_plan_attempts WHERE operation_id=?1 AND candidate_state='unresolved'",
+                        [&id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+                    ).optional()? {
+                        if let Some(raw_plan) = tx.query_row("SELECT record_json FROM financial_plans WHERE plan_id=?1", [&plan_id], |row| row.get::<_, String>(0)).optional()? {
+                            let mut plan: Value = serde_json::from_str(&raw_plan)?;
+                            if plan.get("active_attempt_id").and_then(Value::as_str) == Some(id.as_str()) {
+                                plan["active_attempt_id"] = Value::Null;
+                                if let Some(reservations) = plan.pointer_mut("/usage/reservations").and_then(Value::as_array_mut) {
+                                    reservations.retain(|reservation| reservation.get("attempt_id").and_then(Value::as_str) != Some(id.as_str()));
+                                }
+                                tx.execute("UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3", params![plan.to_string(), chrono::Utc::now().to_rfc3339(), plan_id])?;
+                            }
+                        }
+                        tx.execute("UPDATE financial_plan_attempts SET candidate_state='cancelled' WHERE operation_id=?1 AND candidate_state='unresolved'", [&id])?;
+                    }
                     report.cancelled_before_submission.push(id);
                 }
                 "submitted" => {
@@ -1022,6 +1136,624 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    /// Begin an idempotent request to create or revise a named financial plan.
+    /// The engine supplies canonical fingerprints; the store treats all
+    /// financial data as opaque and only enforces durable identity.
+    pub fn begin_financial_plan_request(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        plan_id: &str,
+        timestamp: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT fingerprint, status FROM financial_plan_requests WHERE request_id=?1",
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((found, _)) = existing {
+            if found != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "INSERT INTO financial_plan_requests(request_id, fingerprint, status, plan_id, revision_id, created_at, updated_at) VALUES (?1, ?2, 'awaiting_approval', ?3, NULL, ?4, ?4)",
+            params![request_id, fingerprint, plan_id, timestamp],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn financial_plan_request_status(
+        &self,
+        request_id: &str,
+    ) -> Result<FinancialPlanRequestStatus> {
+        self.conn.query_row(
+            "SELECT fingerprint, status, plan_id, revision_id FROM financial_plan_requests WHERE request_id=?1",
+            [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().map_err(StoreError::from)
+    }
+
+    /// Atomically persist an approved immutable revision and make it active.
+    /// `expected_plan` is None for initial approval and the complete prior row
+    /// for a revision, providing a CAS against concurrent revisions/revokes.
+    #[expect(clippy::too_many_arguments)]
+    pub fn commit_financial_plan_revision(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        plan_id: &str,
+        revision_id: &str,
+        expected_plan: Option<&Value>,
+        revision: &Value,
+        plan_record: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let request: Option<(String, String, String)> = tx.query_row(
+            "SELECT fingerprint, status, plan_id FROM financial_plan_requests WHERE request_id=?1",
+            [request_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        if request.as_ref()
+            != Some(&(
+                fingerprint.to_owned(),
+                "awaiting_approval".to_owned(),
+                plan_id.to_owned(),
+            ))
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT active_revision_id, record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match (expected_plan, current) {
+            (None, None) => {}
+            (Some(expected), Some((_old_revision_id, current)))
+                if serde_json::from_str::<Value>(&current)? == *expected => {}
+            _ => return Err(StoreError::ConcurrentReservation),
+        }
+        let active_revision = plan_record
+            .get("revision")
+            .and_then(|revision| json_string(revision, "revision_id"))
+            .ok_or(StoreError::RequestConflict)?;
+        if active_revision != revision_id {
+            return Err(StoreError::RequestConflict);
+        }
+        tx.execute(
+            "INSERT INTO financial_plans(plan_id, active_revision_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(plan_id) DO UPDATE SET active_revision_id=excluded.active_revision_id, record_json=excluded.record_json, updated_at=excluded.updated_at",
+            params![plan_id, revision_id, plan_record.to_string(), timestamp],
+        )?;
+        tx.execute(
+            "INSERT INTO financial_plan_revisions(plan_id, revision_id, request_id, revision_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![plan_id, revision_id, request_id, revision.to_string(), timestamp],
+        )?;
+        tx.execute(
+            "UPDATE financial_plan_requests SET status='approved', revision_id=?1, updated_at=?2 WHERE request_id=?3 AND fingerprint=?4 AND status='awaiting_approval'",
+            params![revision_id, timestamp, request_id, fingerprint],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_financial_plan_request(
+        &mut self,
+        request_id: &str,
+        fingerprint: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let count = self.conn.execute(
+            "UPDATE financial_plan_requests SET status='interrupted', updated_at=?1 WHERE request_id=?2 AND fingerprint=?3 AND status='awaiting_approval'",
+            params![timestamp, request_id, fingerprint],
+        )?;
+        if count == 0 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        Ok(())
+    }
+
+    pub fn financial_plan(&self, plan_id: &str) -> Result<Option<Value>> {
+        self.conn
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| {
+                    let text: String = row.get(0)?;
+                    serde_json::from_str(&text).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn financial_plan_revision(
+        &self,
+        plan_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<Value>> {
+        self.conn.query_row("SELECT revision_json FROM financial_plan_revisions WHERE plan_id=?1 AND revision_id=?2", params![plan_id, revision_id], |row| {
+            let text: String = row.get(0)?;
+            serde_json::from_str(&text).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))
+        }).optional().map_err(StoreError::from)
+    }
+
+    pub fn financial_plan_revision_owner(
+        &self,
+        revision_id: &str,
+    ) -> Result<Option<(String, Value)>> {
+        self.conn
+            .query_row(
+                "SELECT plan_id, revision_json FROM financial_plan_revisions WHERE revision_id=?1",
+                [revision_id],
+                |row| {
+                    let plan_id: String = row.get(0)?;
+                    let text: String = row.get(1)?;
+                    let value = serde_json::from_str(&text).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok((plan_id, value))
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn compare_update_financial_plan(
+        &mut self,
+        plan_id: &str,
+        expected: &Value,
+        updated: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let active_revision = updated
+            .get("revision")
+            .and_then(|revision| json_string(revision, "revision_id"))
+            .ok_or(StoreError::RequestConflict)?;
+        tx.execute("UPDATE financial_plans SET active_revision_id=?1, record_json=?2, updated_at=?3 WHERE plan_id=?4", params![active_revision, updated.to_string(), timestamp, plan_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Create a durable plan attempt and its operation row in one transaction.
+    /// The plan's active attempt field serializes attempts across broker
+    /// processes; the SQL index provides a second check.
+    #[expect(clippy::too_many_arguments)]
+    pub fn create_financial_plan_attempt(
+        &mut self,
+        plan_id: &str,
+        revision_id: &str,
+        step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<RequestRow> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if expected_plan
+            .get("revision")
+            .and_then(|revision| json_string(revision, "revision_id"))
+            != Some(revision_id)
+            || json_string(updated_plan, "active_attempt_id") != Some(operation_id)
+        {
+            return Err(StoreError::RequestConflict);
+        }
+        let expected_revision = expected_plan.get("revision").unwrap_or(&Value::Null);
+        let expected_expiry = json_string(expected_revision, "expires_at")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        if json_string(expected_revision, "status") != Some("active")
+            || expected_expiry.is_none_or(|expires| expires <= chrono::Utc::now())
+            || json_string(expected_plan, "active_attempt_id").is_some()
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let unresolved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved')", [plan_id], |row| row.get(0))?;
+        if unresolved {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if let Some(existing) = get_request_tx(&tx, request_id)? {
+            if existing.fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            tx.commit()?;
+            return Ok(RequestRow {
+                created: false,
+                ..existing
+            });
+        }
+        tx.execute("INSERT INTO operations(id, request_id, fingerprint, operation, status, run_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'awaiting_approval', NULL, ?5, ?6, ?6)", params![operation_id, request_id, fingerprint, operation, record.to_string(), timestamp])?;
+        tx.execute(
+            "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
+            params![updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.execute("INSERT INTO financial_plan_attempts(plan_id, revision_id, step_id, operation_id, request_id, candidate_state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'unresolved', ?6)", params![plan_id, revision_id, step_id, operation_id, request_id, timestamp])?;
+        tx.commit()?;
+        Ok(RequestRow {
+            operation_id: operation_id.to_owned(),
+            request_id: request_id.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            operation: operation.to_owned(),
+            record: record.clone(),
+            created: true,
+        })
+    }
+
+    /// Atomically persist a verified read-step result, close its plan attempt,
+    /// and release the plan's unresolved-attempt guard. Reads create no
+    /// financial settlement or credit.
+    #[expect(clippy::too_many_arguments)]
+    pub fn finish_financial_plan_read(
+        &mut self,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        operation_record: &Value,
+        succeeded: bool,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(updated_plan, "active_attempt_id").is_some()
+            || json_string(operation_record, "status")
+                != Some(if succeeded { "completed" } else { "failed" })
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let current_attempt: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM financial_plan_attempts WHERE plan_id=?1 AND operation_id=?2 AND candidate_state='unresolved')",
+            params![plan_id, operation_id],
+            |row| row.get(0),
+        )?;
+        let durable_status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM operations WHERE id=?1",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if !current_attempt || durable_status.as_deref() != Some("awaiting_approval") {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let terminal_status = if succeeded { "completed" } else { "failed" };
+        tx.execute(
+            "UPDATE operations SET status=?1, record_json=?2, updated_at=?3 WHERE id=?4 AND status='awaiting_approval'",
+            params![terminal_status, operation_record.to_string(), timestamp, operation_id],
+        )?;
+        tx.execute(
+            "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
+            params![updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.execute(
+            "UPDATE financial_plan_attempts SET candidate_state=?1 WHERE plan_id=?2 AND operation_id=?3 AND candidate_state='unresolved'",
+            params![terminal_status, plan_id, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub fn replace_financial_plan_candidate(
+        &mut self,
+        plan_id: &str,
+        revision_id: &str,
+        step_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        previous_operation_id: &str,
+        cancelled_record: &Value,
+        operation_id: &str,
+        request_id: &str,
+        fingerprint: &str,
+        operation: &str,
+        record: &Value,
+        timestamp: &str,
+    ) -> Result<RequestRow> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let revision = expected_plan.get("revision").unwrap_or(&Value::Null);
+        let expiry = json_string(revision, "expires_at")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(expected_plan, "active_attempt_id") != Some(previous_operation_id)
+            || json_string(revision, "revision_id") != Some(revision_id)
+            || json_string(revision, "status") != Some("active")
+            || expiry.is_none_or(|expires| expires <= chrono::Utc::now())
+            || json_string(updated_plan, "active_attempt_id") != Some(operation_id)
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let old_status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM operations WHERE id=?1",
+                [previous_operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if old_status.as_deref() != Some("awaiting_approval") {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let old_submitted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            [previous_operation_id],
+            |row| row.get(0),
+        )?;
+        if old_submitted {
+            return Err(StoreError::SubmissionConflict);
+        }
+        if let Some(existing) = get_request_tx(&tx, request_id)? {
+            if existing.fingerprint != fingerprint {
+                return Err(StoreError::RequestConflict);
+            }
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.execute(
+            "UPDATE operations SET status='rejected', record_json=?1, updated_at=?2 WHERE id=?3",
+            params![
+                cancelled_record.to_string(),
+                timestamp,
+                previous_operation_id
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM reservations WHERE operation_id=?1",
+            [previous_operation_id],
+        )?;
+        tx.execute("UPDATE financial_plan_attempts SET candidate_state='superseded' WHERE operation_id=?1 AND plan_id=?2 AND candidate_state='unresolved'", params![previous_operation_id, plan_id])?;
+        tx.execute("INSERT INTO operations(id, request_id, fingerprint, operation, status, run_id, record_json, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'awaiting_approval', NULL, ?5, ?6, ?6)", params![operation_id, request_id, fingerprint, operation, record.to_string(), timestamp])?;
+        tx.execute(
+            "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
+            params![updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.execute("INSERT INTO financial_plan_attempts(plan_id, revision_id, step_id, operation_id, request_id, candidate_state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 'unresolved', ?6)", params![plan_id, revision_id, step_id, operation_id, request_id, timestamp])?;
+        tx.commit()?;
+        Ok(RequestRow {
+            operation_id: operation_id.to_owned(),
+            request_id: request_id.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            operation: operation.to_owned(),
+            record: record.clone(),
+            created: true,
+        })
+    }
+
+    /// Atomically persist submission identity only while the exact active plan
+    /// revision still owns this unresolved attempt. A concurrent revoke or
+    /// revision changes the plan JSON and makes dispatch fail closed.
+    #[expect(clippy::too_many_arguments)]
+    pub fn persist_financial_plan_submission(
+        &mut self,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        approved_expires_at: &str,
+        submission: &SubmissionRow,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let revision = expected_plan.get("revision").unwrap_or(&Value::Null);
+        let expiry = json_string(revision, "expires_at")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        let status = json_string(revision, "status");
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            || json_string(revision, "revision_id").is_none()
+            || json_string(revision, "expires_at") != Some(approved_expires_at)
+            || status != Some("active")
+            || expiry.is_none_or(|expires| expires <= chrono::Utc::now())
+            || chrono::DateTime::parse_from_rfc3339(timestamp).is_err()
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        persist_submission_tx(&tx, operation_id, submission, timestamp)?;
+        tx.execute(
+            "UPDATE financial_plans SET record_json=?1, updated_at=?2 WHERE plan_id=?3",
+            params![updated_plan.to_string(), timestamp, plan_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn financial_plan_attempt_owner(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<(String, String, String, String)>> {
+        self.conn.query_row("SELECT plan_id, revision_id, step_id, candidate_state FROM financial_plan_attempts WHERE operation_id=?1", [operation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(StoreError::from)
+    }
+
+    pub fn update_financial_plan_candidate_preview(
+        &mut self,
+        plan_id: &str,
+        expected_plan: &Value,
+        operation_id: &str,
+        operation_record: &Value,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let revision = expected_plan.get("revision").unwrap_or(&Value::Null);
+        let expiry = json_string(revision, "expires_at")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            || json_string(revision, "status") != Some("active")
+            || expiry.is_none_or(|expires| expires <= chrono::Utc::now())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status FROM operations WHERE id=?1",
+                [operation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if status.as_deref() != Some("awaiting_approval") {
+            return Err(StoreError::AlreadySettled);
+        }
+        tx.execute(
+            "UPDATE operations SET record_json=?1, updated_at=?2 WHERE id=?3",
+            params![operation_record.to_string(), timestamp, operation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub fn commit_financial_plan_settlement(
+        &mut self,
+        settlement: &Settlement,
+        plan_id: &str,
+        expected_plan: &Value,
+        updated_plan: &Value,
+        operation_id: &str,
+        candidate_state: &str,
+        timestamp: &str,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM financial_plans WHERE plan_id=?1",
+                [plan_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if current
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()?
+            != Some(expected_plan.clone())
+        {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        commit_settlement_tx(&tx, settlement, timestamp)?;
+        tx.execute("UPDATE financial_plans SET active_revision_id=?1, record_json=?2, updated_at=?3 WHERE plan_id=?4", params![updated_plan.get("revision").and_then(|revision| json_string(revision, "revision_id")).ok_or(StoreError::RequestConflict)?, updated_plan.to_string(), timestamp, plan_id])?;
+        tx.execute("UPDATE financial_plan_attempts SET candidate_state=?1 WHERE operation_id=?2 AND plan_id=?3 AND candidate_state='unresolved'", params![candidate_state, operation_id, plan_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn recover_financial_plan_requests(&mut self, timestamp: &str) -> Result<()> {
+        self.conn.execute("UPDATE financial_plan_requests SET status='approved', revision_id=(SELECT revision_id FROM financial_plan_revisions r WHERE r.request_id=financial_plan_requests.request_id), updated_at=?1 WHERE status='awaiting_approval' AND EXISTS(SELECT 1 FROM financial_plan_revisions r WHERE r.request_id=financial_plan_requests.request_id)", [timestamp])?;
+        self.conn.execute("UPDATE financial_plan_requests SET status='interrupted', updated_at=?1 WHERE status='awaiting_approval' AND NOT EXISTS(SELECT 1 FROM financial_plan_revisions r WHERE r.request_id=financial_plan_requests.request_id)", [timestamp])?;
+        Ok(())
     }
 
     /// Reconcile approval requests left awaiting by a previous broker process.
