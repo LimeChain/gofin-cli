@@ -760,7 +760,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "prompt":companion_skill::SETUP_PROMPT,
                 "default":"no",
                 "when":"After successful human setup; never in JSON mode.",
-                "installation":"Only an explicit y/yes runs fin skill install --agent codex as the human account; conflicts are preserved without automatic backup or replacement.",
+                "installation":"Use arrow keys to move and Space to toggle Codex and Claude Code; Enter installs selected copies as the human account. Nothing is preselected. Enter with none selected, Esc or EOF installs nothing; conflicts are preserved without automatic backup or replacement.",
                 "failure":"Optional skill failure or cancellation leaves the completed Fin installation intact."
             });
         }

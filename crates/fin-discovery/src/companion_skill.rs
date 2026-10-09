@@ -7,23 +7,26 @@ use serde_json::{Value, json};
 
 pub const CONTENT: &str = include_str!("../../../skills/fin/SKILL.md");
 pub const VERSION: &str = "1.2.0";
-pub const SETUP_PROMPT: &str = "Install Fin's optional Codex skill? [y/N]";
+pub const SETUP_PROMPT: &str = "Install Fin's optional skill";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEnvironment {
     Codex,
+    Claude,
 }
 impl AgentEnvironment {
-    pub const ALL: &[Self] = &[Self::Codex];
+    pub const ALL: &[Self] = &[Self::Codex, Self::Claude];
     pub fn name(self) -> &'static str {
         match self {
             Self::Codex => "codex",
+            Self::Claude => "claude",
         }
     }
     pub fn directory(self) -> &'static str {
         match self {
             Self::Codex => ".agents/skills/fin",
+            Self::Claude => ".claude/skills/fin",
         }
     }
 }
@@ -99,7 +102,7 @@ pub fn definitions() -> Vec<fin_domain::Definition> {
             if inspect {OperationKind::Read} else {OperationKind::Configuration},
             if inspect {ExecutionActor::AgentReadable} else {ExecutionActor::AgentInvocable},
             if inspect {json!({"agent":"codex"})} else {json!({"agent":"codex","backup":false})},
-            json!({"service_required":false,"requires_administrator":false,"requires_human_terminal":false,"financial_movement":false,"financial_authorization":false,"secret_input":"none","companion_skill":metadata(),"command_line_examples":[format!("fin skill {action} --agent codex --json")]}),
+            json!({"service_required":false,"requires_administrator":false,"requires_human_terminal":false,"financial_movement":false,"financial_authorization":false,"secret_input":"none","companion_skill":metadata(),"command_line_examples":AgentEnvironment::ALL.iter().map(|agent| format!("fin skill {action} --agent {} --json",agent.name())).collect::<Vec<_>>()}),
         );
         if inspect { definition.input_schema = super::schema::<SkillTarget>(); }
         definition.output_schema = super::schema::<SkillResult>();

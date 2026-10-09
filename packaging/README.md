@@ -30,7 +30,9 @@ Setup registers `/Library/Fin/runtime` in `/etc/paths.d/fin`, so a new macOS
 Terminal can run `fin` directly. It leaves Homebrew directories untouched and
 automatically configures completion for the user's login shell, using only
 Fin-owned files and marked shell blocks. After success it asks
-`Install Fin's optional Codex skill? [y/N]`. Enter skips; y/yes invokes the skill
+which skills to install: arrow keys move between Codex and Claude Code,
+Space toggles each checkbox, and Enter installs selected copies. Enter with
+none selected or Esc skips. Confirming selected agents invokes the skill
 installer as the human account. Optional failure or cancellation preserves the
 completed setup. The skill is embedded in the `fin` binary,
 including Linux discovery bundles, and installs offline without sudo or approval.
