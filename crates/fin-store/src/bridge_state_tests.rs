@@ -406,7 +406,7 @@ fn v3_upgrade_adds_bridge_tables_without_touching_pending_operation_or_submissio
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        7
+        8
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-pending").unwrap(),

@@ -11,6 +11,9 @@ use fin_domain::boundaries::{
     BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundarySpec,
     BoundaryStatus, BoundaryViolation,
 };
+use fin_domain::financial_plans::{
+    FinancialPlanAuthorizationRecord, FinancialPlanAuthorizationStatus, FinancialPlanRevision,
+};
 use fin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
     CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, FinError,
@@ -38,10 +41,12 @@ mod boundary_authorizations;
 #[cfg(test)]
 mod boundary_dispatch_tests;
 mod cash_reservation_sources;
+mod financial_plans;
 mod ordinary_policy;
 use ordinary_policy::reject_unpriced_run;
 mod projected_provenance;
 mod projected_shares;
+use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
 
 const DEFAULT_LIMIT_MICROS: u64 = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
 fn legacy_movement_limit() -> String {
@@ -306,6 +311,11 @@ impl Engine {
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
             .recover_boundary_authorization_requests(&now())
+            .map_err(map_store)?;
+        store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .recover_financial_plan_requests(&now())
             .map_err(map_store)?;
         Ok(Self {
             store,
@@ -1126,7 +1136,9 @@ impl Engine {
             self.update_record(&record)?;
             return Ok(record);
         }
-        let result = self.execute_new(adapter, &request, &mut record, None).await;
+        let result = self
+            .execute_new(adapter, &request, &mut record, None, None, None)
+            .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
@@ -1201,11 +1213,70 @@ impl Engine {
         request: &OperationRequest,
         record: &mut OperationRecord,
         boundary: Option<BoundaryAuthorizationRecord>,
+        plan: Option<FinancialPlanAuthorizationRecord>,
+        preprepared: Option<PreparedOperation>,
     ) -> Result<OperationRecord> {
         let context = self.preparation_context(request.run_id.as_deref())?;
-        let mut prepared = adapter
-            .prepare_with_context(&request.operation, &request.input, &context)
-            .await?;
+        let mut prepared = match preprepared {
+            Some(prepared) => prepared,
+            None => {
+                adapter
+                    .prepare_with_context(&request.operation, &request.input, &context)
+                    .await?
+            }
+        };
+        let plan_attempt_hash = if let Some(plan) = &plan {
+            let linkage = plan
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == record.id)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "The durable plan attempt linkage is missing.",
+                        "Reconcile the original attempt before retrying.",
+                    )
+                })?;
+            let prepared_hash = binding_hash(
+                &fin_domain::financial_plans::financial_plan_attempt_binding(
+                    &prepared,
+                    &plan.revision.plan_id,
+                    &plan.revision.revision_id,
+                    &linkage.step_id,
+                ),
+            )?;
+            if prepared_hash != linkage.execution_binding_hash {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The prepared operation differs from the immutable plan attempt candidate.",
+                    "Preview the current candidate and submit a new attempt only after reconciliation.",
+                ));
+            }
+            self.validate_plan_candidate(
+                adapter.as_ref(),
+                &plan.revision,
+                &linkage.step_id,
+                &record.input,
+                &record.id,
+                &prepared,
+            )?;
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                validate_candidate_plan_caps(plan, &linkage.step_id, &prepared, &store)?;
+            }
+            financial_plans::inject_plan_marker(
+                &mut prepared,
+                plan,
+                &linkage.step_id,
+                prepared_hash.clone(),
+            )?;
+            Some(prepared_hash)
+        } else {
+            None
+        };
         let boundary_attempt_hash = if let Some(boundary) = &boundary {
             adapter.validate_boundary_candidate(&boundary.authorization.spec, &prepared)?;
             validate_candidate_caps(&boundary.authorization, &prepared)?;
@@ -1268,6 +1339,14 @@ impl Engine {
             }
             ensure_audit_binding(&boundary.approval, &approved_binding_hash)?;
             (boundary.approval.clone(), None)
+        } else if let Some(plan) = &plan {
+            ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
+            validate_future_expiry(
+                &plan.revision.expires_at,
+                Utc::now(),
+                "PLAN_AUTHORIZATION_EXPIRED",
+            )?;
+            (plan.approval.clone(), None)
         } else {
             let challenge_expiry = std::cmp::min(
                 parse_time(&prepared.expires_at)?,
@@ -1290,7 +1369,8 @@ impl Engine {
         record.updated_at = now();
         self.update_record(record)?;
 
-        let mut refreshed = adapter.revalidate(&prepared).await?;
+        let adapter_candidate = strip_plan_metadata(&prepared);
+        let mut refreshed = adapter.revalidate(&adapter_candidate).await?;
         self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
             .await?;
         validate_prepared(&refreshed, &request.operation, Utc::now())?;
@@ -1318,6 +1398,7 @@ impl Engine {
             let _ = marker;
         }
         if boundary.is_none()
+            && plan.is_none()
             && binding_hash(&authorization_binding(&refreshed))? != approved_binding_hash
         {
             return Err(FinError::new(
@@ -1326,6 +1407,55 @@ impl Engine {
                 "Execution parameters changed after approval.",
                 "Refresh the preview and authorize the changed operation.",
             ));
+        }
+        if let Some(plan) = &plan {
+            let linkage = plan
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == record.id)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "The durable plan attempt linkage is missing.",
+                        "Reconcile the original attempt.",
+                    )
+                })?;
+            let refreshed_hash = binding_hash(
+                &fin_domain::financial_plans::financial_plan_attempt_binding(
+                    &refreshed,
+                    &plan.revision.plan_id,
+                    &plan.revision.revision_id,
+                    &linkage.step_id,
+                ),
+            )?;
+            if Some(refreshed_hash.as_str()) != plan_attempt_hash.as_deref() {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The venue candidate changed after it was bound to this plan attempt.",
+                    "Reconcile this attempt before proposing another candidate.",
+                ));
+            }
+            self.validate_plan_candidate(
+                adapter.as_ref(),
+                &plan.revision,
+                &linkage.step_id,
+                &record.input,
+                &record.id,
+                &refreshed,
+            )?;
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                validate_candidate_plan_caps(plan, &linkage.step_id, &refreshed, &store)?;
+            }
+            financial_plans::inject_plan_marker(
+                &mut refreshed,
+                plan,
+                &linkage.step_id,
+                plan_attempt_hash.clone().unwrap_or_default(),
+            )?;
         }
         if let Some(challenge) = &challenge {
             ensure_approval_fresh(&audit, challenge, Utc::now())?;
@@ -1346,6 +1476,26 @@ impl Engine {
             &record.id,
             boundary.as_ref().map(|b| b.authorization.id.as_str()),
         )?;
+        if let Some(plan) = &plan {
+            let current = self.load_financial_plan(&plan.revision.plan_id)?;
+            if current.revision.revision_id != plan.revision.revision_id
+                || current.revision.status != FinancialPlanAuthorizationStatus::Active
+                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || current.active_attempt_id.as_deref() != Some(record.id.as_str())
+                || plan_attempt_hash.as_deref()
+                    != plan
+                        .attempts
+                        .iter()
+                        .find(|attempt| attempt.attempt_id == record.id)
+                        .map(|attempt| attempt.execution_binding_hash.as_str())
+            {
+                return Err(plan_error(
+                    "PLAN_AUTHORIZATION_INACTIVE",
+                    "Plan authority changed or expired before dispatch.",
+                    "Reconcile the attempt and obtain fresh authorization if another attempt is needed.",
+                ));
+            }
+        }
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
@@ -1374,16 +1524,25 @@ impl Engine {
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
             operation_id: record.id.clone(),
-            expected_binding_hash: approved_binding_hash,
+            expected_binding_hash: plan
+                .as_ref()
+                .map(|p| p.revision.approval_binding_hash.clone())
+                .unwrap_or(approved_binding_hash),
             approval: audit,
             boundary_authorization_id: boundary.as_ref().map(|b| b.authorization.id.clone()),
             boundary_authorization_snapshot: boundary.clone(),
+            financial_plan_id: plan.as_ref().map(|p| p.revision.plan_id.clone()),
+            financial_plan_snapshot: plan.clone(),
+            adapter: Some(adapter.clone()),
             options: self.options.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
             record: Mutex::new(record.clone()),
         });
-        let submission = adapter.submit(&refreshed, journal.clone()).await;
+        let adapter_submission_candidate = strip_plan_metadata(&refreshed);
+        let submission = adapter
+            .submit(&adapter_submission_candidate, journal.clone())
+            .await;
         if let Err(error) = submission {
             let durable = journal
                 .record
@@ -1452,7 +1611,69 @@ impl Engine {
                     "Restore the same adapter version and reconcile; do not resubmit.",
                 )
             })?;
-        let reconciliation = match adapter.reconcile(&record).await {
+        let mut adapter_record = record.clone();
+        if let Some(prepared) = &record.preview {
+            adapter_record.preview = Some(strip_plan_metadata(prepared));
+        }
+        let plan_owner = {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .financial_plan_attempt_owner(&record.id)
+                .map_err(map_store)?
+        };
+        if let Some((plan_id, revision_id, step_id, _)) = plan_owner {
+            let revision_value = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .financial_plan_revision(&plan_id, &revision_id)
+                .map_err(map_store)?
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_REVISION_MISSING",
+                        "The original plan revision for this attempt is missing.",
+                        "Keep the submission unresolved and restore its immutable revision history.",
+                    )
+                })?;
+            let revision: FinancialPlanRevision = from_value(revision_value)?;
+            let step = revision
+                .spec
+                .steps
+                .iter()
+                .find(|step| step.step_id == step_id)
+                .ok_or_else(|| internal("original plan step disappeared"))?;
+            if step.operation != record.operation {
+                return Err(plan_error(
+                    "PLAN_ATTEMPT_BINDING_MISMATCH",
+                    "The original plan step no longer matches its operation record.",
+                    "Keep the submission unresolved and inspect its immutable plan history.",
+                ));
+            }
+            let permission = financial_plans::permission_for_step(&revision, &step_id)?;
+            if !permission.generated_input_fields.is_empty() {
+                let execution_input = financial_plans::plan_attempt_input(
+                    &revision,
+                    &step_id,
+                    &record.input,
+                    &record.id,
+                )?;
+                let prepared = record.preview.as_ref().ok_or_else(|| {
+                    plan_error(
+                        "PLAN_CANDIDATE_MISSING",
+                        "The original plan attempt has no durable prepared candidate.",
+                        "Keep the submission unresolved and restore its original candidate record.",
+                    )
+                })?;
+                financial_plans::validate_prepared_generated_input(
+                    &permission.generated_input_fields,
+                    &execution_input,
+                    &prepared.input,
+                )?;
+                adapter_record.input = execution_input;
+            }
+        }
+        let reconciliation = match adapter.reconcile(&adapter_record).await {
             Ok(reconciliation) => reconciliation,
             Err(error) => {
                 let mut retained = record;
@@ -2442,6 +2663,84 @@ impl Engine {
                     )
                     .map_err(map_store)
             }
+        } else if let Some((plan_id, _revision_id, _step_id, _state)) = {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .financial_plan_attempt_owner(&record.id)
+                .map_err(map_store)?
+        } {
+            let mut plan = self.load_financial_plan(&plan_id)?;
+            let expected = plan.clone();
+            let (_, revision_id, step_id, _) = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .financial_plan_attempt_owner(&record.id)
+                .map_err(map_store)?
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "Settled operation has no durable plan attempt link.",
+                        "Preserve the operation and reconcile against its original plan.",
+                    )
+                })?;
+            let linkage = plan
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == record.id)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "Settled operation has no plan history entry.",
+                        "Preserve the operation and reconcile against its original plan.",
+                    )
+                })?;
+            let prepared = record.preview.as_ref().ok_or_else(|| {
+                plan_error(
+                    "PLAN_CANDIDATE_MISSING",
+                    "Settled plan attempt has no prepared candidate.",
+                    "Preserve the operation and reconcile against its original plan.",
+                )
+            })?;
+            if linkage.revision_id != revision_id
+                || linkage.step_id != step_id
+                || linkage.execution_binding_hash
+                    != binding_hash(
+                        &fin_domain::financial_plans::financial_plan_attempt_binding(
+                            prepared,
+                            &plan_id,
+                            &revision_id,
+                            &step_id,
+                        ),
+                    )?
+            {
+                return Err(plan_error(
+                    "PLAN_ATTEMPT_BINDING_MISMATCH",
+                    "Settlement candidate does not match its durable plan attempt linkage.",
+                    "Keep the attempt unresolved and inspect the original execution binding.",
+                ));
+            }
+            if plan.active_attempt_id.as_deref() == Some(record.id.as_str()) {
+                plan.active_attempt_id = None;
+                plan.usage
+                    .reservations
+                    .retain(|reservation| reservation.attempt_id != record.id);
+                financial_plans::account_financial_plan_effects(&mut plan, &record)?;
+            }
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .commit_financial_plan_settlement(
+                    &settlement,
+                    &plan_id,
+                    &to_value(&expected)?,
+                    &to_value(&plan)?,
+                    &record.id,
+                    "settled",
+                    &record.updated_at,
+                )
+                .map_err(map_store)
         } else {
             let handoff = transfer_principal(&record)?;
             if let Some(principal) = handoff {
@@ -2972,6 +3271,9 @@ struct OperationSubmissionJournal {
     approval: ApprovalAudit,
     boundary_authorization_id: Option<String>,
     boundary_authorization_snapshot: Option<BoundaryAuthorizationRecord>,
+    financial_plan_id: Option<String>,
+    financial_plan_snapshot: Option<FinancialPlanAuthorizationRecord>,
+    adapter: Option<Arc<dyn Adapter>>,
     options: EngineOptions,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
@@ -2981,6 +3283,78 @@ struct OperationSubmissionJournal {
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
+        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
+        {
+            let current: FinancialPlanAuthorizationRecord = {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                from_value(store.financial_plan(id).map_err(map_store)?.ok_or_else(|| plan_error("PLAN_NOT_FOUND", "Plan authority no longer exists.", "Keep the attempt unresolved and reconcile its original submission."))?)?
+            };
+            if current.revision.revision_id != snapshot.revision.revision_id
+                || current.revision.status != FinancialPlanAuthorizationStatus::Active
+                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || current.active_attempt_id.as_deref() != Some(self.operation_id.as_str())
+            {
+                return Err(plan_error(
+                    "PLAN_AUTHORIZATION_INACTIVE",
+                    "Plan authority is revoked, expired, or no longer owns this attempt.",
+                    "Reconcile the original attempt; fresh authorization is required for another attempt.",
+                ));
+            }
+            let operation = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .clone();
+            let prepared = operation.preview.ok_or_else(|| {
+                plan_error(
+                    "PLAN_CANDIDATE_MISSING",
+                    "Plan attempt has no durable prepared candidate.",
+                    "Keep the attempt unresolved and inspect its original record.",
+                )
+            })?;
+            let linkage = current
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == self.operation_id)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "Plan attempt linkage is missing.",
+                        "Keep the attempt unresolved and reconcile its original record.",
+                    )
+                })?;
+            let candidate_hash = binding_hash(
+                &fin_domain::financial_plans::financial_plan_attempt_binding(
+                    &prepared,
+                    id,
+                    &current.revision.revision_id,
+                    &linkage.step_id,
+                ),
+            )?;
+            if candidate_hash != linkage.execution_binding_hash {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The concrete candidate changed after it was bound to this attempt.",
+                    "Reconcile this attempt before proposing another candidate.",
+                ));
+            }
+            {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                ordinary_policy::validate_boundary_candidate_policy(
+                    &prepared,
+                    &self.operation_id,
+                    &self.options,
+                    &store,
+                )?;
+            }
+            return Ok(());
+        }
         if let Some(id) = &self.boundary_authorization_id {
             let grant = self.active_boundary_grant(id)?;
             let prepared = self
@@ -3000,6 +3374,129 @@ impl SubmissionJournal for OperationSubmissionJournal {
     }
 
     fn assert_candidate(&self, prepared: &PreparedOperation) -> Result<()> {
+        if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
+        {
+            self.assert_authorized()?;
+            let raw_input = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .input
+                .clone();
+            let current: FinancialPlanAuthorizationRecord = from_value(
+                self.store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .financial_plan(id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_NOT_FOUND",
+                            "Plan authority no longer exists.",
+                            "Reconcile the original attempt.",
+                        )
+                    })?,
+            )?;
+            let linkage = current
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id == self.operation_id)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_ATTEMPT_MISSING",
+                        "Plan attempt linkage is missing.",
+                        "Reconcile the original attempt.",
+                    )
+                })?;
+            let hash = binding_hash(
+                &fin_domain::financial_plans::financial_plan_attempt_binding(
+                    prepared,
+                    id,
+                    &current.revision.revision_id,
+                    &linkage.step_id,
+                ),
+            )?;
+            if hash != linkage.execution_binding_hash {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The adapter revalidation changed the immutable plan candidate.",
+                    "Reconcile this attempt before proposing another candidate.",
+                ));
+            }
+            let adapter = self
+                .adapter
+                .as_ref()
+                .ok_or_else(|| internal("plan execution adapter is missing"))?;
+            let permission = permission_for_step(&current.revision, &linkage.step_id)?;
+            if let Some(exact) = &permission.exact {
+                let step = current
+                    .revision
+                    .spec
+                    .steps
+                    .iter()
+                    .find(|step| step.step_id == linkage.step_id)
+                    .ok_or_else(|| internal("plan step disappeared"))?;
+                financial_plans::validate_exact_plan_candidate(
+                    adapter.as_ref(),
+                    &step.operation,
+                    &step.input,
+                    exact,
+                    &raw_input,
+                    prepared,
+                )?;
+            } else {
+                let scope = permission
+                    .permission
+                    .as_ref()
+                    .ok_or_else(|| internal("adapter plan permission disappeared"))?;
+                adapter.validate_boundary_candidate(&scope.spec, prepared)?;
+            }
+            financial_plans::validate_generated_plan_candidate(
+                adapter.as_ref(),
+                &current.revision,
+                &linkage.step_id,
+                &raw_input,
+                &self.operation_id,
+                prepared,
+            )?;
+            let mut durable_candidate = prepared.clone();
+            financial_plans::inject_plan_marker(
+                &mut durable_candidate,
+                &current,
+                &linkage.step_id,
+                hash.clone(),
+            )?;
+            let updated_record = {
+                let mut record = self
+                    .record
+                    .lock()
+                    .map_err(|_| internal("journal record lock poisoned"))?;
+                record.preview = Some(durable_candidate.clone());
+                record.updated_at = now();
+                record.clone()
+            };
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            validate_candidate_plan_caps(&current, &linkage.step_id, prepared, &store)?;
+            ordinary_policy::validate_boundary_candidate_policy(
+                prepared,
+                &self.operation_id,
+                &self.options,
+                &store,
+            )?;
+            store
+                .update_financial_plan_candidate_preview(
+                    id,
+                    &to_value(snapshot)?,
+                    &self.operation_id,
+                    &to_value(&updated_record)?,
+                    &updated_record.updated_at,
+                )
+                .map_err(map_store)?;
+            return Ok(());
+        }
         let Some(grant_id) = self.boundary_authorization_id.as_deref() else {
             return self.assert_authorized();
         };
@@ -3176,6 +3673,29 @@ impl OperationSubmissionJournal {
                     id,
                     &to_value(snapshot)?,
                     &self.operation_id,
+                    &submission_row,
+                    &now(),
+                )
+                .map_err(map_store)?;
+        } else if let (Some(id), Some(snapshot)) =
+            (&self.financial_plan_id, &self.financial_plan_snapshot)
+        {
+            let mut updated = snapshot.clone();
+            if let Some(linkage) = updated
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.attempt_id == self.operation_id)
+            {
+                linkage.submission_id =
+                    Some(format!("{}:{}", submission.kind, submission.reference));
+            }
+            store
+                .persist_financial_plan_submission(
+                    id,
+                    &to_value(snapshot)?,
+                    &to_value(&updated)?,
+                    &self.operation_id,
+                    &snapshot.revision.expires_at,
                     &submission_row,
                     &now(),
                 )
@@ -3530,8 +4050,42 @@ fn validate_effects(
             "Keep the operation unresolved and restore a compatible journal.",
         )
     })?;
-    let expected_binding_hash = binding_hash(&authorization_binding(prepared))?;
-    if expected_binding_hash != approval.binding_hash {
+    let plan_metadata = prepared
+        .binding
+        .get(fin_domain::financial_plans::PLAN_METADATA_KEY);
+    let approval_matches = if let Some(metadata) = plan_metadata {
+        let plan_id = metadata.get("plan_id").and_then(Value::as_str);
+        let revision_id = metadata.get("revision_id").and_then(Value::as_str);
+        let step_id = metadata.get("step_id").and_then(Value::as_str);
+        let attempt_hash = metadata.get("attempt_binding_hash").and_then(Value::as_str);
+        let approval_hash = metadata
+            .get("approval_binding_hash")
+            .and_then(Value::as_str);
+        match (plan_id, revision_id, step_id, attempt_hash, approval_hash) {
+            (
+                Some(plan_id),
+                Some(revision_id),
+                Some(step_id),
+                Some(attempt_hash),
+                Some(approval_hash),
+            ) => {
+                approval_hash == approval.binding_hash
+                    && attempt_hash
+                        == binding_hash(
+                            &fin_domain::financial_plans::financial_plan_attempt_binding(
+                                prepared,
+                                plan_id,
+                                revision_id,
+                                step_id,
+                            ),
+                        )?
+            }
+            _ => false,
+        }
+    } else {
+        binding_hash(&authorization_binding(prepared))? == approval.binding_hash
+    };
+    if !approval_matches {
         return Err(FinError::new(
             "APPROVAL_PROOF_MISMATCH",
             "reconciliation",
@@ -9272,6 +9826,16 @@ fn inject_boundary_marker(
     Ok(())
 }
 
+/// Broker-owned journal markers must never cross the adapter API boundary.
+/// They are restored on the durable engine preview after validation.
+fn strip_plan_metadata(prepared: &PreparedOperation) -> PreparedOperation {
+    let mut candidate = prepared.clone();
+    if let Some(binding) = candidate.binding.as_object_mut() {
+        binding.remove(fin_domain::financial_plans::PLAN_METADATA_KEY);
+    }
+    candidate
+}
+
 fn account_boundary_effects(
     authorization: &mut BoundaryAuthorization,
     effects: Option<&VerifiedEffects>,
@@ -9602,6 +10166,9 @@ mod tests {
             approval: operation.approval.clone().unwrap(),
             boundary_authorization_id: None,
             boundary_authorization_snapshot: None,
+            financial_plan_id: None,
+            financial_plan_snapshot: None,
+            adapter: None,
             options: EngineOptions::default(),
             consumed: AtomicBool::new(true),
             store: Arc::new(Mutex::new(store)),

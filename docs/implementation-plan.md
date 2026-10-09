@@ -92,6 +92,26 @@ human-approved grant. Changed bounds require fresh approval; in-bounds candidate
 reuse remaining authority. Revocation prevents future dispatch without undoing
 submitted effects. Quote freshness does not renew consent.
 
+Named sequential plans reuse the journal lifecycle with explicit plan-step authority.
+Generic exact scopes bind canonical request inputs, operation schemas, protected
+connection identities and explicit exact-asset caps. Connection metadata includes
+stable non-secret alias mappings, addresses, networks and asset configuration;
+volatile observations do not belong in that identity contract. Schema validation uses the
+maintained JSON Schema validator with external retrieval disabled. No operation
+allowlist or adapter opt-in is needed for registered agent financial operations;
+reads can also be sequenced. Normal operation success is an explicit completion
+condition for zero-principal actions. Optional adapter variation scopes remain
+available. Live permissions, balances, prices and simulations are deferred to
+fresh execution preparation; plan review must say which checks are deferred.
+Broker plan metadata remains engine-owned and is removed before adapter calls,
+so strict current and future adapter bindings retain their ordinary contract. Plan and step consumption, net funding credits,
+reservations and completion progress settle together. A plan uses exact per-asset
+aggregate caps alongside independent protected USD policy. Exact-input operations
+retain their ordinary conservative USD charge, including non-cash exposure such
+as derivative notional. Credits cannot erase gross usage. Revisions retain usage
+and started steps; historical restoration-run models are not reused. The LLM names
+the plan and submits each step; there is no scheduler or automatic renewal.
+
 Keep administrative approval separate from financial authority. Credential and
 protected policy changes belong to the human's private Terminal and independent
 configuration approval. No production authorization-disable switch is permitted.

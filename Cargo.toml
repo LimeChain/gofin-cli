@@ -13,6 +13,7 @@ async-trait = "0.1.89"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
 schemars = "1.2.2"
+jsonschema = { version = "0.58.6", default-features = false, features = ["arbitrary-precision"] }
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal", "sync", "process", "fs"] }
 sha2 = "0.10.9"

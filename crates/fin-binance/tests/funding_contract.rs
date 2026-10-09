@@ -5,6 +5,11 @@ use fin_binance::{
 };
 use serde_json::{Value, json};
 
+#[path = "funding_contract/generic_plans.rs"]
+mod generic_plan_tests;
+#[path = "funding_contract/withdrawal_rejection.rs"]
+mod withdrawal_rejection_tests;
+
 fn amount(value: &str) -> ExactDecimal {
     ExactDecimal::parse(value).expect("fixture amount is exact")
 }
@@ -852,17 +857,62 @@ fn operation_definitions_are_available_offline_and_writes_remain_agent_plannable
             .iter()
             .any(|definition| definition.name == "binance.deposit-history")
     );
-    assert!(definitions.iter().all(|definition| {
-        if definition.kind == fin_domain::OperationKind::Write {
-            definition.execution_actor == fin_domain::ExecutionActor::AgentInvocable
-        } else {
-            matches!(
-                definition.execution_actor,
-                fin_domain::ExecutionActor::AgentInvocable
-                    | fin_domain::ExecutionActor::AgentReadable
-            )
+    assert!(definitions.iter().all(|definition| match definition.kind {
+        fin_domain::OperationKind::Read => {
+            definition.execution_actor == fin_domain::ExecutionActor::AgentReadable
         }
+        fin_domain::OperationKind::Write => {
+            definition.execution_actor == fin_domain::ExecutionActor::AgentInvocable
+        }
+        fin_domain::OperationKind::Configuration | fin_domain::OperationKind::Lifecycle => false,
     }));
+    for read in [
+        "binance.balances",
+        "binance.networks",
+        "binance.deposit-address",
+        "binance.deposit-addresses",
+        "binance.spot.markets",
+        "binance.futures.positions",
+    ] {
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.name == read)
+                .unwrap_or_else(|| panic!("missing read definition {read}"))
+                .execution_actor,
+            fin_domain::ExecutionActor::AgentReadable,
+            "generic plans must be able to include ordinary read steps"
+        );
+    }
+    for (operation, field) in [
+        ("binance.transfer", "/requestId"),
+        ("binance.withdraw", "/requestId"),
+        ("binance.spot-order", "/requestId"),
+        ("binance.spot.order-place", "/request_id"),
+        ("binance.futures.order-place", "/request_id"),
+    ] {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == operation)
+            .unwrap_or_else(|| panic!("missing write definition {operation}"));
+        assert_eq!(
+            definition.semantics["broker_generated_attempt_input_fields"],
+            json!([field]),
+            "only non-authority correlation IDs can vary by concrete attempt"
+        );
+    }
+    for operation in ["binance.spot.order-cancel", "binance.futures.order-cancel"] {
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == operation)
+            .unwrap_or_else(|| panic!("missing write definition {operation}"));
+        assert!(
+            definition
+                .semantics
+                .get("broker_generated_attempt_input_fields")
+                .is_none()
+        );
+    }
     assert!(
         !definitions
             .iter()
@@ -1032,7 +1082,7 @@ impl fin_binance::BinanceTransport for RouteAwareTransferTransport {
                     "clientTranId":self.client_id.lock().unwrap().clone(),
                     "asset":"ETH", "amount":"0.25", "fromAccountType":"SPOT",
                     "toAccountType":"SPOT", "fromEmail":from_email, "toEmail":to_email,
-                    "status":"SUCCESS", "createTimeStamp":1
+                    "status":"SUCCESS", "createTimeStamp":request.get("startTime").unwrap().parse::<u64>().unwrap()
                 }]}))
             }
             endpoint => panic!("unexpected synthetic endpoint {endpoint:?}"),
@@ -1155,6 +1205,11 @@ impl fin_binance::BinanceTransport for DefaultMasterReceiptTransport {
                 }
                 let start = request.get("startTime").unwrap().parse::<u64>().unwrap();
                 let end = request.get("endTime").unwrap().parse::<u64>().unwrap();
+                assert_eq!(
+                    start % 1_000,
+                    0,
+                    "child transfer history query uses Binance's second precision"
+                );
                 let time = if matches!(self.fault, DefaultMasterReceiptFault::OutsideWindow) {
                     self.outside_timestamp(end)
                 } else {
@@ -1228,10 +1283,16 @@ impl fin_binance::BinanceTransport for DefaultMasterReceiptTransport {
                     (peer_email, child_email)
                 };
                 let end = request.get("endTime").unwrap().parse::<u64>().unwrap();
+                let start = request.get("startTime").unwrap().parse::<u64>().unwrap();
+                assert_eq!(
+                    start % 1_000,
+                    0,
+                    "universal-transfer history query uses Binance's second precision"
+                );
                 let time = if matches!(self.fault, DefaultMasterReceiptFault::OutsideWindow) {
                     self.outside_timestamp(end)
                 } else {
-                    request.get("startTime").unwrap().parse::<u64>().unwrap()
+                    start
                 };
                 let row = json!({
                     "tranId":123456789,
@@ -1307,6 +1368,9 @@ async fn submit_and_reconcile_default_master_transfer(
         "VENUE_TIMEOUT"
     );
     let mut original = journal.persisted.lock().unwrap()[0].clone();
+    let submitted_second = chrono::Utc::now().timestamp_millis().div_euclid(1_000) * 1_000;
+    let submitted_at = chrono::DateTime::from_timestamp_millis(submitted_second + 605).unwrap();
+    original.data["submittedAt"] = json!(submitted_at.to_rfc3339());
     if legacy_submission {
         original
             .data
@@ -1380,7 +1444,7 @@ impl fin_binance::BinanceTransport for DiagnosticTransferTransport {
                     "clientTranId":self.client_id.lock().unwrap().clone(),
                     "asset":"ETH", "amount":"0.25", "fromAccountType":"SPOT",
                     "toAccountType":"SPOT", "fromEmail":"child@example.invalid",
-                    "status":"PENDING", "createTimeStamp":1
+                    "status":"PENDING", "createTimeStamp":request.get("startTime").unwrap().parse::<u64>().unwrap()
                 }]}));
             }
             return Ok(json!({"totalCount":0,"result":[]}));
@@ -1444,7 +1508,7 @@ impl fin_binance::BinanceTransport for TransferFixtureTransport {
                 "clientTranId":request.get("clientTranId"),
                 "asset":"ETH", "amount":"0.123456", "fromAccountType":"SPOT",
                 "toAccountType":"SPOT", "fromEmail":"child@example.invalid",
-                "status":self.transfer_history_status, "createTimeStamp":1
+                "status":self.transfer_history_status, "createTimeStamp":request.get("startTime").unwrap().parse::<u64>().unwrap()
             }]})),
             E::UniversalTransfer if self.timeout_transfer => {
                 Err(fin_binance::TransportError::Timeout)
@@ -2845,10 +2909,15 @@ async fn ccxt_transport_keeps_exact_parameters_closed_endpoint_and_large_integer
     }
     .request()
     .unwrap();
-    let response = fin_binance::BinanceTransport::request(
+    let journal = std::sync::Arc::new(RecordingJournal {
+        events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        persisted: std::sync::Mutex::new(Vec::new()),
+    });
+    let response = fin_binance::BinanceTransport::request_authorized(
         &transport,
         &fin_binance::CredentialHandle::new("test-only-http-credential").unwrap(),
         request,
+        journal,
     )
     .await
     .unwrap();
@@ -2932,17 +3001,22 @@ async fn universal_transfer_transport_ed25519_signs_encoded_route_email_exactly(
         to_email: Some(email.into()),
         client_id: fin_binance::ClientIdentity::transfer("synthetic-ed25519-transfer-1").unwrap(),
     };
-    let response = fin_binance::BinanceTransport::request(
+    let journal = std::sync::Arc::new(RecordingJournal {
+        events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        persisted: std::sync::Mutex::new(Vec::new()),
+    });
+    let response = fin_binance::BinanceTransport::request_authorized(
         &transport,
         &fin_binance::CredentialHandle::new("test-only-ed25519-transfer").unwrap(),
         intent.request().unwrap(),
+        journal,
     )
     .await
     .unwrap();
     assert_eq!(response["tranId"].as_u64(), Some(9_007_199_254_740_993));
 
     let wire = server.await.unwrap();
-    assert!(wire.starts_with("POST /sapi/v1/sub-account/universalTransfer "));
+    assert!(wire.starts_with("POST /sapi/v1/sub-account/universalTransfer?"));
     assert!(
         wire.to_ascii_lowercase()
             .contains("x-mbx-apikey: synthetic-ed25519-api-key")
@@ -2950,8 +3024,15 @@ async fn universal_transfer_transport_ed25519_signs_encoded_route_email_exactly(
     let params = request_parameters(&wire);
     assert_eq!(params["toEmail"], email);
     assert_eq!(params["amount"], "0.01265");
-    let body = wire.split_once("\r\n\r\n").unwrap().1;
-    let (payload, signature) = body.rsplit_once("&signature=").unwrap();
+    let target = wire
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    let query = target.split_once('?').unwrap().1;
+    let (payload, signature) = query.rsplit_once("&signature=").unwrap();
     assert!(payload.contains("toEmail=synthetic%2Broute%26percent%25%E9%9B%AA%40example.invalid"));
     assert!(!payload.contains("%2540"));
     let signature = percent_decode_component(signature);
@@ -3088,10 +3169,15 @@ async fn loopback_http_rate_limits_are_reported_once_without_retry_for_418_or_42
         }
         .request()
         .unwrap();
-        let result = fin_binance::BinanceTransport::request(
+        let journal = std::sync::Arc::new(RecordingJournal {
+            events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            persisted: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = fin_binance::BinanceTransport::request_authorized(
             &transport,
             &fin_binance::CredentialHandle::new("test-only-rate-limit").unwrap(),
             request,
+            journal,
         )
         .await;
         assert!(

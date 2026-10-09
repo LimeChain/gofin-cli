@@ -935,7 +935,7 @@ pub fn trading_read_definitions() -> Vec<Definition> {
         } else {
             json!({"type":"array","maxItems":MAX_ROWS,"items":row_schema})
         };
-        defs.push(Definition { name:name.into(), description:description.into(), kind:OperationKind::Read, execution_actor:ExecutionActor::AgentInvocable,
+        defs.push(Definition { name:name.into(), description:description.into(), kind:OperationKind::Read, execution_actor:ExecutionActor::AgentReadable,
             input_schema:schema, output_schema:output, error_schema:schema_for!(FinError).into(), examples:vec![example],
             coverage:"Implemented named read; synthetic fixture verification. Production account and live acceptance pending.".into(),
             completion:"A bounded venue observation; not a financial execution or terminal settlement proof.".into(),

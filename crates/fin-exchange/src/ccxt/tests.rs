@@ -133,18 +133,28 @@ async fn official_binance_hmac_preserves_long_amount_and_large_identifiers() {
     let mut transfer_params = params();
     transfer_params.push(("fromEmail".into(), "synthetic+tag%&ü@unit.invalid".into()));
     let value = client
-        .request(
+        .request_guarded(
             ExchangeId::Binance,
             Method::BinanceUniversalTransfer,
             credentials("SYNTHETIC-HMAC-SECRET".into()),
             transfer_params,
+            Arc::new(|| true),
         )
         .await
         .unwrap();
     assert_eq!(value["tranId"], 18446744073709551615u64);
     let request = server.request();
-    assert!(request.starts_with("POST /sapi/v1/sub-account/universalTransfer "));
-    let (payload, signature) = signed_body(&request);
+    assert!(request.starts_with("POST /sapi/v1/sub-account/universalTransfer?"));
+    let target = request
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    assert!(target.contains('?'));
+    assert!(request.split_once("\r\n\r\n").unwrap().1.is_empty());
+    let (payload, signature) = signed_payload(&request);
     assert!(payload.contains("amount=12345678901234567890.123456789012345678"));
     assert!(payload.contains("fromEmail=synthetic%2Btag%25%26%C3%BC%40unit.invalid"));
     assert!(!payload.contains("%2540"));
@@ -233,16 +243,28 @@ async fn ed25519_transfer_signatures_preserve_route_email_in_post_and_history_ge
         let server = Server::new(200, r#"{"tranId":1}"#, Duration::ZERO);
         let mut route_params = params();
         route_params.push((field.into(), email.into()));
-        CcxtClient::for_test(&server.url)
-            .unwrap()
-            .request(
-                ExchangeId::Binance,
-                method,
-                credentials(pem.to_string()),
-                route_params,
-            )
-            .await
-            .unwrap();
+        let client = CcxtClient::for_test(&server.url).unwrap();
+        let result = if method == Method::BinanceUniversalTransfer {
+            client
+                .request_guarded(
+                    ExchangeId::Binance,
+                    method,
+                    credentials(pem.to_string()),
+                    route_params,
+                    Arc::new(|| true),
+                )
+                .await
+        } else {
+            client
+                .request(
+                    ExchangeId::Binance,
+                    method,
+                    credentials(pem.to_string()),
+                    route_params,
+                )
+                .await
+        };
+        result.unwrap();
         let request = server.request();
         let (payload, signature) = signed_payload(&request);
         assert!(payload.contains(&format!(
@@ -257,7 +279,9 @@ async fn ed25519_transfer_signatures_preserve_route_email_in_post_and_history_ge
             .1
             .into_owned();
         assert_eq!(decoded, email);
-        let signature = if method == Method::BinanceUniversalTransferHistory {
+        let signature = if method == Method::BinanceUniversalTransferHistory
+            || method == Method::BinanceUniversalTransfer
+        {
             reqwest::Url::parse(&format!("http://127.0.0.1/?sig={signature}"))
                 .unwrap()
                 .query_pairs()
@@ -280,6 +304,93 @@ async fn ed25519_transfer_signatures_preserve_route_email_in_post_and_history_ge
         assert_eq!(server.finish(), 1);
     }
 }
+
+#[tokio::test]
+async fn ed25519_universal_transfer_signs_both_route_emails_in_the_query() {
+    use ed25519_dalek::{Verifier, pkcs8::EncodePrivateKey};
+    let key = ed25519_dalek::SigningKey::from_bytes(&[31; 32]);
+    let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+    let server = Server::new(200, r#"{"tranId":7}"#, Duration::ZERO);
+    let params = vec![
+        ("asset".into(), "USDC".into()),
+        ("amount".into(), "12.5".into()),
+        ("fromAccountType".into(), "SPOT".into()),
+        ("toAccountType".into(), "SPOT".into()),
+        ("clientTranId".into(), "fin-local-0123456789".into()),
+        ("fromEmail".into(), "child+tag%&ü@unit.invalid".into()),
+        ("toEmail".into(), "main+tag@example.invalid".into()),
+    ];
+    CcxtClient::for_test(&server.url)
+        .unwrap()
+        .request_guarded(
+            ExchangeId::Binance,
+            Method::BinanceUniversalTransfer,
+            credentials(pem.to_string()),
+            params,
+            Arc::new(|| true),
+        )
+        .await
+        .unwrap();
+
+    let request = server.request();
+    assert!(request.starts_with("POST /sapi/v1/sub-account/universalTransfer?"));
+    let (payload, signature) = signed_payload(&request);
+    let target = request
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    assert!(target.contains('?'));
+    assert!(request.split_once("\r\n\r\n").unwrap().1.is_empty());
+    assert!(
+        !request
+            .to_ascii_lowercase()
+            .contains("content-type: application/x-www-form-urlencoded")
+    );
+    let wire_signature = target
+        .split_once('?')
+        .unwrap()
+        .1
+        .rsplit_once("&signature=")
+        .unwrap()
+        .1;
+    assert!(wire_signature.ends_with("%3D%3D"));
+    assert!(
+        !wire_signature
+            .chars()
+            .any(|character| matches!(character, '+' | '/' | '='))
+    );
+    assert!(payload.contains("fromEmail=child%2Btag%25%26%C3%BC%40unit.invalid"));
+    assert!(payload.contains("toEmail=main%2Btag%40example.invalid"));
+    assert!(!payload.contains("%252B") && !payload.contains("%2540"));
+    let decoded = reqwest::Url::parse(&format!("http://127.0.0.1/?{payload}"))
+        .unwrap()
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(decoded["fromEmail"], "child+tag%&ü@unit.invalid");
+    assert_eq!(decoded["toEmail"], "main+tag@example.invalid");
+    let signature = reqwest::Url::parse(&format!("http://127.0.0.1/?sig={signature}"))
+        .unwrap()
+        .query_pairs()
+        .next()
+        .unwrap()
+        .1
+        .into_owned();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .unwrap();
+    key.verifying_key()
+        .verify(
+            payload.as_bytes(),
+            &ed25519_dalek::Signature::from_slice(&bytes).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(server.finish(), 1);
+}
+
 #[tokio::test]
 async fn official_binance_ed25519_signs_exact_wire_payload() {
     use ed25519_dalek::{Verifier, pkcs8::EncodePrivateKey};
@@ -297,7 +408,7 @@ async fn official_binance_ed25519_signs_exact_wire_payload() {
         .await
         .unwrap();
     let request = server.request();
-    let (payload, signature) = signed_body(&request);
+    let (payload, signature) = signed_payload(&request);
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(signature)
         .unwrap();
@@ -339,16 +450,65 @@ async fn official_binance_rsa_signs_exact_wire_payload() {
         .unwrap();
     assert_eq!(server.finish(), 1);
 }
+
+#[tokio::test]
+async fn official_binance_rsa_universal_transfer_signs_query_without_body() {
+    use rsa::{pkcs8::EncodePrivateKey, signature::Verifier};
+    let key = rsa::RsaPrivateKey::new(&mut rand::rngs::StdRng::seed_from_u64(59), 1024).unwrap();
+    use rand::SeedableRng;
+    let pem = key.to_pkcs8_pem(Default::default()).unwrap();
+    let server = Server::new(200, r#"{"tranId":7}"#, Duration::ZERO);
+    CcxtClient::for_test(&server.url)
+        .unwrap()
+        .request_guarded(
+            ExchangeId::Binance,
+            Method::BinanceUniversalTransfer,
+            credentials(pem.to_string()),
+            params(),
+            Arc::new(|| true),
+        )
+        .await
+        .unwrap();
+    let request = server.request();
+    let target = request
+        .lines()
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    assert!(target.starts_with("/sapi/v1/sub-account/universalTransfer?"));
+    assert!(request.split_once("\r\n\r\n").unwrap().1.is_empty());
+    let (payload, signature) = signed_payload(&request);
+    let signature = reqwest::Url::parse(&format!("http://127.0.0.1/?sig={signature}"))
+        .unwrap()
+        .query_pairs()
+        .next()
+        .unwrap()
+        .1
+        .into_owned();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .unwrap();
+    rsa::pkcs1v15::VerifyingKey::<Sha256>::new(key.to_public_key())
+        .verify(
+            payload.as_bytes(),
+            &rsa::pkcs1v15::Signature::try_from(bytes.as_slice()).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(server.finish(), 1);
+}
 #[tokio::test]
 async fn timeout_write_never_replays() {
     let server = Server::new(200, r#"{"tranId":1}"#, Duration::from_millis(300));
     let error = CcxtClient::for_test_with_timeout(&server.url, Duration::from_millis(100))
         .unwrap()
-        .request(
+        .request_guarded(
             ExchangeId::Binance,
             Method::BinanceUniversalTransfer,
             credentials("SYNTHETIC".into()),
             params(),
+            Arc::new(|| true),
         )
         .await
         .unwrap_err();
@@ -360,11 +520,12 @@ async fn redirects_never_replay_write() {
     let server = Server::new(302, "", Duration::ZERO);
     let result = CcxtClient::for_test(&server.url)
         .unwrap()
-        .request(
+        .request_guarded(
             ExchangeId::Binance,
             Method::BinanceUniversalTransfer,
             credentials("SYNTHETIC".into()),
             params(),
+            Arc::new(|| true),
         )
         .await;
     assert!(result.is_err());
@@ -833,13 +994,25 @@ async fn additional_venues_redact_errors_and_reject_private_and_credentialed_req
     assert_eq!(server.finish(), 7);
 }
 
-/// GET/DELETE sign the query; POST signs the body. Reconstruct the exact
-/// transport payload rather than parsing amounts through any numeric type.
+/// Reconstruct the exact signed transport payload without parsing financial
+/// amounts through any numeric type.
 fn signed_payload(request: &str) -> (String, String) {
     if request.starts_with("POST ") {
+        let target = request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        if let Some((_, query)) = target.split_once('?') {
+            let (payload, signature) = query.rsplit_once("&signature=").unwrap();
+            return (payload.to_owned(), signature.to_owned());
+        }
         let (payload, signature) = signed_body(request);
-        (payload.to_owned(), signature)
-    } else {
+        return (payload.to_owned(), signature);
+    }
+    {
         let target = request
             .lines()
             .next()
@@ -945,6 +1118,7 @@ async fn trading_writes_require_guard_and_expired_guard_sends_nothing() {
         Method::BinanceFuturesPlaceOrder,
         Method::BinanceFuturesCancelOrder,
         Method::BinanceWalletTransfer,
+        Method::BinanceUniversalTransfer,
     ] {
         let error = client
             .request(
@@ -980,6 +1154,7 @@ async fn trading_write_errors_never_retry_and_keep_safe_exchange_evidence() {
         Method::BinanceFuturesPlaceOrder,
         Method::BinanceSpotCancelOrder,
         Method::BinanceFuturesCancelOrder,
+        Method::BinanceUniversalTransfer,
     ] {
         for status in [400, 429, 500, 302] {
             let server = Server::new(
@@ -1001,6 +1176,7 @@ async fn trading_write_errors_never_retry_and_keep_safe_exchange_evidence() {
             assert_eq!(result.http_status, Some(status));
             assert_eq!(result.exchange_code, Some(-2010));
             assert!(!format!("{result:?} {result}").contains("SYNTHETIC"));
+            assert!(!format!("{result:?} {result}").contains("signature="));
             servers.push(server);
         }
     }

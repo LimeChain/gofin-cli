@@ -46,6 +46,21 @@ pub trait ExchangeProfile: Send + Sync {
             "This exchange profile has no implemented boundary authorization.",
         ))
     }
+    /// Derive a balance-independent scope for one explicitly authorized plan
+    /// step. Profiles opt in per operation and must not use projected balances
+    /// or short-lived quote data to claim future funding.
+    async fn prepare_plan_permission(
+        &self,
+        _operation: &str,
+        _input: &Value,
+        _bounds: &Value,
+    ) -> Result<fin_domain::financial_plans::PlanPermission, FinError> {
+        Err(error(
+            "PLAN_PERMISSION_UNSUPPORTED",
+            "authorization",
+            "This exchange profile does not support named financial plan permissions.",
+        ))
+    }
     fn validate_boundary_candidate(
         &self,
         _spec: &fin_domain::boundaries::BoundarySpec,
@@ -216,6 +231,17 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
         self.require_kind(&prepared.operation, OperationKind::Write, "authorization")?;
         self.profile.prepare_boundaries(prepared, bounds)
+    }
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> Result<fin_domain::financial_plans::PlanPermission, FinError> {
+        self.require_kind(operation, OperationKind::Write, "authorization")?;
+        self.profile
+            .prepare_plan_permission(operation, input, bounds)
+            .await
     }
     fn validate_boundary_candidate(
         &self,

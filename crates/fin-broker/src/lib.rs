@@ -482,6 +482,40 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
+    for definition in &mut definitions {
+        // Bridge transfers use their own persisted finite-boundary grants;
+        // do not advertise them as generic named-plan operations.
+        if definition.name.starts_with("bridge.") {
+            continue;
+        }
+        let eligible = matches!(
+            (&definition.kind, &definition.execution_actor),
+            (
+                OperationKind::Write,
+                fin_domain::ExecutionActor::AgentInvocable
+            ) | (
+                OperationKind::Read,
+                fin_domain::ExecutionActor::AgentReadable
+            )
+        );
+        if eligible {
+            if !definition.semantics.is_object() {
+                definition.semantics = json!({"adapter_semantics":definition.semantics.clone()});
+            }
+            if let Some(semantics) = definition.semantics.as_object_mut() {
+                semantics.insert(
+                    "plan_authorization".into(),
+                    json!({
+                        "mode":"exact_input",
+                        "binds":["operation", "input_schema", "canonical_input", "protected_connection_identity"],
+                        "financial_limits":"per_step_maximum_debits_and_costs",
+                        "deferred_write_checks":["current_balances", "current_prices", "fee_quotes", "market_metadata", "permissions", "simulation", "verified_typed_effects"],
+                        "approval_requires_future_balances":false
+                    }),
+                );
+            }
+        }
+    }
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
 }
@@ -1435,6 +1469,8 @@ impl BrokerRuntime {
                 | R::DaemonStop
                 | R::RevokeBoundary { .. }
                 | R::BoundaryStatus { .. }
+                | R::PlanStatus { .. }
+                | R::RevokePlan { .. }
         );
         let public_market_read = matches!(&request, R::Read { operation, .. }
             if matches!(operation.as_str(), "exchange.order-book" | "exchange.markets" | "exchange.ticker"));
@@ -1484,6 +1520,7 @@ impl BrokerRuntime {
                         connections.push(fin_domain::ConnectionMetadata { name:name.clone(), provider:"coingecko".into(), resource:resource.clone(), role:None, parent:None, network:None, address:None, credential_ref:None, signing_enabled:false, details:json!({"api_plan":api_plan,"purpose":"USD pricing reads","financial_access":false}) });
                     }
                 }
+                connections = deduplicate_connections(connections);
                 serde_json::to_value(connections).map_err(|_| internal_error())
             }
             R::Doctor => Ok(
@@ -1500,6 +1537,59 @@ impl BrokerRuntime {
             R::PreviewBoundaryAuthorization { request } => {
                 self.engine.preview_boundary_authorization(request).await
             }
+            R::PreviewPlan { request } => {
+                serde_json::to_value(self.engine.preview_financial_plan(request).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::AuthorizePlan { request } => {
+                serde_json::to_value(self.engine.authorize_financial_plan(request).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::PlanStatus { plan_id } => {
+                serde_json::to_value(self.engine.financial_plan_status(&plan_id).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::RevokePlan { plan_id } => {
+                serde_json::to_value(self.engine.revoke_financial_plan(&plan_id).await?)
+                    .map_err(|_| internal_error())
+            }
+            R::PreviewPlanStep {
+                plan_id,
+                step_id,
+                operation,
+                input,
+            } => serde_json::to_value(
+                self.engine
+                    .preview_financial_plan_step(&plan_id, &step_id, &operation, &input)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
+            R::ExecutePlanStep {
+                plan_id,
+                step_id,
+                request,
+            } => serde_json::to_value(
+                self.engine
+                    .execute_financial_plan_step(&plan_id, &step_id, request)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
+            R::ReplacePlanCandidate {
+                plan_id,
+                step_id,
+                previous_attempt_id,
+                request,
+            } => serde_json::to_value(
+                self.engine
+                    .execute_financial_plan_step_replacing(
+                        &plan_id,
+                        &step_id,
+                        &previous_attempt_id,
+                        request,
+                    )
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
             R::AuthorizeBoundary { request } => {
                 serde_json::to_value(self.engine.authorize_boundary(request).await?)
                     .map_err(|_| internal_error())
@@ -1870,6 +1960,21 @@ impl BrokerRuntime {
     }
 }
 
+/// Collapse repeated view rows caused by composite adapters also exposing the
+/// metadata of their constituent providers. Keep the first occurrence and
+/// retain every distinct identity or metadata field.
+fn deduplicate_connections(
+    connections: Vec<fin_domain::ConnectionMetadata>,
+) -> Vec<fin_domain::ConnectionMetadata> {
+    let mut unique = Vec::with_capacity(connections.len());
+    for connection in connections {
+        if !unique.contains(&connection) {
+            unique.push(connection);
+        }
+    }
+    unique
+}
+
 struct CompositeObserver {
     adapters: Vec<Arc<dyn Adapter>>,
     engine: Mutex<Option<Weak<Engine>>>,
@@ -1937,8 +2042,20 @@ impl Adapter for CompositeObserver {
             .as_ref()
             .and_then(Weak::upgrade)
         {
+            // Read records are journaled while the adapter runs, but they do
+            // not represent unresolved financial movements. In particular,
+            // `fin.snapshot` can itself be a plan read, so count writes and
+            // unknown records conservatively while excluding registered reads.
+            let mut read_operations = self
+                .adapters
+                .iter()
+                .flat_map(|adapter| adapter.definitions())
+                .filter(|definition| definition.kind == OperationKind::Read)
+                .map(|definition| definition.name)
+                .collect::<BTreeSet<_>>();
+            read_operations.insert("fin.snapshot".into());
             for record in engine.operations()? {
-                if !record.status.terminal() {
+                if !record.status.terminal() && !read_operations.contains(&record.operation) {
                     combined.complete = false;
                     combined.state.in_flight.push(record.id.clone());
                     combined
@@ -2726,20 +2843,89 @@ mod tests {
     use super::*;
     use fin_domain::boundaries::BoundaryAuthorizationRequest;
     use fin_domain::{
-        Amount, OperationKind, PreparedOperation, Quantity, ResourceAmount, Submission,
+        Amount, OperationKind, OperationRequest, PreparedOperation, Quantity, ResourceAmount,
+        Submission,
     };
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn operation_catalog_advertises_generic_exact_plan_support_by_actor_and_kind() {
+        let definitions = operation_definitions();
+        for definition in &definitions {
+            let eligible = !definition.name.starts_with("bridge.")
+                && matches!(
+                    (&definition.kind, &definition.execution_actor),
+                    (
+                        OperationKind::Write,
+                        fin_domain::ExecutionActor::AgentInvocable
+                    ) | (
+                        OperationKind::Read,
+                        fin_domain::ExecutionActor::AgentReadable
+                    )
+                );
+            assert_eq!(
+                definition
+                    .semantics
+                    .get("plan_authorization")
+                    .and_then(Value::as_object)
+                    .is_some(),
+                eligible,
+                "{}",
+                definition.name
+            );
+            if eligible {
+                assert_eq!(
+                    definition.semantics["plan_authorization"]["mode"],
+                    "exact_input"
+                );
+                assert_eq!(
+                    definition.semantics["plan_authorization"]["approval_requires_future_balances"],
+                    false
+                );
+                jsonschema::options()
+                    .offline()
+                    .build(&definition.input_schema)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "eligible plan operation {} has an invalid or unavailable input schema: {error}",
+                            definition.name
+                        )
+                    });
+            }
+        }
+        let deposit = definitions
+            .iter()
+            .find(|definition| definition.name == "binance.deposit")
+            .unwrap();
+        assert_eq!(
+            deposit.semantics["broker_generated_attempt_input_fields"],
+            json!(["/requestId"])
+        );
+        assert!(
+            deposit.input_schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "requestId"))
+        );
+        assert_eq!(
+            deposit.input_schema["properties"]["requestId"]["type"],
+            "string"
+        );
+    }
 
     struct ReadAdapter {
         captures: Arc<AtomicUsize>,
         pricing_snapshot: Option<Arc<Mutex<StateSnapshot>>>,
         pricing_preflight: Option<Arc<AtomicBool>>,
         identity_probe: Option<(Arc<AtomicBool>, Arc<AtomicUsize>)>,
+        connection_metadata: Vec<fin_domain::ConnectionMetadata>,
     }
 
     #[async_trait]
     impl Adapter for ReadAdapter {
+        fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            self.connection_metadata.clone()
+        }
         fn definitions(&self) -> Vec<Definition> {
             let mut definitions = vec![
                 Definition {
@@ -2984,6 +3170,7 @@ mod tests {
                     pricing_snapshot: Some(snapshot.clone()),
                     pricing_preflight: Some(allow_preflight.clone()),
                     identity_probe: None,
+                    connection_metadata: vec![],
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(RecordingPriceValuator {
@@ -3204,6 +3391,7 @@ mod tests {
                     pricing_snapshot: Some(observed),
                     pricing_preflight: None,
                     identity_probe: None,
+                    connection_metadata: vec![],
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(pricing::tests::fixed_valuator("1.02")),
@@ -3553,6 +3741,7 @@ mod tests {
                     pricing_snapshot: None,
                     pricing_preflight: None,
                     identity_probe: Some((fail.clone(), calls.clone())),
+                    connection_metadata: vec![],
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
@@ -4075,6 +4264,7 @@ mod tests {
                     pricing_snapshot: None,
                     pricing_preflight: None,
                     identity_probe: None,
+                    connection_metadata: vec![],
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
@@ -4213,6 +4403,197 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "fin.snapshot")
         );
+    }
+
+    #[tokio::test]
+    async fn connection_view_deduplicates_exact_rows_without_changing_plan_identity_metadata() {
+        let connection = |provider: &str, network: Option<&str>, details: Value| {
+            fin_domain::ConnectionMetadata {
+                name: "shared-wallet".into(),
+                provider: provider.into(),
+                resource: ResourceId("shared:resource".into()),
+                role: None,
+                parent: None,
+                network: network.map(str::to_owned),
+                address: Some("0x0000000000000000000000000000000000000001".into()),
+                credential_ref: None,
+                signing_enabled: true,
+                details,
+            }
+        };
+        let binance = connection("binance", None, json!({"account":"main"}));
+        let ethereum = connection(
+            "ethereum",
+            Some("ethereum:1"),
+            json!({"chain_id":1,"wallet":"shared-wallet"}),
+        );
+        let arbitrum = connection(
+            "ethereum",
+            Some("arbitrum:42161"),
+            json!({"chain_id":42161,"wallet":"shared-wallet"}),
+        );
+        let destination = connection(
+            "binance-ethereum-destination",
+            Some("ethereum:1"),
+            json!({"destination":"deposit-route"}),
+        );
+        let captures = Arc::new(AtomicUsize::new(0));
+        let runtime = compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures,
+                    pricing_snapshot: None,
+                    pricing_preflight: None,
+                    identity_probe: None,
+                    connection_metadata: vec![
+                        binance.clone(),
+                        binance.clone(),
+                        ethereum.clone(),
+                        arbitrum.clone(),
+                        destination.clone(),
+                    ],
+                })],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+
+        // The shared composite's connection view is also used in exact plan
+        // identity hashes, so it retains its full source metadata sequence.
+        assert_eq!(runtime.observer.connections().len(), 5);
+        let response = runtime.handle(BrokerRequest::Connections).await;
+        assert!(response.ok, "{:?}", response.error);
+        let rows = response.result.unwrap().as_array().unwrap().clone();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["provider"] == "binance")
+                .count(),
+            1
+        );
+        assert!(
+            rows.iter()
+                .any(|row| { row["provider"] == "ethereum" && row["network"] == "ethereum:1" })
+        );
+        assert!(
+            rows.iter()
+                .any(|row| { row["provider"] == "ethereum" && row["network"] == "arbitrum:42161" })
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["provider"] == "binance-ethereum-destination")
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_fin_snapshot_plan_read_does_not_count_its_own_journal_record() {
+        struct PlanAuthorizer;
+        #[async_trait]
+        impl Authorizer for PlanAuthorizer {
+            async fn authorize(
+                &self,
+                challenge: &fin_domain::AuthorizationChallenge,
+            ) -> fin_domain::Result<fin_domain::ApprovalAudit> {
+                assert_eq!(challenge.purpose, "financial_plan");
+                Ok(fin_domain::ApprovalAudit {
+                    mechanism: "synthetic-plan-read-approval".into(),
+                    binding_hash: challenge.binding_hash.clone(),
+                    challenge_nonce: challenge.nonce.clone(),
+                    approved_at: now(),
+                    expires_at: challenge.expires_at.clone(),
+                })
+            }
+        }
+
+        let captures = Arc::new(AtomicUsize::new(0));
+        let runtime = compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures: captures.clone(),
+                    pricing_snapshot: None,
+                    pricing_preflight: None,
+                    identity_probe: None,
+                    connection_metadata: vec![],
+                })],
+                authorizer: Arc::new(PlanAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        let mut request = fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
+            request_id: "synthetic-snapshot-plan-approval".into(),
+            plan: fin_domain::financial_plans::FinancialPlanSpec {
+                version: 1,
+                name: "Synthetic snapshot read".into(),
+                steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
+                    step_id: "snapshot".into(),
+                    operation: "fin.snapshot".into(),
+                    input: json!({}),
+                    permitted_variations: json!({
+                        "mode":"exact",
+                        "maximum_debits":[],
+                        "maximum_costs":[],
+                        "possible_credits":[]
+                    }),
+                    completion: fin_domain::financial_plans::FinancialStepCompletion {
+                        operation_succeeded: true,
+                        principal_spend: None,
+                        minimum_net_receipt: None,
+                    },
+                    funding_dependencies: vec![],
+                }],
+                aggregate_bounds: fin_domain::financial_plans::FinancialPlanBounds {
+                    maximum_debits: vec![],
+                    maximum_costs: vec![],
+                },
+            },
+            valid_for_seconds: 600,
+            replaces_revision_id: None,
+            expected_review_hash: None,
+        };
+        let review = runtime
+            .engine
+            .preview_financial_plan(request.clone())
+            .await
+            .unwrap();
+        request.expected_review_hash = Some(review.review_hash);
+        let authorized = runtime
+            .engine
+            .authorize_financial_plan(request)
+            .await
+            .unwrap();
+        let attempt = runtime
+            .engine
+            .execute_financial_plan_step(
+                &authorized.plan_id,
+                "snapshot",
+                OperationRequest {
+                    request_id: "synthetic-snapshot-plan-attempt".into(),
+                    operation: "fin.snapshot".into(),
+                    input: json!({}),
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(attempt.status, fin_domain::Status::Completed);
+        let snapshot = attempt
+            .last_reconciliation_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.get("read_result"))
+            .expect("completed plan read returns its snapshot result");
+        assert_eq!(snapshot["complete"], true);
+        assert_eq!(snapshot["pending"], json!([]));
+        assert_eq!(snapshot["state"]["in_flight"], json!([]));
+        assert_eq!(captures.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

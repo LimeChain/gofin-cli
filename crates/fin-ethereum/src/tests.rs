@@ -5165,6 +5165,86 @@ mod wallet_only_tests {
             })
         }
     }
+    #[derive(Default)]
+    struct IsolatedPlanAuthorization(AtomicUsize);
+    #[async_trait]
+    impl Authorizer for IsolatedPlanAuthorization {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            assert_eq!(challenge.purpose, "financial_plan");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-wallet-plan-approval".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+    struct SyntheticPlanSigner {
+        calls: AtomicUsize,
+        signer: fin_evm::LocalEnvelopeSigner,
+    }
+    impl SyntheticPlanSigner {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                // Deterministic test-only key. This fixture never reaches a
+                // public network and the key is not a real credential.
+                signer: fin_evm::LocalEnvelopeSigner::from_private_key(
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+            }
+        }
+        fn address(&self) -> String {
+            format!("{:#x}", self.signer.address())
+        }
+    }
+    #[async_trait]
+    impl fin_evm::EnvelopeSigner for SyntheticPlanSigner {
+        async fn sign_prepared(
+            &self,
+            transaction: &FrozenTransaction,
+        ) -> Result<fin_evm::alloy::primitives::Bytes> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.signer.sign_prepared(transaction).await
+        }
+    }
+    struct SyntheticPlanDispatch {
+        inner: Arc<Fixture>,
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl EvmRpc for SyntheticPlanDispatch {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_sendRawTransaction" {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let encoded = params[0]
+                    .as_str()
+                    .and_then(|value| value.strip_prefix("0x"))
+                    .expect("signed transaction is hex encoded");
+                let raw = hex::decode(encoded).expect("signed transaction hex is valid");
+                let hash = fin_evm::alloy::primitives::keccak256(raw);
+                let receipt_hash = format!("{hash:#x}");
+                if let Some(receipt) = self.inner.receipt.lock().unwrap().as_object_mut() {
+                    receipt.insert("transactionHash".into(), json!(receipt_hash));
+                    if let Some(logs) = receipt.get_mut("logs").and_then(Value::as_array_mut) {
+                        for log in logs {
+                            log["transactionHash"] = json!(receipt_hash);
+                        }
+                    }
+                }
+                self.inner.latest.store(22, Ordering::SeqCst);
+                return Ok(json!(receipt_hash));
+            }
+            let mut result = self.inner.request(method, params).await?;
+            if method == "eth_getTransactionByHash" {
+                result["hash"] = self.inner.receipt.lock().unwrap()["transactionHash"].clone();
+            }
+            Ok(result)
+        }
+    }
     struct EnginePrices(AtomicU64);
     impl Default for EnginePrices {
         fn default() -> Self {
@@ -5281,6 +5361,264 @@ mod wallet_only_tests {
                 }
             }
         }
+    }
+    #[tokio::test]
+    async fn generic_exact_plan_keeps_broker_metadata_out_of_strict_ethereum_bindings() {
+        use fin_domain::financial_plans::{
+            FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
+            FinancialPlanStepSpec, FinancialStepCompletion,
+        };
+        use fin_engine::{Engine, EngineOptions};
+        use fin_store::Store;
+
+        for operation in ["wallet.transfer", "aave.collateral"] {
+            let rpc = Arc::new(Fixture::new());
+            if operation == "aave.collateral" {
+                rpc.states.lock().unwrap().insert(
+                    20,
+                    AtBlock {
+                        scaled_supply: U256::from(1_000_000),
+                        income: ray(),
+                        debt_index: ray(),
+                        supply_previous: ray(),
+                        collateral: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            let signer = Arc::new(IsolatedSigningSeam::default());
+            let mut adapter =
+                adapter(rpc.clone()).with_wallet_valuation(Arc::new(EnginePrices::default()));
+            adapter.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, Some(signer.clone())));
+            let adapter = Arc::new(adapter);
+            let input = if operation == "wallet.transfer" {
+                transfer(1, "native")
+            } else {
+                aave_input(operation)
+            };
+            let candidate = adapter.prepare(operation, &input).await.unwrap();
+            let variations = json!({
+                "mode":"exact",
+                "maximum_debits":candidate.intent.debits,
+                "maximum_costs":candidate.intent.maximum_costs,
+                "possible_credits":[]
+            });
+            let step_id = if operation == "wallet.transfer" {
+                "transfer"
+            } else {
+                "collateral"
+            };
+            let plan = FinancialPlanSpec {
+                version: 1,
+                name: format!("Synthetic {operation} plan"),
+                steps: vec![FinancialPlanStepSpec {
+                    step_id: step_id.into(),
+                    operation: operation.into(),
+                    input: input.clone(),
+                    permitted_variations: variations,
+                    completion: FinancialStepCompletion {
+                        operation_succeeded: true,
+                        principal_spend: None,
+                        minimum_net_receipt: None,
+                    },
+                    funding_dependencies: vec![],
+                }],
+                aggregate_bounds: FinancialPlanBounds {
+                    maximum_debits: candidate.intent.debits.clone(),
+                    maximum_costs: candidate.intent.maximum_costs.clone(),
+                },
+            };
+            let approval = Arc::new(IsolatedPlanAuthorization::default());
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter],
+                approval.clone(),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let mut authorization_request = FinancialPlanAuthorizationRequest {
+                request_id: format!("synthetic-plan-{operation}"),
+                plan,
+                valid_for_seconds: 600,
+                replaces_revision_id: None,
+                expected_review_hash: None,
+            };
+            let review = engine
+                .preview_financial_plan(authorization_request.clone())
+                .await
+                .unwrap();
+            authorization_request.expected_review_hash = Some(review.review_hash);
+            let status = engine
+                .authorize_financial_plan(authorization_request)
+                .await
+                .unwrap();
+            let attempt = engine
+                .execute_financial_plan_step(
+                    &status.plan_id,
+                    step_id,
+                    OperationRequest {
+                        request_id: format!("synthetic-attempt-{operation}"),
+                        operation: operation.into(),
+                        input,
+                        run_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                attempt.error.as_ref().map(|error| error.code.as_str()),
+                Some("SYNTHETIC_WALLET_SIGNER_REACHED"),
+                "{operation} must pass strict adapter binding decode and reach only the isolated signer"
+            );
+            assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+            assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+            assert!(attempt.submission.is_none() && attempt.effects.is_none());
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|method| method == "eth_sendRawTransaction")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn generic_exact_wallet_wrap_plan_reconciles_verified_receipt_under_one_approval() {
+        use fin_domain::financial_plans::{
+            FinancialPlanAuthorizationRequest, FinancialPlanBounds, FinancialPlanSpec,
+            FinancialPlanStepSpec, FinancialStepCompletion,
+        };
+        use fin_engine::{Engine, EngineOptions};
+        use fin_store::Store;
+
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(SyntheticPlanSigner::new());
+        let dispatch = Arc::new(SyntheticPlanDispatch {
+            inner: rpc.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut adapter =
+            adapter(rpc.clone()).with_wallet_valuation(Arc::new(EnginePrices::default()));
+        adapter.wallets[0].address = signer.address();
+        adapter.runtime = Arc::new(EvmRuntime::new(dispatch.clone(), 1, Some(signer.clone())));
+        let mut input = input();
+        input["amount"] = json!("0.001");
+        let candidate = adapter.prepare("wallet.wrap", &input).await.unwrap();
+        let binding: Binding = serde_json::from_value(candidate.binding.clone()).unwrap();
+        let amount = candidate.intent.debits[0].amount.clone();
+        let native = AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        };
+        let weth = AssetId {
+            network: "ethereum:1".into(),
+            reference: lower_address(addr(100)),
+            decimals: 18,
+        };
+        let variations = json!({
+            "mode":"exact",
+            "maximum_debits":candidate.intent.debits,
+            "maximum_costs":candidate.intent.maximum_costs,
+            "possible_credits":[{"resource":candidate.intent.debits[0].resource,"asset":weth}]
+        });
+        rpc.set_receipt(
+            &binding,
+            21,
+            vec![event(
+                addr(100),
+                Weth::Deposit {
+                    dst: signer.signer.address(),
+                    wad: fin_evm::u256(&amount.atoms).unwrap(),
+                },
+                21,
+            )],
+        );
+        let plan = FinancialPlanSpec {
+            version: 1,
+            name: "Synthetic wrap settlement".into(),
+            steps: vec![FinancialPlanStepSpec {
+                step_id: "wrap".into(),
+                operation: "wallet.wrap".into(),
+                input: input.clone(),
+                permitted_variations: variations,
+                completion: FinancialStepCompletion {
+                    operation_succeeded: true,
+                    principal_spend: Some(fin_domain::ResourceAmount {
+                        resource: candidate.intent.debits[0].resource.clone(),
+                        amount: amount.clone(),
+                    }),
+                    minimum_net_receipt: None,
+                },
+                funding_dependencies: vec![],
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: candidate.intent.debits.clone(),
+                maximum_costs: candidate.intent.maximum_costs.clone(),
+            },
+        };
+        // Keep the receipt's principal identity explicit and exercise exact
+        // asset matching in completion/accounting.
+        assert_eq!(amount.asset, native);
+        let authorization = Arc::new(IsolatedPlanAuthorization::default());
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![Arc::new(adapter)],
+            authorization.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut request = FinancialPlanAuthorizationRequest {
+            request_id: "synthetic-wrap-plan-approval".into(),
+            plan,
+            valid_for_seconds: 600,
+            replaces_revision_id: None,
+            expected_review_hash: None,
+        };
+        let review = engine
+            .preview_financial_plan(request.clone())
+            .await
+            .unwrap();
+        request.expected_review_hash = Some(review.review_hash);
+        let approved = engine.authorize_financial_plan(request).await.unwrap();
+        let record = engine
+            .execute_financial_plan_step(
+                &approved.plan_id,
+                "wrap",
+                OperationRequest {
+                    request_id: "synthetic-wrap-plan-attempt".into(),
+                    operation: "wallet.wrap".into(),
+                    input,
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.status, Status::Completed, "{:?}", record.error);
+        assert!(record.effects.is_some());
+        assert_eq!(
+            record.preview.as_ref().unwrap().binding
+                [fin_domain::financial_plans::PLAN_METADATA_KEY]["plan_id"],
+            approved.plan_id
+        );
+        let status = engine
+            .financial_plan_status(&approved.plan_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            status.steps[0].state,
+            fin_domain::financial_plans::FinancialPlanStepProgressState::Completed
+        );
+        assert!(
+            status
+                .usage
+                .verified_proceeds
+                .iter()
+                .any(|proceeds| { proceeds.asset == weth && proceeds.available == amount.atoms })
+        );
+        assert_eq!(authorization.0.load(Ordering::SeqCst), 1);
+        assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(dispatch.calls.load(Ordering::SeqCst), 1);
     }
     #[tokio::test]
     async fn ordinary_new_chain_transfers_enforce_personal_allocation_and_movement_before_approval()

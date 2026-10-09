@@ -1,6 +1,7 @@
 //! Shared safe CLI arguments, validation, and offline onboarding discovery.
 //! Enrollment DTOs were drafted by Ogi Spark/GLM and reviewed against the CLI contract.
 use clap::{Args, ValueEnum};
+use fin_domain::financial_plans::FinancialPlanSpec;
 use fin_domain::{Definition, ExecutionActor, FinError, OperationKind, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -150,7 +151,7 @@ pub fn bridge_profile() -> Value {
 
 /// Machine execution policy shared by offline discovery and callers.
 pub fn machine_contract() -> Value {
-    json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact per-write approval or an existing bounded authorization. Granting bounded authority still requires fresh macOS Touch ID; the OS approval UI may appear, but --json never prompts in the terminal. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"fin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"fin authorizations cancel ID prevents future dispatch without Touch ID","status":"fin authorizations status ID reconciles durable attempts"}})
+    json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact per-write approval or an existing bounded authorization. Granting bounded authority still requires fresh macOS Touch ID; the OS approval UI may appear, but --json never prompts in the terminal. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"fin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"fin authorizations cancel ID prevents future dispatch without Touch ID","status":"fin authorizations status ID reconciles durable attempts"},"named_financial_plans":{"default_valid_for_seconds":600,"preview":"fin plans preview --input PLAN_JSON is read-only and returns a review_hash","authorization":"fin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 10m] [--replaces REVISION_ID] regenerates review and rejects changed review_hash before Touch ID","step_execution":"fin execute OP --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID explicitly submits one eligible step","dry_run":"fin execute OP --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run refreshes evidence and reserves/submits nothing","replacement":"--replaces-attempt identifies only an unsubmitted plan candidate","status":"fin plans status PLAN_ID reconciles but never executes","revocation":"fin plans cancel PLAN_ID blocks future dispatch without cancelling submitted venue orders","generated_input_fields":"Only exact JSON pointers declared by the trusted operation definition may be assigned by Fin per attempt; the reviewed template remains bound and terminal review labels generated fields.","authority":"one plan revision authority; attempts retain their own IDs; no child grants"}})
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -194,12 +195,60 @@ fn default_boundary_duration() -> String {
     "10m".into()
 }
 
+fn synthetic_financial_plan_example() -> Value {
+    json!({
+        "version":1,
+        "name":"Synthetic wallet transfer",
+        "steps":[{
+            "step_id":"transfer",
+            "operation":"wallet.transfer",
+            "input":{"request_id":"SYNTHETIC-plan-step-1","wallet":"main-wallet","network":"evm","chain_id":1,"max_fee_eth":"0.001","token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},
+            "permitted_variations":{"mode":"exact","maximum_debits":[{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[{"location":{"kind":"cash","resource":"ethereum:1:0x0000000000000000000000000000000000000002"},"amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"1000000000000000"},"treatment":"additional_debit"}],"possible_credits":[]},
+            "completion":{"operation_succeeded":true,"principal_spend":{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}},
+            "funding_dependencies":[]
+        }],
+        "aggregate_bounds":{"maximum_debits":[{"resource":"ethereum:1:0x0000000000000000000000000000000000000002","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[{"location":{"kind":"cash","resource":"ethereum:1:0x0000000000000000000000000000000000000002"},"amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"1000000000000000"},"treatment":"additional_debit"}]}
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BoundaryExecuteInput {
     pub operation: String,
     pub input: Value,
     pub authorization: String,
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_attempt: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanAuthorizeInput {
+    /// The complete versioned plan JSON passed with `--input`.
+    pub plan: FinancialPlanSpec,
+    pub id: String,
+    #[serde(default = "default_boundary_duration")]
+    pub valid_for: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanPreviewInput {
+    pub plan: FinancialPlanSpec,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanStepExecuteInput {
+    pub operation: String,
+    pub input: Value,
+    pub plan: String,
+    pub step: String,
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces_attempt: Option<String>,
@@ -374,7 +423,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
         "scope":"Setup, policy set and connection add/update/remove only. Everyday commands use the protected background service without sudo.",
         "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
-        "financial_approval":"Every financial write requires its own fresh Touch ID approval."
+        "financial_approval":"Standalone financial writes require fresh exact approval. Creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. An explicitly submitted attempt under active authority does not require another prompt, but Fin rechecks current evidence, authority and protected policy before dispatch."
     });
     let enrollment = json!({
         "requires_human_terminal":true,"secret_input":"protected-hidden-terminal-prompt",
@@ -383,7 +432,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "human_action":"Run this command yourself in a new human-owned Terminal session. Never enter keys through an agent tool or chat.",
         "platform":"macOS protected enrollment; unavailable providers fail closed",
         "configuration_authorization":"Independent approval of the resolved connection. Saves configuration only, moves no funds, grants no future financial authority.",
-        "financial_authorization":"Each later financial write, including cleanup, requires a separate fresh macOS Touch ID approval. Enrollment and daemon startup grant none.",
+        "financial_authorization":"Enrollment and daemon startup grant no financial authority. Standalone writes require fresh exact approval; supported bounded authorizations and named plans require fresh Touch ID when created or replaced. Attempts under active authority are explicitly submitted and rechecked before dispatch without another prompt.",
         "metadata_input":"Run fin connections add for guided public metadata, or fin connections add binance/ethereum to preselect the provider. The positional provider and --provider are alternatives; do not combine them. Supply complete metadata flags for explicit enrollment. Updates require flags.",
         "pem_input":"In the private human-terminal prompt, paste the complete BEGIN/END block using actual line breaks or literal \\n (also \\r\\n) separators, without surrounding quotes, then press Enter. Never supply it through arguments or chat.",
         "input_progress":"Hidden input acknowledges each received secret without echoing it. Read-only validation and Touch ID stages appear on stderr.",
@@ -472,7 +521,7 @@ pub fn operation_definitions() -> Vec<Definition> {
                 "arguments":["OPERATION","--input JSON","--id REQUEST_ID","--dry-run","--json"],
                 "cli_field_mapping":{"request_id":"--id","dry_run":"--dry-run"},
                 "allocation_scope":"Installation-wide rolling 24-hour gross movement, maximum costs and additional borrowed allocation; unresolved submissions continue counting beyond the window. No run, return plan or restoration required.",
-                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","allocation_scope":"Previews do not reserve or validate the rolling allocation budget","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute; the broker revalidates and requires fresh approval"},
+                "dry_run":{"flag":"--dry-run","command_line_template":"fin execute OPERATION --input JSON --dry-run --json","equivalent_to":"fin preview OPERATION --input JSON --json","financial_movement":false,"financial_authorization":false,"journal_write":false,"identity":"--id is optional and not consumed; operation-specific input identities remain required where its schema requires them","allocation_scope":"Previews do not reserve or validate the rolling allocation budget","result":"The same preview result/errors as fin preview; checks and simulations depend on the adapter","execution":"Remove --dry-run and supply --id to execute. Standalone exact writes require fresh approval; attempts selected under an active boundary grant or named plan use that authority without another prompt. The broker rechecks current evidence, authority and protected policy before every dispatch."},
                 "venue_request_identity":"A venue request identifier inside input JSON is separate from the logical --id value."
             }),
         ),
@@ -528,6 +577,46 @@ pub fn operation_definitions() -> Vec<Definition> {
             ExecutionActor::AgentInvocable,
             json!({"id":"opaque-authorization-id"}),
             json!({"command_line_example":"fin authorizations cancel opaque-authorization-id --json","touch_id":false,"submitted_attempts":"Cancellation does not cancel an already submitted venue order; reconcile it with authorizations status."}),
+        ),
+        definition::<FinancialPlanSpec>(
+            "plans.preview",
+            "Regenerate a read-only review of exact-input scopes for registered financial and read operations.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            synthetic_financial_plan_example(),
+            json!({"command_line_template":"fin plans preview --input PLAN_JSON [--valid-for 10m] [--replaces REVISION_ID] [--json]","read_only":true,"returns":"Canonical review_hash, ordered exact operation inputs, bound schema and protected connection identities, cumulative debit/fee caps, conditional funding and completion targets. Authorization does not validate live balances, quotes or simulations; every concrete attempt performs fresh adapter checks. No reservation or approval is created.","exact_scope_schema":schema::<fin_domain::financial_plans::FinancialPlanExactScope>(),"scope_selection":"Set step.permitted_variations.mode to exact and declare maximum_debits, maximum_costs, and possible_credits. Inputs are fixed except JSON pointers explicitly declared by the trusted operation definition as broker_generated_attempt_input_fields; Fin assigns each such string per attempt and binds the template. Every step is freshly prepared on submission."}),
+        ),
+        definition::<FinancialPlanSpec>(
+            "plans.authorize",
+            "Create or replace one immutable named plan revision after fresh human approval.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            synthetic_financial_plan_example(),
+            json!({"command_line_template":"fin plans authorize --input PLAN_JSON --id REQUEST_ID [--valid-for 10m] [--replaces REVISION_ID] [--review-hash HASH] [--json]","requires_fresh_touch_id":true,"review":"Terminal displays the complete named revision before approval. Trusted broker_generated_attempt_input_fields are shown as Fin-assigned per attempt; the original input template remains bound. Generic exact-input scopes bind the operation schema and protected connection identities but defer live balance, market, fee and simulation checks to each concrete attempt. An explicit --review-hash must match freshly generated review material before Touch ID.","exact_scope_schema":schema::<fin_domain::financial_plans::FinancialPlanExactScope>(),"idempotency":"Reuse --id after response loss to recover the original request; review_hash is excluded from request identity.","duration":"Starts after successful Touch ID; default 600 seconds and independent from native challenge expiry.","completion":"Verified operation success is required; optional spend and net-receipt targets are also enforced.","revision":"A replacement preserves started/completed step identity, order, fixed scope, targets and carried-forward usage; only the unstarted suffix can change."}),
+        ),
+        definition::<PlanStepExecuteInput>(
+            "execute.plan-step",
+            "Preview or explicitly submit one eligible step under the active named plan revision.",
+            OperationKind::Write,
+            ExecutionActor::AgentInvocable,
+            json!({"operation":"aave.withdraw","input":{"request_id":"SYNTHETIC-plan-attempt-1","wallet":"main-wallet","network":"evm","chain_id":1,"max_fee_eth":"0.001","token":"0x0000000000000000000000000000000000000010","amount":"all","max_amount":"1","recipient":"0x0000000000000000000000000000000000000001"},"plan":"opaque-plan-id","step":"withdraw","id":"synthetic-attempt-001"}),
+            json!({"command_line_template":"fin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID [--dry-run] [--replaces-attempt ATTEMPT_ID]","selectors":"--plan and --authorization are mutually exclusive. --step requires --plan.","execution":"Only the first incomplete step can run. Every candidate refreshes balances, prices, fees, market/protocol metadata, protected policy and applicable simulations.","funding":"A dependent step needs verified net proceeds from its declared producing step and current available balance.","retry":"Duplicate IDs recover their original attempt. Uncertain submissions require fin plans status PLAN_ID reconciliation before another attempt.","replacement":"Only explicitly named unsubmitted candidates can be replaced; submitted or uncertain attempts cannot be replaced."}),
+        ),
+        definition::<IdInput>(
+            "plans.status",
+            "Read authorization state and sequential execution progress; reconciliation never executes a step.",
+            OperationKind::Read,
+            ExecutionActor::AgentReadable,
+            json!({"id":"opaque-plan-id"}),
+            json!({"command_line_example":"fin plans status opaque-plan-id --json","returns":"Authorization state, revision, attempts, reservations, verified consumption and proceeds, remaining authority, next eligible step and blockers."}),
+        ),
+        definition::<IdInput>(
+            "plans.cancel",
+            "Revoke future dispatch under a named plan without Touch ID.",
+            OperationKind::Configuration,
+            ExecutionActor::AgentInvocable,
+            json!({"id":"opaque-plan-id"}),
+            json!({"command_line_example":"fin plans cancel opaque-plan-id --json","touch_id":false,"submitted_attempts":"Revocation does not cancel venue orders already submitted; status can continue reconciliation."}),
         ),
         definition::<IdInput>(
             "status",
@@ -726,6 +815,15 @@ pub fn operation_definitions() -> Vec<Definition> {
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);
             item.semantics["future_financial_authority"] = json!(false);
+        } else if item.name == "plans.preview" {
+            item.output_schema = schema::<fin_domain::financial_plans::FinancialPlanReview>();
+        } else if matches!(
+            item.name.as_str(),
+            "plans.authorize" | "plans.status" | "plans.cancel"
+        ) {
+            item.output_schema = schema::<fin_domain::financial_plans::FinancialPlanStatus>();
+        } else if item.name == "execute.plan-step" {
+            item.output_schema = schema::<fin_domain::OperationRecord>();
         }
     }
     definitions
@@ -735,7 +833,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
         "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
-        "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT FOK scoped return plans", "ioc_partial_fills":"synthetic reconciliation only; scoped IOC return plans unavailable"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
+        "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT IOC/FOK orders; named plans bind exact input, schema and protected connection identity", "ioc_partial_fills":"Each attempt settles through the verified operation journal; plan completion requires its declared cumulative targets"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"fin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"fin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
     });
@@ -746,7 +844,9 @@ pub fn exchange_capabilities() -> serde_json::Value {
         "source": "native ETH and standard ERC20 transfers on configured Fin EVM networks with a reviewed Binance network mapping",
         "unsupported": "other source chains, memo/tag routes and non-unit denominations; Binance metadata availability alone does not establish Fin source-chain execution",
         "approval": "fresh exact approval binds wallet, destination account, chain, asset, address, amount and fee cap",
-        "completion": "canonical chain evidence and matching usable Binance deposit credit with balance evidence; delayed credit retains the original submission"
+        "completion": "canonical chain evidence and matching usable Binance deposit credit with balance evidence; delayed credit retains the original submission",
+        "broker_generated_attempt_input_fields": ["/requestId"],
+        "request_id_assignment": "The required requestId remains in the reviewed plan template, but Fin assigns a stable unique venue requestId for each concrete attempt and shows this field as Fin-assigned in human review."
     });
     for (venue, scope) in [
         ("kraken", "spot"),
@@ -904,6 +1004,93 @@ mod tests {
         assert_eq!(
             definition.semantics["binance"]["subaccount_modes"]["standalone"]["hierarchy_authority"],
             "none inferred"
+        );
+    }
+
+    #[test]
+    fn named_plan_discovery_uses_supported_complete_example_and_typed_outputs() {
+        let definitions = operation_definitions();
+        let example = synthetic_financial_plan_example();
+        let plan: FinancialPlanSpec = serde_json::from_value(example).unwrap();
+        plan.validate().unwrap();
+        assert_eq!(plan.steps[0].operation, "wallet.transfer");
+        assert_eq!(plan.steps[0].permitted_variations["mode"], "exact");
+        let preview = definitions
+            .iter()
+            .find(|definition| definition.name == "plans.preview")
+            .unwrap();
+        assert_eq!(
+            preview.output_schema,
+            schema::<fin_domain::financial_plans::FinancialPlanReview>()
+        );
+        assert!(
+            preview.semantics["command_line_template"]
+                .as_str()
+                .unwrap()
+                .contains("--valid-for")
+        );
+        let authorize = definitions
+            .iter()
+            .find(|definition| definition.name == "plans.authorize")
+            .unwrap();
+        assert_eq!(
+            authorize.output_schema,
+            schema::<fin_domain::financial_plans::FinancialPlanStatus>()
+        );
+        assert!(
+            authorize.semantics["command_line_template"]
+                .as_str()
+                .unwrap()
+                .contains("--review-hash")
+        );
+        let execute = definitions
+            .iter()
+            .find(|definition| definition.name == "execute.plan-step")
+            .unwrap();
+        assert!(
+            execute.semantics["command_line_template"]
+                .as_str()
+                .unwrap()
+                .contains("--plan PLAN_ID --step STEP_ID")
+        );
+        let machine = machine_contract();
+        assert_eq!(
+            machine["named_financial_plans"]["authority"],
+            "one plan revision authority; attempts retain their own IDs; no child grants"
+        );
+        assert!(
+            preview.semantics["returns"]
+                .as_str()
+                .unwrap()
+                .contains("every concrete attempt performs fresh adapter checks")
+        );
+        for field in [
+            "mode",
+            "maximum_debits",
+            "maximum_costs",
+            "possible_credits",
+        ] {
+            assert!(
+                preview.semantics["exact_scope_schema"]["properties"][field].is_object(),
+                "exact plan scope schema must expose {field}"
+            );
+        }
+        assert!(
+            authorize.semantics["review"]
+                .as_str()
+                .unwrap()
+                .contains("Fin-assigned per attempt")
+        );
+        let deposit = exchange_capabilities()["fin"]["binance"]["deposits"].clone();
+        assert_eq!(
+            deposit["broker_generated_attempt_input_fields"],
+            json!(["/requestId"])
+        );
+        assert!(
+            deposit["request_id_assignment"]
+                .as_str()
+                .unwrap()
+                .contains("stable unique venue requestId")
         );
     }
     #[test]

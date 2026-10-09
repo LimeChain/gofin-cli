@@ -209,6 +209,282 @@ impl Ui {
         )
     }
 
+    /// Review the complete ordered plan before the broker requests one Touch ID.
+    pub fn plan_authorization_review(&self, review: &Value) -> io::Result<()> {
+        self.plan_authorization_review_to(review, &mut io::stderr().lock())
+    }
+
+    fn plan_authorization_review_to(
+        &self,
+        review: &Value,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        if self.machine {
+            return Ok(());
+        }
+        let plan = &review["plan"];
+        let name = plan["name"].as_str().unwrap_or("unnamed");
+        self.message_to(&format!("Plan: {name}"), "36", output)?;
+        if let Some(plan_id) = review["plan_id"].as_str() {
+            self.message_to(&format!("Plan ID: {plan_id}"), "36", output)?;
+        } else {
+            self.message_to(
+                "Plan ID: assigned by the broker when authorization is created",
+                "36",
+                output,
+            )?;
+        }
+        if let Some(request_id) = review["authorization_request_id"].as_str() {
+            self.message_to(
+                &format!("Authorization request ID: {request_id}"),
+                "36",
+                output,
+            )?;
+        }
+        let seconds = review["valid_for_seconds"].as_u64().unwrap_or(600);
+        self.message_to(
+            &format!(
+                "Approval duration: {} from successful Touch ID",
+                duration_label(seconds)
+            ),
+            "36",
+            output,
+        )?;
+        if let Some(revision) = review["replaces_revision_id"].as_str() {
+            self.message_to(&format!("Revises: {revision}"), "33", output)?;
+        }
+        if let Some(steps) = plan["steps"].as_array() {
+            for (index, step) in steps.iter().enumerate() {
+                let step_id = step["step_id"].as_str().unwrap_or("step");
+                let operation = step["operation"].as_str().unwrap_or("operation");
+                let permission = review["permissions"]
+                    .as_array()
+                    .and_then(|rows| rows.iter().find(|row| row["step_id"] == step_id));
+                let generated_fields = permission
+                    .and_then(|row| row["generated_input_fields"].as_array())
+                    .map(|fields| {
+                        fields
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                self.message_to(
+                    &format!("{}. {} — {}", index + 1, step_id, operation),
+                    "36",
+                    output,
+                )?;
+                if let Some(input) = step.get("input") {
+                    let display_input =
+                        plan_input_for_display(input, &generated_fields).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "Broker-generated input field metadata is invalid.",
+                            )
+                        })?;
+                    if generated_fields.is_empty() {
+                        self.message_to("   Exact step input:", "36", output)?;
+                    } else {
+                        self.message_to(
+                            "   Input template (Fin-assigned fields shown as placeholders):",
+                            "36",
+                            output,
+                        )?;
+                        for field in &generated_fields {
+                            self.message_to(
+                                &format!("   {field}: assigned by Fin per attempt"),
+                                "33",
+                                output,
+                            )?;
+                        }
+                    }
+                    let rendered = serde_json::to_string_pretty(&display_input)
+                        .unwrap_or_else(|_| display_input.to_string());
+                    for line in rendered.lines() {
+                        self.message_to(&format!("     {line}"), "36", output)?;
+                    }
+                }
+                if let Some(target) = step["completion"]["principal_spend"].as_object() {
+                    let _ = target;
+                    if let Some(amount) = concise_amount(&step["completion"]["principal_spend"]) {
+                        self.message_to(
+                            &format!("   Cumulative principal-spend target: {amount}"),
+                            "36",
+                            output,
+                        )?;
+                    }
+                }
+                if let Some(amount) = concise_amount(&step["completion"]["minimum_net_receipt"]) {
+                    self.message_to(
+                        &format!("   Minimum net receipt target: {amount}"),
+                        "36",
+                        output,
+                    )?;
+                }
+                if step["completion"]["operation_succeeded"] == true {
+                    self.message_to("   Completion: verified operation success", "36", output)?;
+                }
+                if let Some(dependencies) = step["funding_dependencies"].as_array() {
+                    for dependency in dependencies {
+                        let producer = dependency["producing_step_id"]
+                            .as_str()
+                            .unwrap_or("previous step");
+                        let resource = dependency["resource"].as_str().unwrap_or("resource");
+                        let asset = dependency["asset"]["reference"].as_str().unwrap_or("asset");
+                        self.message_to(&format!("   Conditional funding: {asset} from {producer} at {resource}, available only after verified settlement"), "33", output)?;
+                    }
+                }
+                if let Some(permission) = permission {
+                    let exact = permission.get("exact").filter(|value| !value.is_null());
+                    let adapter_permission = permission
+                        .get("permission")
+                        .filter(|value| !value.is_null());
+                    let scope = exact
+                        .map(|value| &value["scope"])
+                        .or_else(|| adapter_permission.map(|value| &value["spec"]));
+                    if exact.is_some() {
+                        self.message_to(
+                            "   Scope: exact operation input; schema and connection identities bound",
+                            "36",
+                            output,
+                        )?;
+                    } else if let Some(summary) = scope.and_then(|value| value["summary"].as_str())
+                    {
+                        self.message_to(&format!("   Scope: {summary}"), "36", output)?;
+                    }
+                    for field in ["maximum_debits", "maximum_costs"] {
+                        for bound in scope
+                            .map(|scope| &scope[field])
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                        {
+                            let label = if field == "maximum_debits" {
+                                "Step debit cap"
+                            } else {
+                                "Step fee cap"
+                            };
+                            let amount = concise_amount(bound)
+                                .unwrap_or_else(|| safe_text(&bound.to_string()));
+                            let resource = bound["resource"]
+                                .as_str()
+                                .map(|value| format!(" at {value}"))
+                                .unwrap_or_default();
+                            self.message_to(
+                                &format!("   {label}: {amount}{resource}"),
+                                "36",
+                                output,
+                            )?;
+                        }
+                    }
+                    for credit in scope
+                        .map(|scope| &scope["possible_credits"])
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        let asset = credit["asset"]["reference"].as_str().unwrap_or("asset");
+                        let network = credit["asset"]["network"].as_str().unwrap_or("network");
+                        let resource = credit["resource"].as_str().unwrap_or("resource");
+                        self.message_to(
+                            &format!(
+                                "   Possible verified credit: {asset} ({network}) at {resource}"
+                            ),
+                            "36",
+                            output,
+                        )?;
+                    }
+                    if let Some(fees) =
+                        adapter_permission.and_then(|body| body["fee_assets"].as_array())
+                    {
+                        let assets = fees
+                            .iter()
+                            .filter_map(|asset| asset["reference"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if !assets.is_empty() {
+                            self.message_to(
+                                &format!("   Permitted fee assets: {assets}"),
+                                "36",
+                                output,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(bounds) = plan["aggregate_bounds"].as_object() {
+            for field in ["maximum_debits", "maximum_costs"] {
+                if let Some(rows) = bounds.get(field).and_then(Value::as_array) {
+                    let label = if field == "maximum_debits" {
+                        "Aggregate debit cap"
+                    } else {
+                        "Aggregate fee cap"
+                    };
+                    for bound in rows {
+                        let amount =
+                            concise_amount(bound).unwrap_or_else(|| safe_text(&bound.to_string()));
+                        let resource = bound["resource"]
+                            .as_str()
+                            .map(|value| format!(" at {value}"))
+                            .unwrap_or_default();
+                        self.message_to(&format!("{label}: {amount}{resource}"), "36", output)?;
+                    }
+                }
+            }
+        }
+        if let Some(usage) = review.get("carried_forward_usage")
+            && usage != &Value::Null
+            && usage != &json!({})
+        {
+            for (field, label) in [
+                ("consumed_debits", "Prior verified debit"),
+                ("consumed_costs", "Prior verified fee"),
+            ] {
+                for amount in usage[field].as_array().into_iter().flatten() {
+                    let formatted =
+                        concise_amount(amount).unwrap_or_else(|| safe_text(&amount.to_string()));
+                    self.message_to(&format!("{label}: {formatted}"), "33", output)?;
+                }
+            }
+            for reservation in usage["reservations"].as_array().into_iter().flatten() {
+                self.message_to(
+                    &format!(
+                        "Unresolved reservation: attempt {} for step {}",
+                        reservation["attempt_id"].as_str().unwrap_or("unknown"),
+                        reservation["step_id"].as_str().unwrap_or("unknown")
+                    ),
+                    "33",
+                    output,
+                )?;
+            }
+        }
+        for (field, label) in [
+            ("remaining_debits", "Remaining authority"),
+            ("remaining_costs", "Remaining fee authority"),
+        ] {
+            for amount in review[field].as_array().into_iter().flatten() {
+                let formatted =
+                    concise_amount(amount).unwrap_or_else(|| safe_text(&amount.to_string()));
+                self.message_to(&format!("{label}: {formatted}"), "36", output)?;
+            }
+        }
+        for warning in review["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            self.message_to(&format!("Warning: {warning}"), "33", output)?;
+        }
+        self.message_to(
+            "One Touch ID approves this named plan. Each step must still be submitted explicitly.",
+            "36",
+            output,
+        )
+    }
+
     fn message_to(&self, text: &str, color: &str, output: &mut impl Write) -> io::Result<()> {
         if !self.machine {
             writeln!(output, "{}", self.styled(&safe_text(text), color))?;
@@ -249,6 +525,11 @@ impl Ui {
             Ok(())
         } else if command == "authorizations" && !self.is_verbose() {
             for (text, color) in authorization_rows(value) {
+                writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
+            }
+            Ok(())
+        } else if command == "plans" && !self.is_verbose() {
+            for (text, color) in financial_plan_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
             }
             Ok(())
@@ -389,6 +670,26 @@ impl Drop for Progress {
 
 /// Escape terminal controls and Unicode direction overrides instead of letting
 /// untrusted venue/provider strings alter terminal contents or apparent values.
+fn plan_input_for_display(input: &Value, generated_fields: &[String]) -> io::Result<Value> {
+    let mut display = input.clone();
+    for pointer in generated_fields {
+        let Some(value) = display.pointer_mut(pointer) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Generated input pointer does not resolve.",
+            ));
+        };
+        if !value.is_string() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Generated input field is not a string.",
+            ));
+        }
+        *value = json!("<assigned by Fin per attempt>");
+    }
+    Ok(display)
+}
+
 pub fn safe_text(text: &str) -> String {
     let mut safe = String::with_capacity(text.len());
     for character in text.chars() {
@@ -987,6 +1288,102 @@ fn authorization_rows(value: &Value) -> Vec<(String, &'static str)> {
     rows
 }
 
+fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
+    let mut rows = Vec::new();
+    let plan_id = value["plan_id"].as_str().unwrap_or("unavailable");
+    let revision = &value["revision"];
+    let name = revision["spec"]["name"]
+        .as_str()
+        .or_else(|| value["plan"]["name"].as_str())
+        .unwrap_or("named plan");
+    let authorization_state = revision["status"]
+        .as_str()
+        .or_else(|| value["authorization_status"].as_str())
+        .unwrap_or("reviewed");
+    rows.push((format!("Plan {name} ({plan_id})"), "36"));
+    rows.push((
+        format!("Authorization: {authorization_state}"),
+        if authorization_state == "active" {
+            "32"
+        } else {
+            "33"
+        },
+    ));
+    if let Some(expires) = revision["expires_at"].as_str() {
+        rows.push((format!("Expires: {expires}"), "36"));
+    }
+    if let Some(steps) = value["steps"].as_array() {
+        let completed = steps
+            .iter()
+            .filter(|step| step["state"] == "completed")
+            .count();
+        rows.push((
+            format!("Progress: {completed}/{} steps complete", steps.len()),
+            if completed == steps.len() { "32" } else { "36" },
+        ));
+        if let Some(next) = value["next_eligible_step_id"].as_str() {
+            rows.push((format!("Next eligible step: {next}"), "36"));
+        }
+        let attempts = steps
+            .iter()
+            .flat_map(|step| step["attempts"].as_array().into_iter().flatten())
+            .count();
+        let unresolved = steps
+            .iter()
+            .flat_map(|step| step["attempts"].as_array().into_iter().flatten())
+            .filter(|attempt| {
+                matches!(
+                    attempt["status"].as_str(),
+                    Some("submitted" | "pending" | "unknown")
+                )
+            })
+            .count();
+        rows.push((
+            format!("Attempts: {attempts}; unresolved: {unresolved}"),
+            if unresolved == 0 { "36" } else { "33" },
+        ));
+        for attempt in steps
+            .iter()
+            .flat_map(|step| step["attempts"].as_array().into_iter().flatten())
+            .filter(|attempt| !attempt["result"].is_null())
+        {
+            rows.push((
+                format!(
+                    "Read result recorded for step {} attempt {} (use --json for exact data)",
+                    attempt["step_id"].as_str().unwrap_or("unknown"),
+                    attempt["attempt_id"].as_str().unwrap_or("unknown")
+                ),
+                "36",
+            ));
+        }
+    }
+    if let Some(usage) = value.get("usage") {
+        for (field, label) in [
+            ("reservations", "Open reservations"),
+            ("consumed_debits", "Verified consumed debits"),
+            ("verified_proceeds", "Verified proceeds"),
+        ] {
+            if let Some(amounts) = usage.get(field).and_then(Value::as_array) {
+                rows.push((format!("{label}: {}", amounts.len()), "36"));
+            }
+        }
+    }
+    if let Some(blockers) = value["blockers"].as_array() {
+        for blocker in blockers.iter().filter_map(Value::as_str) {
+            rows.push((format!("Blocked: {blocker}"), "33"));
+        }
+    }
+    if rows.len() == 2 && authorization_state == "reviewed" {
+        if let Some(hash) = value["review_hash"].as_str() {
+            rows.push((format!("Review hash: {hash}"), "36"));
+        }
+        if let Some(steps) = value["plan"]["steps"].as_array() {
+            rows.push((format!("Ordered steps: {}", steps.len()), "36"));
+        }
+    }
+    rows
+}
+
 fn concise_amount(value: &Value) -> Option<String> {
     let amount = value.get("amount").unwrap_or(value);
     let atoms = amount.get("atoms")?.as_str()?;
@@ -1399,6 +1796,106 @@ mod tests {
             )
             .unwrap();
         assert!(String::from_utf8(output).unwrap().contains("for 1 second."));
+    }
+
+    #[test]
+    fn named_plan_review_shows_identity_steps_conditional_funding_and_duration() {
+        let review = json!({
+            "plan_id":"synthetic-plan",
+            "authorization_request_id":"synthetic-request",
+            "valid_for_seconds":600,
+            "replaces_revision_id":"prior-revision",
+            "plan":{"name":"Synthetic rotation","steps":[{
+                "step_id":"transfer","operation":"wallet.transfer",
+                "input":{"requestId":"template-only-not-a-venue-id","amount":"0.01","recipient":"0x000000000000000000000000000000000000beef","spender":"0x000000000000000000000000000000000000cafe","allbound":true},
+                "completion":{"operation_succeeded":true,"principal_spend":null,"minimum_net_receipt":null},
+                "funding_dependencies":[],
+                "permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]}
+            }],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}},
+            "permissions":[{"step_id":"transfer","generated_input_fields":["/requestId"],"exact":{"scope":{"mode":"exact","maximum_debits":[{"resource":"ethereum:1:wallet","amount":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"10000000000000000"}}],"maximum_costs":[],"possible_credits":[]},"definition_hash":"schema-hash","connections_hash":"connection-hash"}}],
+            "carried_forward_usage":{"consumed_debits":[]}
+        });
+        let mut bytes = Vec::new();
+        ui(false, false, true, true, false, true)
+            .plan_authorization_review_to(&review, &mut bytes)
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("\u{1b}"));
+        for expected in [
+            "Plan: Synthetic rotation",
+            "Plan ID: synthetic-plan",
+            "Authorization request ID: synthetic-request",
+            "Revises: prior-revision",
+            "transfer — wallet.transfer",
+            "Input template (Fin-assigned fields shown as placeholders):",
+            "/requestId: assigned by Fin per attempt",
+            "<assigned by Fin per attempt>",
+            "0.01",
+            "0x000000000000000000000000000000000000beef",
+            "0x000000000000000000000000000000000000cafe",
+            "allbound",
+            "Scope: exact operation input; schema and connection identities bound",
+            "Step debit cap:",
+            "Completion: verified operation success",
+            "Approval duration: 10 minutes from successful Touch ID",
+            "One Touch ID approves this named plan",
+        ] {
+            assert!(text.contains(expected), "missing `{expected}` in {text}");
+        }
+        assert!(!text.contains("template-only-not-a-venue-id"));
+        let mut adapter_scope_review = review.clone();
+        adapter_scope_review["permissions"][0] = json!({
+            "step_id":"transfer",
+            "generated_input_fields":["/requestId"],
+            "permission":{
+                "spec":{"summary":"Synthetic variable spot scope","maximum_debits":[],"maximum_costs":[]},
+                "possible_credits":[],"fee_assets":[]
+            }
+        });
+        let mut adapter_scope_output = Vec::new();
+        ui(false, false, true, true, false, true)
+            .plan_authorization_review_to(&adapter_scope_review, &mut adapter_scope_output)
+            .unwrap();
+        let adapter_scope_text = String::from_utf8(adapter_scope_output).unwrap();
+        assert!(adapter_scope_text.contains("/requestId: assigned by Fin per attempt"));
+        assert!(!adapter_scope_text.contains("template-only-not-a-venue-id"));
+        let mut machine_output = Vec::new();
+        ui(true, false, false, false, true, true)
+            .plan_authorization_review_to(&review, &mut machine_output)
+            .unwrap();
+        assert!(machine_output.is_empty());
+
+        let mut new_plan = review.clone();
+        new_plan.as_object_mut().unwrap().remove("plan_id");
+        let mut new_plan_output = Vec::new();
+        ui(false, false, true, true, false, true)
+            .plan_authorization_review_to(&new_plan, &mut new_plan_output)
+            .unwrap();
+        let new_plan_text = String::from_utf8(new_plan_output).unwrap();
+        assert!(new_plan_text.contains("Plan ID: assigned by the broker"));
+        assert!(new_plan_text.contains("Authorization request ID: synthetic-request"));
+
+        let status = json!({"plan_id":"synthetic-plan","revision":{"status":"active"},"steps":[{"step_id":"balances","attempts":[{"step_id":"balances","attempt_id":"read-attempt","status":"completed","result":{"assets":[{"symbol":"ETH","amount":"1"}]}}]}]});
+        let mut status_output = Vec::new();
+        ui(false, false, true, true, false, true)
+            .write_result_to(&status, "plans", &mut status_output)
+            .unwrap();
+        let status_text = String::from_utf8(status_output).unwrap();
+        assert!(
+            status_text.contains(
+                "Read result recorded for step balances attempt read-attempt (use --json for exact data)"
+            ),
+            "{status_text}"
+        );
+        let mut machine_status = Vec::new();
+        ui(true, false, false, false, true, true)
+            .write_result_to(&status, "plans", &mut machine_status)
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&machine_status).unwrap();
+        assert_eq!(
+            parsed["steps"][0]["attempts"][0]["result"]["assets"][0]["symbol"],
+            "ETH"
+        );
     }
 
     #[test]

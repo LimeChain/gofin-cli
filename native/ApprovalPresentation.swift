@@ -102,6 +102,70 @@ func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> 
     return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
 }
 
+// One biometric action authorizes the complete named revision. Preserve the
+// full plan name in the 240-character system reason; optional money details
+// stay in the terminal review and canonical binding.
+func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
+    guard binding["version"] as? Int == 1,
+          binding["kind"] as? String == "financial_plan",
+          let planID = binding["plan_id"] as? String, !planID.isEmpty, planID.count <= 256,
+          let revisionID = binding["revision_id"] as? String, !revisionID.isEmpty, revisionID.count <= 256,
+          let plan = binding["plan"] as? [String: Any],
+          let name = plan["name"] as? String, !name.isEmpty, name.unicodeScalars.count <= 80,
+          name == binding["name"] as? String,
+          name.trimmingCharacters(in: .whitespacesAndNewlines) == name,
+          name.unicodeScalars.allSatisfy({ scalar in
+              let value = scalar.value
+              return !CharacterSet.controlCharacters.contains(scalar)
+                  && value != 0x2028 && value != 0x2029
+                  && value != 0x061c && value != 0x200e && value != 0x200f
+                  && !(0x202a...0x202e).contains(value)
+                  && !(0x2066...0x2069).contains(value)
+          }),
+          let steps = plan["steps"] as? [[String: Any]], !steps.isEmpty,
+          let permissions = binding["permissions"] as? [[String: Any]], permissions.count == steps.count,
+          let duration = binding["valid_for_seconds"] as? NSNumber,
+          CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
+          !summary.isEmpty, summary.count <= 4096 else { return nil }
+    for (step, permission) in zip(steps, permissions) {
+        guard let stepID = step["step_id"] as? String, !stepID.isEmpty,
+              permission["step_id"] as? String == stepID,
+              let operation = step["operation"] as? String, !operation.isEmpty,
+              !operation.hasPrefix("configuration:"), !operation.hasPrefix("policy."),
+              !operation.hasPrefix("connections.") else { return nil }
+        if let generated = permission["generated_input_fields"] {
+            guard let fields = generated as? [String],
+                  fields.allSatisfy({ !$0.isEmpty && $0.hasPrefix("/") }) else { return nil }
+        }
+        guard
+              ((permission["permission"] as? [String: Any]).map { body in
+                  body["spec"] is [String: Any]
+                      && body["possible_credits"] is [[String: Any]]
+                      && body["fee_assets"] is [[String: Any]]
+              } ?? false)
+              || ((permission["exact"] as? [String: Any]).map { exact in
+                  guard let scope = exact["scope"] as? [String: Any] else { return false }
+                  return scope["mode"] as? String == "exact"
+                      && scope["maximum_debits"] is [[String: Any]]
+                      && scope["maximum_costs"] is [[String: Any]]
+                      && scope["possible_credits"] is [[String: Any]]
+                      && (exact["definition_hash"] as? String)?.isEmpty == false
+                      && (exact["connections_hash"] as? String)?.isEmpty == false
+              } ?? false) else { return nil }
+    }
+    let revised = binding["replaces_revision_id"] as? String
+    let lead = revised == nil
+        ? "approve the plan “\(name)”"
+        : "approve the revised plan “\(name)”"
+    // The validated name is bounded to 80 Unicode scalars, so the complete
+    // lead fits. Include duration/step count only as a whole optional suffix.
+    guard lead.unicodeScalars.count <= authenticationReasonMaximumCharacters else { return nil }
+    let durationSeconds = duration.uint64Value
+    let details = " (\(steps.count) steps, \(durationSeconds) seconds)"
+    let detailed = lead + details
+    return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : lead
+}
+
 // LocalAuthentication prefixes this reason with the app name. Use a specific
 // lower-case action, without repeating the product name or adding punctuation.
 // Full configuration/permissions remain in the protected terminal review.
