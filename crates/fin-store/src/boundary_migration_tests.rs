@@ -59,10 +59,10 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
             ],
         )
         .unwrap();
-    // Recreate the prior schema; there is no v3 approval-request table in v2.
+    // Recreate v2 after removing the v3 and v4 tables from this fixture.
     store
         .conn
-        .execute_batch("DROP TABLE boundary_authorization_requests; PRAGMA user_version=2;")
+        .execute_batch("DROP TABLE financial_plan_attempts; DROP TABLE financial_plan_requests; DROP TABLE financial_plan_revisions; DROP TABLE financial_plans; DROP TABLE boundary_authorization_requests; PRAGMA user_version=2;")
         .unwrap();
     drop(store);
     let reopened = Store::open(&path).unwrap();
@@ -71,7 +71,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-op").unwrap().unwrap(),

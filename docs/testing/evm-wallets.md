@@ -76,10 +76,12 @@ protected hidden prompt, then approve configuration Touch ID after the read-only
 ping and fresh ETH/USD quote checks. The key grants market-data access only and requests consume plan
 quota/billing. Never provide it in chat, JSON, CLI values or environment variables.
 No enrollment is required during setup; without it, anonymous access remains
-best effort. Every financial write still needs its own approval, fresh valid
-USD quotes and the existing limits. Authentication itself does not make a stale
-or missing quote usable. Verify protected enrollment and authenticated freshness
-independently from anonymous public probes.
+best effort. A standalone financial write needs fresh exact approval. An attempt
+explicitly submitted under an active named plan may use that plan's authority
+without another prompt, but still needs fresh valid USD quotes and current
+policy/evidence checks. CoinGecko authentication grants no financial authority,
+and it does not make stale or missing quotes usable. Verify protected enrollment
+and authenticated freshness independently from anonymous public probes.
 
 ## Coverage and settlement limits
 

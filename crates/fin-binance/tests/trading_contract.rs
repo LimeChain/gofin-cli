@@ -27,6 +27,8 @@ const ACCOUNT: &str = "synthetic-main";
 mod boundary_lifecycle_tests;
 #[path = "trading_contract/boundaries.rs"]
 mod boundary_tests;
+#[path = "trading_contract/plan_permissions.rs"]
+mod plan_permission_tests;
 fn units(value: &str) -> i128 {
     let negative = value.starts_with('-');
     let value = value.strip_prefix('-').unwrap_or(value);

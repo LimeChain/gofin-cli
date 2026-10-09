@@ -234,6 +234,58 @@ grants may survive restart with original expiry, but restart cannot auto-submit.
 Administration retains its separate protected human path. See the
 [CLI workflow](../README.md#operation-boundary-authorization).
 
+### Named sequential plan authorization
+
+A separate versioned financial-plan contract binds a name, ordered step identities,
+exact registry input scopes or adapter variation scopes, completion conditions, funding dependencies,
+aggregate asset/fee caps and duration. The default lifetime is 600 seconds from
+successful approval; the native challenge has its separate short lifetime.
+The prompt identifies the plan by its bound name while terminal review presents
+all permissions. Names are labels, never authority or unique identifiers.
+
+Exact scopes use ordinary registered operation schemas and protected connection
+identity snapshots. They fix every input field and per-step debit/cost cap;
+current and future registry operations require no special plan implementation.
+Authorization identity metadata must retain stable, non-secret protected configuration,
+including destination alias address/network/asset mappings. The complete metadata
+is bound; live balances and other volatile observations are excluded.
+Public `fin connections` output remains the enrolled accounts and one grouped
+EVM-wallet summary. Broker-only `authorization_identities()` retains exact
+per-chain signer/confirmation metadata and Binance destination asset maps for
+plan binding. This metadata split is intentional; saved generic EVM plans made
+with the earlier public identity set may fail closed and require a newly
+approved revision after the identity contract changes.
+Reads retain ordinary results and cannot create verified financial funding.
+Administration and credential enrollment keep their separate human-only path.
+`operation_succeeded` completion reuses normal verified operation success,
+including authority-only operations; optional amount conditions are conjunctive.
+Plan metadata is engine-owned, stripped before adapter calls and retained in the
+durable operation record and journal, preserving strict adapter binding parsers.
+
+Generic permission review validates structure without pretending to check live
+balances, permissions, markets or simulation. These checks remain deferred; it
+does not require future balances or freeze execution quotes. Each explicit attempt reuses the normal prepare/revalidate/submit path
+with distinct plan authority; no independently usable child grants exist. The
+journal checks the active revision, step eligibility, funding, cumulative caps,
+expiry, revocation and protected policy at dispatch. Typed verified effects and
+costs determine cumulative completion; terminal IOC attempts alone do not.
+
+SQLite commits proof, operation settlement, released reservations, plan/step
+consumption, net proceeds and progress atomically. Future inputs require verified
+predecessor credit and current balances. Reservations are counted once, and
+intermediate credits never replenish gross authority. Exact-input operations
+preserve ordinary conservative USD policy charges for
+non-cash exposure as well as cash movements. Revisions retain usage and
+started-step scope; only unstarted steps may be restructured. Restart never
+replays work. Expired or revoked plans can still reconcile submitted attempts.
+Historical restoration runs remain separate recovery data.
+
+An operation definition may explicitly name string JSON pointers that Fin
+assigns per attempt, such as a venue request ID. The plan binds the caller's
+unchanged input template and the declaration; Fin substitutes a stable
+plan/revision/step/attempt-derived value only when preparing that concrete
+attempt. Terminal review labels generated fields as Fin-assigned.
+
 ### Standalone exact-operation authorization
 
 1. Persist the logical request ID and canonical fingerprint; resolve aliases to exact resource identities.

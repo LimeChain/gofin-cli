@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTENT: &str = include_str!("../../../skills/fin/SKILL.md");
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.2.0";
 pub const SETUP_PROMPT: &str = "Install Fin's optional Codex skill? [y/N]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
@@ -77,7 +77,7 @@ pub struct SkillResult {
 
 pub fn metadata() -> Value {
     json!({
-        "name":"fin", "purpose":"Teach agents to discover Fin, preview individual operations, respect human enrollment and per-write approval, and reconcile uncertain outcomes.",
+        "name":"fin", "purpose":"Teach agents to prefer one bounded named plan for coherent multi-action financial intents, preserve separate approvals for standalone writes, respect human enrollment and plan approval, explicitly submit each step, and reconcile uncertain outcomes.",
         "version":VERSION, "bundled":true, "optional":true,
         "supported_agent_environments":AgentEnvironment::ALL.iter().map(|agent| json!({"name":agent.name(),"destination":format!("$HOME/{}",agent.directory())})).collect::<Vec<_>>(),
         "requires_administrator":false, "requires_financial_approval":false, "network_required":false, "service_required":false,
