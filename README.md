@@ -1,5 +1,7 @@
 # Fin
 
+See the maintained [roadmap and feature backlog](docs/roadmap/README.md) on the `roadmap` branch for release scope and status.
+
 **Agent-native financial interface for the crypto stack.**
 
 Fin is a compiled Rust CLI for local financial execution. An agent discovers

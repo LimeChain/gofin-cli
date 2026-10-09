@@ -1,0 +1,38 @@
+# Fin roadmap and feature backlog
+
+Updated 2026-10-09. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+
+First-release scope: **items 1–23 inclusive**, as specified by the user on 2026-10-09. Items 24–28 are later roadmap work. Inclusion defines required release scope, not implementation or verification status.
+
+| ID | Feature | Status |
+| --- | --- | --- |
+| 1 | [Exchange spot asset pricing](exchange-spot-asset-pricing.md) | Implemented — user reported |
+| 2 | [Boundary-based operation approval](boundary-based-operation-approval.md) | Implemented — user reported |
+| 3 | [Expiring sequential plan approval](expiring-sequential-plan-approval.md) | Implemented — user reported |
+| 4 | [Parallel development sandboxes](parallel-development-sandbox.md) | Implemented — user reported |
+| 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | In progress — user reported; Ethereum, Arbitrum and Robinhood Chain; ETH and USDC where supported |
+| 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | In progress — user reported |
+| 7 | [Aave support](aave-support.md) | Requested; review existing implementation and define network/version coverage |
+| 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
+| 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | In progress — user reported; full CCXT-supported suite plus Arbitrum USDC deposits; extensive ask-ogi consultation |
+| 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
+| 11 | [Kraken support](integration-roadmap.md#11-kraken-support) | Roadmap — scope to define |
+| 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
+| 13 | [OKX support](integration-roadmap.md#13-okx-support) | Roadmap — scope to define |
+| 14 | [Solana wallet and transactions](integration-roadmap.md#14-solana-wallet-and-transactions) | Roadmap — foundation for Solana integrations |
+| 15 | [Solana Meteora support](integration-roadmap.md#15-solana-meteora-support) | Roadmap — scope to define |
+| 16 | [Solana Jupiter support](integration-roadmap.md#16-solana-jupiter-support) | Roadmap — interpreted from “Jupyter” |
+| 17 | [Solana Pump support](integration-roadmap.md#17-solana-pump-support) | Roadmap — product/action scope to define |
+| 18 | [Solana Backpack support](integration-roadmap.md#18-solana-backpack-support) | Roadmap — wallet/exchange scope to clarify |
+| 19 | [Robinhood Chain Ramses support](integration-roadmap.md#19-robinhood-chain-ramses-support) | Roadmap — deployment and action scope to verify |
+| 20 | [Base support](integration-roadmap.md#20-base-support) | Roadmap — available onboarded dapps, bridging, deposits and withdrawals |
+| 21 | [Solana Kamino support](integration-roadmap.md#21-solana-kamino-support) | Roadmap — first release; product/action scope to define |
+| 22 | [Solana Phoenix support](integration-roadmap.md#22-solana-phoenix-support) | Roadmap — first release; product/action scope to define |
+| 23 | [At least two bridges to Solana](integration-roadmap.md#23-at-least-two-bridges-to-solana) | First release — requested; bridge providers, source networks and assets to select |
+| 24 | [SEI support](integration-roadmap.md#24-sei-support) | Later release — available onboarded dapps and bridging |
+| 25 | [BSC support](integration-roadmap.md#25-bsc-support) | Later release — available onboarded dapps and bridging |
+| 26 | [Hedera bridging](integration-roadmap.md#26-hedera-bridging) | Later release — route and asset coverage to define |
+| 27 | [Hedera SaucerSwap support](integration-roadmap.md#27-hedera-saucerswap-support) | Later release — action scope to define |
+| 28 | [Across.to support](integration-roadmap.md#28-acrossto-support) | Later release — requested; route and asset coverage to define |
+
+This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.
