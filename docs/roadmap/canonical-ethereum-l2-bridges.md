@@ -1,6 +1,6 @@
 # Support canonical bridges between Ethereum and Arbitrum or Robinhood Chain
 
-Status: In progress, reported by the user on 2026-10-08. Completion and verification have not been reported. RH is interpreted as Robinhood Chain.
+Status: Implemented, reported complete by the user on 2026-10-09. Implementation and verification evidence were not independently reviewed in this roadmap update. The original draft below records requested scope; current repository documentation governs delivered behavior. RH is interpreted as Robinhood Chain.
 
 ## Description
 

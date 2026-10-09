@@ -11,7 +11,7 @@ First-release scope: **items 1–23 inclusive**, as specified by the user on 202
 | 3 | [Expiring sequential plan approval](expiring-sequential-plan-approval.md) | Implemented — user reported |
 | 4 | [Parallel development sandboxes](parallel-development-sandbox.md) | Implemented — user reported |
 | 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | In progress — user reported; Ethereum, Arbitrum and Robinhood Chain; ETH and USDC where supported |
-| 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | In progress — user reported |
+| 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | Implemented — user reported |
 | 7 | [Aave support](aave-support.md) | Requested; review existing implementation and define network/version coverage |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | In progress — user reported; full CCXT-supported suite plus Arbitrum USDC deposits; extensive ask-ogi consultation |
