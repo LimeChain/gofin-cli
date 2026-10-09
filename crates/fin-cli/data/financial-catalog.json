@@ -9185,6 +9185,971 @@
     }
   },
   {
+    "name": "bridge.quotes",
+    "description": "Compare the configured Relay and Canonical Inbox bridge routes for exact EVM wallet, asset and recipient identities.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$defs": {
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AmountInterval": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "minimum": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "minimum",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "BridgeAssetInput": {
+          "additionalProperties": false,
+          "properties": {
+            "chainId": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "token": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "chainId"
+          ],
+          "type": "object"
+        },
+        "BridgeBounds": {
+          "additionalProperties": false,
+          "description": "All caps are explicit and asset-denominated. USD caps use integer microdollars;\na caller must supply independent Fin pricing evidence before policy can enforce them.",
+          "properties": {
+            "authorization_seconds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "fee_caps": {
+              "items": {
+                "$ref": "#/$defs/FeeCap"
+              },
+              "type": "array"
+            },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input_usd_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "latest_protocol_deadline": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maximum_source_debit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maximum_total_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "minimum_net_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Amount"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "minimum_output_input_ratio": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RatioBound"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_usd_per_unit_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fee_caps"
+          ],
+          "type": "object"
+        },
+        "BridgeQuoteIntentInput": {
+          "additionalProperties": false,
+          "properties": {
+            "allowedRefundAssets": {
+              "items": {
+                "$ref": "#/$defs/BridgeAssetInput"
+              },
+              "type": "array"
+            },
+            "amount": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "destinationAssets": {
+              "items": {
+                "$ref": "#/$defs/BridgeAssetInput"
+              },
+              "type": "array"
+            },
+            "destinationChainId": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "recipient": {
+              "type": "string"
+            },
+            "refundTo": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/BridgeAssetInput"
+            },
+            "wallet": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "wallet",
+            "source",
+            "destinationChainId",
+            "destinationAssets",
+            "recipient",
+            "refundTo",
+            "allowedRefundAssets",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "FeeCap": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "kind": {
+              "$ref": "#/$defs/FeeKind"
+            },
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "maximum_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "asset",
+            "kind",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "FeeKind": {
+          "enum": [
+            "gas",
+            "additional_debit",
+            "withheld_from_output"
+          ],
+          "type": "string"
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "RatioBound": {
+          "additionalProperties": false,
+          "properties": {
+            "denominator": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "numerator": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "numerator",
+            "denominator"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Public CLI input. `wallet` is a configured broker alias; the broker resolves\nit to the physical `BridgeIntent.wallet` resource before provider access.",
+      "properties": {
+        "bounds": {
+          "$ref": "#/$defs/BridgeBounds",
+          "default": {
+            "authorization_seconds": null,
+            "fee_caps": [],
+            "input": null,
+            "input_usd_micros": null,
+            "latest_protocol_deadline": null,
+            "maximum_source_debit": null,
+            "maximum_total_usd_micros": null,
+            "minimum_net_receipt": null,
+            "minimum_output_input_ratio": null,
+            "source_usd_per_unit_micros": null
+          }
+        },
+        "intent": {
+          "$ref": "#/$defs/BridgeQuoteIntentInput"
+        },
+        "refreshTransferId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "intent"
+      ],
+      "title": "BridgeQuoteInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "coverage": {
+          "required": [
+            "providers",
+            "compared_providers",
+            "market_wide_comparison",
+            "complete"
+          ],
+          "type": "object"
+        },
+        "failures": {
+          "type": "array"
+        },
+        "transfers": {
+          "items": {
+            "properties": {
+              "settlement_policy": {
+                "properties": {
+                  "arrival_estimate_scope": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "required": [
+                      "chain_id",
+                      "min_confirmations",
+                      "require_finalized"
+                    ],
+                    "type": "object"
+                  },
+                  "source": {
+                    "required": [
+                      "chain_id",
+                      "min_confirmations",
+                      "require_finalized"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "source",
+                  "destination",
+                  "arrival_estimate_scope"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "transfer_id",
+              "quote",
+              "priced_fees",
+              "steps",
+              "settlement_policy",
+              "next_action"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "coverage",
+        "transfers",
+        "failures"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "bounds": {},
+        "intent": {
+          "allowedRefundAssets": [
+            {
+              "chainId": 1,
+              "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            },
+            {
+              "chainId": 42161,
+              "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+            }
+          ],
+          "amount": "10000000",
+          "destinationAssets": [
+            {
+              "chainId": 42161,
+              "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+            }
+          ],
+          "destinationChainId": 42161,
+          "recipient": "0x1111111111111111111111111111111111111111",
+          "refundTo": "0x1111111111111111111111111111111111111111",
+          "source": {
+            "chainId": 1,
+            "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+          },
+          "wallet": "wallet"
+        }
+      },
+      {
+        "bounds": {},
+        "intent": {
+          "allowedRefundAssets": [],
+          "amount": "10000000000000000",
+          "destinationAssets": [
+            {
+              "chainId": 4663
+            }
+          ],
+          "destinationChainId": 4663,
+          "recipient": "0x1111111111111111111111111111111111111111",
+          "refundTo": "0x1111111111111111111111111111111111111111",
+          "source": {
+            "chainId": 1
+          },
+          "wallet": "wallet"
+        }
+      }
+    ],
+    "coverage": "Compares configured Relay routes and Canonical Inbox native-ETH deposits where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.",
+    "completion": "Returns exact assets, Fin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.",
+    "semantics": {
+      "agent_supplied_calldata": false,
+      "command_line_example": "fin read bridge.quotes --input JSON --json",
+      "financial_authorization": false,
+      "provider_comparison": "configured providers only; not market-wide",
+      "provider_credentials": "none",
+      "provider_usd_fields": "ignored; fee USD values are independently priced by Fin",
+      "providers": [
+        {
+          "coverage": "reviewed native ETH and finite ERC-20 protocol routes",
+          "id": "relay"
+        },
+        {
+          "coverage": "native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path",
+          "id": "arbitrum_canonical"
+        }
+      ],
+      "quote_persistence": "broker-owned, restart-safe",
+      "service_required": true
+    }
+  },
+  {
+    "name": "bridge.status",
+    "description": "Reconcile a saved bridge transfer without requesting new authority or resubmitting a wallet step.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "transferId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transferId"
+      ],
+      "title": "BridgeStatusInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "provider_status": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "settlement": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "properties": {
+                "cash_credits": {
+                  "type": "array"
+                },
+                "costs": {
+                  "type": "array"
+                },
+                "evidence_id": {
+                  "type": "string"
+                },
+                "observed_at": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "destination",
+                    "refund"
+                  ]
+                },
+                "proof": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "outcome",
+                "evidence_id",
+                "observed_at",
+                "cash_credits",
+                "costs",
+                "proof"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "settlement_policy": {
+          "required": [
+            "source",
+            "destination",
+            "arrival_estimate_scope"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "transfer_id",
+        "state",
+        "next_action",
+        "settlement",
+        "settlement_policy"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "transferId": "SYNTHETIC-transfer-id"
+      }
+    ],
+    "coverage": "Reconciles saved Relay transfers and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
+    "completion": "Relay settles only after exact reviewed-router or direct-order-tag proof and finality. Canonical settles only after the source-derived type-0x64 child transaction and finality match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
+    "semantics": {
+      "financial_authorization": false,
+      "may_reconcile": true,
+      "may_submit": false,
+      "provider_identity": "saved provider only; no fallback or route switching",
+      "provider_request_identity": "broker-persisted only"
+    }
+  },
+  {
+    "name": "bridge.transfer",
+    "description": "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AmountInterval": {
+          "additionalProperties": false,
+          "properties": {
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "minimum": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "minimum",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "BridgeBounds": {
+          "additionalProperties": false,
+          "description": "All caps are explicit and asset-denominated. USD caps use integer microdollars;\na caller must supply independent Fin pricing evidence before policy can enforce them.",
+          "properties": {
+            "authorization_seconds": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "fee_caps": {
+              "items": {
+                "$ref": "#/$defs/FeeCap"
+              },
+              "type": "array"
+            },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "input_usd_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "latest_protocol_deadline": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "maximum_source_debit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maximum_total_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "minimum_net_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Amount"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "minimum_output_input_ratio": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RatioBound"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_usd_per_unit_micros": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AmountInterval"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fee_caps"
+          ],
+          "type": "object"
+        },
+        "BridgeStepKind": {
+          "enum": [
+            "approval",
+            "reset_allowance",
+            "deposit"
+          ],
+          "type": "string"
+        },
+        "FeeCap": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "kind": {
+              "$ref": "#/$defs/FeeKind"
+            },
+            "maximum": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "maximum_usd_micros": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "asset",
+            "kind",
+            "maximum"
+          ],
+          "type": "object"
+        },
+        "FeeKind": {
+          "enum": [
+            "gas",
+            "additional_debit",
+            "withheld_from_output"
+          ],
+          "type": "string"
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "RatioBound": {
+          "additionalProperties": false,
+          "properties": {
+            "denominator": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "numerator": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "numerator",
+            "denominator"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "bounds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BridgeBounds"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Human-selected execution bounds; quote-time hints alone grant no write scope."
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "stepKind": {
+          "$ref": "#/$defs/BridgeStepKind"
+        },
+        "transferId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transferId",
+        "stepId",
+        "stepKind"
+      ],
+      "title": "BridgeTransferInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "required": [
+        "transfer_id",
+        "step_id",
+        "kind",
+        "status"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "bounds": {
+          "feeCaps": [
+            {
+              "asset": {
+                "decimals": 18,
+                "network": "ethereum:1",
+                "reference": "native"
+              },
+              "kind": "gas",
+              "maximum": "1000000000000000"
+            }
+          ]
+        },
+        "stepId": "SYNTHETIC-step-id",
+        "stepKind": "deposit",
+        "transferId": "SYNTHETIC-transfer-id"
+      }
+    ],
+    "coverage": "Relay handles its reviewed native ETH and finite ERC-20 source steps. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
+    "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
+    "semantics": {
+      "agent_supplied_calldata": false,
+      "command_line_example": "fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\"}'",
+      "financial_authorization": "fresh per-write Touch ID or one finite transfer-boundary grant",
+      "observer_only_chains": [
+        {
+          "chain_id": 537713,
+          "name": "RelayChain",
+          "wallet_authority": false
+        },
+        {
+          "chain_id": 8453,
+          "name": "Base",
+          "wallet_authority": false
+        }
+      ],
+      "providers": [
+        "relay",
+        "arbitrum_canonical"
+      ],
+      "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
+      "service_required": true,
+      "source_and_destination": "reviewed wallet networks only"
+    }
+  },
+  {
     "name": "exchange.markets",
     "description": "Read public market metadata (venue snapshot/page).",
     "kind": "read",

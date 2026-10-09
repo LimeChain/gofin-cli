@@ -902,6 +902,49 @@ fn set_external_erc20_receipt(rpc: &Fixture, chain: u64, logs: Vec<Value>) {
     });
 }
 
+struct FailedPayoutReceiptRpc(Arc<Fixture>);
+#[async_trait]
+impl EvmRpc for FailedPayoutReceiptRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_getTransactionReceipt" {
+            return Err(FinError::new(
+                "RPC_UNAVAILABLE",
+                "rpc",
+                "Synthetic isolated receipt RPC failure.",
+                "Retry reconciliation of the same withdrawal identity.",
+            ));
+        }
+        self.0.request(method, params).await
+    }
+}
+
+#[tokio::test]
+async fn payout_rpc_failures_report_only_the_reviewed_method_name() {
+    let fixture = Arc::new(Fixture::new());
+    fixture.latest.store(21, Ordering::SeqCst);
+    set_external_native_receipt(&fixture, 1);
+    let adapter = payout_proof_adapter(1, Arc::new(FailedPayoutReceiptRpc(fixture)));
+
+    let error = adapter
+        .verify_external_credit(
+            &txhash(),
+            &lower_address(addr(2)),
+            &AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            "0.001",
+            "0.001",
+            2,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "RPC_UNAVAILABLE");
+    assert_eq!(error.stage, "external-credit:eth_getTransactionReceipt");
+    assert!(!error.stage.contains("http"));
+}
+
 #[tokio::test]
 async fn external_payouts_use_l2_sequencer_inclusion_without_weakening_mainnet_finality() {
     for chain in [42161, 4663] {

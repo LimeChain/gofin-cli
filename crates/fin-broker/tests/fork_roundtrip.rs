@@ -46,6 +46,10 @@ const SYNTHETIC_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae7
 // Never use or fund this key outside the guarded local Anvil test.
 const SYNTHETIC_RETURN_KEY: &str =
     "b013ed10eaec648ee473566eb1fc11f1bfa1495c21d9336047058e263cf02e8e";
+// Public deterministic SHA256 fixture: "Fin isolated Relay source-contract fixture v1 PUBLIC DO NOT FUND".
+// This key is usable only behind the owned loopback Anvil guard; never fund it.
+const SYNTHETIC_RELAY_KEY: &str =
+    "d7469842ed5017fff61764a6d96d80c642986461a1181c2f3ad6f3ddb05547e6";
 const WALLET: &str = "isolated-anvil-wallet";
 const RETURN_WALLET: &str = "isolated-anvil-return-wallet";
 const MAX_WRITES: u64 = 24;
@@ -906,6 +910,7 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
             adapters: vec![adapter.clone()],
             authorizer: approval.clone(),
             valuator: Arc::new(OracleValuation(adapter.clone())),
+            bridge: None,
         },
     )?;
     let baseline = broker.snapshot().await?;
@@ -1253,6 +1258,197 @@ async fn deployed_protocol_roundtrip_via_broker_restores_exact_state() -> Result
         "Isolated mainnet-fork verification: {} settled writes; {} duplicates without approval/sign/submission; guarded 1h debt accrual, exact cash evidence and complete cleanup passed. No biometric or live-write claim.",
         j.records.len(),
         j.records.len()
+    );
+    Ok(())
+}
+
+// Reuse only the synthetic provider from the in-memory lifecycle suite. Its
+// protocol order is deliberately synthetic and cannot establish a live fill.
+#[path = "support/bridge_provider.rs"]
+mod bridge_provider;
+
+struct ForkBridgePrices;
+#[async_trait]
+impl fin_pricing::UsdPriceSource for ForkBridgePrices {
+    async fn quote(&self, _: &AssetId) -> Result<fin_pricing::UsdQuote> {
+        Ok(fin_pricing::UsdQuote {
+            usd_per_unit: "3000".into(),
+            updated_at: now(),
+            observed_at: now(),
+            source: "synthetic isolated Relay source-contract fixture".into(),
+        })
+    }
+}
+
+#[tokio::test]
+#[ignore = "Owned loopback Anvil only; deployed source proof, not a cross-chain round trip"]
+async fn deployed_relay_native_source_proof_keeps_principal_in_transit() -> Result<()> {
+    let rpc = Arc::new(ForkRpc::new()?);
+    rpc.guard().await?;
+    let key = LocalEnvelopeSigner::from_private_key(SYNTHETIC_RELAY_KEY)?;
+    let target = lower_address(key.address());
+    let depository = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
+    if !fin_evm::rpc_bytes(
+        &rpc.request("eth_getCode", json!([&target, "latest"]))
+            .await?,
+    )?
+    .is_empty()
+    {
+        return Err(blocked("The public source fixture must be an EOA."));
+    }
+    let signer = Arc::new(ForkSigner {
+        rpc: rpc.clone(),
+        keys: vec![key],
+        signatures: AtomicU64::new(0),
+    });
+    let runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, Some(signer.clone())));
+    runtime.code(address(depository)?).await?;
+    // $60 at the deliberately conservative synthetic price, below $100.
+    let funded_atoms = U256::from(20_000_000_000_000_000u64);
+    rpc.mutate_local(
+        "anvil_setBalance",
+        json!([&target, hex_quantity(funded_atoms)]),
+    )
+    .await?;
+    let source_before = runtime.balance(address(&target)?, None).await?;
+    let depository_before = runtime.balance(address(depository)?, None).await?;
+    let prices = Arc::new(fin_broker::SharedUsdValuator::with_source(Arc::new(
+        ForkBridgePrices,
+    )));
+    let mut wallet_config = EthereumConfig::wallet_only(1, 1, vec![]);
+    // Test-only local canonical inclusion. This is not production finality proof.
+    wallet_config.require_finalized = false;
+    let wallet = Arc::new(
+        EthereumAdapter::new(
+            wallet_config,
+            vec![WalletConnection {
+                name: WALLET.into(),
+                address: target.clone(),
+                signing_enabled: true,
+            }],
+            runtime.clone(),
+        )?
+        .with_wallet_valuation(prices.clone()),
+    );
+    let bridge = Arc::new(fin_broker::BridgeAdapter::with_provider_and_observers(
+        Arc::new(bridge_provider::SyntheticProvider {
+            revisions: std::sync::atomic::AtomicUsize::new(0),
+        }),
+        BTreeMap::from([(1, wallet.clone())]),
+        BTreeMap::from([(1, runtime.clone())]),
+        prices.clone(),
+    )?);
+    let temp =
+        tempfile::tempdir().map_err(|_| blocked("Cannot create isolated bridge journal."))?;
+    let approval = Arc::new(IsolatedApproval {
+        rpc: rpc.clone(),
+        count: AtomicU64::new(0),
+    });
+    let broker = compose_runtime(
+        BrokerConfigV2 {
+            version: 2,
+            networks: vec![NetworkConfig::ethereum_mainnet()],
+            deployments: vec![],
+            connections: vec![],
+            policy: BrokerPolicy::beta(),
+            approver_uid: unsafe { libc::geteuid() },
+            extensions: BTreeMap::new(),
+        },
+        RuntimeDependencies {
+            store: Store::open(temp.path().join("source-contract.sqlite"))
+                .map_err(|_| blocked("Cannot open isolated bridge journal."))?,
+            adapters: vec![wallet, bridge.clone()],
+            authorizer: approval.clone(),
+            valuator: prices,
+            bridge: Some(bridge.clone()),
+        },
+    )?;
+    let quotes: Value = call(
+        &broker,
+        BrokerRequest::Read {
+            operation: "bridge.quotes".into(),
+            input: json!({"intent": {
+                "wallet": WALLET, "source": {"chainId":1}, "destinationChainId":42161,
+                "destinationAssets":[{"chainId":42161}], "recipient":target,"refundTo":target,
+                "allowedRefundAssets":[{"chainId":1}], "amount":"5000000000000000",
+            }}),
+        },
+    )
+    .await?;
+    let transfer_id = quotes["transfers"][0]["transfer_id"]
+        .as_str()
+        .ok_or_else(|| blocked("Fixture quote missing transfer ID."))?;
+    let step_id = quotes["transfers"][0]["steps"][0]["step_id"]
+        .as_str()
+        .ok_or_else(|| blocked("Fixture quote missing step ID."))?;
+    let request = OperationRequest {
+        request_id: "isolated-relay-native-deposit".into(),
+        operation: "bridge.transfer".into(),
+        run_id: None,
+        input: json!({"transferId":transfer_id,"stepId":step_id,"stepKind":"deposit","bounds":{
+            "fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"500000000000000"}]
+        }}),
+    };
+    let mut record: OperationRecord = call(
+        &broker,
+        BrokerRequest::Execute {
+            request: request.clone(),
+        },
+    )
+    .await?;
+    if !record.status.terminal() {
+        rpc.mine().await?;
+        record = call(
+            &broker,
+            BrokerRequest::Status {
+                id: record.id.clone(),
+            },
+        )
+        .await?;
+    }
+    if record.status != Status::Completed {
+        return Err(record
+            .error
+            .unwrap_or_else(|| blocked("Deployed Relay deposit lacks source proof.")));
+    }
+    let effects = record
+        .effects
+        .as_ref()
+        .ok_or_else(|| blocked("Source proof lacks typed effects."))?;
+    let native_debit = U256::from(5_000_000_000_000_000u64);
+    let gas = effects
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            FinancialEffect::Cost {
+                category, amount, ..
+            } if category == "gas" => Some(u256(&amount.atoms)),
+            _ => None,
+        })
+        .transpose()?
+        .ok_or_else(|| blocked("Source proof lacks exact gas cost."))?;
+    assert_eq!(
+        source_before - runtime.balance(address(&target)?, None).await?,
+        native_debit + gas
+    );
+    assert_eq!(
+        runtime.balance(address(depository)?, None).await? - depository_before,
+        native_debit
+    );
+    assert!(effects.effects.iter().any(|effect| matches!(effect, FinancialEffect::TransitPrincipal { transfer_id: id, .. } if id == transfer_id)));
+    assert!(
+        !effects
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, FinancialEffect::UsableCredit { .. }))
+    );
+    let duplicate: OperationRecord = call(&broker, BrokerRequest::Execute { request }).await?;
+    assert_eq!(duplicate.id, record.id);
+    assert_eq!(rpc.sent.load(Ordering::SeqCst), 1);
+    assert_eq!(approval.count.load(Ordering::SeqCst), 1);
+    println!(
+        "{}",
+        json!({"verification":"isolated-deployed-relay-source-contract","source_step":"completed","parent":"in_transit","native_debit_atoms":native_debit.to_string(),"verified_gas_atoms":gas.to_string(),"submissions":1,"production_writes":0,"destination_verified":false,"round_trip_restoration":false})
     );
     Ok(())
 }

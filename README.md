@@ -6,10 +6,12 @@ Fin is a compiled Rust CLI for local financial execution. An agent discovers
 operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
-orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain, plus
-Ethereum mainnet Uniswap and Aave. The [product concept](docs/fin-product-concept.md) describes the broader
-exchange, trading and DeFi scope. MCP and general chain-to-chain bridging follow
-later. Fin is open source; license selection is pending.
+orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
+Relay transfers plus a narrow canonical native-ETH route to those reviewed
+wallet networks, plus Ethereum
+mainnet Uniswap and Aave. The [product concept](docs/fin-product-concept.md)
+describes the broader exchange, trading and DeFi scope. MCP and additional
+bridge providers follow later. Fin is open source; license selection is pending.
 
 ## Components and responsibilities
 
@@ -34,9 +36,10 @@ The broker enforces approval, policy and credential access independently.
 ## Requirements
 
 - **macOS 13+, Apple Silicon or Intel:** the protected installation requires macOS
-  Terminal, administrator access and working Touch ID. Every financial write
-  requires fresh Touch ID, including cleanup. Reads, previews and status do not
-  require financial approval.
+  Terminal, administrator access and working Touch ID. Each new financial
+  authorization requires fresh Touch ID, including cleanup. Writes inside a
+  supported finite transfer grant use its approved remaining scope. Reads,
+  previews and status do not require financial approval.
 - **Linux x86_64:** the delivery bundle supports offline help, schemas and
   capability discovery. Protected setup, credential enrollment and financial
   execution are unavailable; no Linux authorization provider is implemented.
@@ -167,10 +170,152 @@ fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":
 Enrollment requires no network. Each operation selects its explicit `chain_id`:
 Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
 ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
-native/ERC-20 transfers. Dapps and bridging on those networks are later work.
+native/ERC-20 transfers. The supported Relay and canonical bridge scope is
+described below; other dapps and bridge providers remain later work.
 Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. EVM pricing keeps the existing
 CoinGecko native-ETH and exact network/contract token path.
+
+## Bridge transfers
+
+Fin supports direct native ETH and explicitly reviewed ERC-20 Relay deposits
+between Ethereum Mainnet (`1`), Arbitrum One (`42161`) and Robinhood Chain
+(`4663`). It also supports a narrow canonical Inbox route for native ETH from
+Ethereum to the same wallet on Arbitrum One or Robinhood Chain. Canonical routes
+do not support tokens, another recipient, swaps, or reverse transfers. The first
+request is a read: quote-time bounds are optional planning hints, quotes reserve
+no funds, and provider quotes are not a market-wide comparison. Choose exact
+destination and refund asset identities; USDC, USDG
+and other bridged USDC representations are not interchangeable. Robinhood's
+reviewed token is USDG, not USDC. A requested RH USDC route may return a
+per-asset unsupported failure and must not be silently replaced.
+
+### Relay routes
+
+Relay destination candidates are locators, not proof. For a direct native payout,
+Fin checks that the canonical type-2 transaction targets the approved recipient,
+has positive native value at or above the selected receipt floor, comes from a
+different account, and carries exactly the saved 32-byte protocol order ID as
+its input. If address-level retention is established with the intrinsic-gas
+proof, Fin requires a reviewed Nitro destination chain, an empty transaction
+access list, and `gasUsed - gasUsedForL1` exactly equal to intrinsic gas for the
+tagged calldata. This proves retained value without asserting that the recipient
+is codeless. For an ERC-20 payout, the transaction must call the exact
+approved token with zero native value and exactly `transfer(address,uint256)`
+calldata followed by that same 32-byte order ID; the canonical receipt must
+contain one matching `Transfer` log from the transaction sender to the approved
+recipient for the call amount. Fin verifies the receipt's chain, hash, success,
+canonical inclusion and configured finality before settlement. Relay's `solver`
+identifies the protocol order; it is not assumed to be the sender of every
+destination payout. Applicable RouterV3 proof remains route-specific and does
+not define all supported payout shapes.
+
+### Canonical Inbox routes
+
+The canonical provider uses only reviewed Ethereum `Inbox.depositEth()`
+deployments. A source receipt meeting Ethereum's configured confirmation and
+finality rule must include the matching Inbox and Bridge events; Fin derives the
+child transaction hash from that source proof using the independently tested
+Arbitrum SDK encoding. It then verifies the derived child transaction receipt
+and exact native-ETH payment to the same EOA. Provider status or an externally
+supplied destination hash cannot settle the transfer. The guarded Ethereum fork
+source-proof test passed for both reviewed child deployments. Both authorized
+`0.0004 ETH` live source deposits are confirmed, with derived child hashes
+matching their source events. Fin verified both exact destination receipts at
+required finality and marked both transfers Completed. This was an isolated
+disposable-development run with automatic approval; protected installation
+and human Touch ID remain unverified. See the [bridge verification matrix](docs/testing/bridge.md#recorded-isolated-live-run)
+for exact outcomes and the separate under-minimum withdrawal result.
+
+This example quotes 10 USDC from Ethereum to Arbitrum. Quantities are atomic
+units encoded as decimal strings (USDC has six decimals). Replace the public
+recipient with the intended full address:
+
+```sh
+fin read bridge.quotes --input '{"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"}}' --json
+```
+
+The response contains persisted `transfer_id` and declared step IDs/kinds for
+each supported destination quote, plus any per-asset failures and its
+`settlement_policy`. That policy reports source and destination chain IDs,
+minimum confirmations and whether finalization is required. Source rules reflect
+configured network policy; destination bridge settlement always requires a
+finalized receipt. Inspect the actual quote's fees, net minimum, optional
+provider arrival estimate, validity, refund alternatives and ordered steps. A
+missing estimate stays unknown, and an arrival estimate does not replace the
+settlement policy. Then choose the amount interval,
+exact source-debit cap, net-receipt
+floor and cumulative gas caps for the transfer. The public operation fields
+are camelCase; nested `bounds` fields retain their schema's snake_case names.
+For example, a transfer-step input has this shape:
+
+```json
+{
+  "transferId": "TRANSFER_ID_FROM_QUOTE",
+  "stepId": "STEP_ID_FROM_QUOTE",
+  "stepKind": "approval",
+  "bounds": {
+    "input": {"minimum": "10000000", "maximum": "10000000"},
+    "maximum_source_debit": "10000000",
+    "minimum_net_receipt": {
+      "asset": {"network": "ethereum:42161", "reference": "0xaf88d065e77c8cc2239327c5edb3a432268e5831", "decimals": 6},
+      "atoms": "9500000"
+    },
+    "fee_caps": [{
+      "asset": {"network": "ethereum:1", "reference": "native", "decimals": 18},
+      "kind": "gas",
+      "maximum": "1000000000000000"
+    }]
+  }
+}
+```
+
+Preview the selected declared step before authorizing it. The first authorization
+can cover only that transfer's persisted finite approval/reset/deposit plan and
+cumulative debit/fee limits; it cannot authorize another transfer or ordinary
+wallet writes. It requires fresh Touch ID. Each actual step still gets a unique
+operation ID. Submit later steps under the same grant only while it remains
+valid; a quote refresh inside the approved quantity/bounds does not renew an
+expired authorization. Follow the authorization syntax and machine contract in
+`fin schema bridge.transfer --json` and `fin schema authorizations.authorize --json`.
+
+```sh
+fin preview bridge.transfer --input '{"transferId":"TRANSFER_ID_FROM_QUOTE","stepId":"STEP_ID_FROM_QUOTE","stepKind":"approval","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}' --json
+fin authorizations authorize bridge.transfer --id TRANSFER_ID_FROM_QUOTE --input '{"transferId":"TRANSFER_ID_FROM_QUOTE","stepId":"STEP_ID_FROM_QUOTE","stepKind":"approval","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}' --bounds '{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}' --json
+fin execute bridge.transfer --input '{"transferId":"TRANSFER_ID_FROM_QUOTE","stepId":"STEP_ID_FROM_QUOTE","stepKind":"approval","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}}' --id APPROVAL_STEP_ATTEMPT_ID --authorization AUTHORIZATION_ID --json
+fin read bridge.status --input '{"transferId":"TRANSFER_ID_FROM_QUOTE"}' --json
+```
+
+When a saved quote expires before source submission, refresh it with
+`refreshTransferId` and the unchanged wallet, chains, assets, recipient and
+refund scope. The source amount may change only inside the original or approved
+interval; approved bounds, step identities and prior settled approvals remain
+fixed. A submitted or uncertain source deposit is never refreshed or resent.
+Use `bridge.status` to reconcile its original transaction. Source confirmation
+means the source debit is proven and the transfer is in transit; it does not
+mean the recipient has received funds. A transfer is completed or refunded only
+after exact order-correlated destination/refund evidence and configured
+finality are independently verified. For a direct payout, the saved protocol
+order ID inside the payout transaction is the correlation; provider request IDs
+and Relay status are not sufficient proof. Status distinguishes a missing
+receipt, pending confirmations/finality, and a finalized transaction whose
+payment proof did not match. Diagnostics report bounded transaction and log
+shape facts, such as input length and exact-match booleans, without returning
+full calldata or receipt payloads. A proof mismatch leaves the transfer
+unresolved; it is not treated as more time waiting for confirmations.
+
+Relay integration needs no provider key. It currently depends on Relay's
+anonymous `/quote` endpoint, which is deprecated; the newer `/requests/v3`
+request path requires an API key and is not used. Endpoint withdrawal or an
+unsupported response leaves the Relay quote unavailable; it does not change a
+saved transfer's provider or route. A separate canonical quote is returned only
+when the exact request is eligible for its native-ETH same-wallet route. Base
+(`8453`) and Relay Chain (`537713`) are read-only
+observers; neither grants wallet authority. Other canonical bridges, Across,
+LayerZero/Stargate and Chainlink CCIP have no enabled route. Both canonical
+destinations completed in the recorded isolated development run; protected
+installation and human Touch ID remain unverified. See [bridge design](docs/bridge-design.md)
+and the [bridge verification guide](docs/testing/bridge.md).
 
 Binance assets use exact active spot-market metadata: choose a direct **USDC**
 pair first, otherwise **USDT**. Fin values one unit at the **best ask × quote/USD**,
@@ -720,6 +865,14 @@ establish that such a withdrawal route can be submitted. Other routes explicitly
 remain pending after Binance reports completion. This receipt policy does not
 change finality for Fin-originated wallet transfers or Binance deposits.
 Observer routing is separate from exchange submission support.
+
+For standard Binance withdrawals, `amount` is the gross SPOT debit and already
+includes the network fee; Binance history and the destination chain report the
+net payout. The current read-only route observation reports a 0.5 USDC fee, so
+for a 20 USDC net receipt request `amount` 20.5, set
+`maxFee` to 0.5, and `minReceiveAmount` to 20. The source needs 20.5 USDC, not
+21; fees are dynamic, so inspect fresh metadata and prepare a new preview before
+any later write.
 
 Inspect the exact withdrawal contract before preparing a real amount:
 

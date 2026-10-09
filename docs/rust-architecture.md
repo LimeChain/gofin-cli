@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, and Ethereum mainnet Uniswap/Aave adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, Ethereum mainnet Uniswap/Aave adapters and a Relay-backed bridge adapter. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## One CLI and a protected execution role
 
@@ -47,6 +47,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `fin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
 | `fin-ethereum`          | EVM wallets across reviewed networks, optional mainnet Uniswap/Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `fin-bridge`            | Relay quote normalization, fixed order/calldata validation, exact source-deposit decoding, and destination/refund event decoding. It supplies candidates; broker RPC verification and engine settlement establish proof. |
 | `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
 | `fin-human-terminal`    | Direct human terminal provenance checks, bounded private secret capture, cancellation and terminal restoration.                                        |
@@ -86,7 +87,38 @@ finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
 compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Uniswap/Aave are mainnet-only; general bridging is a separate capability.
+Uniswap/Aave are mainnet-only. Relay transfers are a separate application
+capability, not a general wallet write or arbitrary calldata interface.
+
+### Relay bridge composition and settlement
+
+`fin-bridge` owns typed quote/step contracts, anonymous Relay transport, order
+validation and decoders. `fin-broker` injects reviewed deployments, resolves the
+physical signer/address, persists quotes and step topology, and composes source,
+destination and refund observers. It reuses the existing per-chain `fin-evm`
+runtime for simulation, finite approvals, signing, nonce serialization and
+canonical receipts. `fin-engine` and `fin-store` own grant binding, step claims,
+cumulative debit/fee usage, source-proof transit handoff, and terminal settlement;
+shared accounting has no provider-specific branch.
+
+Wallet authority is limited to chains `1`, `42161` and `4663`. Base (`8453`)
+provides observer-only solver identity evidence; Relay Chain (`537713`) is an
+observer-only settlement network. Neither is selectable as the transfer wallet
+chain. One grant binds one persisted transfer and its finite approval,
+allowance-reset and deposit steps. Each step remains a separate immutable
+operation. A quote refresh can replace only an unsubmitted quote inside the
+approved identities, amount interval, receipt floor and caps; it does not renew
+grant expiry. A source deposit that is submitted or uncertain is reconciled under
+its original transaction identity, never repriced and resent.
+
+The source receipt proves only source inclusion/debit and creates a non-spendable
+transit resource while releasing the source nonce/transaction lock. It does not
+prove user receipt. Relay status provides candidate hashes and diagnostics. The
+broker independently checks finalized canonical receipts, the pinned solver,
+exact router event metadata and the user-selected destination/refund expectation
+before calling the engine's idempotent external settlement API. Missing or
+ambiguous correlation remains pending. See the [bridge guide](../README.md#relay-bridge-transfers)
+and [bridge verification procedure](testing/bridge.md).
 
 A legacy `ConnectionConfig::Ethereum` stays scoped to its original chain.
 Protected human-approved `connections update --provider evm` broadens it

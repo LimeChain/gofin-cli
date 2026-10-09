@@ -59,6 +59,32 @@ partial parent/email associations and unverified or mismatched account identitie
 
 ## Approval contracts
 
+The [bridging design](bridge-design.md) is implemented for Relay-backed direct
+native ETH and reviewed ERC-20 transfers between Ethereum Mainnet (`1`), Arbitrum
+One (`42161`) and Robinhood Chain (`4663`). The public operations are
+`bridge.quotes`, `bridge.transfer` and `bridge.status`; exact CLI schemas and a
+quote-first example live in the [README](../README.md#relay-bridge-transfers).
+Quote discovery is a read and grants no authority. A selected transfer uses
+exact/default quantities or human-selected bounds, broker-owned quote/step IDs,
+and one finite grant covering only its declared approval/reset/deposit steps.
+The grant binds cumulative source debit and fee caps. Refresh may choose another
+amount inside the approved interval while preserving route, identities, steps,
+receipt floor and grant; it does not renew an expired grant. Refresh after a
+submitted or uncertain source deposit is prohibited.
+
+Source transaction confirmation releases the wallet transaction lock and moves
+principal into non-spendable transfer transit. It is not end-to-end completion.
+`bridge.status` independently verifies exact order-correlated destination receipt
+or refund evidence at configured finality before settling the transfer. Relay
+status and transaction hashes are candidate locators only. Base (`8453`) and
+Relay Chain (`537713`) are observer-only. The provider requires no key and
+currently depends on Relay's deprecated anonymous `/quote`; the newer
+`/requests/v3` path requires an API key and is not used. If the anonymous endpoint
+is removed or a route is unsupported, Fin leaves it unavailable. Canonical
+bridges, Across, LayerZero/Stargate and Chainlink CCIP remain deferred. See the
+[bridge testing guide](testing/bridge.md) for synthetic coverage and the separate
+human/live verification recipe.
+
 Standalone writes use exact, fresh approval. Operation-boundary consent is an
 explicit adapter capability, not a general spending session. Fixed identities,
 permitted variations, cumulative debits and fee caps, and expiry belong to the
@@ -76,6 +102,10 @@ oversized summaries stop at a complete clause with an explicit reference to the
 full terminal review. Exact amounts are never cut midway. Terminal/agent review
 and the complete hash-bound authorization remain unchanged; this presentation
 budget does not guarantee the system dialog's layout on every macOS version.
+Bridge approval summaries retain readable wallet aliases and chain names, the
+chosen source amount/range, route, selected guaranteed receipt floor and maximum
+fees. The complete review identifies recipient, refund scope, finite steps,
+allowances and exact transaction bindings.
 
 ## Pricing contracts
 

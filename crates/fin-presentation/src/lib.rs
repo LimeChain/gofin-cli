@@ -236,6 +236,17 @@ impl Ui {
     ) -> io::Result<()> {
         if self.machine {
             write_json(value, output)
+        } else if matches!(command, "execute" | "status")
+            && !self.is_verbose()
+            && render_partial_transfer_failure(value).is_some()
+        {
+            for text in render_partial_transfer_failure(value)
+                .expect("checked above")
+                .lines()
+            {
+                writeln!(output, "{}", self.styled(text, "33"))?;
+            }
+            Ok(())
         } else if command == "authorizations" && !self.is_verbose() {
             for (text, color) in authorization_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
@@ -400,6 +411,14 @@ pub fn safe_text(text: &str) -> String {
 /// fields. Discovery has a shorter overview with its full metadata in verbose mode.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
+    if !verbose && matches!(command, "read" | "preview" | "execute" | "status") {
+        if let Some(rendered) = render_partial_transfer_failure(value) {
+            return rendered;
+        }
+        if let Some(rendered) = render_bridge_result(command, value) {
+            return rendered;
+        }
+    }
     if command == "authorizations" && !verbose {
         for (text, _) in authorization_rows(value) {
             line(&mut output, 0, &safe_text(&text));
@@ -540,6 +559,354 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         render_value(&mut output, value, 0);
     }
     output
+}
+
+fn render_partial_transfer_failure(value: &Value) -> Option<String> {
+    if value["status"].as_str() != Some("failed") {
+        return None;
+    }
+    // Failed transfers can still contain a verified positive recipient credit.
+    // Explain that movement explicitly so failure is never mistaken for a safe
+    // instruction to repeat an already submitted financial action.
+    let effects = value["effects"]["effects"].as_array()?;
+    let credits = effects
+        .iter()
+        .filter(|effect| effect["kind"].as_str() == Some("transfer"))
+        .filter_map(|effect| {
+            let amount = &effect["credit"];
+            let atoms = amount["atoms"].as_str()?;
+            if atoms.is_empty() || atoms.chars().all(|digit| digit == '0') {
+                return None;
+            }
+            display_amount(amount)
+        })
+        .collect::<Vec<_>>();
+    if credits.is_empty() {
+        return None;
+    }
+    let mut output = String::new();
+    line(
+        &mut output,
+        0,
+        &format!(
+            "Receipt minimum not met. Received {}.",
+            safe_text(&credits.join(", "))
+        ),
+    );
+    line(
+        &mut output,
+        0,
+        "Funds moved and are reconciled. Do not repeat this request; inspect the result before planning another action.",
+    );
+    Some(output)
+}
+
+fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
+    if value["operation"].as_str() == Some("bridge.transfer") {
+        let transfer_id = value["input"]["transferId"]
+            .as_str()
+            .or_else(|| value["input"]["transfer_id"].as_str())?;
+        let kind = value["input"]["stepKind"]
+            .as_str()
+            .or_else(|| value["input"]["step_kind"].as_str())
+            .unwrap_or("step");
+        let status = value["status"].as_str().unwrap_or("unknown");
+        let mut output = String::new();
+        if status == "completed" && kind == "deposit" {
+            line(
+                &mut output,
+                0,
+                "Source deposit confirmed; destination settlement is still pending.",
+            );
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Next: fin read bridge.status --input '{{\"transferId\":\"{}\"}}'",
+                    safe_text(transfer_id)
+                ),
+            );
+        } else if status == "completed" {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Bridge {kind} step confirmed for transfer {}.",
+                    safe_text(transfer_id)
+                ),
+            );
+            line(
+                &mut output,
+                0,
+                "Next: preview the next declared bridge.transfer step.",
+            );
+        } else {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Bridge {kind} step {} for transfer {}.",
+                    safe_text(status),
+                    safe_text(transfer_id)
+                ),
+            );
+            line(
+                &mut output,
+                0,
+                "Reconcile the original operation before retrying.",
+            );
+        }
+        return Some(output);
+    }
+    if value.get("transfers").and_then(Value::as_array).is_some() {
+        let transfers = value["transfers"].as_array()?;
+        let mut output = String::new();
+        line(
+            &mut output,
+            0,
+            &format!("Bridge quotes: {} route(s).", transfers.len()),
+        );
+        if value["coverage"]["market_wide_comparison"] == false {
+            line(
+                &mut output,
+                0,
+                "These quotes are not a market-wide comparison.",
+            );
+        }
+        for transfer in transfers {
+            let id = transfer["transfer_id"].as_str().unwrap_or("unavailable");
+            let quote = &transfer["quote"];
+            let amount = display_amount(&quote["gross_debit"])?;
+            let minimum = display_amount(&quote["minimum_receipt"])?;
+            let route = format!(
+                "{} → {}",
+                bridge_chain_name(quote["intent"]["source"]["chain_id"].as_u64()?),
+                bridge_chain_name(quote["intent"]["destination_chain_id"].as_u64()?)
+            );
+            let provider = bridge_provider_name(
+                quote["provider"].as_str(),
+                quote["intent"]["destination_chain_id"].as_u64(),
+            );
+            let via = provider
+                .map(|provider| format!(" via {provider}"))
+                .unwrap_or_default();
+            line(
+                &mut output,
+                0,
+                &format!("{route}{via}: {amount}; receive at least {minimum}."),
+            );
+            if let Some(seconds) = quote["estimated_arrival_seconds"].as_u64() {
+                line(
+                    &mut output,
+                    1,
+                    &format!("Estimated arrival: {}.", bridge_eta(seconds)),
+                );
+            }
+            if let Some(recipient) = quote["intent"]["recipient"].as_str() {
+                line(
+                    &mut output,
+                    1,
+                    &format!("Recipient: {}.", abbreviate_public_address(recipient)),
+                );
+            }
+            if let Some(fees) = quote["fees"].as_array() {
+                if fees.is_empty() {
+                    line(&mut output, 1, "Provider quote reports no additional fees.");
+                } else {
+                    for fee in fees {
+                        if let Some(amount) = display_amount(&fee["amount"]) {
+                            let kind = fee["kind"].as_str().unwrap_or("fee").replace('_', " ");
+                            line(&mut output, 1, &format!("{kind}: {amount}."));
+                        }
+                    }
+                }
+            }
+            if let Some(class) = quote["class"].as_str() {
+                line(
+                    &mut output,
+                    1,
+                    &format!("Quote class: {}.", safe_text(class)),
+                );
+            }
+            if let Some(valid_until) = quote["valid_until"].as_str() {
+                line(
+                    &mut output,
+                    1,
+                    &format!("Quote valid until {}.", safe_text(valid_until)),
+                );
+            }
+            line(&mut output, 1, &format!("Transfer ID: {}.", safe_text(id)));
+            if let Some(action) = transfer["next_action"].as_str() {
+                line(&mut output, 1, &safe_text(action));
+            }
+        }
+        if let Some(failures) = value["failures"]
+            .as_array()
+            .filter(|failures| !failures.is_empty())
+        {
+            line(
+                &mut output,
+                0,
+                &format!("Unavailable routes: {}.", failures.len()),
+            );
+            for failure in failures {
+                let asset = failure["destination_asset"]["token"]
+                    .as_str()
+                    .unwrap_or("native ETH");
+                let action = failure["error"]["next_action"]
+                    .as_str()
+                    .unwrap_or("Retry with another exact destination asset.");
+                line(
+                    &mut output,
+                    1,
+                    &format!("{}: {}", safe_text(asset), safe_text(action)),
+                );
+            }
+        }
+        return Some(output);
+    }
+    let id = value.get("transfer_id").and_then(Value::as_str)?;
+    if value.get("state").is_some() || value.get("provider_status").is_some() {
+        let mut output = String::new();
+        line(
+            &mut output,
+            0,
+            &format!(
+                "Bridge transfer {}: {}.",
+                safe_text(id),
+                safe_text(value["state"].as_str().unwrap_or("pending"))
+            ),
+        );
+        if let Some(steps) = value["steps"].as_array() {
+            for step in steps {
+                line(
+                    &mut output,
+                    1,
+                    &format!(
+                        "{}: {}",
+                        safe_text(step["kind"].as_str().unwrap_or("step")),
+                        safe_text(step["state"].as_str().unwrap_or("pending"))
+                    ),
+                );
+            }
+        }
+        if let Some(action) = value["next_action"].as_str() {
+            line(&mut output, 0, &format!("Next: {}", safe_text(action)));
+        }
+        if let Some(diagnostic) = value["provider_status"].as_object() {
+            if let Some(status) = diagnostic.get("status").and_then(Value::as_str) {
+                if value["provider"].as_str() == Some("arbitrum_canonical") {
+                    line(
+                        &mut output,
+                        0,
+                        "Canonical Inbox destination receipt is still being verified.",
+                    );
+                } else if value["provider"].as_str() == Some("relay") {
+                    line(
+                        &mut output,
+                        0,
+                        &format!(
+                            "Relay reports {}; on-chain receipt is still being verified.",
+                            safe_text(status)
+                        ),
+                    );
+                }
+            }
+        } else if value["provider"].as_str() == Some("arbitrum_canonical")
+            && value["state"].as_str() == Some("in_transit")
+        {
+            line(
+                &mut output,
+                0,
+                "Canonical Inbox destination receipt is still being verified.",
+            );
+        }
+        return Some(output);
+    }
+    if command == "preview" && value.get("summary").and_then(Value::as_str).is_some() {
+        // The approval path already displays this concise summary immediately
+        // before Touch ID; the normal preview still gets its complete checks.
+        return None;
+    }
+    None
+}
+
+fn display_amount(amount: &Value) -> Option<String> {
+    let atoms = amount["atoms"].as_str()?;
+    let decimals = amount["asset"]["decimals"].as_u64()? as usize;
+    let reference = amount["asset"]["reference"].as_str()?;
+    let mut digits = atoms.to_owned();
+    if decimals > 0 {
+        if digits.len() <= decimals {
+            digits.insert_str(0, &"0".repeat(decimals + 1 - digits.len()));
+        }
+        let split = digits.len() - decimals;
+        let fraction = digits.split_off(split);
+        let fraction = fraction.trim_end_matches('0');
+        if !fraction.is_empty() {
+            digits.push('.');
+            digits.push_str(fraction);
+        }
+    }
+    let asset = match reference {
+        "native" => "ETH",
+        address
+            if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                || address.eq_ignore_ascii_case("0xaf88d065e77c8cc2239327c5edb3a432268e5831") =>
+        {
+            "USDC"
+        }
+        address if address.eq_ignore_ascii_case("0x5fc5360d0400a0fd4f2af552add042d716f1d168") => {
+            "USDG"
+        }
+        other => other,
+    };
+    Some(format!("{digits} {asset}"))
+}
+
+fn bridge_chain_name(chain_id: u64) -> &'static str {
+    match chain_id {
+        1 => "Ethereum",
+        42161 => "Arbitrum",
+        4663 => "Robinhood Chain",
+        _ => "EVM",
+    }
+}
+
+fn bridge_provider_name(
+    provider: Option<&str>,
+    destination_chain_id: Option<u64>,
+) -> Option<&'static str> {
+    match (provider?, destination_chain_id?) {
+        ("relay", _) => Some("Relay"),
+        ("arbitrum_canonical", 42161) => Some("Canonical Inbox"),
+        ("arbitrum_canonical", 4663) => Some("Canonical Inbox"),
+        _ => None,
+    }
+}
+
+fn bridge_eta(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("about {seconds} seconds")
+    } else {
+        let minutes = seconds.saturating_add(59) / 60;
+        format!(
+            "about {minutes} minute{}",
+            if minutes == 1 { "" } else { "s" }
+        )
+    }
+}
+
+fn abbreviate_public_address(address: &str) -> String {
+    if address.len() > 12 {
+        format!(
+            "{}…{}",
+            safe_text(&address[..6]),
+            safe_text(&address[address.len() - 4..])
+        )
+    } else {
+        safe_text(address)
+    }
 }
 
 fn authorization_rows(value: &Value) -> Vec<(String, &'static str)> {
@@ -1383,5 +1750,105 @@ mod tests {
         assert!(text.contains("unpriced assets excluded from USD totals"));
         assert!(text.contains("$0 is an estimate, not verified worth"));
         assert!(!text.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn bridge_quotes_and_pending_status_are_concise_and_preserve_exact_identity() {
+        let quote = json!({
+            "coverage":{"market_wide_comparison":false},
+            "transfers":[{"transfer_id":"synthetic-transfer","quote":{
+                "provider":"relay",
+                "gross_debit":{"asset":{"network":"ethereum:1","reference":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48","decimals":6},"atoms":"10000000"},
+                "minimum_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9985000"},
+                "intent":{"source":{"chain_id":1},"destination_chain_id":42161},"estimated_arrival_seconds":90,"valid_until":"2030-01-01T00:00:00Z"
+            },"next_action":"Preview bridge.transfer."}],"failures":[]
+        });
+        let text = render_human("read", &quote, false);
+        assert!(text.contains("Bridge quotes: 1 route(s)."));
+        assert!(
+            text.contains("Ethereum → Arbitrum via Relay: 10 USDC; receive at least 9.985 USDC.")
+        );
+        assert!(text.contains("Estimated arrival: about 2 minutes."));
+        assert!(text.contains("synthetic-transfer"));
+        assert!(!text.contains("10000000"));
+
+        let canonical = json!({
+            "transfers":[{"quote":{
+                "provider":"arbitrum_canonical",
+                "gross_debit":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"100000000000000000"},
+                "minimum_receipt":{"asset":{"network":"ethereum:42161","reference":"native","decimals":18},"atoms":"99000000000000000"},
+                "intent":{"source":{"chain_id":1},"destination_chain_id":42161}
+            }}]
+        });
+        let text = render_human("read", &canonical, false);
+        assert!(text.contains(
+            "Ethereum → Arbitrum via Canonical Inbox: 0.1 ETH; receive at least 0.099 ETH."
+        ));
+
+        let pending = json!({"transfer_id":"synthetic-transfer","provider":"relay","state":"in_transit","steps":[{"kind":"deposit","state":"settled"}],"provider_status":{"status":"refund"},"next_action":"Retry fin read bridge.status."});
+        let text = render_human("read", &pending, false);
+        assert!(text.contains("Bridge transfer synthetic-transfer: in_transit."));
+        assert!(text.contains("Relay reports refund; on-chain receipt is still being verified."));
+        assert!(text.contains("Next: Retry fin read bridge.status."));
+        assert!(!text.contains("provider_status"));
+
+        let canonical_pending = json!({"transfer_id":"canonical-transfer","provider":"arbitrum_canonical","state":"in_transit","steps":[{"kind":"deposit","state":"settled"}],"next_action":"Retry fin read bridge.status."});
+        let text = render_human("read", &canonical_pending, false);
+        assert!(text.contains("Canonical Inbox destination receipt is still being verified."));
+
+        let source = json!({"operation":"bridge.transfer","input":{"transferId":"synthetic-transfer","stepKind":"deposit"},"status":"completed"});
+        let text = render_human("status", &source, false);
+        assert!(
+            text.contains("Source deposit confirmed; destination settlement is still pending.")
+        );
+        assert!(text.contains("fin read bridge.status"));
+        assert!(!text.contains("Transfer completed"));
+    }
+
+    #[test]
+    fn failed_verified_transfer_discloses_credit_without_implying_a_safe_replay() {
+        let value = json!({
+            "operation":"binance.withdraw","status":"failed",
+            "effects":{"effects":[{"kind":"transfer",
+                "debit":{"asset":{"network":"binance","reference":"ETH","decimals":36},"atoms":"12500000000000000000000000000000000"},
+                "credit":{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"atoms":"12350000000000000"}
+            }]}
+        });
+        let text = render_human("status", &value, false);
+        assert!(text.contains("Received 0.01235 ETH"));
+        assert!(text.contains("Funds moved and are reconciled"));
+        assert!(text.contains("Do not repeat this request"));
+        assert!(!text.contains("completed"));
+        for (tty, dumb, no_color) in [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let mut output = Vec::new();
+            ui(false, false, tty, tty, dumb, no_color)
+                .write_result_to(&value, "status", &mut output)
+                .unwrap();
+            let rendered = String::from_utf8(output).unwrap();
+            assert!(rendered.contains("Received 0.01235 ETH"));
+            assert_eq!(rendered.contains('\x1b'), tty && !dumb && !no_color);
+            if tty && !dumb && !no_color {
+                assert!(
+                    rendered
+                        .lines()
+                        .all(|row| row.starts_with("\x1b[33m") && row.ends_with("\x1b[0m"))
+                );
+            }
+        }
+        let mut machine = Vec::new();
+        ui(true, false, true, true, false, false)
+            .write_result_to(&value, "status", &mut machine)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), value);
+        assert!(!machine.contains(&0x1b));
+        let mut no_movement = value.clone();
+        no_movement["effects"]["effects"] = json!([]);
+        assert!(!render_human("status", &no_movement, false).contains("Received "));
+        assert!(render_human("status", &value, true).contains("12350000000000000"));
     }
 }

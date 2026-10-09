@@ -163,6 +163,16 @@ struct ApprovalPresentationTests {
         assert(financialAuthenticationReason(write, summary: depositSummary)!.contains("USD caps:"))
         assert(depositReason.count <= 180 && !depositReason.contains("full details"))
         assert(!depositReason.contains("native/18") && !depositReason.contains("42161") && !depositReason.contains("0x"))
+        var bridge = write
+        bridge["operation"] = "bridge.transfer"
+        let bridgeSummary = "Bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50."
+        let bridgeReason = financialAuthenticationReason(bridge, summary: bridgeSummary)!
+        assert(bridgeReason == "bridge 10 USDC; dev-wallet Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50.")
+        assert(bridgeReason.contains("Relay") && bridgeReason.contains("9.95 USDC") && bridgeReason.contains("$0.50"))
+        let oversizedBridge = "Bridge 10 USDC; " + String(repeating: "long-alias", count: 30) + " Ethereum Mainnet → Arbitrum One via Relay; Receive ≥9.95 USDC; Max fees $0.50."
+        let compactBridge = financialAuthenticationReason(bridge, summary: oversizedBridge)!
+        assert(compactBridge.count <= 180 && compactBridge.contains("See terminal review for full details."))
+        assert(compactBridge.contains("bridge 10 USDC;"))
         let oversizedDeposit = "Deposit 0.0000003 ETH: " + String(repeating: "long-alias", count: 30) + " on Arbitrum One. Max fee 0.00001 ETH."
         let oversizedReason = financialAuthenticationReason(deposit, summary: oversizedDeposit)!
         assert(oversizedReason.count <= 180 && oversizedReason.contains("See terminal review for full details."))

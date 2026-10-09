@@ -111,6 +111,43 @@ pub fn evm_network_profiles() -> Value {
     json!([{"network":"ethereum:1","name":"Ethereum Mainnet","chain_id":1,"native_coin":"ETH","operations":["wallet","Uniswap","Aave"]},{"network":"ethereum:42161","name":"Arbitrum One","chain_id":42161,"native_coin":"ETH","operations":["wallet"]},{"network":"ethereum:4663","name":"Robinhood Chain","chain_id":4663,"native_coin":"ETH","operations":["wallet"]}])
 }
 
+/// Offline bridge scope. The Relay settlement observer is intentionally kept
+/// separate from wallet networks and never grants wallet authority.
+pub fn bridge_profile() -> Value {
+    json!({
+        "providers": [
+            {
+                "id": "relay",
+                "coverage": "Quote-dependent native ETH and explicitly reviewed ERC-20 routes between supported networks"
+            },
+            {
+                "id": "arbitrum_canonical",
+                "coverage": "Native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain only; destination transaction identity is derived from finalized source proof"
+            }
+        ],
+        "provider_credentials": "no provider keys; Relay uses anonymous quotes and the canonical provider uses configured read-only EVM RPC",
+        "wallet_chains": [
+            {"chain_id": 1, "network": "ethereum:1", "name": "Ethereum Mainnet"},
+            {"chain_id": 42161, "network": "ethereum:42161", "name": "Arbitrum One"},
+            {"chain_id": 4663, "network": "ethereum:4663", "name": "Robinhood Chain"}
+        ],
+        "settlement_observers": [
+            {"chain_id": 537713, "name": "RelayChain", "role": "read_only_settlement_evidence", "wallet_authority": false}
+        ],
+        "solver_observers": [
+            {"chain_id":8453,"name":"Base","role":"read_only_protocol_order_observer","wallet_authority":false}
+        ],
+        "assets": "native ETH and explicitly identified reviewed ERC-20 contracts; Relay coverage is quote-dependent, while the canonical provider supports native ETH only",
+        "writes": "direct provider-reviewed deposits with finite token approvals only; canonical routes are native ETH only; no origin swaps or agent-supplied calldata",
+        "quotes": "quotes report individual provider coverage, not a market-wide comparison or financial authorization",
+        "input_schemas": {
+            "bridge.quotes": serde_json::to_value(schemars::schema_for!(fin_bridge::BridgeQuoteInput)).expect("schema serializes"),
+            "bridge.transfer": serde_json::to_value(schemars::schema_for!(fin_bridge::BridgeTransferInput)).expect("schema serializes"),
+            "bridge.status": serde_json::to_value(schemars::schema_for!(fin_bridge::BridgeStatusInput)).expect("schema serializes")
+        }
+    })
+}
+
 /// Machine execution policy shared by offline discovery and callers.
 pub fn machine_contract() -> Value {
     json!({"version":1,"flag":"--json","stdout":"one JSON value on success or error","stderr":"no human prose, progress or prompts","color":false,"terminal_prompts":false,"verbose":"ignored","exit_status":{"success":0,"error":1},"error_envelope":{"ok":false,"error":"FinError"},"human_interactive_commands":"Return HUMAN_TERMINAL_REQUIRED before privilege escalation or credential access; human runs the command without --json.","financial_writes":"Agent-invocable through exact per-write approval or an existing bounded authorization. Granting bounded authority still requires fresh macOS Touch ID; the OS approval UI may appear, but --json never prompts in the terminal. Client wait is bounded to 300 seconds, then reconcile the same request ID or authorization ID.","bounded_authorization":{"default_valid_for_seconds":600,"logical_intent_id":"--id on authorizations authorize","attempt_id":"--id on execute","execution_flag":"--authorization","dry_run":"fin execute OP --input JSON --authorization ID --dry-run evaluates fresh evidence without submission or consumption","revocation":"fin authorizations cancel ID prevents future dispatch without Touch ID","status":"fin authorizations status ID reconciles durable attempts"}})
@@ -734,6 +771,38 @@ pub fn exchange_capabilities() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_settlement_observer_is_disclosed_without_wallet_authority() {
+        let wallet_chains = evm_network_profiles()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|network| network["chain_id"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(wallet_chains, [1, 42161, 4663]);
+        let bridge = bridge_profile();
+        let providers = bridge["providers"].as_array().unwrap();
+        assert_eq!(providers[0]["id"], "relay");
+        assert_eq!(providers[1]["id"], "arbitrum_canonical");
+        assert!(
+            providers[1]["coverage"]
+                .as_str()
+                .unwrap()
+                .contains("Native ETH")
+        );
+        let observers = bridge["settlement_observers"].as_array().unwrap();
+        assert_eq!(observers.len(), 1);
+        assert_eq!(observers[0]["chain_id"], 537713);
+        assert_eq!(observers[0]["wallet_authority"], false);
+        assert!(!wallet_chains.contains(&537713));
+        let solvers = bridge["solver_observers"].as_array().unwrap();
+        assert_eq!(solvers.len(), 1);
+        assert_eq!(solvers[0]["chain_id"], 8453);
+        assert_eq!(solvers[0]["wallet_authority"], false);
+        assert!(!wallet_chains.contains(&8453));
+        assert!(bridge["input_schemas"]["bridge.transfer"]["properties"]["bounds"].is_object());
+    }
     #[derive(clap::Parser)]
     struct Cli {
         #[command(flatten)]

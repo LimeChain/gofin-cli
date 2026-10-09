@@ -30,6 +30,13 @@ fn error(code: &str, stage: &str, message: &str) -> FinError {
     )
 }
 
+fn preserve_rpc_cause(mut mapped: FinError, source: &FinError) -> FinError {
+    if let Some(details) = source.details.as_deref() {
+        mapped.details = Some(Box::new(details.clone()));
+    }
+    mapped
+}
+
 fn ceil_percent(value: U256, percent: u64) -> Option<U256> {
     value
         .checked_mul(U256::from(percent))
@@ -152,19 +159,72 @@ struct RpcAttemptFailure {
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 
-fn rpc_rejection(details: &Value) -> RpcAttemptFailure {
+fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttemptFailure {
     // Read only an exact signed integer. Provider messages, data and other
     // fields can contain request parameters or private revert payloads.
     let code = details.get("code").and_then(Value::as_i64);
+    let normalized_message = details
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let historical_state_unavailable = historical_state_fallback
+        && matches!(code, Some(-32000 | -32001))
+        && !normalized_message.contains("execution reverted")
+        && !normalized_message.contains("revert reason")
+        && (normalized_message.contains("missing trie node")
+            || normalized_message.contains("missing historical state")
+            || normalized_message.contains("historical state unavailable")
+            || normalized_message.contains("historical state is unavailable")
+            || normalized_message.contains("historical state is not available")
+            || normalized_message.contains("historical state has been pruned")
+            || normalized_message.contains("state is not available")
+            || normalized_message.contains("state unavailable"));
     let message = match code {
+        Some(_) if historical_state_unavailable => {
+            "RPC endpoint cannot serve the requested historical state; trying the next configured read endpoint.".to_owned()
+        }
         Some(code) => format!(
             "RPC request was rejected (JSON-RPC code {code}); external details are suppressed."
         ),
         None => "RPC request was rejected; external details are suppressed.".to_owned(),
     };
+    let mut error = error(
+        if historical_state_unavailable {
+            "RPC_HISTORICAL_STATE_UNAVAILABLE"
+        } else {
+            "RPC_REQUEST_FAILED"
+        },
+        "rpc",
+        &message,
+    );
+    if let Some(code) = code {
+        error = error.with_details(json!({"json_rpc_code":code}));
+    }
     RpcAttemptFailure {
-        retryable: code.is_some_and(|code| matches!(code, -32002 | -32005)),
-        error: error("RPC_REQUEST_FAILED", "rpc", &message),
+        retryable: historical_state_unavailable
+            || code.is_some_and(|code| matches!(code, -32002 | -32005)),
+        error,
+    }
+}
+
+fn has_historical_block_tag(value: Option<&Value>) -> bool {
+    value.and_then(Value::as_str).is_some_and(|tag| {
+        tag.strip_prefix("0x")
+            .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    })
+}
+
+fn is_historical_state_read(method: &str, params: &Value) -> bool {
+    let params = match params.as_array() {
+        Some(params) => params,
+        None => return false,
+    };
+    match method {
+        "eth_getCode" | "eth_getBalance" => has_historical_block_tag(params.get(1)),
+        "eth_getStorageAt" => has_historical_block_tag(params.get(2)),
+        "eth_call" => has_historical_block_tag(params.get(1)),
+        _ => false,
     }
 }
 
@@ -223,6 +283,7 @@ impl HttpRpc {
         url: &str,
         method: &str,
         params: Value,
+        historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
         let response = self
             .client
@@ -242,7 +303,8 @@ impl HttpRpc {
             let status = response.status();
             return Err(RpcAttemptFailure {
                 retryable: matches!(status.as_u16(), 408 | 425 | 429 | 500 | 502 | 503 | 504),
-                error: error("RPC_UNAVAILABLE", "rpc", "RPC HTTP request failed."),
+                error: error("RPC_UNAVAILABLE", "rpc", "RPC HTTP request failed.")
+                    .with_details(json!({"http_status":status.as_u16()})),
             });
         }
         let body = response
@@ -277,7 +339,7 @@ impl HttpRpc {
             });
         }
         if let Some(details) = result.get("error") {
-            return Err(rpc_rejection(details));
+            return Err(rpc_rejection(details, historical_state_fallback));
         }
         result
             .get("result")
@@ -293,10 +355,14 @@ impl HttpRpc {
         method: &str,
         params: Value,
         retries: usize,
+        historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
         let mut retry_index = 0;
         loop {
-            match self.at_once(url, method, params.clone()).await {
+            match self
+                .at_once(url, method, params.clone(), historical_state_fallback)
+                .await
+            {
                 Ok(result) => return Ok(result),
                 Err(failure) if failure.retryable && retry_index < retries => {
                     let delay = READ_RETRY_DELAYS_MS
@@ -307,7 +373,16 @@ impl HttpRpc {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
                 Err(failure) => {
-                    let error = if failure.retryable {
+                    let error = if failure.error.code == "RPC_HISTORICAL_STATE_UNAVAILABLE" {
+                        preserve_rpc_cause(
+                            error(
+                                "RPC_HISTORICAL_STATE_UNAVAILABLE",
+                                "rpc",
+                                "Configured RPC endpoint could not serve historical state after bounded retries.",
+                            ),
+                            &failure.error,
+                        )
+                    } else if failure.retryable {
                         let message = if failure.error.code == "RPC_REQUEST_FAILED" {
                             // This message is generated locally by rpc_rejection;
                             // retain its validated numeric cause, never provider text.
@@ -318,7 +393,10 @@ impl HttpRpc {
                         } else {
                             "Transient RPC failure persisted after bounded retries.".to_owned()
                         };
-                        error("RPC_UNAVAILABLE", "rpc", &message)
+                        preserve_rpc_cause(
+                            error("RPC_UNAVAILABLE", "rpc", &message),
+                            &failure.error,
+                        )
                     } else {
                         failure.error
                     };
@@ -347,7 +425,13 @@ impl HttpRpc {
             return Ok(());
         }
         let chain_id_response = self
-            .at(url, "eth_chainId", json!([]), MAX_READ_RETRIES_PER_ENDPOINT)
+            .at(
+                url,
+                "eth_chainId",
+                json!([]),
+                MAX_READ_RETRIES_PER_ENDPOINT,
+                false,
+            )
             .await?;
         let chain_id = rpc_u64(&chain_id_response).map_err(|failure| RpcAttemptFailure {
             retryable: false,
@@ -384,6 +468,7 @@ impl EvmRpc for HttpRpc {
             "eth_chainId",
             "eth_getCode",
             "eth_getBalance",
+            "eth_getStorageAt",
             "eth_call",
             "eth_estimateGas",
             "eth_maxPriorityFeePerGas",
@@ -405,6 +490,7 @@ impl EvmRpc for HttpRpc {
         } else {
             &self.urls[..]
         };
+        let historical_state_fallback = is_historical_state_read(method, &params);
         let mut failure = error(
             "RPC_UNAVAILABLE",
             "rpc",
@@ -413,11 +499,7 @@ impl EvmRpc for HttpRpc {
         for url in urls {
             match self.ensure_endpoint(url).await {
                 Ok(()) => (),
-                Err(e)
-                    if e.retryable
-                        || (method != "eth_sendRawTransaction"
-                            && e.error.code == "WRONG_CHAIN") =>
-                {
+                Err(e) if e.retryable => {
                     failure = e.error;
                     continue;
                 }
@@ -428,7 +510,16 @@ impl EvmRpc for HttpRpc {
             } else {
                 MAX_READ_RETRIES_PER_ENDPOINT
             };
-            match self.at(url, method, params.clone(), retries).await {
+            match self
+                .at(
+                    url,
+                    method,
+                    params.clone(),
+                    retries,
+                    historical_state_fallback,
+                )
+                .await
+            {
                 Ok(value) => return Ok(value),
                 Err(e) if e.retryable => failure = e.error,
                 Err(e) => return Err(e.error),
@@ -617,6 +708,7 @@ pub struct PreparedCall {
 #[derive(Clone, Debug)]
 pub struct CanonicalReceipt {
     pub hash: B256,
+    pub transaction_sender: String,
     pub block_hash: B256,
     pub block_number: u64,
     pub confirmations: u64,
@@ -635,6 +727,9 @@ impl EvmRuntime {
             signer,
             chain_id,
         }
+    }
+    pub fn can_sign(&self) -> bool {
+        self.signer.is_some()
     }
     pub async fn assert_chain(&self) -> Result<()> {
         if rpc_u64(&self.rpc.request("eth_chainId", json!([])).await?)? != self.chain_id {
@@ -687,7 +782,39 @@ impl EvmRuntime {
         call: &C,
         block: Option<u64>,
     ) -> Result<C::Return> {
-        let raw = rpc_bytes(&self.rpc.request("eth_call", json!([{"to":lower_address(to),"data":hex_bytes(&call.abi_encode())},block_tag(block)])).await?)?;
+        self.call_with_sender(None, to, call, block).await
+    }
+    /// Simulate a state-changing method with its real caller while preserving
+    /// the ordinary caller-free form for public view reads.
+    pub async fn call_from<C: SolCall>(
+        &self,
+        from: Address,
+        to: Address,
+        call: &C,
+        block: Option<u64>,
+    ) -> Result<C::Return> {
+        self.call_with_sender(Some(from), to, call, block).await
+    }
+    async fn call_with_sender<C: SolCall>(
+        &self,
+        from: Option<Address>,
+        to: Address,
+        call: &C,
+        block: Option<u64>,
+    ) -> Result<C::Return> {
+        let mut transaction = json!({
+            "to":lower_address(to),
+            "data":hex_bytes(&call.abi_encode())
+        });
+        if let Some(from) = from {
+            transaction["from"] = json!(lower_address(from));
+        }
+        let raw = rpc_bytes(
+            &self
+                .rpc
+                .request("eth_call", json!([transaction, block_tag(block)]))
+                .await?,
+        )?;
         C::abi_decode_returns(&raw).map_err(|_| {
             error(
                 "CONTRACT_DATA_INVALID",
@@ -1042,6 +1169,131 @@ impl EvmRuntime {
         })?;
         Ok(Some(CanonicalReceipt {
             hash: expected,
+            transaction_sender: transaction.sender.clone(),
+            block_hash,
+            block_number,
+            confirmations,
+            success: status == 1,
+            fee,
+            receipt,
+        }))
+    }
+
+    /// Observe a transaction candidate reported by an external protocol. This
+    /// proves only canonical inclusion and configured finality; callers must
+    /// independently verify the receipt logs and protocol correlation before
+    /// treating it as a financial effect.
+    pub async fn observe_receipt(
+        &self,
+        transaction_hash: &str,
+        required: u64,
+        require_finalized: bool,
+    ) -> Result<Option<CanonicalReceipt>> {
+        if required == 0 {
+            return Err(error(
+                "RECEIPT_IDENTITY_INVALID",
+                "reconciliation",
+                "Receipt observation requires a nonzero confirmation rule.",
+            ));
+        }
+        self.assert_chain().await?;
+        let expected = hash(transaction_hash)?;
+        let receipt = self
+            .rpc
+            .request("eth_getTransactionReceipt", json!([transaction_hash]))
+            .await?;
+        if receipt.is_null() {
+            return Ok(None);
+        }
+        let reported = self
+            .rpc
+            .request("eth_getTransactionByHash", json!([transaction_hash]))
+            .await?;
+        if reported.is_null()
+            || hash(receipt["transactionHash"].as_str().unwrap_or(""))? != expected
+            || hash(reported["hash"].as_str().unwrap_or(""))? != expected
+        {
+            return Err(error(
+                "RECEIPT_IDENTITY_INVALID",
+                "reconciliation",
+                "RPC receipt and transaction do not match the reported candidate hash.",
+            ));
+        }
+        let block_number = rpc_u64(&receipt["blockNumber"])?;
+        let block_hash = hash(receipt["blockHash"].as_str().unwrap_or(""))?;
+        if hash(reported["blockHash"].as_str().unwrap_or(""))? != block_hash
+            || rpc_u64(&reported["blockNumber"])? != block_number
+        {
+            return Err(error(
+                "RECEIPT_IDENTITY_INVALID",
+                "reconciliation",
+                "Receipt and transaction inclusion differ.",
+            ));
+        }
+        let block = self
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([format!("{block_number:#x}"), false]),
+            )
+            .await?;
+        if block.is_null()
+            || hash(block["hash"].as_str().unwrap_or(""))? != block_hash
+            || rpc_u64(&block["number"])? != block_number
+        {
+            return Ok(None);
+        }
+        let latest = rpc_u64(&self.rpc.request("eth_blockNumber", json!([])).await?)?;
+        let confirmations = if latest >= block_number {
+            latest - block_number + 1
+        } else {
+            0
+        };
+        if confirmations < required {
+            return Ok(None);
+        }
+        if require_finalized {
+            let finalized = self
+                .rpc
+                .request("eth_getBlockByNumber", json!(["finalized", false]))
+                .await?;
+            if finalized.is_null() || rpc_u64(&finalized["number"])? < block_number {
+                return Ok(None);
+            }
+            // Recheck the candidate block after observing the finalized head;
+            // the finalized head's hash is expected to differ from this block.
+            let canonical = self
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([format!("{block_number:#x}"), false]),
+                )
+                .await?;
+            if canonical.is_null() || hash(canonical["hash"].as_str().unwrap_or(""))? != block_hash
+            {
+                return Ok(None);
+            }
+        }
+        let status = rpc_u64(&receipt["status"])?;
+        if status > 1 {
+            return Err(error(
+                "RECEIPT_IDENTITY_INVALID",
+                "reconciliation",
+                "Receipt status is not a canonical success/revert value.",
+            ));
+        }
+        let gas = rpc_u64(&receipt["gasUsed"])?;
+        let price = rpc_u256(&receipt["effectiveGasPrice"])?;
+        let fee = U256::from(gas).checked_mul(price).ok_or_else(|| {
+            error(
+                "U256_OVERFLOW",
+                "reconciliation",
+                "Receipt gas cost overflows uint256.",
+            )
+        })?;
+        Ok(Some(CanonicalReceipt {
+            hash: expected,
+            transaction_sender: lower_address(address(reported["from"].as_str().unwrap_or(""))?),
             block_hash,
             block_number,
             confirmations,
@@ -1169,8 +1421,78 @@ mod http_rpc_tests {
         stream.flush().unwrap();
     }
 
+    #[tokio::test]
+    async fn observer_receipt_proves_only_canonical_confirmed_inclusion() {
+        let tx_hash = format!("0x{}", "11".repeat(32));
+        let block_hash = format!("0x{}", "22".repeat(32));
+        let receipt = json!({
+            "transactionHash":tx_hash,
+            "blockHash":block_hash,
+            "blockNumber":"0x10",
+            "status":"0x1",
+            "gasUsed":"0x5208",
+            "effectiveGasPrice":"0x2",
+            "logs":[{"address":"0x3333333333333333333333333333333333333333"}]
+        });
+        let transaction = json!({"hash":tx_hash,"blockHash":block_hash,"blockNumber":"0x10","from":"0x4444444444444444444444444444444444444444"});
+        let block = json!({"hash":block_hash,"number":"0x10"});
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt.clone()),
+            FixtureResponse::Json(transaction),
+            FixtureResponse::Json(block),
+            FixtureResponse::Json(json!("0x11")),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let observed = runtime
+            .observe_receipt(&tx_hash, 2, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.hash, hash(&tx_hash).unwrap());
+        assert_eq!(
+            observed.transaction_sender,
+            "0x4444444444444444444444444444444444444444"
+        );
+        assert_eq!(observed.block_number, 16);
+        assert_eq!(observed.confirmations, 2);
+        assert!(observed.success);
+        assert_eq!(observed.fee, U256::from(0x5208 * 2));
+        assert_eq!(
+            observed.receipt["logs"][0]["address"],
+            "0x3333333333333333333333333333333333333333"
+        );
+        assert_eq!(
+            worker.join().unwrap(),
+            vec![
+                "eth_chainId",
+                "eth_chainId",
+                "eth_getTransactionReceipt",
+                "eth_getTransactionByHash",
+                "eth_getBlockByNumber",
+                "eth_blockNumber"
+            ]
+        );
+    }
+
     fn two_endpoint_rpc(
         first_result: FixtureResponse,
+    ) -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>) {
+        two_endpoint_rpc_with_chain(first_result, "0x1")
+    }
+
+    fn two_endpoint_rpc_with_chain(
+        first_result: FixtureResponse,
+        chain_id: &'static str,
+    ) -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>) {
+        two_endpoint_rpc_with_chain_responses(first_result, chain_id, 2)
+    }
+
+    fn two_endpoint_rpc_with_chain_responses(
+        first_result: FixtureResponse,
+        chain_id: &'static str,
+        first_response_count: usize,
     ) -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>) {
         let first = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1178,7 +1500,11 @@ mod http_rpc_tests {
         let second_address = second.local_addr().unwrap();
         let first_worker = std::thread::spawn(move || {
             let mut methods = Vec::new();
-            for response in [FixtureResponse::Json(json!("0x1")), first_result] {
+            let mut responses = vec![FixtureResponse::Json(json!(chain_id))];
+            if first_response_count > 1 {
+                responses.push(first_result);
+            }
+            for response in responses {
                 let (mut stream, _) = first.accept().unwrap();
                 let request: Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
                 methods.push(request["method"].as_str().unwrap().to_owned());
@@ -1226,6 +1552,60 @@ mod http_rpc_tests {
                     }
                     Err(failure) => panic!("fixture listener failed: {failure}"),
                 }
+            }
+            methods
+        });
+        let rpc = HttpRpc::isolated_localhost(format!("http://{first_address}"), 1).unwrap();
+        let rpc = HttpRpc {
+            urls: vec![
+                format!("http://{first_address}"),
+                format!("http://{second_address}"),
+            ],
+            expected_chain_id: rpc.expected_chain_id,
+            client: rpc.client,
+            verified: rpc.verified,
+        };
+        (rpc, first_worker, second_worker)
+    }
+
+    fn historical_state_fallback_rpc() -> (HttpRpc, JoinHandle<Vec<String>>, JoinHandle<Vec<String>>)
+    {
+        let first = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let first_address = first.local_addr().unwrap();
+        let second_address = second.local_addr().unwrap();
+        let first_worker = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = first.accept().unwrap();
+                let request: Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
+                let method = request["method"].as_str().unwrap().to_owned();
+                methods.push(method.clone());
+                let payload = if index == 0 {
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":"0x1"})
+                } else {
+                    json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"missing trie node PRIVATE_PROVIDER_DATA"}})
+                }
+                .to_string();
+                write_response(&mut stream, 200, payload.as_bytes());
+            }
+            methods
+        });
+        let second_worker = std::thread::spawn(move || {
+            let mut methods = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = second.accept().unwrap();
+                let request: Value = serde_json::from_slice(&read_request(&mut stream)).unwrap();
+                let method = request["method"].as_str().unwrap().to_owned();
+                methods.push(method.clone());
+                let result = if method == "eth_chainId" {
+                    json!("0x1")
+                } else {
+                    json!("0x6000")
+                };
+                let payload =
+                    json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
+                write_response(&mut stream, 200, payload.as_bytes());
             }
             methods
         });
@@ -1292,6 +1672,52 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
+    async fn historical_state_error_fails_over_but_revert_does_not() {
+        let (rpc, first, second) = historical_state_fallback_rpc();
+        assert_eq!(
+            rpc.request(
+                "eth_getCode",
+                json!(["0x0000000000000000000000000000000000000002", "0x10"])
+            )
+            .await
+            .unwrap(),
+            "0x6000"
+        );
+        assert_eq!(
+            first.join().unwrap(),
+            vec!["eth_chainId", "eth_getCode", "eth_getCode", "eth_getCode"]
+        );
+        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_getCode"]);
+
+        let (rpc, first, second) =
+            two_endpoint_rpc(FixtureResponse::RpcError(-32000, "execution reverted"));
+        assert_eq!(
+            rpc.request("eth_call", json!([{}, "latest"]))
+                .await
+                .unwrap_err()
+                .code,
+            "RPC_REQUEST_FAILED"
+        );
+        assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+        assert!(second.join().unwrap().is_empty());
+
+        let (rpc, first, second) =
+            two_endpoint_rpc_with_chain_responses(FixtureResponse::Json(json!("0x6000")), "0x2", 1);
+        assert_eq!(
+            rpc.request(
+                "eth_getCode",
+                json!(["0x0000000000000000000000000000000000000002", "0x10"])
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "WRONG_CHAIN"
+        );
+        assert_eq!(first.join().unwrap(), vec!["eth_chainId"]);
+        assert!(second.join().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn semantic_and_identity_errors_do_not_fail_over_to_another_endpoint() {
         let (rpc, first, second) =
             two_endpoint_rpc(FixtureResponse::RpcError(3, "execution reverted"));
@@ -1334,6 +1760,7 @@ mod http_rpc_tests {
             .await
             .unwrap_err();
         assert_eq!(failure.code, "RPC_UNAVAILABLE");
+        assert_eq!(failure.details.as_deref().unwrap()["http_status"], 503);
         assert_eq!(
             worker.join().unwrap(),
             vec!["eth_chainId", "eth_call", "eth_call", "eth_call"]
@@ -1343,12 +1770,15 @@ mod http_rpc_tests {
     #[test]
     fn rpc_rejection_retains_only_exact_numeric_codes() {
         for code in [-32700_i64, -32602, -32005, -32002, 3, i64::MIN, i64::MAX] {
-            let failure = rpc_rejection(&json!({
-                "code":code,
-                "message":"SYNTHETIC_PRIVATE_MESSAGE",
-                "data":{"calldata":"SYNTHETIC_PRIVATE_DATA"},
-                "params":["SYNTHETIC_PRIVATE_PARAMS"]
-            }));
+            let failure = rpc_rejection(
+                &json!({
+                    "code":code,
+                    "message":"SYNTHETIC_PRIVATE_MESSAGE",
+                    "data":{"calldata":"SYNTHETIC_PRIVATE_DATA"},
+                    "params":["SYNTHETIC_PRIVATE_PARAMS"]
+                }),
+                false,
+            );
             assert_eq!(failure.error.code, "RPC_REQUEST_FAILED");
             assert!(
                 failure
@@ -1357,6 +1787,10 @@ mod http_rpc_tests {
                     .contains(&format!("JSON-RPC code {code}"))
             );
             assert_eq!(failure.retryable, matches!(code, -32002 | -32005));
+            assert_eq!(
+                failure.error.details.as_deref().unwrap()["json_rpc_code"],
+                code
+            );
             assert!(
                 !serde_json::to_string(&failure.error)
                     .unwrap()
@@ -1371,7 +1805,7 @@ mod http_rpc_tests {
             json!("SYNTHETIC_PRIVATE_ERROR"),
             Value::Null,
         ] {
-            let failure = rpc_rejection(&details);
+            let failure = rpc_rejection(&details, false);
             assert_eq!(failure.error.code, "RPC_REQUEST_FAILED");
             assert!(!failure.retryable);
             assert!(!failure.error.message.contains("JSON-RPC code"));
@@ -1380,6 +1814,57 @@ mod http_rpc_tests {
                     .unwrap()
                     .contains("SYNTHETIC_PRIVATE")
             );
+        }
+    }
+
+    #[test]
+    fn only_recognized_historical_state_errors_are_fallback_eligible() {
+        for (code, message) in [
+            (-32000, "missing trie node abc"),
+            (-32001, "historical state is not available"),
+            (-32000, "state unavailable"),
+        ] {
+            let failure = rpc_rejection(&json!({"code":code,"message":message}), true);
+            assert!(failure.retryable);
+            assert_eq!(failure.error.code, "RPC_HISTORICAL_STATE_UNAVAILABLE");
+            assert!(!failure.error.message.contains("abc"));
+            assert!(!failure.error.message.contains(message));
+        }
+        for (code, message) in [
+            (-32000, "execution reverted"),
+            (-32000, "execution reverted: missing trie node"),
+            (-32001, "invalid params"),
+            (-32002, "missing trie node"),
+        ] {
+            let failure = rpc_rejection(&json!({"code":code,"message":message}), true);
+            assert!(!failure.retryable || matches!(code, -32002));
+            if code != -32002 {
+                assert_eq!(failure.error.code, "RPC_REQUEST_FAILED");
+            }
+        }
+        let latest_state_error =
+            rpc_rejection(&json!({"code":-32000,"message":"missing trie node"}), false);
+        assert!(!latest_state_error.retryable);
+        assert_eq!(latest_state_error.error.code, "RPC_REQUEST_FAILED");
+    }
+
+    #[test]
+    fn historical_fallback_is_limited_to_read_methods_with_explicit_block_numbers() {
+        for (method, params) in [
+            ("eth_getCode", json!(["0x1", "0x10"])),
+            ("eth_getBalance", json!(["0x1", "0x10"])),
+            ("eth_getStorageAt", json!(["0x1", "0x0", "0x10"])),
+            ("eth_call", json!([{"to":"0x1"}, "0x10"])),
+        ] {
+            assert!(is_historical_state_read(method, &params), "{method}");
+        }
+        for (method, params) in [
+            ("eth_getCode", json!(["0x1", "latest"])),
+            ("eth_getBalance", json!(["0x1"])),
+            ("eth_call", json!([{"to":"0x1"}, "pending"])),
+            ("eth_sendRawTransaction", json!(["0xdeadbeef"])),
+        ] {
+            assert!(!is_historical_state_read(method, &params), "{method}");
         }
     }
 

@@ -30,7 +30,7 @@ fn charge(prepared: &PreparedOperation) -> Result<BigUint> {
         + value.additional_allocation_usd_micros.integer())
 }
 
-fn record_charge(record: &OperationRecord) -> Result<BigUint> {
+pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
     let Some(prepared) = record.preview.as_ref() else {
         return Err(budget_error(
             "VALUATION_UNAVAILABLE",
@@ -144,9 +144,54 @@ impl Engine {
     }
     pub fn allocation_used_usd_micros(&self) -> Result<String> {
         let mut total = BigUint::zero();
-        for record in self.operations()? {
-            if counted(&record, Utc::now())? {
+        let instant = Utc::now();
+        let (owners, owner_operations, transfers, operations) = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            let operation_rows = store.list_records().map_err(map_store)?;
+            let operations = operation_rows
+                .into_iter()
+                .map(from_value::<OperationRecord>)
+                .collect::<Result<Vec<_>>>()?;
+            let owners = store.bridge_allocation_owners().map_err(map_store)?;
+            let operation_ids = owners
+                .iter()
+                .map(|row| row.0.clone())
+                .collect::<BTreeSet<_>>();
+            let transfers = owners
+                .iter()
+                .map(|row| store.bridge_transfer(&row.1).map_err(map_store))
+                .collect::<Result<Vec<_>>>()?;
+            (owners, operation_ids, transfers, operations)
+        };
+        for record in operations {
+            // The row's single allocation charge moved atomically to its bridge
+            // transfer owner after source proof; never count both identities.
+            if owner_operations.contains(&record.id) {
+                continue;
+            }
+            if counted(&record, instant)? {
                 total += record_charge(&record)?;
+            }
+        }
+        for (owner, transfer) in owners.iter().zip(transfers.iter()) {
+            let unresolved = transfer.as_ref().is_some_and(|record| {
+                !matches!(
+                    record.state,
+                    fin_domain::BridgeTransferState::Completed
+                        | fin_domain::BridgeTransferState::Refunded
+                        | fin_domain::BridgeTransferState::Failed
+                )
+            });
+            let within_window = owner.4.as_deref().is_some_and(|timestamp| {
+                parse_time(timestamp)
+                    .map(|settled| settled > instant - chrono::Duration::hours(24))
+                    .unwrap_or(true)
+            });
+            if unresolved || within_window {
+                total += parse_uint(&owner.2)?;
             }
         }
         Ok(total.to_string())

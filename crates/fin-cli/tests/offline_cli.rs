@@ -156,7 +156,7 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 50);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 53);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],

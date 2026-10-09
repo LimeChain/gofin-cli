@@ -572,6 +572,24 @@ fn config() -> BrokerConfigV2 {
     }
 }
 
+fn validate_bridge_composition(
+    adapters: &[Arc<dyn Adapter>],
+    bridge: &Option<Arc<fin_broker::BridgeAdapter>>,
+) -> Result<(), String> {
+    let adapter_has_bridge_operations = adapters.iter().any(|adapter| {
+        adapter
+            .definitions()
+            .iter()
+            .any(|definition| definition.name.starts_with("bridge."))
+    });
+    if adapter_has_bridge_operations != bridge.is_some() {
+        return Err(
+            "bridge operations and shared bridge state must be wired together at startup".into(),
+        );
+    }
+    Ok(())
+}
+
 async fn run(args: Args) -> Result<(), String> {
     let environment_dir = args
         .database
@@ -609,7 +627,7 @@ async fn run(args: Args) -> Result<(), String> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
-    let (runtime_config, adapters, valuator) = if args.mode == "live" {
+    let (runtime_config, adapters, valuator, bridge) = if args.mode == "live" {
         let runtime_config = profile::broker_config(&environment_config)?;
         let credentials = Arc::new(
             dev_credentials::DevelopmentCredentialProvider::new(
@@ -629,7 +647,12 @@ async fn run(args: Args) -> Result<(), String> {
             ),
         )
         .map_err(|_| "live development adapters could not be initialized")?;
-        (runtime_config, applications.adapters, applications.valuator)
+        (
+            runtime_config,
+            applications.adapters,
+            applications.valuator,
+            applications.bridge,
+        )
     } else {
         (
             config(),
@@ -638,8 +661,10 @@ async fn run(args: Args) -> Result<(), String> {
                 movement_usd_micros: "0".into(),
             }) as Arc<dyn Adapter>],
             Arc::new(SyntheticValuator) as Arc<dyn AssetValuator>,
+            None,
         )
     };
+    validate_bridge_composition(&adapters, &bridge)?;
     let requires_identity_check = runtime_config
         .connections
         .iter()
@@ -674,6 +699,7 @@ async fn run(args: Args) -> Result<(), String> {
             adapters,
             authorizer: Arc::new(DevelopmentAutoAuthorizer),
             valuator,
+            bridge,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -718,6 +744,21 @@ async fn run(args: Args) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_bridge_operations_require_the_shared_repository_composition() {
+        let bridge = Arc::new(
+            fin_broker::BridgeAdapter::new(
+                std::collections::BTreeMap::new(),
+                Arc::new(fin_broker::SharedUsdValuator::new().unwrap()),
+            )
+            .unwrap(),
+        );
+        let adapters: Vec<Arc<dyn Adapter>> = vec![bridge.clone()];
+        assert!(validate_bridge_composition(&adapters, &None).is_err());
+        assert!(validate_bridge_composition(&adapters, &Some(bridge)).is_ok());
+        assert!(validate_bridge_composition(&[], &None).is_ok());
+    }
 
     #[test]
     fn discovery_requires_an_import_and_import_requires_live_mode() {
@@ -802,6 +843,7 @@ mod tests {
                 adapters: vec![adapter],
                 authorizer: Arc::new(DevelopmentAutoAuthorizer),
                 valuator: Arc::new(SyntheticValuator),
+                bridge: None,
             },
         )
         .unwrap();

@@ -5,6 +5,7 @@ mod spot;
 mod trading;
 mod transfer_rejection;
 mod withdrawal;
+mod withdrawal_rejection;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use fin_domain::{
@@ -26,6 +27,8 @@ use std::{
     sync::Arc,
 };
 pub use withdrawal::binance_evm_chain_id;
+
+const SUB_TO_MASTER_RECV_WINDOW_MS: u64 = 5_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1296,7 +1299,7 @@ impl BinanceProfile {
             }
             .request()
             .map_err(domain_error)?
-            .push("recvWindow", "5000")
+            .push("recvWindow", SUB_TO_MASTER_RECV_WINDOW_MS.to_string())
         } else {
             intent.request().map_err(domain_error)?
         };
@@ -1554,14 +1557,32 @@ impl BinanceProfile {
         })?;
         let receipt_available = self.receipt_available(&destination, &input.coin, &input.network);
         let min_receive_atoms = decimal_to_atoms(&min_receive, asset.decimals)?;
-        // The receiver bound is independently verified against the chain.
-        // transactionFee is a separate venue debit, so a user may require the
-        // full API quantity as the minimum payout.
-        if min_receive.checked_cmp(&quantity).is_gt() {
+        // Binance's standard withdrawal API amount is the gross amount removed
+        // from SPOT. The network fee is withheld from that amount, so the net
+        // payout cannot exceed gross minus the currently published fee. The
+        // user-selected fee cap must also leave enough room for the requested
+        // receipt floor even if the fee rises to that cap.
+        let expected_net = subtract_decimal(&quantity, fee).ok_or_else(|| {
+            error(
+                "WITHDRAWAL_FEE_EXCEEDS_AMOUNT",
+                "preview",
+                "Published network fee exceeds the gross withdrawal amount.",
+            )
+        })?;
+        let minimum_net_at_fee_cap = subtract_decimal(&quantity, &max_fee).ok_or_else(|| {
+            error(
+                "WITHDRAWAL_FEE_EXCEEDS_AMOUNT",
+                "preview",
+                "Approved maximum fee exceeds the gross withdrawal amount.",
+            )
+        })?;
+        if min_receive.checked_cmp(&minimum_net_at_fee_cap).is_gt()
+            || min_receive.checked_cmp(&expected_net).is_gt()
+        {
             return Err(error(
                 "RECEIPT_BOUND_UNSUPPORTED",
                 "preview",
-                "Minimum receipt exceeds the exact API quantity bound.",
+                "Minimum net receipt exceeds the gross amount after the approved fee bound.",
             ));
         }
         let debit_asset = AssetId {
@@ -1570,11 +1591,10 @@ impl BinanceProfile {
             decimals: 36,
         };
         let max_fee_atoms = decimal_to_atoms(&max_fee, debit_asset.decimals)?;
-        let gross = add_decimal(&quantity, &max_fee)?;
         let _required_main = if let Some(funding) = &funding {
-            add_decimal(&gross, &funding.total_amount)?
+            add_decimal(&quantity, &funding.total_amount)?
         } else {
-            gross.clone()
+            quantity.clone()
         };
         let balances = self.spot_balances(account, None).await?;
         let free = Self::free(&balances, &input.coin)
@@ -1585,11 +1605,11 @@ impl BinanceProfile {
         } else {
             free.clone()
         };
-        if projected.checked_cmp(&gross).is_lt() {
+        if projected.checked_cmp(&quantity).is_lt() {
             return Err(error(
                 "INSUFFICIENT_BALANCE",
                 "preview",
-                "Main SPOT free balance must cover the API amount plus approved maximum fee.",
+                "Main SPOT free balance must cover the gross API withdrawal amount, including its network fee.",
             ));
         }
         let client_id = ClientIdentity::withdrawal(&input.request_id).map_err(domain_error)?;
@@ -1629,14 +1649,14 @@ impl BinanceProfile {
         let mut binding = json!({
             "account": account.name, "destination": destination.name, "chainId": destination.chain_id,
             "asset": asset, "debitAsset": debit_asset, "params": prepared_request, "maximumFee": max_fee.canonical(),
-            "maximumGrossDebit": gross.canonical(), "minimumReceive": min_receive.canonical(),
+            "maximumGrossDebit": quantity.canonical(), "minimumReceive": min_receive.canonical(),
             "maximumReceive": quantity.canonical(), "confirmations": destination.confirmations,
             "observedFree": free.canonical(), "publishedFee": fee.canonical(),
             "withdrawOrderId": client_id.as_str(), "network": input.network,
             "memo": input.memo, "receiptResource": destination.resource, "receiptAddress": destination.address,
             "receiptMode": if receipt_available { "chain" } else { "unverified" }
         });
-        let mut warnings = vec!["Binance documents network fee and transaction amount separately from recipient net receipt. Debit is bounded by API amount plus the maximum fee; receipt is bounded by API amount minus maximum fee.".to_owned()];
+        let mut warnings = vec!["The Binance API amount is the gross source debit and already includes the network fee. Recipient history and chain evidence report the net payout after that fee; do not add the fee to the API amount.".to_owned()];
         let mut checks = vec![
             Self::check(
                 "permission",
@@ -1700,7 +1720,7 @@ impl BinanceProfile {
                     asset: debit_asset,
                     atoms: max_fee_atoms,
                 },
-                treatment: CostTreatment::AdditionalDebit,
+                treatment: CostTreatment::IncludedInDebit,
             }],
             expected: effects,
             locks: vec![account.resource.clone(), destination.resource.clone()],
@@ -1713,7 +1733,7 @@ impl BinanceProfile {
             serde_json::to_value(&input).unwrap_or(Value::Null),
             binding,
             format!(
-                "Withdraw API quantity {} {} from {} SPOT to {} ({}) on {}; published fee {}, approved maximum fee {}, maximum gross debit {}, minimum net receipt {}.",
+                "Withdraw gross API amount {} {} from {} SPOT to {} ({}) on {}; this amount includes the published network fee {}; approved maximum fee {}; expected net receipt {}; minimum net receipt {}.",
                 quantity.canonical(),
                 input.coin,
                 account.name,
@@ -1722,7 +1742,7 @@ impl BinanceProfile {
                 input.network,
                 fee.canonical(),
                 max_fee.canonical(),
-                gross.canonical(),
+                expected_net.canonical(),
                 min_receive.canonical()
             ) + &input
                 .memo
@@ -2041,40 +2061,51 @@ fn http_failure_error(
     binance_code: Option<i64>,
     kind: HttpFailureKind,
 ) -> FinError {
-    let mut error = match kind {
-        HttpFailureKind::RateLimited => error(
-            "VENUE_RATE_LIMIT",
+    let mut error = if stage == "submission" && status == 400 && binance_code == Some(-4035) {
+        FinError::new(
+            "WITHDRAWAL_ADDRESS_NOT_WHITELISTED",
             stage,
-            "Binance rate limited the request.",
-        ),
-        HttpFailureKind::PermissionDenied => error(
-            "VENUE_PERMISSION",
-            stage,
-            "The selected Binance credential was denied.",
-        ),
-        HttpFailureKind::Rejected => error(
-            "VENUE_REQUEST_FAILED",
-            stage,
-            "Binance rejected the request; reconcile any persisted submission before retrying.",
-        ),
-        HttpFailureKind::InvalidResponse => error(
-            "VENUE_RESPONSE_INVALID",
-            stage,
-            "Binance returned an invalid response; reconcile any persisted submission before retrying.",
-        ),
+            "Binance rejected this withdrawal because the destination is not on its withdrawal allowlist.",
+            "Check `fin schema binance.whitelist --json`, then inspect the exact account, coin, network, address, and memo with `fin read binance.whitelist`. Add or enable the destination through Binance Address Management, then reconcile this original withdrawal before considering another operation.",
+        )
+    } else {
+        let mut error = match kind {
+            HttpFailureKind::RateLimited => error(
+                "VENUE_RATE_LIMIT",
+                stage,
+                "Binance rate limited the request.",
+            ),
+            HttpFailureKind::PermissionDenied => error(
+                "VENUE_PERMISSION",
+                stage,
+                "The selected Binance credential was denied.",
+            ),
+            HttpFailureKind::Rejected => error(
+                "VENUE_REQUEST_FAILED",
+                stage,
+                "Binance rejected the request; reconcile any persisted submission before retrying.",
+            ),
+            HttpFailureKind::InvalidResponse => error(
+                "VENUE_RESPONSE_INVALID",
+                stage,
+                "Binance returned an invalid response; reconcile any persisted submission before retrying.",
+            ),
+        };
+        // These values are parsed from the protocol status and a JSON signed
+        // integer only. Never attach upstream messages or response contents.
+        error.message.push_str(&format!(" [HTTP {status}"));
+        if let Some(code) = binance_code {
+            error.message.push_str(&format!("; Binance code {code}"));
+        }
+        error.message.push(']');
+        error
     };
-    // These values are parsed from the protocol status and a JSON signed
-    // integer only. Never attach upstream messages or response contents.
-    error.message.push_str(&format!(" [HTTP {status}"));
-    if let Some(code) = binance_code {
-        error.message.push_str(&format!("; Binance code {code}"));
-    }
-    error.message.push(']');
-    error.with_details(json!({
+    error.details = Some(Box::new(json!({
         "transport": "binance-ccxt",
         "http_status": status,
         "binance_code": binance_code,
-    }))
+    })));
+    error
 }
 
 fn domain_error(error: impl std::fmt::Display) -> FinError {
@@ -3312,11 +3343,27 @@ impl BinanceProfile {
                 "The destination has no reviewed Ethereum asset identity for this Binance coin.",
             )
         })?;
-        if min_receive.checked_cmp(&quantity).is_gt() {
+        let expected_net = subtract_decimal(&quantity, fee).ok_or_else(|| {
+            error(
+                "WITHDRAWAL_FEE_EXCEEDS_AMOUNT",
+                "preflight",
+                "Published network fee exceeds the gross withdrawal amount.",
+            )
+        })?;
+        let minimum_net_at_fee_cap = subtract_decimal(&quantity, &max_fee).ok_or_else(|| {
+            error(
+                "WITHDRAWAL_FEE_EXCEEDS_AMOUNT",
+                "preflight",
+                "Approved maximum fee exceeds the gross withdrawal amount.",
+            )
+        })?;
+        if min_receive.checked_cmp(&minimum_net_at_fee_cap).is_gt()
+            || min_receive.checked_cmp(&expected_net).is_gt()
+        {
             return Err(error(
                 "RECEIPT_BOUND_UNSUPPORTED",
                 "preflight",
-                "Minimum recipient credit exceeds the exact API quantity bound.",
+                "Minimum net recipient credit exceeds the gross amount after the approved fee bound.",
             ));
         }
         let debit_asset = AssetId {
@@ -3326,7 +3373,7 @@ impl BinanceProfile {
         };
         let debit_atoms = decimal_to_atoms(&quantity, debit_asset.decimals)?;
         let fee_atoms = decimal_to_atoms(&max_fee, debit_asset.decimals)?;
-        let required = debit_atoms.checked_add(&fee_atoms).map_err(domain_error)?;
+        let required = debit_atoms.clone();
         let source_min = context
             .projected
             .cash
@@ -3338,7 +3385,7 @@ impl BinanceProfile {
             return Err(error(
                 "PLAN_FUNDS_UNAVAILABLE",
                 "preflight",
-                "Projected Binance SPOT cash cannot cover the exact withdrawal plus maximum fee.",
+                "Projected Binance SPOT cash cannot cover the gross API withdrawal amount, including its network fee.",
             ));
         }
         let source_step = context
@@ -3384,7 +3431,7 @@ impl BinanceProfile {
                 asset: debit_asset.clone(),
                 atoms: fee_atoms,
             },
-            treatment: CostTreatment::AdditionalDebit,
+            treatment: CostTreatment::IncludedInDebit,
         };
         let intent = FinancialIntent {
             debits: vec![ResourceAmount {
@@ -3405,9 +3452,8 @@ impl BinanceProfile {
             }],
             locks: vec![account.resource.clone(), destination.resource.clone()],
         };
-        // The API quantity is the transfer principal. The venue network fee
-        // is separately bounded by intent.maximum_costs and folded into the
-        // projected cash debit by fin-engine exactly once.
+        // The gross API quantity is the complete source debit. The fee is
+        // withheld from that debit, so projected destination holdings are net.
         let max_debit = required;
         let signed_min = SignedQuantity::negative(&amount_atoms);
         let signed_max = SignedQuantity::negative(&amount_atoms);
@@ -3446,7 +3492,7 @@ impl BinanceProfile {
                 amount: max_debit,
                 source_step,
             }],
-            evidence: json!({"method":"binance-conditional-withdrawal-v2","account":account.resource,"destination":destination.resource,"address":destination.address,"network":input.network,"memo":input.memo,"publishedFee":fee.canonical(),"maximumFee":max_fee.canonical(),"minimumReceive":min_receive.canonical(),"maximumReceive":quantity.canonical(),"precisionIncrement":increment.canonical(),"travelRule":"NIL","conditional":"Actual execution still needs a fresh ordinary Binance preview, Touch ID, original withdrawOrderId journaling, and canonical Ethereum receipt verification."}),
+            evidence: json!({"method":"binance-conditional-withdrawal-v3","account":account.resource,"destination":destination.resource,"address":destination.address,"network":input.network,"memo":input.memo,"apiGrossAmount":quantity.canonical(),"publishedFee":fee.canonical(),"maximumFee":max_fee.canonical(),"minimumReceive":min_receive.canonical(),"maximumReceive":quantity.canonical(),"precisionIncrement":increment.canonical(),"travelRule":"NIL","conditional":"Actual execution still needs a fresh ordinary Binance preview, Touch ID, original withdrawOrderId journaling, and canonical Ethereum receipt verification."}),
         })
     }
 
@@ -3887,6 +3933,16 @@ impl BinanceProfile {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let requested = amount(qty_text)?;
+        // The durable operation input retains the caller's decimal spelling,
+        // while this binding and Binance request use ExactDecimal::canonical.
+        // Compare the immutable quantities numerically so equivalent forms
+        // such as `0.012700` reconcile without weakening amount identity.
+        let same_persisted_amount = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_str)
+                .and_then(|value| amount(value).ok())
+                .is_some_and(|value| value.checked_cmp(&requested).is_eq())
+        };
         let params: BinanceRequest = serde_json::from_value(
             binding.get("params").cloned().unwrap_or(Value::Null),
         )
@@ -3935,9 +3991,8 @@ impl BinanceProfile {
             || binding.get("coin").and_then(Value::as_str)
                 != data.get("coin").and_then(Value::as_str)
             || binding.get("coin").and_then(Value::as_str) != Some(coin)
-            || binding.get("amount").and_then(Value::as_str)
-                != data.get("amount").and_then(Value::as_str)
-            || binding.get("amount").and_then(Value::as_str) != Some(qty_text)
+            || !same_persisted_amount(data.get("amount"))
+            || !same_persisted_amount(record.input.get("amount"))
             || binding.get("fromWallet").and_then(Value::as_str) != Some("SPOT")
             || binding.get("toWallet").and_then(Value::as_str) != Some("SPOT")
             || params.endpoint != BinanceEndpoint::SubToMasterTransfer
@@ -3989,14 +4044,16 @@ impl BinanceProfile {
             ));
         }
         let end_ms = Utc::now().timestamp_millis().max(0) as u64;
-        let history_request = subaccount_transfer_history_request(
-            coin,
-            2,
-            started.timestamp_millis().max(0) as u64,
-            end_ms,
-            200,
-        )
-        .map_err(domain_error)?;
+        let start_ms = started.timestamp_millis().max(0) as u64;
+        // Venue history timestamps can be rounded or arrive just before the
+        // local persisted submit time. Search and validate only within the
+        // same small window as the request's recvWindow, while retaining the
+        // immutable venue ID and exact route/amount checks below.
+        let history_start_ms = start_ms.saturating_sub(SUB_TO_MASTER_RECV_WINDOW_MS);
+        let history_end_ms = end_ms.saturating_add(SUB_TO_MASTER_RECV_WINDOW_MS);
+        let history_request =
+            subaccount_transfer_history_request(coin, 2, history_start_ms, history_end_ms, 200)
+                .map_err(domain_error)?;
         let history_response = match self.call(child, history_request, "reconciliation").await {
             Ok(value) => value,
             Err(_) => {
@@ -4041,8 +4098,8 @@ impl BinanceProfile {
                 .email
                 .as_deref()
                 .is_some_and(|email| row.email != email)
-            || row.timestamp < started.timestamp_millis().max(0) as u64
-            || row.timestamp > end_ms
+            || row.timestamp < history_start_ms
+            || row.timestamp > history_end_ms
         {
             return Ok(unknown(
                 json!({"route":"sub_to_master","venueId":venue_id.as_str(),"historyComplete":true,"reason":"Child history row does not match the exact master, asset, quantity, SPOT wallets, SUCCESS status, or time window."}),
@@ -4104,7 +4161,7 @@ impl BinanceProfile {
 
     async fn reconcile_withdrawal(
         &self,
-        _record: &OperationRecord,
+        record: &OperationRecord,
         submission: &Submission,
     ) -> Result<Reconciliation, FinError> {
         let unknown = |evidence: Value| Reconciliation {
@@ -4268,6 +4325,29 @@ impl BinanceProfile {
             }
         }
         if matches.is_empty() {
+            let recorded_whitelist_rejection = record
+                .error
+                .as_ref()
+                .is_some_and(withdrawal_rejection::recorded_whitelist_rejection);
+            if complete && recorded_whitelist_rejection {
+                // A recorded venue rejection is actionable only after complete
+                // identity-filtered history and a fresh authoritative source
+                // balance show that this exact withdrawal had no effect.
+                if let Ok(balances) = self.spot_balances(account, None).await {
+                    let source_free_now = Self::free(&balances, coin)
+                        .cloned()
+                        .unwrap_or_else(ExactDecimal::zero);
+                    if let Some(rejected) = withdrawal_rejection::try_reconcile(
+                        record,
+                        submission,
+                        complete,
+                        matches.len(),
+                        &source_free_now,
+                    )? {
+                        return Ok(rejected);
+                    }
+                }
+            }
             return Ok(unknown(
                 json!({"withdrawOrderId":reference,"historyComplete":complete,"reason":"No matching withdrawal record proves whether the write reached Binance; do not retry."}),
             ));
@@ -4299,22 +4379,36 @@ impl BinanceProfile {
                 json!({"withdrawOrderId":reference,"historyComplete":complete,"reason":"Withdrawal identity, asset, network, address, wallet type or external transfer type mismatch."}),
             ));
         }
+        if !complete || row.withdraw_order_id.as_deref() != Some(reference) {
+            return Ok(unknown(json!({
+                "withdrawal":redact_funding_row(&row),
+                "withdrawOrderId":reference,
+                "historyComplete":complete,
+                "reason":"A terminal withdrawal requires complete history and the exact persisted withdrawOrderId."
+            })));
+        }
         let base_evidence = redact_funding_row(&row);
         let status = row.status;
         let source_before =
             observed_decimal(data["sourceFreeBefore"].as_str().unwrap_or_default())?;
-        let current = Self::free(&self.spot_balances(account, None).await?, coin)
-            .cloned()
-            .unwrap_or_else(ExactDecimal::zero);
-        let debit = decimal_delta(&source_before, &current);
-        let Some(debit) = debit else {
-            return Ok(unknown(
-                json!({"withdrawal":base_evidence,"reason":"Main account free balance increased after withdrawal; the correlated debit cannot be established."}),
-            ));
-        };
+        // An account balance is shared and may include unrelated concurrent
+        // withdrawals or credits. Keep it as corroboration, never attribute
+        // its aggregate delta to this operation's immutable request identity.
+        let current = self
+            .spot_balances(account, None)
+            .await
+            .ok()
+            .map(|balances| {
+                Self::free(&balances, coin)
+                    .cloned()
+                    .unwrap_or_else(ExactDecimal::zero)
+            });
+        let aggregate_debit = current
+            .as_ref()
+            .and_then(|current| decimal_delta(&source_before, current));
         if matches!(status, 1 | 3 | 5) {
-            if debit.is_zero() {
-                let evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.canonical(),"sourceDebitObserved":"0","venueState":"failed"});
+            if aggregate_debit.as_ref().is_some_and(ExactDecimal::is_zero) {
+                let evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.as_ref().map(ExactDecimal::canonical),"aggregateSourceDebitObserved":"0","venueState":"failed"});
                 return Ok(Reconciliation {
                     status: Status::Failed,
                     evidence: evidence.clone(),
@@ -4322,13 +4416,13 @@ impl BinanceProfile {
                 });
             }
             return Ok(unknown(
-                json!({"withdrawal":base_evidence,"sourceDebitObserved":debit.canonical(),"reason":"Binance reports withdrawal failure but a source debit remains; keep it unresolved."}),
+                json!({"withdrawal":base_evidence,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"reason":"Binance reports withdrawal failure but an aggregate source debit remains or could not be established; keep it unresolved."}),
             ));
         }
         if status != 6 {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"historyComplete":complete,"sourceDebitObserved":debit.canonical(),"venueState":"pending"}),
+                evidence: json!({"withdrawal":base_evidence,"historyComplete":complete,"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"venueState":"pending"}),
                 verified: None,
             });
         }
@@ -4346,15 +4440,12 @@ impl BinanceProfile {
                 "Persisted maximum fee is invalid.",
             )
         })?)?;
-        let lower_bound =
-            subtract_decimal(&amount_requested, &max_fee).unwrap_or_else(ExactDecimal::zero);
-        let upper_bound = add_decimal(&amount_requested, &max_fee)?;
+        let history_net_plus_fee = add_decimal(&row.amount, fee)?;
         if fee.checked_cmp(&max_fee).is_gt()
-            || debit.checked_cmp(&lower_bound).is_lt()
-            || debit.checked_cmp(&upper_bound).is_gt()
+            || history_net_plus_fee.checked_cmp(&amount_requested).is_ne()
         {
             return Ok(unknown(
-                json!({"withdrawal":base_evidence,"actualFee":fee.canonical(),"sourceDebitObserved":debit.canonical(),"reason":"Observed Binance fee or source debit exceeds the approved exact bounds."}),
+                json!({"withdrawal":base_evidence,"actualFee":fee.canonical(),"sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"apiGrossAmount":amount_requested.canonical(),"reason":"Observed Binance fee exceeds its approved cap or correlated history net plus fee differs from the exact gross API amount."}),
             ));
         }
         let asset: AssetId = serde_json::from_value(binding["asset"].clone()).map_err(|_| {
@@ -4371,7 +4462,7 @@ impl BinanceProfile {
         let Some(verifier) = verifier else {
             return Ok(Reconciliation {
                 status: Status::Pending,
-                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","sourceDebitObserved":debit.canonical(),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
+                evidence: json!({"withdrawal":base_evidence,"venueState":"completed","destinationReceipt":"unverified","sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"actualFee":fee.canonical(),"reason":"Binance reports completion; an independent receipt observer for this destination asset/network is unavailable. Reconcile this original request; do not resubmit."}),
                 verified: None,
             });
         };
@@ -4385,6 +4476,18 @@ impl BinanceProfile {
                 verified: None,
             });
         };
+        // The observer must return the actual positive canonical payout even
+        // when it is below the user's approved floor. Fin will then settle a
+        // verified shortfall as Failed with its actual effects, rather than
+        // hiding a real debit behind an unresolved amount-bound error.
+        let positive_atom = if asset.decimals == 0 {
+            "1".to_owned()
+        } else {
+            format!(
+                "0.{}1",
+                "0".repeat(asset.decimals.saturating_sub(1) as usize)
+            )
+        };
         let receipt = verifier
             .verify(PayoutRequest {
                 tx_hash: tx_hash.into(),
@@ -4393,10 +4496,7 @@ impl BinanceProfile {
                 chain_id: destination.chain_id,
                 recipient: destination.address.clone(),
                 asset: asset.clone(),
-                minimum_amount: data["minimumReceive"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
+                minimum_amount: positive_atom,
                 maximum_amount: data["maximumReceive"]
                     .as_str()
                     .unwrap_or_default()
@@ -4434,9 +4534,11 @@ impl BinanceProfile {
         )
         .map_err(domain_error)?;
         if received_atoms < minimum || received_atoms > maximum {
-            return Ok(unknown(
-                json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Ethereum recipient amount falls outside approved receipt bounds."}),
-            ));
+            if received_atoms > maximum || received_atoms.is_zero() {
+                return Ok(unknown(
+                    json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"reason":"Ethereum recipient amount exceeds the approved maximum or is not positive."}),
+                ));
+            }
         }
         let debit_asset: AssetId =
             serde_json::from_value(binding["debitAsset"].clone()).map_err(|_| {
@@ -4446,25 +4548,54 @@ impl BinanceProfile {
                     "Persisted Binance debit asset identity is invalid.",
                 )
             })?;
-        let fee_atoms = decimal_to_atoms(fee, debit_asset.decimals)?;
-        let transfer_debit = subtract_decimal(&debit, fee).ok_or_else(|| {
-            error(
-                "WITHDRAWAL_ACCOUNTING_UNKNOWN",
-                "reconciliation",
-                "Observed transaction fee exceeds total source debit.",
-            )
-        })?;
         let received_decimal = ExactDecimal::parse(&received_atoms.to_decimal(asset.decimals))
             .map_err(domain_error)?;
-        if transfer_debit.checked_cmp(&received_decimal).is_ne() {
+        let history_net_atoms = decimal_to_atoms(&row.amount, asset.decimals)?;
+        if received_atoms != history_net_atoms {
             return Ok(unknown(
-                json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"sourceDebitObserved":debit.canonical(),"actualFee":fee.canonical(),"reason":"Binance debit, reported fee, and verified recipient receipt do not conserve exactly."}),
+                json!({"withdrawal":base_evidence,"recipient":receipt.evidence,"sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"historyNetAmount":row.amount.canonical(),"actualFee":fee.canonical(),"reason":"Verified recipient receipt differs from Binance's exact correlated net history amount."}),
             ));
         }
-        let transfer_debit_atoms = decimal_to_atoms(&transfer_debit, debit_asset.decimals)?;
+        let fee_bound_treatment = record
+            .preview
+            .as_ref()
+            .and_then(|preview| {
+                preview.intent.maximum_costs.iter().find(|bound| {
+                    bound.amount.asset == debit_asset
+                        && bound.location
+                            == (AccountingLocation::Cash {
+                                resource: account.resource.clone(),
+                            })
+                })
+            })
+            .map(|bound| bound.treatment.clone());
+        let (transfer_debit, fee_treatment) = match fee_bound_treatment {
+            // Preserve the saved accounting contract for operations previewed
+            // before Binance's amount semantics were corrected.
+            Some(CostTreatment::AdditionalDebit) => (
+                subtract_decimal(&history_net_plus_fee, fee).ok_or_else(|| {
+                    error(
+                        "WITHDRAWAL_ACCOUNTING_UNKNOWN",
+                        "reconciliation",
+                        "Observed transaction fee exceeds total source debit.",
+                    )
+                })?,
+                CostTreatment::AdditionalDebit,
+            ),
+            // New previews define the gross API amount as one source debit,
+            // including its deducted network fee.
+            Some(CostTreatment::IncludedInDebit) => {
+                (history_net_plus_fee.clone(), CostTreatment::IncludedInDebit)
+            }
+            _ => {
+                return Ok(unknown(
+                    json!({"withdrawal":base_evidence,"reason":"The immutable preview does not contain a compatible withdrawal-fee bound."}),
+                ));
+            }
+        };
         let amount_debit = Amount {
             asset: debit_asset.clone(),
-            atoms: transfer_debit_atoms.clone(),
+            atoms: decimal_to_atoms(&transfer_debit, debit_asset.decimals)?,
         };
         let amount_credit = Amount {
             asset: asset.clone(),
@@ -4476,21 +4607,39 @@ impl BinanceProfile {
             debit: amount_debit,
             credit: amount_credit,
         }];
-        if !fee_atoms.is_zero() {
+        if !fee.is_zero() {
             effects.push(FinancialEffect::Cost {
                 location: AccountingLocation::Cash {
                     resource: account.resource.clone(),
                 },
                 amount: Amount {
-                    asset: debit_asset,
-                    atoms: fee_atoms,
+                    asset: debit_asset.clone(),
+                    atoms: decimal_to_atoms(fee, debit_asset.decimals)?,
                 },
                 category: "binance_withdrawal_fee".into(),
-                treatment: CostTreatment::AdditionalDebit,
+                treatment: fee_treatment,
             });
         }
-        let evidence = json!({"withdrawal":base_evidence,"historyComplete":complete,"withdrawOrderId":reference,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.canonical(),"sourceDebitObserved":debit.canonical(),"actualFee":fee.canonical(),"recipient":receipt.evidence,"balanceCorrelation":"matching withdrawal identity plus venue fee and canonical destination chain receipt"});
+        let mut evidence = json!({"withdrawal":base_evidence.clone(),"historyComplete":complete,"withdrawOrderId":reference,"sourceFreeBefore":source_before.canonical(),"sourceFree":current.as_ref().map(ExactDecimal::canonical),"sourceDebitObserved":history_net_plus_fee.canonical(),"aggregateSourceDebitObserved":aggregate_debit.as_ref().map(ExactDecimal::canonical),"apiGrossAmount":amount_requested.canonical(),"historyNetAmount":row.amount.canonical(),"actualFee":fee.canonical(),"recipient":receipt.evidence.clone(),"balanceCorrelation":"the exact withdrawOrderId history net amount plus fee equals its API gross request and matches the canonical destination receipt; account-wide balance delta is corroboration only"});
+        if received_atoms < minimum {
+            evidence["actual_gross_debit"] = json!(history_net_plus_fee.canonical());
+            evidence["actual_net_receipt"] = json!(received_decimal.canonical());
+            evidence["actual_fee"] = json!(fee.canonical());
+            evidence["approved_minimum"] = json!(minimum.to_decimal(asset.decimals));
+            evidence["minimum_receipt_met"] = json!(false);
+            evidence["partial_payout_reconciled"] = json!(true);
+            evidence["outcome_reason"] = json!(
+                "Funds moved and the original withdrawal was reconciled, but the verified net payout was below its approved minimum; do not retry or treat this as a no-effects failure."
+            );
+        }
         let verified = make_verified(submission.clone(), effects, evidence.clone())?;
+        if received_atoms < minimum {
+            return Ok(Reconciliation {
+                status: Status::Failed,
+                evidence,
+                verified: Some(verified),
+            });
+        }
         Ok(Reconciliation {
             status: Status::Completed,
             evidence,

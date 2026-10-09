@@ -75,6 +75,11 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
         // Exceptionally long aliases use the explicit full-review fallback.
         return compactAuthenticationReason(prefix: "deposit ", summary: String(concise.dropFirst("Deposit ".count)), maximumCharacters: 180)
     }
+    if operation == "bridge.transfer", summary.hasPrefix("Bridge ") {
+        // Keep the route, Relay, receipt floor and fee cap in the native reason
+        // when they fit. Longer trusted reviews use complete-clause shortening.
+        return compactAuthenticationReason(prefix: "bridge ", summary: String(summary.dropFirst("Bridge ".count)), maximumCharacters: 180)
+    }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
 

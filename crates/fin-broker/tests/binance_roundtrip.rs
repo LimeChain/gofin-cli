@@ -116,6 +116,9 @@ impl SyntheticVenue {
         s.balances
             .insert(key.into(), format!("{}.{:03}", next / 1000, next % 1000));
     }
+    fn format_milli(value: i64) -> String {
+        format!("{}.{:03}", value / 1000, value % 1000)
+    }
     fn record_deposit(&self, tx_hash: &str, amount: &str) {
         self.record_coin_deposit_for("main", ASSET, "ETH", tx_hash, amount);
     }
@@ -307,20 +310,23 @@ impl BinanceTransport for SyntheticVenue {
                     .cloned()
                     .ok_or(TransportError::InvalidResponse)?;
                 let fee = s.withdraw_fee.clone();
-                let gross = milli(&amount) + milli(&fee);
-                if milli(&Self::free(&s, "main")) < gross {
+                let gross = milli(&amount);
+                let fee_milli = milli(&fee);
+                if gross < fee_milli || milli(&Self::free(&s, "main")) < gross {
                     return Err(TransportError::Rejected);
                 }
                 Self::alter(&mut s, "main", -gross);
+                let net = gross - fee_milli;
+                let net_amount = Self::format_milli(net);
                 if let Some(wallet_balance) = self.wallet_balance.lock().unwrap().as_ref() {
-                    adjust_native_balance(wallet_balance, &amount, true);
+                    adjust_native_balance(wallet_balance, &net_amount, true);
                 }
                 let hash = format!("0x{}", "ee".repeat(32));
                 let address = params
                     .get("address")
                     .cloned()
                     .ok_or(TransportError::InvalidResponse)?;
-                s.withdrawal_history.push(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id,"coin":"ETH","network":"ETH","address":address,"amount":amount,"transactionFee":fee,"status":6,"txId":hash,"transferType":0,"walletType":0,"applyTime":chrono::Utc::now().to_rfc3339()}));
+                s.withdrawal_history.push(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id,"coin":"ETH","network":"ETH","address":address,"amount":net_amount,"transactionFee":fee,"status":6,"txId":hash,"transferType":0,"walletType":0,"applyTime":chrono::Utc::now().to_rfc3339()}));
                 Ok(json!({"id":"synthetic-withdrawal","withdrawOrderId":order_id}))
             }
             E::UniversalTransferHistory => {
@@ -732,6 +738,7 @@ fn runtime(
             adapters: vec![adapter(venue)],
             authorizer: approval,
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap()
@@ -781,6 +788,7 @@ async fn two_child_spot_roundtrip_restores_allocations_and_reconciles_history() 
             adapters: vec![adapter],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap();
@@ -982,6 +990,7 @@ async fn permission_precision_and_stale_price_guards_block_before_any_post() {
             adapters: vec![adapter.clone()],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap();
@@ -2835,6 +2844,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
             adapters: vec![binance.clone(), composite.clone(), wallet_observer.clone()],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap();
@@ -2871,6 +2881,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
             adapters: vec![binance.clone(), composite.clone(), wallet_observer.clone()],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap();
@@ -2913,7 +2924,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
         request: OperationRequest {
             request_id: "scoped-withdraw-return".into(),
             operation: "binance.withdraw".into(),
-            input: json!({"requestId":"scoped-withdraw-return","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.009","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"}),
+            input: json!({"requestId":"scoped-withdraw-return","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.010","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.009"}),
             run_id: None,
         },
     }).await;
@@ -2940,8 +2951,8 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
 #[tokio::test]
 async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_full_allocation() {
     let venue = Arc::new(SyntheticVenue::new());
-    // The selected main-account amount is a separately tracked withdrawal-fee
-    // reserve; the two child allocations are returned in full.
+    // Child balances plus the preexisting main balance cover the gross API
+    // withdrawal amount; its network fee is withheld from that amount.
     venue
         .state
         .lock()
@@ -3040,6 +3051,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
             adapters: vec![binance, composite, wallet_observer],
             authorizer: approval.clone(),
             valuator: Arc::new(SyntheticValuator),
+            bridge: None,
         },
     )
     .unwrap();
@@ -3058,7 +3070,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
         (
             "journey-withdraw",
             "binance.withdraw",
-            json!({"requestId":"journey-withdraw","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.015","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.015"}),
+            json!({"requestId":"journey-withdraw","account":"main","destination":"synthetic-wallet","coin":"ETH","amount":"0.016","network":"ETH","walletType":"SPOT","maxFee":"0.001","minReceiveAmount":"0.015"}),
         ),
         (
             "scoped-deposit-forward",

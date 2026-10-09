@@ -68,6 +68,14 @@ fn exact_one<T>(events: Vec<T>) -> Result<T> {
     )?;
     Ok(events.into_iter().next().expect("one"))
 }
+
+fn external_credit_rpc_error(mut error: FinError, method: &str) -> FinError {
+    // Surface the reviewed RPC method in sanitized reconciliation evidence so
+    // an operator can distinguish a transient read failure from an unsupported
+    // proof layout. Never include the configured endpoint or request payload.
+    error.stage = format!("external-credit:{method}");
+    error
+}
 /// Accrued expenses are accounted before principal; carry unpaid amounts across partial repayments.
 pub(crate) fn settle_debt_costs(
     new_interest: U256,
@@ -239,12 +247,16 @@ impl EthereumAdapter {
             "FUNDING_BOUNDS_INVALID",
             "Funding requires positive finite ordered amount bounds.",
         )?;
-        self.runtime.assert_chain().await?;
+        self.runtime
+            .assert_chain()
+            .await
+            .map_err(|error| external_credit_rpc_error(error, "eth_chainId"))?;
         let receipt = self
             .runtime
             .rpc
             .request("eth_getTransactionReceipt", json!([tx_hash]))
-            .await?;
+            .await
+            .map_err(|error| external_credit_rpc_error(error, "eth_getTransactionReceipt"))?;
         let pending = || ExternalCredit {
             status: Status::Pending,
             amount_atoms: None,
@@ -257,7 +269,8 @@ impl EthereumAdapter {
             .runtime
             .rpc
             .request("eth_getTransactionByHash", json!([tx_hash]))
-            .await?;
+            .await
+            .map_err(|error| external_credit_rpc_error(error, "eth_getTransactionByHash"))?;
         if transaction.is_null() {
             return Ok(pending());
         }
@@ -284,7 +297,8 @@ impl EthereumAdapter {
                 "eth_getBlockByNumber",
                 json!([fin_evm::block_tag(Some(block)), false]),
             )
-            .await?;
+            .await
+            .map_err(|error| external_credit_rpc_error(error, "eth_getBlockByNumber"))?;
         if header.is_null()
             || h(&header["hash"])? != block_hash
             || fin_evm::rpc_u64(&header["number"])? != block
@@ -296,7 +310,8 @@ impl EthereumAdapter {
                 .runtime
                 .rpc
                 .request("eth_blockNumber", json!([]))
-                .await?,
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_blockNumber"))?,
         )?;
         let observed_confirmations = if latest >= block {
             latest - block + 1
@@ -338,7 +353,8 @@ impl EthereumAdapter {
                     "eth_getBlockByNumber",
                     json!([fin_evm::block_tag(Some(block)), false]),
                 )
-                .await?;
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_getBlockByNumber"))?;
             if canonical["hash"] != json!(format!("{block_hash:#x}"))
                 || fin_evm::rpc_u64(&canonical["number"])? != block
             {
@@ -388,7 +404,8 @@ impl EthereumAdapter {
                         "eth_getCode",
                         json!([lower_address(recipient), fin_evm::block_tag(Some(block))]),
                     )
-                    .await?,
+                    .await
+                    .map_err(|error| external_credit_rpc_error(error, "eth_getCode"))?,
             )?;
             require(
                 code.is_empty(),
@@ -415,7 +432,19 @@ impl EthereumAdapter {
             "Canonical net funding credit violates the exact venue payout bounds.",
         )?;
         require(
-            self.balance_of(&token, recipient, Some(block)).await? >= credited,
+            self.balance_of(&token, recipient, Some(block))
+                .await
+                .map_err(|error| {
+                    external_credit_rpc_error(
+                        error,
+                        if token.reference == "native" {
+                            "eth_getBalance"
+                        } else {
+                            "eth_call"
+                        },
+                    )
+                })?
+                >= credited,
             "FUNDING_HOLDING_MISMATCH",
             "Recipient inclusion-block holdings do not cover its proved net credit.",
         )?;
@@ -455,7 +484,8 @@ impl EthereumAdapter {
                 "eth_getBlockByNumber",
                 json!([fin_evm::block_tag(Some(block)), false]),
             )
-            .await?;
+            .await
+            .map_err(|error| external_credit_rpc_error(error, "eth_getBlockByNumber"))?;
         if header.is_null() {
             return Ok(false);
         }
@@ -548,7 +578,8 @@ impl EthereumAdapter {
                     "eth_getBlockByNumber",
                     json!([format!("{:#x}", receipt.block_number), false]),
                 )
-                .await?;
+                .await
+                .map_err(|error| external_credit_rpc_error(error, "eth_getBlockByNumber"))?;
             if canonical["hash"] != json!(format!("{:#x}", receipt.block_hash))
                 || fin_evm::rpc_u64(&canonical["number"])? != receipt.block_number
             {

@@ -184,8 +184,11 @@ impl BinanceTransport for Venue {
             E::StandardWithdrawal => {
                 self.posts.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(p("network"), "ARBITRUM");
-                self.change("main", "ETH", &add(p("amount"), "0.0001"), false);
-                self.withdrawal.lock().unwrap().push(json!({"id":"synthetic-withdrawal","withdrawOrderId":p("withdrawOrderId"),"coin":"ETH","network":"ARBITRUM","address":p("address"),"amount":p("amount"),"transactionFee":"0.0001","status":6,"txId":format!("0x{}","ab".repeat(32)),"transferType":0,"walletType":0,"applyTime":now()}));
+                let gross = p("amount");
+                let fee = "0.0001";
+                let net = sub(gross, fee);
+                self.change("main", "ETH", gross, false);
+                self.withdrawal.lock().unwrap().push(json!({"id":"synthetic-withdrawal","withdrawOrderId":p("withdrawOrderId"),"coin":"ETH","network":"ARBITRUM","address":p("address"),"amount":net,"transactionFee":fee,"status":6,"txId":format!("0x{}","ab".repeat(32)),"transferType":0,"walletType":0,"applyTime":now()}));
                 return Err(TransportError::Timeout);
             }
             E::WithdrawalHistory => json!(self.withdrawal.lock().unwrap().clone()),
@@ -247,7 +250,7 @@ impl BinanceRecipientVerifier for Receipt {
             } else {
                 Status::Pending
             },
-            amount_atoms: Some(units("0.00999")),
+            amount_atoms: Some(units("0.00989")),
             evidence: json!({"syntheticReceipt":true,"chainId":42161,"recipient":r.recipient,"canonical":self.0.load(Ordering::SeqCst)}),
         }
     }
@@ -367,7 +370,7 @@ async fn permanent_portfolio_sell_buy_transfer_arbitrum_receipt_and_restart() {
         request_id: "withdraw".into(),
         operation: "binance.withdraw".into(),
         run_id: None,
-        input: json!({"requestId":"withdraw","account":"main","destination":"wallet","coin":"ETH","amount":"0.00999","network":"ARBITRUM","walletType":"SPOT","maxFee":"0.0001","minReceiveAmount":"0.00999"}),
+        input: json!({"requestId":"withdraw","account":"main","destination":"wallet","coin":"ETH","amount":"0.00999","network":"ARBITRUM","walletType":"SPOT","maxFee":"0.0001","minReceiveAmount":"0.00989"}),
     };
     let pending = e.execute(request.clone()).await.unwrap();
     assert_eq!(pending.status, Status::Unknown, "{pending:?}");
@@ -403,7 +406,7 @@ async fn permanent_portfolio_sell_buy_transfer_arbitrum_receipt_and_restart() {
     assert_eq!(done.status, Status::Completed, "{done:?}");
     assert_eq!(auth.count.load(Ordering::SeqCst), 5);
     assert_eq!(v.free("sub", "ETH"), "0");
-    assert_eq!(v.free("main", "ETH"), "0.0009");
+    assert_eq!(v.free("main", "ETH"), "0.001");
     assert_eq!(v.posts.load(Ordering::SeqCst), 5);
 }
 #[tokio::test]

@@ -556,6 +556,11 @@ fn broker_unavailable() -> FinError {
 }
 pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
+        BrokerRequest::Read { operation, .. }
+            if matches!(operation.as_str(), "bridge.quotes" | "bridge.status") =>
+        {
+            OBSERVER_TIMEOUT
+        }
         BrokerRequest::Execute { .. }
         | BrokerRequest::AuthorizeBoundary { .. }
         | BrokerRequest::ExecuteBoundary { .. }
@@ -653,6 +658,7 @@ fn capabilities() -> Value {
         "machine_contract": fin_discovery::machine_contract(),
         "exchanges": fin_discovery::exchange_capabilities(),
         "evm_networks": fin_discovery::evm_network_profiles(),
+        "bridging": fin_discovery::bridge_profile(),
         "pricing": {"provider":"coingecko","authentication":"Optional protected human-enrolled Demo/Pro API key; otherwise anonymous public access is best effort.","enrollment_command":"fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo","api_key_values_accepted_in_arguments":false,"fallback":"none; missing/stale/rate-limited quotes block writes"},
         "platforms": {
             "macos": {"protected_broker": true, "human_enrollment": true},
@@ -2054,6 +2060,27 @@ mod tests {
             broker_response_timeout(&BrokerRequest::Doctor),
             BROKER_TIMEOUT
         );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Read {
+                operation: "bridge.quotes".into(),
+                input: json!({}),
+            }),
+            OBSERVER_TIMEOUT
+        );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Read {
+                operation: "bridge.status".into(),
+                input: json!({}),
+            }),
+            OBSERVER_TIMEOUT
+        );
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Read {
+                operation: "wallet.balances".into(),
+                input: json!({}),
+            }),
+            BROKER_TIMEOUT
+        );
     }
 
     #[test]
@@ -2160,7 +2187,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 50);
+        assert_eq!(financial_catalog().len(), 53);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 

@@ -1,6 +1,6 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), and [EVM wallets](evm-wallets.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
+These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), [EVM wallets](evm-wallets.md), and [Relay bridge](bridge.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
 
 ```sh
 cargo fmt --all -- --check
@@ -81,6 +81,14 @@ Public no-secret RPC/indexer probes, human enrollment/Touch ID and funded transf
 round trips must each be reported separately when observed; this guide marks no
 unrun case passed. Existing $100 allocation, per-write approval and complete
 restoration requirements also apply to any separately authorized L2 live test.
+
+## Relay bridge regressions
+
+Use the [bridge verification guide](bridge.md) for focused tests and the
+quote/authorize/execute/status lifecycle. It separates source confirmation from
+destination settlement and gives the conditional live round-trip recipe. Code,
+synthetic tests, and provider vectors do not establish cross-chain live
+settlement, installed isolation or real Touch ID; report those separately.
 
 ## Local development loop
 

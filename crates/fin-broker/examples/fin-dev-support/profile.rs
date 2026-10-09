@@ -32,6 +32,14 @@ pub struct EnvironmentConfig {
     pub mode: String,
     #[serde(default)]
     pub credentials: CredentialReferences,
+    /// Optional same-user development policy override. Legacy development
+    /// environments omit this field and retain the beta policy defaults.
+    #[serde(default)]
+    pub policy: Option<BrokerPolicy>,
+    /// Optional explicit per-chain public RPC endpoints for this disposable
+    /// development profile. Missing chains retain the reviewed defaults.
+    #[serde(default)]
+    pub rpc_urls: BTreeMap<u64, Vec<String>>,
     #[serde(default)]
     pub binance_uid: Option<String>,
     #[serde(default)]
@@ -63,6 +71,8 @@ impl EnvironmentConfig {
             version: 1,
             mode: "synthetic".into(),
             credentials: CredentialReferences::default(),
+            policy: None,
+            rpc_urls: BTreeMap::new(),
             binance_uid: None,
             binance_sub_uid: None,
             binance_sub_email: None,
@@ -528,16 +538,33 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             });
         }
     }
-    let networks = NetworkConfig::reviewed_evm_networks();
-    Ok(BrokerConfigV2 {
+    let mut networks = NetworkConfig::reviewed_evm_networks();
+    for chain_id in config.rpc_urls.keys() {
+        if ![1, 42161, 4663].contains(chain_id) {
+            return Err("development RPC override names an unsupported chain".into());
+        }
+    }
+    for network in &mut networks {
+        if let Some(rpc_urls) = config.rpc_urls.get(&network.chain_id) {
+            if rpc_urls.is_empty() {
+                return Err("development RPC override must include a public HTTPS endpoint".into());
+            }
+            network.rpc_urls = rpc_urls.clone();
+        }
+    }
+    let runtime_config = BrokerConfigV2 {
         version: 2,
         networks,
         deployments: vec![DeploymentConfig::ethereum_mainnet()],
         connections,
-        policy: BrokerPolicy::beta(),
+        policy: config.policy.clone().unwrap_or_else(BrokerPolicy::beta),
         approver_uid: unsafe { libc::geteuid() },
         extensions: BTreeMap::new(),
-    })
+    };
+    runtime_config
+        .validate()
+        .map_err(|_| "development connection profile is invalid".to_owned())?;
+    Ok(runtime_config)
 }
 
 fn canonical_uid(uid: &str) -> bool {
@@ -556,6 +583,72 @@ mod tests {
 
     const ED25519_PEM: &str = "-----BEGIN PRIVATE KEY-----\\nMC4CAQAwBQYDK2VwBCIEIGyctEVql3srd/k3DvetsRG/NYWQTmkdCHWRv4pKWzst\\n-----END PRIVATE KEY-----";
     const RSA_PEM: &str = "-----BEGIN PRIVATE KEY-----\\nMIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAKtmufoMN/K7mD5r\\n3qnIp9uiI4zEhKT2WWEr2Jdv11s9oULC2+JHeZz3HIBtfQy2w2L0DrCoFW622rQ4\\n1jOkMnRmn0UBdLE9WuWujk94Z36512HyciJLcRS+eR1RDdr/9ahV51pEnK+AYfFN\\n2MePxwFGHDegm0O8c1qhS0EfsFnZAgMBAAECgYA42CXftsOrXenc8dtzxZdd8QUH\\nP3maWBVGc8suVio/GU5tHMDd58R+eTnbofQyDj74h2aD0grhoAUidiMcF12f0AVQ\\nfARoAAvttb5PRjMHa3ob0XmF7Elgw3jUmD0R8buuSlEsl0c04TppLhfkFP0eOHTN\\nJpsU/3PQMo42e2qm7QJBANpNYN19LHYqSM+JyA7O8fZMEMqnuOfXDUXvSzjtOPPt\\n7Ub5k9vrwYndlWqDmBTRAxWzpf2cq0Uxs1FYJ34Ink8CQQDI//ezQx962yES75lM\\nMZ/TrJZJbOBB3YGQ2nouQD5evcxlWh/G4lNbT8+4lrSriDGYJqOR9d9gVpZuA74J\\nVmNXAkEAqXoPLITkQqybMDw4S37QDDWLh7lkbODg1h1rmbtZTs61OjfCWacS7vRO\\n7o1RQT/vFCcPQ/AgayylmQ5GQqtwMwJAVGDgIyjydii3YbOjrxDF/55cGMbT/dJ3\\nKdANqozdofgbbhC/dkZcp+CBWwQpJDkwWKcf045cD51J2TVI+bKCUQJAUq54aKDL\\nWdtcSlCtJK5LBmQXf7xm/v6FdrEIAIQWL/1TjctFjTgYki8a0G+Fu3F6udRhBIGA\\nL/dD1B/ct/MoHA==\\n-----END PRIVATE KEY-----";
+
+    fn custom_development_policy() -> BrokerPolicy {
+        BrokerPolicy {
+            require_run_for_writes: false,
+            max_movement_usd_micros: "100000000".into(),
+            max_run_allocation_usd_micros: "200000000".into(),
+            preview_ttl_seconds: 90,
+            allow_unpriced_exchange_assets: false,
+        }
+    }
+
+    #[test]
+    fn legacy_environment_defaults_to_beta_policy_and_saved_policy_is_used() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
+        legacy.as_object_mut().unwrap().remove("policy");
+        legacy.as_object_mut().unwrap().remove("rpc_urls");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let loaded = EnvironmentConfig::read(&path, "env").unwrap();
+        assert!(loaded.policy.is_none());
+        assert!(loaded.rpc_urls.is_empty());
+        assert_eq!(broker_config(&loaded).unwrap().policy, BrokerPolicy::beta());
+
+        let mut configured = loaded;
+        configured.policy = Some(custom_development_policy());
+        configured.write_atomic(&path).unwrap();
+        let loaded = EnvironmentConfig::read(&path, "env").unwrap();
+        let runtime_config = broker_config(&loaded).unwrap();
+        assert_eq!(runtime_config.policy, custom_development_policy());
+        assert!(runtime_config.validate().is_ok());
+    }
+
+    #[test]
+    fn development_rpc_overrides_are_chain_scoped_and_validated() {
+        let mut config = EnvironmentConfig::empty("env");
+        let defaults = NetworkConfig::reviewed_evm_networks();
+        let runtime = broker_config(&config).unwrap();
+        assert_eq!(runtime.networks, defaults);
+
+        config.rpc_urls.insert(
+            1,
+            vec![
+                "https://eth.drpc.org".into(),
+                "https://ethereum-rpc.publicnode.com".into(),
+            ],
+        );
+        let runtime = broker_config(&config).unwrap();
+        assert_eq!(runtime.networks[0].rpc_urls, config.rpc_urls[&1]);
+        assert_eq!(runtime.networks[1], defaults[1]);
+        assert_eq!(runtime.networks[2], defaults[2]);
+
+        config.rpc_urls.insert(42161, Vec::new());
+        assert!(broker_config(&config).is_err());
+        config.rpc_urls.remove(&42161);
+
+        config
+            .rpc_urls
+            .insert(1, vec!["https://user:secret@example.invalid".into()]);
+        assert!(broker_config(&config).is_err());
+        config
+            .rpc_urls
+            .insert(31337, vec!["https://rpc.example.invalid".into()]);
+        assert!(broker_config(&config).is_err());
+    }
 
     #[test]
     fn classifies_synthetic_ed25519_and_rsa_pem_keys() {
@@ -576,6 +669,12 @@ mod tests {
         let config_path = dir.path().join("config.json");
         let credential_dir = dir.path().join("credentials");
         let dotenv_path = dir.path().join("keys.env");
+        let mut initial = EnvironmentConfig::empty("env");
+        initial.policy = Some(custom_development_policy());
+        initial
+            .rpc_urls
+            .insert(1, vec!["https://archive.example.invalid".into()]);
+        initial.write_atomic(&config_path).unwrap();
         let source = format!(
             "FIN_DEV_BINANCE_API_KEY=synthetic-main-api-key\nFIN_DEV_BINANCE_PRIVATE_KEY_PEM={ED25519_PEM}\nFIN_DEV_BINANCE_UID=100\nFIN_DEV_BINANCE_SUB_API_KEY=synthetic-sub-api-key\nFIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM={ED25519_PEM}\nFIN_DEV_BINANCE_SUB_UID=200\nFIN_DEV_BINANCE_SUB_EMAIL=child@example.invalid\n"
         );
@@ -592,7 +691,13 @@ mod tests {
             saved.binance_sub_email.as_deref(),
             Some("child@example.invalid")
         );
+        assert_eq!(saved.policy, Some(custom_development_policy()));
+        assert_eq!(
+            saved.rpc_urls.get(&1),
+            Some(&vec!["https://archive.example.invalid".into()])
+        );
         let config = broker_config(&saved).unwrap();
+        assert_eq!(config.policy, custom_development_policy());
         assert!(config.validate().is_ok());
         let credentials =
             dev_credentials::DevelopmentCredentialProvider::new(credential_dir).unwrap();

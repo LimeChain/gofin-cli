@@ -4,6 +4,7 @@
 //! is rooted at the installed paths; the separately named composition entry
 //! point exists for synthetic adapter/credential harnesses.
 
+mod bridge;
 pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
@@ -11,6 +12,7 @@ mod evm_router;
 mod policy;
 mod pricing;
 mod pricing_cache;
+pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use pricing::SharedUsdValuator;
 
@@ -479,6 +481,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(fin_ethereum::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
+    definitions.extend(BridgeAdapter::operation_definitions());
     definitions.sort_by(|left, right| left.name.cmp(&right.name));
     definitions
 }
@@ -741,6 +744,7 @@ pub struct EthereumPayoutVerifier {
 pub struct ProtectedApplications {
     pub adapters: Vec<Arc<dyn Adapter>>,
     pub valuator: Arc<dyn AssetValuator>,
+    pub bridge: Option<Arc<BridgeAdapter>>,
 }
 
 pub fn build_protected_applications(
@@ -882,6 +886,29 @@ pub fn build_applications_with_price_source(
                 .collect(),
         )));
     }
+    let bridge = if ethereum_adapters.is_empty() {
+        None
+    } else {
+        let bridge_observers = eth_rpcs
+            .iter()
+            .map(|(chain_id, rpc)| {
+                (
+                    *chain_id,
+                    Arc::new(fin_evm::EvmRuntime::new(rpc.clone(), *chain_id, None)),
+                )
+            })
+            .collect();
+        let bridge = Arc::new(BridgeAdapter::with_observers(
+            ethereum_adapters
+                .values()
+                .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                .collect(),
+            bridge_observers,
+            binance_prices.clone(),
+        )?);
+        adapters.push(bridge.clone());
+        Some(bridge)
+    };
     let exchange_client = Arc::new(fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
         error(
             "EXCHANGE_TRANSPORT_UNAVAILABLE",
@@ -977,7 +1004,11 @@ pub fn build_applications_with_price_source(
         }
     }
     let valuator: Arc<dyn AssetValuator> = binance_prices;
-    Ok(ProtectedApplications { adapters, valuator })
+    Ok(ProtectedApplications {
+        adapters,
+        valuator,
+        bridge,
+    })
 }
 
 /// A reusable wallet has one payout destination per configured chain. Legacy
@@ -1171,11 +1202,26 @@ impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
                 amount_atoms: proof.amount_atoms,
                 evidence: proof.evidence,
             },
-            Err(error) => fin_binance::PayoutResult {
-                status: fin_domain::Status::Unknown,
-                amount_atoms: None,
-                evidence: json!({"verification":"failed-closed","code":error.code}),
-            },
+            Err(error) => {
+                let mut evidence = json!({
+                    "verification":"failed-closed",
+                    "code":error.code,
+                    "stage":error.stage,
+                });
+                if let Some(details) = error.details.as_deref().and_then(Value::as_object) {
+                    if let Some(code) = details.get("json_rpc_code").and_then(Value::as_i64) {
+                        evidence["jsonRpcCode"] = json!(code);
+                    }
+                    if let Some(status) = details.get("http_status").and_then(Value::as_u64) {
+                        evidence["httpStatus"] = json!(status);
+                    }
+                }
+                fin_binance::PayoutResult {
+                    status: fin_domain::Status::Unknown,
+                    amount_atoms: None,
+                    evidence,
+                }
+            }
         }
     }
 }
@@ -1185,6 +1231,7 @@ pub struct RuntimeDependencies {
     pub adapters: Vec<Arc<dyn Adapter>>,
     pub authorizer: Arc<dyn Authorizer>,
     pub valuator: Arc<dyn AssetValuator>,
+    pub bridge: Option<Arc<BridgeAdapter>>,
 }
 
 pub struct BrokerRuntime {
@@ -1235,6 +1282,10 @@ pub fn compose_runtime(
             "Remove the conflicting operation from the injected adapter set.",
         ));
     }
+    let shared_store = dependencies.store.share();
+    if let Some(bridge) = &dependencies.bridge {
+        bridge.attach_state(fin_store::BridgeStateRepository::new(shared_store.clone()))?;
+    }
     let observer = Arc::new(CompositeObserver::new(dependencies.adapters.clone()));
     let mut engine_adapters = dependencies.adapters.clone();
     engine_adapters.push(observer.clone());
@@ -1242,14 +1293,17 @@ pub fn compose_runtime(
         valuator: dependencies.valuator.clone(),
     });
     let engine = Arc::new(
-        Engine::new(
-            dependencies.store,
+        Engine::new_with_shared_store(
+            shared_store,
             engine_adapters,
             dependencies.authorizer,
             options,
         )?
         .with_cost_origin_price_provider(price_provider),
     );
+    if let Some(bridge) = &dependencies.bridge {
+        bridge.attach_engine(Arc::downgrade(&engine))?;
+    }
     observer.attach(Arc::downgrade(&engine));
     Ok(Arc::new(BrokerRuntime {
         engine,
@@ -1289,6 +1343,7 @@ async fn protected_runtime_from_config(
             adapters: applications.adapters,
             authorizer,
             valuator: applications.valuator,
+            bridge: applications.bridge,
         },
     )?;
     runtime.protected_config_check.store(true, Ordering::SeqCst);
@@ -2935,6 +2990,7 @@ mod tests {
                     calls: calls.clone(),
                     revision: revision.clone(),
                 }),
+                bridge: None,
             },
         )
         .unwrap();
@@ -3151,6 +3207,7 @@ mod tests {
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(pricing::tests::fixed_valuator("1.02")),
+                bridge: None,
             },
         )
         .unwrap();
@@ -3296,6 +3353,7 @@ mod tests {
                     adapters: applications.adapters,
                     authorizer: Arc::new(ReadOnlyAuthorizer),
                     valuator: applications.valuator,
+                    bridge: applications.bridge,
                 },
             )
         }
@@ -3442,6 +3500,7 @@ mod tests {
                 adapters: vec![],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
+                bridge: None,
             },
         )
         .unwrap();
@@ -3497,6 +3556,7 @@ mod tests {
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
+                bridge: None,
             },
         )
         .unwrap();
@@ -3543,6 +3603,7 @@ mod tests {
                 adapters: applications.adapters,
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: applications.valuator,
+                bridge: applications.bridge,
             },
         )
         .unwrap();
@@ -3975,6 +4036,7 @@ mod tests {
                     adapters: applications.adapters,
                     authorizer: Arc::new(ReadOnlyAuthorizer),
                     valuator: applications.valuator,
+                    bridge: applications.bridge,
                 },
             )
             .unwrap();
@@ -4016,6 +4078,7 @@ mod tests {
                 })],
                 authorizer: Arc::new(ReadOnlyAuthorizer),
                 valuator: Arc::new(FixtureValuator),
+                bridge: None,
             },
         )
         .unwrap();

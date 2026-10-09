@@ -38,6 +38,7 @@ fin-credentials = { path = "crates/fin-credentials" }
 fin-discovery = { path = "crates/fin-discovery" }
 fin-protocol = { path = "crates/fin-protocol" }
 fin-evm = { path = "crates/fin-evm" }
+fin-bridge = { path = "crates/fin-bridge" }
 fin-ethereum = { path = "crates/fin-ethereum" }
 fin-broker = { path = "crates/fin-broker" }
 fin-human-terminal = { path = "crates/fin-human-terminal" }

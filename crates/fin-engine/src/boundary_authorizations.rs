@@ -19,7 +19,10 @@ impl Engine {
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
         let spec = adapter.prepare_boundaries(&prepared, &request.bounds)?;
-        validate_boundary_spec(&prepared, &spec)?;
+        let bridge_scope = bridge_boundary_scope(&prepared, &request.input)?;
+        let prospective_debit =
+            self.bridge_boundary_prospective_debit(bridge_scope.as_ref(), &prepared, &spec)?;
+        validate_boundary_spec(&prepared, &spec, prospective_debit.as_ref())?;
         let replacement = if let Some(id) = &request.replaces {
             let old = self.load_boundary_record(id)?;
             if old.authorization.operation != request.operation
@@ -169,7 +172,47 @@ impl Engine {
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
         let spec = adapter.prepare_boundaries(&prepared, &request.bounds)?;
-        validate_boundary_spec(&prepared, &spec)?;
+        let bridge_scope = bridge_boundary_scope(&prepared, &request.input)?;
+        let prospective_debit =
+            self.bridge_boundary_prospective_debit(bridge_scope.as_ref(), &prepared, &spec)?;
+        validate_boundary_spec(&prepared, &spec, prospective_debit.as_ref())?;
+        let bridge_authorization_seconds = if let Some((_, _, _, selected_bounds, _)) =
+            &bridge_scope
+        {
+            let selected = bridge_authorization_duration_ceiling(selected_bounds)?;
+            let requested = bridge_authorization_duration_ceiling(&request.bounds)?;
+            if selected != requested {
+                return Err(boundaries::violation_error(
+                    "The bridge authorization duration differs from the prepared selected bounds.",
+                    BoundaryViolation {
+                        constraint: "authorization_duration_scope".into(),
+                        approved_bound: json!(selected),
+                        candidate_value: json!(requested),
+                        evidence_time: Some(prepared.observed_at.clone()),
+                        reauthorization_required: false,
+                        reconciliation_required: false,
+                    },
+                ));
+            }
+            if let Some(maximum) = selected {
+                if request.valid_for_seconds > maximum {
+                    return Err(boundaries::violation_error(
+                        "The requested bridge authorization duration exceeds its selected maximum.",
+                        BoundaryViolation {
+                            constraint: "authorization_duration_seconds".into(),
+                            approved_bound: json!(maximum),
+                            candidate_value: json!(request.valid_for_seconds),
+                            evidence_time: Some(prepared.observed_at.clone()),
+                            reauthorization_required: false,
+                            reconciliation_required: false,
+                        },
+                    ));
+                }
+            }
+            selected
+        } else {
+            None
+        };
         {
             let store = self
                 .store
@@ -202,6 +245,24 @@ impl Engine {
                         candidate_value: spec.fixed.clone(),
                         evidence_time: Some(prepared.observed_at.clone()),
                         reauthorization_required: true,
+                        reconciliation_required: false,
+                    },
+                ));
+            }
+            if bridge_scope.is_some()
+                && bridge_authorization_duration_ceiling(&old.authorization.bounds)?
+                    != bridge_authorization_seconds
+            {
+                return Err(boundaries::violation_error(
+                    "A bridge authorization renewal must retain the transfer's selected duration ceiling.",
+                    BoundaryViolation {
+                        constraint: "authorization_duration_scope".into(),
+                        approved_bound: json!(bridge_authorization_duration_ceiling(
+                            &old.authorization.bounds
+                        )?),
+                        candidate_value: json!(bridge_authorization_seconds),
+                        evidence_time: Some(prepared.observed_at.clone()),
+                        reauthorization_required: false,
                         reconciliation_required: false,
                     },
                 ));
@@ -328,17 +389,56 @@ impl Engine {
         let persisted = if let Some(old) = replaced {
             let mut updated_old = old.clone();
             updated_old.authorization.status = BoundaryAuthorizationStatus::Superseded;
+            if let Some((transfer_id, step_id, step_kind, bounds, expectation)) = &bridge_scope {
+                store
+                    .replace_boundary_bridge_authorization(
+                        &old.authorization.id,
+                        &to_value(&old)?,
+                        &to_value(&updated_old)?,
+                        &id,
+                        &request.request_id,
+                        &intent_id,
+                        &record.request_fingerprint,
+                        &new_record,
+                        &timestamp,
+                        transfer_id,
+                        step_id,
+                        step_kind,
+                        bounds,
+                        expectation,
+                        prospective_debit.as_ref(),
+                    )
+                    .map_err(map_store)?
+            } else {
+                store
+                    .replace_boundary_authorization(
+                        &old.authorization.id,
+                        &to_value(&old)?,
+                        &to_value(&updated_old)?,
+                        &id,
+                        &request.request_id,
+                        &intent_id,
+                        &record.request_fingerprint,
+                        &new_record,
+                        &timestamp,
+                    )
+                    .map_err(map_store)?
+            }
+        } else if let Some((transfer_id, step_id, step_kind, bounds, expectation)) = &bridge_scope {
             store
-                .replace_boundary_authorization(
-                    &old.authorization.id,
-                    &to_value(&old)?,
-                    &to_value(&updated_old)?,
+                .create_boundary_bridge_authorization(
                     &id,
                     &request.request_id,
                     &intent_id,
                     &record.request_fingerprint,
                     &new_record,
                     &timestamp,
+                    transfer_id,
+                    step_id,
+                    step_kind,
+                    bounds,
+                    expectation,
+                    prospective_debit.as_ref(),
                 )
                 .map_err(map_store)?
         } else {
@@ -704,22 +804,44 @@ impl Engine {
         let previous = to_value(&authorization)?;
         authorization.attempts.push(operation_id.clone());
         authorization.active_attempt = Some(operation_id.clone());
-        let created = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .create_boundary_attempt(
-                id,
-                &previous,
-                &to_value(&authorization)?,
-                &operation_id,
-                &request.request_id,
-                &fingerprint,
-                &request.operation,
-                &to_value(&initial)?,
-                &timestamp,
-            )
-            .map_err(map_store)?;
+        let bridge_step = if request.operation == "bridge.transfer" {
+            bridge_step_claim(&request, Some(id), &operation_id, self)?
+        } else {
+            None
+        };
+        let created = {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            if let Some(step) = bridge_step.as_ref() {
+                store.create_boundary_bridge_attempt(
+                    id,
+                    &previous,
+                    &to_value(&authorization)?,
+                    &operation_id,
+                    &request.request_id,
+                    &fingerprint,
+                    &request.operation,
+                    &to_value(&initial)?,
+                    &timestamp,
+                    step,
+                )
+            } else {
+                store.create_boundary_attempt(
+                    id,
+                    &previous,
+                    &to_value(&authorization)?,
+                    &operation_id,
+                    &request.request_id,
+                    &fingerprint,
+                    &request.operation,
+                    &to_value(&initial)?,
+                    &timestamp,
+                )
+            }
+            .map_err(map_store)?
+        };
         if !created.created {
             let existing: OperationRecord = from_value(created.record)?;
             return if matches!(
@@ -769,6 +891,306 @@ impl Engine {
         }
         Ok(result_record)
     }
+
+    /// A bridge allowance step may authorize the one source-principal debit
+    /// which a later declared Deposit step will execute. The adapter's marker
+    /// is only accepted when it exactly matches the durable neutral plan, and
+    /// only if the Deposit is downstream of this still-unsubmitted step.
+    pub(super) fn bridge_boundary_prospective_debit(
+        &self,
+        bridge_scope: Option<&BridgeBoundaryScope>,
+        prepared: &PreparedOperation,
+        spec: &BoundarySpec,
+    ) -> Result<Option<fin_domain::BridgeProspectiveDebit>> {
+        let missing = spec
+            .maximum_debits
+            .iter()
+            .filter(|limit| {
+                !prepared.intent.debits.iter().any(|debit| {
+                    debit.resource == limit.resource && debit.amount.asset == limit.amount.asset
+                })
+            })
+            .collect::<Vec<_>>();
+        let Some((transfer_id, step_id, step_kind, _, _)) = bridge_scope else {
+            return Ok(None);
+        };
+        if !missing.is_empty()
+            && (!matches!(
+                step_kind,
+                fin_domain::BridgeStepKind::Approval | fin_domain::BridgeStepKind::ResetAllowance
+            ) || missing.len() != 1)
+        {
+            return Ok(None);
+        }
+        let marker_value = prepared
+            .binding
+            .get(fin_domain::BRIDGE_STEP_METADATA_KEY)
+            .and_then(|marker| marker.get("prospective_debit"));
+        let Some(marker_value) = marker_value else {
+            return if missing.is_empty() {
+                Ok(None)
+            } else {
+                Err(boundary_error(
+                    "An allowance boundary with future principal must carry its typed declared-deposit scope.",
+                ))
+            };
+        };
+        let marker: fin_domain::BridgeProspectiveDebit =
+            serde_json::from_value(marker_value.clone())
+                .map_err(|_| boundary_error("The bridge prospective debit scope is malformed."))?;
+        if marker.deposit_step_id.trim().is_empty()
+            || marker.maximum.atoms.is_zero()
+            || !prepared.intent.locks.contains(&marker.resource)
+        {
+            return Err(boundary_error(
+                "The prospective source debit does not identify the locked wallet and a positive finite amount.",
+            ));
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        let transfer = store
+            .bridge_transfer(transfer_id)
+            .map_err(map_store)?
+            .ok_or_else(|| boundary_error("The bridge transfer is not in the durable plan."))?;
+        if transfer.prospective_debit.as_ref() != Some(&marker) {
+            return Err(boundary_error(
+                "The prepared prospective debit differs from the durable bridge plan.",
+            ));
+        }
+        let current = transfer
+            .steps
+            .iter()
+            .find(|step| step.step_id == *step_id)
+            .ok_or_else(|| boundary_error("The current bridge step is not declared."))?;
+        let deposit = transfer
+            .steps
+            .iter()
+            .find(|step| step.step_id == marker.deposit_step_id)
+            .ok_or_else(|| boundary_error("The prospective Deposit step is not declared."))?;
+        let kind_matches_deposit = match step_kind {
+            fin_domain::BridgeStepKind::Approval | fin_domain::BridgeStepKind::ResetAllowance => {
+                deposit.step_id != *step_id
+                    && bridge_step_is_downstream(&transfer.steps, &deposit.step_id, step_id)
+            }
+            fin_domain::BridgeStepKind::Deposit => deposit.step_id == *step_id,
+        };
+        if current.kind != *step_kind
+            || current.operation_id.is_some()
+            || current.state != fin_domain::BridgeStepState::Unsubmitted
+            || deposit.kind != fin_domain::BridgeStepKind::Deposit
+            || deposit.operation_id.is_some()
+            || deposit.state != fin_domain::BridgeStepState::Unsubmitted
+            || !kind_matches_deposit
+        {
+            return Err(boundary_error(
+                "The prospective source debit is not tied to a ready allowance step and its declared downstream Deposit.",
+            ));
+        }
+        let expected = fin_domain::ResourceAmount {
+            resource: marker.resource.clone(),
+            amount: marker.maximum.clone(),
+        };
+        if !missing.is_empty()
+            && (missing[0].resource != expected.resource
+                || missing[0].amount.asset != expected.amount.asset
+                || missing[0].amount.atoms != expected.amount.atoms)
+        {
+            return Err(boundary_error(
+                "The authorization's future principal cap differs from the exact durable Deposit scope.",
+            ));
+        }
+        Ok(Some(marker))
+    }
+}
+
+pub(super) type BridgeBoundaryScope = (
+    String,
+    String,
+    fin_domain::BridgeStepKind,
+    Value,
+    fin_domain::BridgeSettlementExpectation,
+);
+
+fn bridge_step_is_downstream(
+    steps: &[fin_domain::BridgeStepLink],
+    dependent_step_id: &str,
+    ancestor_step_id: &str,
+) -> bool {
+    if dependent_step_id == ancestor_step_id {
+        return true;
+    }
+    let mut pending = steps
+        .iter()
+        .find(|step| step.step_id == dependent_step_id)
+        .map(|step| step.depends_on.clone())
+        .unwrap_or_default();
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(step_id) = pending.pop() {
+        if step_id == ancestor_step_id {
+            return true;
+        }
+        if visited.insert(step_id.clone())
+            && let Some(step) = steps.iter().find(|step| step.step_id == step_id)
+        {
+            pending.extend(step.depends_on.iter().cloned());
+        }
+    }
+    false
+}
+
+pub(super) fn bridge_boundary_scope(
+    prepared: &PreparedOperation,
+    input: &Value,
+) -> Result<Option<BridgeBoundaryScope>> {
+    let Some(marker) = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY) else {
+        return Ok(None);
+    };
+    let text = |field: &str| {
+        marker
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| boundary_error("Finite bridge grant marker is incomplete."))
+    };
+    let transfer_id = text("transfer_id")?;
+    let step_id = text("step_id")?;
+    let step_kind: fin_domain::BridgeStepKind = serde_json::from_value(
+        marker
+            .get("kind")
+            .cloned()
+            .ok_or_else(|| boundary_error("Finite bridge grant marker lacks its step kind."))?,
+    )
+    .map_err(|_| boundary_error("Finite bridge grant marker has an unknown step kind."))?;
+    if super::bridge_input_field(input, "transfer_id", "transferId")?.and_then(Value::as_str)
+        != Some(transfer_id.as_str())
+        || super::bridge_input_field(input, "step_id", "stepId")?.and_then(Value::as_str)
+            != Some(step_id.as_str())
+        || super::bridge_input_field(input, "step_kind", "stepKind")?
+            .cloned()
+            .and_then(|value| serde_json::from_value::<fin_domain::BridgeStepKind>(value).ok())
+            != Some(step_kind.clone())
+    {
+        return Err(boundary_error(
+            "Finite bridge grant step differs from its typed public request.",
+        ));
+    }
+    let bounds = marker
+        .get("bounds")
+        .cloned()
+        .ok_or_else(|| boundary_error("Finite bridge grant marker lacks selected bounds."))?;
+    let expectation = serde_json::from_value(
+        marker
+            .get("settlement_expectation")
+            .cloned()
+            .ok_or_else(|| boundary_error("Finite bridge grant marker lacks settlement scope."))?,
+    )
+    .map_err(|_| boundary_error("Finite bridge grant settlement scope is malformed."))?;
+    Ok(Some((transfer_id, step_id, step_kind, bounds, expectation)))
+}
+
+/// Read only the neutral bridge bounds field needed by Engine's authorization
+/// contract. BridgeBounds currently serializes this member in snake_case; the
+/// camelCase alias is accepted for wire-compatible callers, with conflicts
+/// rejected by the shared field reader.
+fn bridge_authorization_duration_ceiling(bounds: &Value) -> Result<Option<u64>> {
+    let value = super::bridge_input_field(bounds, "authorization_seconds", "authorizationSeconds")?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let seconds = value.as_u64().filter(|seconds| *seconds > 0).ok_or_else(|| {
+        boundaries::violation_error(
+            "The selected bridge authorization duration must be a positive integer number of seconds.",
+            BoundaryViolation {
+                constraint: "authorization_duration_seconds".into(),
+                approved_bound: json!({"minimum":1,"type":"positive_integer"}),
+                candidate_value: value.clone(),
+                evidence_time: None,
+                reauthorization_required: false,
+                reconciliation_required: false,
+            },
+        )
+    })?;
+    Ok(Some(seconds))
+}
+
+pub(super) fn bridge_step_claim(
+    request: &OperationRequest,
+    grant_id: Option<&str>,
+    operation_id: &str,
+    engine: &Engine,
+) -> Result<Option<fin_domain::BridgeStepLink>> {
+    let input = &request.input;
+    let transfer_id_value = super::bridge_input_field(input, "transfer_id", "transferId")?;
+    let step_id_value = super::bridge_input_field(input, "step_id", "stepId")?;
+    let step_kind_value = super::bridge_input_field(input, "step_kind", "stepKind")?;
+    let present = [transfer_id_value, step_id_value, step_kind_value]
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+    if present == 0 {
+        // Preserve legacy exact operation grants. Finite bridge transfers use
+        // the complete typed triplet and take the durable claim path below.
+        return Ok(None);
+    }
+    if present != 3 {
+        return Err(boundary_error(
+            "A finite bridge-step attempt requires transfer_id, step_id and step_kind together.",
+        ));
+    }
+    let transfer_id = transfer_id_value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| boundary_error("The bridge transfer ID must be a nonempty string."))?;
+    let step_id = step_id_value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| boundary_error("The bridge step ID must be a nonempty string."))?;
+    let kind: fin_domain::BridgeStepKind =
+        serde_json::from_value(step_kind_value.cloned().unwrap_or(Value::Null)).map_err(|_| {
+            boundary_error("The bridge step kind is not one of the declared finite kinds.")
+        })?;
+    let store = engine
+        .store
+        .lock()
+        .map_err(|_| internal("store lock poisoned"))?;
+    let transfer = store
+        .bridge_transfer(transfer_id)
+        .map_err(map_store)?
+        .ok_or_else(|| boundary_error("The bridge transfer is not present in the durable plan."))?;
+    if transfer.grant_id.as_deref() != grant_id {
+        return Err(boundary_error(
+            "The bridge transfer is not bound to this finite authorization.",
+        ));
+    }
+    let planned = transfer
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .ok_or_else(|| boundary_error("The bridge step is not declared in this transfer."))?;
+    if planned.kind != kind
+        || planned.grant_id.as_deref() != grant_id
+        || planned.operation_id.is_some()
+        || planned.state != fin_domain::BridgeStepState::Unsubmitted
+        || planned.depends_on.iter().any(|dependency| {
+            !transfer.steps.iter().any(|step| {
+                step.step_id == *dependency && step.state == fin_domain::BridgeStepState::Settled
+            })
+        })
+    {
+        return Err(boundary_error(
+            "The bridge step is outside the approved plan, already claimed, or has unsettled dependencies.",
+        ));
+    }
+    let mut claimed = planned.clone();
+    claimed.operation_id = Some(operation_id.to_owned());
+    claimed.state = fin_domain::BridgeStepState::Submitted;
+    Ok(Some(claimed))
 }
 
 fn boundary_request_state_error(status: &str) -> FinError {

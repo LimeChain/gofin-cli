@@ -65,6 +65,22 @@ class Lease:
 
 
 class ForkRunnerTests(unittest.TestCase):
+    def test_filter_selects_only_documented_deployed_contract_tests(self):
+        with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": ""}):
+            self.assertEqual(runner.selected_test_filter(), [])
+        for name in (
+            "deployed_protocol_roundtrip_via_broker_restores_exact_state",
+            "deployed_relay_native_source_proof_keeps_principal_in_transit",
+            "deployed_canonical_native_source_proof_on_both_children",
+        ):
+            with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": name}):
+                self.assertEqual(runner.selected_test_filter(), [name])
+        for invalid in ("unknown", "bridge", "--ignored", "deployed_*"):
+            with mock.patch.dict(runner.os.environ, {"FIN_FORK_TEST_FILTER": invalid}):
+                with self.assertRaises(RuntimeError):
+                    runner.selected_test_filter()
+
+
     def test_unresolved_test_group_retains_node_without_reset(self) -> None:
         events = []
 

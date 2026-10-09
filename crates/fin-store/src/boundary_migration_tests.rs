@@ -62,7 +62,17 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
     // Recreate the prior schema; there is no v3 approval-request table in v2.
     store
         .conn
-        .execute_batch("DROP TABLE boundary_authorization_requests; PRAGMA user_version=2;")
+        .execute_batch(
+            "DROP TABLE boundary_authorization_requests;
+         DROP TABLE bridge_allocation_owners;
+         DROP TABLE bridge_transit;
+         DROP TABLE bridge_step_links;
+         DROP TABLE bridge_quote_revisions;
+         DROP TABLE bridge_settlement_proofs;
+         DROP TABLE bridge_evidence_ids;
+         DROP TABLE bridge_transfers;
+         PRAGMA user_version=2;",
+        )
         .unwrap();
     drop(store);
     let reopened = Store::open(&path).unwrap();
@@ -71,7 +81,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        3
+        7
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-op").unwrap().unwrap(),

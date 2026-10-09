@@ -10,6 +10,7 @@ clap.workspace = true
 chrono.workspace = true
 fin-authorization.workspace = true
 fin-binance.workspace = true
+fin-bridge.workspace = true
 fin-exchange = { workspace = true, features = ["binance", "kraken", "hyperliquid", "okx", "coinbase", "bybit"] }
 fin-credentials.workspace = true
 fin-discovery.workspace = true

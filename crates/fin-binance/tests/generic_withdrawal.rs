@@ -91,7 +91,7 @@ impl FixtureTransport {
             posts: AtomicUsize::new(0),
             timeout: false,
             history_override: Mutex::new(json!({})),
-            free_after: Mutex::new("0.9896".into()),
+            free_after: Mutex::new("0.99".into()),
         })
     }
 
@@ -157,7 +157,7 @@ impl BinanceTransport for FixtureTransport {
                 assert_eq!(request.get("withdrawOrderId"), post.get("withdrawOrderId"));
                 assert_eq!(request.get("coin"), post.get("coin"));
                 let mut row = json!({
-                    "id":"synthetic-withdrawal-id", "coin":post.get("coin"), "amount":post.get("amount"),
+                    "id":"synthetic-withdrawal-id", "coin":post.get("coin"), "amount":"0.0096",
                     "network":post.get("network"), "address":post.get("address"),
                     "addressTag":post.get("addressTag"), "transactionFee":"0.0004",
                     "txId":format!("0x{}", "a".repeat(64)), "status":6,
@@ -180,8 +180,20 @@ impl BinanceRecipientVerifier for ReceiptVerifier {
         self.0.lock().unwrap().push(request);
         PayoutResult {
             status: Status::Completed,
-            amount_atoms: Some(Quantity::from_decimal("0.01", 18).unwrap()),
+            amount_atoms: Some(Quantity::from_decimal("0.0096", 18).unwrap()),
             evidence: json!({"fixture":"synthetic independent EVM receipt"}),
+        }
+    }
+}
+
+struct WrongNetReceiptVerifier;
+#[async_trait::async_trait]
+impl BinanceRecipientVerifier for WrongNetReceiptVerifier {
+    async fn verify(&self, _request: PayoutRequest) -> PayoutResult {
+        PayoutResult {
+            status: Status::Completed,
+            amount_atoms: Some(Quantity::from_decimal("0.0095", 18).unwrap()),
+            evidence: json!({"fixture":"synthetic unrelated net credit"}),
         }
     }
 }
@@ -219,7 +231,7 @@ impl BinanceRecipientVerifier for UnavailableChainVerifier {
     }
 }
 
-struct BitcoinVerifier(Mutex<Vec<PayoutRequest>>);
+struct BitcoinVerifier(Mutex<Vec<PayoutRequest>>, &'static str);
 #[async_trait::async_trait]
 impl BinanceRecipientVerifier for BitcoinVerifier {
     fn supports_asset(&self, network: &str, asset: &AssetId) -> bool {
@@ -257,7 +269,7 @@ impl BinanceRecipientVerifier for BitcoinVerifier {
         self.0.lock().unwrap().push(request);
         PayoutResult {
             status: Status::Completed,
-            amount_atoms: Some(Quantity::from_decimal("0.01", 8).unwrap()),
+            amount_atoms: Some(Quantity::from_decimal(self.1, 8).unwrap()),
             evidence: json!({"fixture":"synthetic independent Bitcoin receipt"}),
         }
     }
@@ -728,7 +740,7 @@ async fn uncertain_raw_withdrawal_reconciles_original_identity_without_replay() 
 async fn custom_bitcoin_observer_settles_exact_conserved_effects_without_adapter_network_changes() {
     let transport = FixtureTransport::new("BTC", "BTC");
     transport.history_override.lock().unwrap()["txId"] = json!("a".repeat(64));
-    let verifier = Arc::new(BitcoinVerifier(Mutex::new(vec![])));
+    let verifier = Arc::new(BitcoinVerifier(Mutex::new(vec![]), "0.0096"));
     let adapter =
         BinanceAdapter::new(config(&[]), transport.clone(), None, Some(verifier.clone())).unwrap();
     let preview = adapter
@@ -766,7 +778,7 @@ async fn custom_bitcoin_observer_settles_exact_conserved_effects_without_adapter
             assert_eq!(credit.asset.network, "bitcoin:mainnet");
             assert_eq!(credit.asset.decimals, 8);
             assert_eq!(debit.atoms.to_decimal(debit.asset.decimals), "0.01");
-            assert_eq!(credit.atoms.to_decimal(credit.asset.decimals), "0.01");
+            assert_eq!(credit.atoms.to_decimal(credit.asset.decimals), "0.0096");
         }
         other => panic!("unexpected custom observer effect {other:?}"),
     }
@@ -775,11 +787,134 @@ async fn custom_bitcoin_observer_settles_exact_conserved_effects_without_adapter
             amount, treatment, ..
         } => {
             assert_eq!(amount.atoms.to_decimal(amount.asset.decimals), "0.0004");
-            assert_eq!(treatment, &fin_domain::CostTreatment::AdditionalDebit);
+            assert_eq!(treatment, &fin_domain::CostTreatment::IncludedInDebit);
         }
         other => panic!("unexpected custom observer cost {other:?}"),
     }
     assert_eq!(verifier.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn immutable_legacy_withdrawal_shortfall_fails_with_verified_partial_effects() {
+    let transport = FixtureTransport::new("ETH", "ARBITRUM");
+    let verifier = Arc::new(ReceiptVerifier(Mutex::new(vec![])));
+    let adapter =
+        BinanceAdapter::new(config(&[1, 42161]), transport.clone(), None, Some(verifier)).unwrap();
+    let mut preview = adapter
+        .prepare("binance.withdraw", &input("ETH", "ARBITRUM", EVM_ADDRESS))
+        .await
+        .unwrap();
+    let submitted = adapter.submit(&preview, journal(&transport)).await.unwrap();
+
+    // Model the immutable preview saved before the fee-semantics correction:
+    // requested API amount .01 plus a separate .001 fee cap, with .01 net floor.
+    preview.input["minReceiveAmount"] = json!("0.01");
+    preview.binding["minimumReceive"] = json!("0.01");
+    preview.binding["maximumGrossDebit"] = json!("0.011");
+    preview.binding["maximumReceive"] = json!("0.01");
+    preview.intent.maximum_costs[0].treatment = fin_domain::CostTreatment::AdditionalDebit;
+    match &mut preview.intent.expected[0] {
+        fin_domain::EffectConstraint::Transfer { minimum_credit, .. } => {
+            *minimum_credit = Quantity::from_decimal("0.01", 18).unwrap();
+        }
+        other => panic!("unexpected saved withdrawal constraint {other:?}"),
+    }
+    let mut submitted = submitted;
+    submitted.data["minimumReceive"] = json!("0.01");
+    submitted.data["maximumGrossDebit"] = json!("0.011");
+    submitted.data["maximumReceive"] = json!("0.01");
+    let pending = record(preview, submitted);
+
+    let result = adapter.reconcile(&pending).await.unwrap();
+    assert_eq!(result.status, Status::Failed);
+    let proof = result
+        .verified
+        .expect("verified partial payout is terminal");
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(proof.evidence["actual_gross_debit"], "0.01");
+    assert_eq!(proof.evidence["actual_net_receipt"], "0.0096");
+    assert_eq!(proof.evidence["actual_fee"], "0.0004");
+    assert_eq!(proof.evidence["approved_minimum"], "0.01");
+    assert_eq!(proof.evidence["minimum_receipt_met"], false);
+    assert_eq!(proof.evidence["partial_payout_reconciled"], true);
+    assert!(
+        proof.evidence["outcome_reason"]
+            .as_str()
+            .unwrap()
+            .contains("do not retry")
+    );
+    match &proof.effects[0] {
+        fin_domain::FinancialEffect::Transfer { debit, credit, .. } => {
+            assert_eq!(debit.atoms.to_decimal(debit.asset.decimals), "0.0096");
+            assert_eq!(credit.atoms.to_decimal(credit.asset.decimals), "0.0096");
+        }
+        other => panic!("unexpected partial withdrawal transfer {other:?}"),
+    }
+    match &proof.effects[1] {
+        fin_domain::FinancialEffect::Cost {
+            amount, treatment, ..
+        } => {
+            assert_eq!(amount.atoms.to_decimal(amount.asset.decimals), "0.0004");
+            assert_eq!(treatment, &fin_domain::CostTreatment::AdditionalDebit);
+        }
+        other => panic!("unexpected partial withdrawal fee {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_account_debit_does_not_change_exact_withdrawal_effect_amount() {
+    let transport = FixtureTransport::new("ETH", "ARBITRUM");
+    // Another concurrent operation debits .00384 ETH from the same shared
+    // account; this withdrawal remains attributable only by its own immutable
+    // venue history identity and canonical recipient receipt.
+    *transport.free_after.lock().unwrap() = "0.98616".into();
+    let verifier = Arc::new(ReceiptVerifier(Mutex::new(vec![])));
+    let adapter =
+        BinanceAdapter::new(config(&[42161]), transport.clone(), None, Some(verifier)).unwrap();
+    let preview = adapter
+        .prepare("binance.withdraw", &input("ETH", "ARBITRUM", EVM_ADDRESS))
+        .await
+        .unwrap();
+    let submitted = adapter.submit(&preview, journal(&transport)).await.unwrap();
+    let result = adapter
+        .reconcile(&record(preview, submitted))
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Completed);
+    let proof = result.verified.unwrap();
+    assert_eq!(proof.evidence["apiGrossAmount"], "0.01");
+    assert_eq!(proof.evidence["sourceDebitObserved"], "0.01");
+    assert_eq!(proof.evidence["aggregateSourceDebitObserved"], "0.01384");
+    match &proof.effects[0] {
+        fin_domain::FinancialEffect::Transfer { debit, credit, .. } => {
+            assert_eq!(debit.atoms.to_decimal(debit.asset.decimals), "0.01");
+            assert_eq!(credit.atoms.to_decimal(credit.asset.decimals), "0.0096");
+        }
+        other => panic!("unexpected concurrent withdrawal effect {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn withdrawal_with_history_identity_but_wrong_chain_amount_stays_unresolved() {
+    let transport = FixtureTransport::new("ETH", "ARBITRUM");
+    let adapter = BinanceAdapter::new(
+        config(&[42161]),
+        transport.clone(),
+        None,
+        Some(Arc::new(WrongNetReceiptVerifier)),
+    )
+    .unwrap();
+    let preview = adapter
+        .prepare("binance.withdraw", &input("ETH", "ARBITRUM", EVM_ADDRESS))
+        .await
+        .unwrap();
+    let submitted = adapter.submit(&preview, journal(&transport)).await.unwrap();
+    let result = adapter
+        .reconcile(&record(preview, submitted))
+        .await
+        .unwrap();
+    assert_eq!(result.status, Status::Unknown);
+    assert!(result.verified.is_none());
 }
 
 #[tokio::test]
@@ -856,12 +991,12 @@ async fn zero_published_fee_and_zero_fee_cap_settle_without_an_invented_cost() {
     transport.metadata.lock().unwrap()[0]["networkList"][0]["withdrawFee"] = json!("0");
     *transport.free_after.lock().unwrap() = "0.99".into();
     *transport.history_override.lock().unwrap() =
-        json!({"transactionFee":"0", "txId":"a".repeat(64)});
+        json!({"amount":"0.01", "transactionFee":"0", "txId":"a".repeat(64)});
     let adapter = BinanceAdapter::new(
         config(&[]),
         transport.clone(),
         None,
-        Some(Arc::new(BitcoinVerifier(Mutex::new(vec![])))),
+        Some(Arc::new(BitcoinVerifier(Mutex::new(vec![]), "0.01"))),
     )
     .unwrap();
     let mut raw = input("BTC", "BTC", BTC_ADDRESS);
@@ -892,26 +1027,14 @@ async fn zero_published_fee_and_zero_fee_cap_settle_without_an_invented_cost() {
 }
 
 #[tokio::test]
-async fn fee_cap_larger_than_quantity_keeps_exact_caps_without_negative_lower_bounds() {
+async fn fee_cap_larger_than_gross_api_amount_is_rejected_before_posting() {
     let transport = FixtureTransport::new("BTC", "BTC");
-    transport.history_override.lock().unwrap()["txId"] = json!("a".repeat(64));
-    let verifier = Arc::new(BitcoinVerifier(Mutex::new(vec![])));
-    let adapter =
-        BinanceAdapter::new(config(&[]), transport.clone(), None, Some(verifier)).unwrap();
+    let adapter = BinanceAdapter::new(config(&[]), transport.clone(), None, None).unwrap();
     let mut raw = input("BTC", "BTC", BTC_ADDRESS);
     raw["maxFee"] = json!("0.01000001");
-    let preview = adapter.prepare("binance.withdraw", &raw).await.unwrap();
-    assert_eq!(preview.binding["maximumGrossDebit"], "0.02000001");
-    let submitted = adapter.submit(&preview, journal(&transport)).await.unwrap();
-    let pending = record(preview, submitted);
-    let result = adapter.reconcile(&pending).await.unwrap();
-    assert_eq!(result.status, Status::Completed);
-    assert_eq!(result.verified.unwrap().effects.len(), 2);
-    transport.history_override.lock().unwrap()["transactionFee"] = json!("0.01000002");
-    let excessive = adapter.reconcile(&pending).await.unwrap();
-    assert_eq!(excessive.status, Status::Unknown);
-    assert!(excessive.verified.is_none());
-    assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+    let error = adapter.prepare("binance.withdraw", &raw).await.unwrap_err();
+    assert_eq!(error.code, "WITHDRAWAL_FEE_EXCEEDS_AMOUNT");
+    assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

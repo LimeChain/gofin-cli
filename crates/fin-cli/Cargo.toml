@@ -16,6 +16,7 @@ path = "examples/fin-dev.rs"
 async-trait.workspace = true
 clap.workspace = true
 fin-domain.workspace = true
+fin-bridge.workspace = true
 fin-discovery.workspace = true
 fin-protocol.workspace = true
 fin-presentation.workspace = true

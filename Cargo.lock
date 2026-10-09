@@ -1820,6 +1820,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fin-bridge"
+version = "0.2.0-beta.1"
+dependencies = [
+ "alloy",
+ "async-trait",
+ "chrono",
+ "fin-domain",
+ "fin-evm",
+ "hex",
+ "num-bigint",
+ "num-traits",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "fin-broker"
 version = "0.2.0-beta.1"
 dependencies = [
@@ -1829,6 +1850,7 @@ dependencies = [
  "ed25519-dalek",
  "fin-authorization",
  "fin-binance",
+ "fin-bridge",
  "fin-credentials",
  "fin-discovery",
  "fin-domain",
@@ -1864,6 +1886,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "fin-bridge",
  "fin-broker",
  "fin-discovery",
  "fin-domain",
@@ -1898,6 +1921,7 @@ name = "fin-discovery"
 version = "0.2.0-beta.1"
 dependencies = [
  "clap",
+ "fin-bridge",
  "fin-domain",
  "schemars 1.2.2",
  "serde",
@@ -2051,6 +2075,7 @@ name = "fin-store"
 version = "0.2.0-beta.1"
 dependencies = [
  "chrono",
+ "fin-domain",
  "hex",
  "rusqlite",
  "serde",

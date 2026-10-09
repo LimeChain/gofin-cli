@@ -101,6 +101,14 @@ Existing chain-scoped Ethereum connections retain their authority until the
 human uses protected `connections update --provider evm` to broaden them; no
 upgrade silently widens a legacy signer's scope. See [EVM wallets](testing/evm-wallets.md).
 
+The same enrolled wallet can quote and execute the supported Relay bridge
+transfers between Ethereum, Arbitrum One and Robinhood Chain; no bridge-specific
+credential is collected. Quote discovery is a read. A selected finite bridge
+grant still requires fresh Touch ID and authorizes only that transfer's declared
+approval/reset/deposit steps. Base and Relay Chain are observers, not wallet
+networks. See the [bridge command guide](../README.md#relay-bridge-transfers)
+for public request shapes and the separate [verification guide](testing/bridge.md).
+
 CoinGecko pricing accepts an optional protected market-data connection:
 
 ```sh

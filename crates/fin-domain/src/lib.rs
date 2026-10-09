@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, FinError>;
+/// Reviewed-adapter metadata in a prepared operation binding for one finite
+/// bridge step; candidate inputs alone never establish this scope.
+pub const BRIDGE_STEP_METADATA_KEY: &str = "__fin_bridge_step";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
@@ -80,6 +83,209 @@ pub struct Amount {
 pub struct ResourceAmount {
     pub resource: ResourceId,
     pub amount: Amount,
+}
+
+/// A transfer outlives any single operation used to move its principal.
+/// These contracts deliberately describe protocol-neutral persisted state.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeTransferState {
+    Prepared,
+    ApprovalPending,
+    SourcePending,
+    InTransit,
+    DestinationPending,
+    Completed,
+    RefundPending,
+    Refunded,
+    Failed,
+    NeedsAttention,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeStepKind {
+    Approval,
+    ResetAllowance,
+    Deposit,
+}
+
+impl BridgeStepKind {
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Self::Approval | Self::ResetAllowance | Self::Deposit => "bridge.transfer",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeQuoteRevision {
+    pub revision: u32,
+    pub provider: String,
+    pub route_id: String,
+    /// Some protocols expose an external order identity; direct canonical
+    /// message routes may be identified only after source proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_id: Option<String>,
+    pub quote_hash: String,
+    /// Adapter-normalized exact quote, bounds and validation evidence. Opaque
+    /// to shared accounting but durable for restart and reconciliation.
+    pub payload: Value,
+    pub observed_at: String,
+    pub valid_until: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeStepState {
+    Unsubmitted,
+    Submitted,
+    Settled,
+    Superseded,
+    NeedsAttention,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeStepLink {
+    pub transfer_id: String,
+    pub grant_id: Option<String>,
+    pub step_id: String,
+    /// Bound by Engine when it durably creates the concrete attempt.
+    pub operation_id: Option<String>,
+    pub kind: BridgeStepKind,
+    pub depends_on: Vec<String>,
+    pub state: BridgeStepState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+pub enum BridgeAllocationOwner {
+    Operation { operation_id: Option<String> },
+    Transfer { transfer_id: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeSettlementOutcome {
+    Destination,
+    Refund,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSettlementTarget {
+    pub resource: ResourceId,
+    pub asset: AssetId,
+    pub minimum_atoms: Quantity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSettlementExpectation {
+    pub destination: Vec<BridgeSettlementTarget>,
+    pub refund: Vec<BridgeSettlementTarget>,
+}
+
+/// A finite bridge plan's source-principal debit, which can be authorized
+/// before its Deposit step is dispatched (for example, while approving a
+/// preceding token allowance). This is reviewed scope, never an operation
+/// effect or spendable resource.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeProspectiveDebit {
+    pub deposit_step_id: String,
+    pub resource: ResourceId,
+    pub maximum: Amount,
+}
+
+/// Application-verified final destination/refund proof. Its exact typed
+/// effects and evidence are persisted with the transfer and keyed by digest.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeSettlementProof {
+    pub transfer_id: String,
+    pub outcome: BridgeSettlementOutcome,
+    #[serde(default)]
+    pub evidence_id: String,
+    pub effects: Vec<FinancialEffect>,
+    pub evidence: Value,
+    pub observed_at: String,
+    pub proof_digest: String,
+}
+
+/// A destination transaction identity deterministically derived from a
+/// finalized source proof. `proof` carries protocol-specific derivation data;
+/// shared accounting stores it without interpreting the protocol.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeDestinationLocator {
+    pub scheme: String,
+    pub source_evidence_id: String,
+    pub destination_chain_id: u64,
+    pub transaction_hash: String,
+    pub proof: Value,
+}
+
+/// Proven principal held outside both wallets while a bridge is unresolved.
+/// It is intentionally not a `ResourceAmount` and cannot satisfy a debit.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TransitResource {
+    pub transfer_id: String,
+    pub amount: Amount,
+    #[serde(default)]
+    pub evidence_id: String,
+    /// Optional source-derived destination transaction locator. Older Relay
+    /// records and transfers without deterministic destination IDs omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_locator: Option<BridgeDestinationLocator>,
+    pub proof_digest: String,
+    pub observed_at: String,
+    pub spendable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BridgeTransferRecord {
+    pub version: u32,
+    pub id: String,
+    /// Bound once after the human approves a finite bridge authorization.
+    pub grant_id: Option<String>,
+    /// Exact original intent, fixed route identity and accepted bounds.
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub settlement_expectation: Option<BridgeSettlementExpectation>,
+    /// Human-selected execution bounds frozen on the first authorized step.
+    /// Provider quote refreshes never modify this scope.
+    #[serde(default)]
+    pub approved_bounds: Option<Value>,
+    /// Exact finite source debit tied to a declared Deposit step. Legacy and
+    /// non-bridge records omit it.
+    #[serde(default)]
+    pub prospective_debit: Option<BridgeProspectiveDebit>,
+    pub state: BridgeTransferState,
+    pub quote_revisions: Vec<BridgeQuoteRevision>,
+    pub steps: Vec<BridgeStepLink>,
+    pub allocation_owner: BridgeAllocationOwner,
+    pub transit: Option<TransitResource>,
+    /// Proof digests already applied to this transfer, for idempotent settlement.
+    pub applied_proofs: Vec<String>,
+    #[serde(default)]
+    pub settlement_proofs: Vec<BridgeSettlementProof>,
+}
+
+pub fn bridge_settlement_digest(proof: &BridgeSettlementProof) -> Result<String> {
+    binding_hash(&serde_json::json!({
+        "transfer_id":proof.transfer_id,
+        "outcome":proof.outcome,
+        "evidence_id":proof.evidence_id,
+        "effects":proof.effects,
+        "evidence":proof.evidence,
+        "observed_at":proof.observed_at,
+    }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -499,6 +705,12 @@ pub enum FinancialEffect {
         to: ResourceId,
         amount: Amount,
     },
+    /// Proven principal committed to an external transfer but not yet
+    /// spendable at either custody location. The containing proof digest binds it.
+    TransitPrincipal {
+        transfer_id: String,
+        amount: Amount,
+    },
     Cost {
         location: AccountingLocation,
         amount: Amount,
@@ -543,6 +755,7 @@ pub struct VerifiedEffects {
     pub observed_at: String,
     pub proof_digest: String,
 }
+
 pub type VerifiedEffectBundle = VerifiedEffects;
 
 pub fn verified_effect_digest(bundle: &VerifiedEffects) -> Result<String> {

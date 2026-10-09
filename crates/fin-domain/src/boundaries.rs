@@ -39,6 +39,15 @@ pub fn attempt_binding(prepared: &PreparedOperation) -> Value {
     if let Some(object) = execution.as_object_mut() {
         object.remove(BOUNDARY_METADATA_KEY);
         object.remove(crate::value_bounds::KEY);
+        // A finite bridge step is candidate-bound by its transfer, step and
+        // kind. The grant ID is injected by Engine only after authorization
+        // and must not change the hash that identifies that candidate.
+        if let Some(bridge_step) = object
+            .get_mut(crate::BRIDGE_STEP_METADATA_KEY)
+            .and_then(Value::as_object_mut)
+        {
+            bridge_step.remove("grant_id");
+        }
     }
     serde_json::json!({
         "operation": prepared.operation,

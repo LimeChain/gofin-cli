@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use fin_domain::boundaries::{
     self, BoundaryAttemptSummary, BoundaryAuthorization, BoundaryAuthorizationRecord,
     BoundaryAuthorizationRequest, BoundaryAuthorizationStatus, BoundaryPreview, BoundarySpec,
-    BoundaryStatus,
+    BoundaryStatus, BoundaryViolation,
 };
 use fin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
@@ -21,7 +21,9 @@ use fin_domain::{
     StateSnapshot, Status, Submission, SubmissionJournal, VerifiedEffects, authorization_binding,
     binding_hash, now, request_fingerprint, verified_effect_digest,
 };
-use fin_store::{RecoveryReport, ReservationRow, Settlement, Store, StoreError, SubmissionRow};
+use fin_store::{
+    RecoveryReport, ReservationRow, Settlement, SharedStore, Store, StoreError, SubmissionRow,
+};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
@@ -265,7 +267,18 @@ pub trait TrustedAssetPriceProvider: Send + Sync {
 
 impl Engine {
     pub fn new(
-        mut store: Store,
+        store: Store,
+        adapters: Vec<Arc<dyn Adapter>>,
+        authorizer: Arc<dyn fin_domain::Authorizer>,
+        options: EngineOptions,
+    ) -> Result<Self> {
+        Self::new_with_shared_store(store.share(), adapters, authorizer, options)
+    }
+
+    /// Construct the engine around a Store shared with a narrow integration
+    /// repository, so bridge state and operation records commit through one DB.
+    pub fn new_with_shared_store(
+        store: SharedStore,
         adapters: Vec<Arc<dyn Adapter>>,
         authorizer: Arc<dyn fin_domain::Authorizer>,
         options: EngineOptions,
@@ -290,10 +303,12 @@ impl Engine {
             }
         }
         store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
             .recover_boundary_authorization_requests(&now())
             .map_err(map_store)?;
         Ok(Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             adapters: RwLock::new(registry),
             authorizer,
             options,
@@ -1002,6 +1017,32 @@ impl Engine {
             ));
         }
         let fingerprint = request_fingerprint(&request)?;
+        // Resolve an existing logical request before inspecting or claiming a
+        // finite bridge step. A completed bridge attempt has already settled
+        // its step link, so asking the plan to claim that step again would
+        // reject a legitimate idempotent retry before request deduplication
+        // can return the original immutable operation record.
+        let existing = {
+            self.store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?
+                .by_request(&request.request_id)
+                .map_err(map_store)?
+        };
+        if let Some(existing) = existing {
+            if existing.fingerprint != fingerprint {
+                return Err(map_store(StoreError::RequestConflict));
+            }
+            let original: OperationRecord = from_value(existing.record)?;
+            return if matches!(
+                original.status,
+                Status::Submitted | Status::Pending | Status::Unknown
+            ) {
+                self.reconcile_serial(original.id.clone()).await
+            } else {
+                Ok(original)
+            };
+        }
         let timestamp = now();
         let id = Uuid::new_v4().to_string();
         let initial = OperationRecord {
@@ -1024,21 +1065,42 @@ impl Engine {
             run_id: request.run_id.clone(),
         };
         let initial_json = to_value(&initial)?;
-        let created = self
-            .store
-            .lock()
-            .map_err(|_| internal("store lock poisoned"))?
-            .create_request(
-                &id,
-                &request.request_id,
-                &fingerprint,
-                &request.operation,
-                request.run_id.as_deref(),
-                "awaiting_approval",
-                &initial_json,
-                &timestamp,
-            )
-            .map_err(map_store)?;
+        let bridge_step = if request.operation == "bridge.transfer" {
+            boundary_authorizations::bridge_step_claim(&request, None, &id, self)?
+        } else {
+            None
+        };
+        let created = {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            if let Some(step) = bridge_step.as_ref() {
+                store.create_bridge_attempt(
+                    &id,
+                    &request.request_id,
+                    &fingerprint,
+                    &request.operation,
+                    request.run_id.as_deref(),
+                    "awaiting_approval",
+                    &initial_json,
+                    &timestamp,
+                    step,
+                )
+            } else {
+                store.create_request(
+                    &id,
+                    &request.request_id,
+                    &fingerprint,
+                    &request.operation,
+                    request.run_id.as_deref(),
+                    "awaiting_approval",
+                    &initial_json,
+                    &timestamp,
+                )
+            }
+            .map_err(map_store)?
+        };
         if !created.created {
             let existing: OperationRecord = from_value(created.record)?;
             return if matches!(
@@ -1279,6 +1341,11 @@ impl Engine {
                 ));
             }
         }
+        self.bind_bridge_approved_scope(
+            &refreshed,
+            &record.id,
+            boundary.as_ref().map(|b| b.authorization.id.as_str()),
+        )?;
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
@@ -1521,6 +1588,224 @@ impl Engine {
             .into_iter()
             .map(from_value)
             .collect()
+    }
+
+    fn bind_bridge_approved_scope(
+        &self,
+        prepared: &PreparedOperation,
+        operation_id: &str,
+        grant_id: Option<&str>,
+    ) -> Result<()> {
+        let Some(marker) = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY) else {
+            return Ok(());
+        };
+        let transfer_id = marker
+            .get("transfer_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks its transfer ID."))?;
+        let step_id = marker
+            .get("step_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks its step ID."))?;
+        let marker_grant = marker.get("grant_id").and_then(Value::as_str);
+        if marker_grant != grant_id {
+            return Err(FinError::new(
+                "BRIDGE_GRANT_MISMATCH",
+                "authorization",
+                "Bridge step is not bound to the active authorization.",
+                "Reconcile the saved transfer and authorize only its declared step.",
+            ));
+        }
+        let bounds = marker
+            .get("bounds")
+            .ok_or_else(|| FinError::validation("Bridge step marker lacks selected bounds."))?;
+        let expectation: fin_domain::BridgeSettlementExpectation =
+            serde_json::from_value(marker.get("settlement_expectation").cloned().ok_or_else(
+                || FinError::validation("Bridge step marker lacks settlement scope."),
+            )?)
+            .map_err(|_| FinError::validation("Bridge settlement scope is malformed."))?;
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .bind_bridge_approval_scope(
+                transfer_id,
+                grant_id,
+                step_id,
+                operation_id,
+                bounds,
+                &expectation,
+            )
+            .map_err(map_store)?;
+        Ok(())
+    }
+
+    /// Apply a final, adapter-verified correlated destination/refund proof to
+    /// a durable bridge transfer. The typed receipt effects and the transfer's
+    /// terminal state commit together; principal cannot be debited a second time.
+    pub fn commit_bridge_external_settlement(
+        &self,
+        proof: fin_domain::BridgeSettlementProof,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
+        let usable_credit_count = proof
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, FinancialEffect::UsableCredit { .. }))
+            .count();
+        if proof.evidence.is_null()
+            || proof.transfer_id.is_empty()
+            || proof.evidence_id.is_empty()
+            || !bridge_event_identity_matches(
+                &proof.evidence,
+                &proof.transfer_id,
+                &proof.evidence_id,
+            )
+            || proof.proof_digest != fin_domain::bridge_settlement_digest(&proof)?
+            || usable_credit_count != 1
+            || proof.effects.iter().any(|effect| match effect {
+                FinancialEffect::UsableCredit { amount, .. } => amount.atoms.is_zero(),
+                FinancialEffect::Cost {
+                    category,
+                    treatment: CostTreatment::DeductedFromCredit,
+                    ..
+                } => category.trim().is_empty(),
+                _ => true,
+            })
+        {
+            return Err(FinError::new(
+                "BRIDGE_SETTLEMENT_INVALID",
+                "reconciliation",
+                "Final transfer proof is incomplete, untyped, or attempts to charge principal again.",
+                "Keep the transfer unresolved and reconcile the correlated destination or refund evidence.",
+            ));
+        }
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        let mut transfer = store
+            .bridge_transfer(&proof.transfer_id)
+            .map_err(map_store)?
+            .ok_or_else(|| {
+                FinError::new(
+                    "BRIDGE_TRANSFER_NOT_FOUND",
+                    "reconciliation",
+                    "The durable transfer record is missing.",
+                    "Restore the original transfer journal; do not create a new transfer.",
+                )
+            })?;
+        let expectation = transfer.settlement_expectation.as_ref().ok_or_else(|| {
+            FinError::new(
+                "BRIDGE_SETTLEMENT_SCOPE_MISSING",
+                "reconciliation",
+                "The durable transfer has no typed destination/refund settlement scope.",
+                "Keep the transfer unresolved and restore its original reviewed quote expectation.",
+            )
+        })?;
+        if transfer.approved_bounds.is_none()
+            || expectation.destination.len() != 1
+            || expectation
+                .destination
+                .iter()
+                .chain(expectation.refund.iter())
+                .any(|target| !valid_bridge_target(target))
+        {
+            return Err(FinError::new(
+                "BRIDGE_SETTLEMENT_SCOPE_INVALID",
+                "reconciliation",
+                "The transfer lacks immutable selected bounds or a valid chain-qualified settlement target.",
+                "Keep the transfer unresolved and restore its original approved quote scope.",
+            ));
+        }
+        let (credit_resource, credit_amount) = proof
+            .effects
+            .iter()
+            .find_map(|effect| match effect {
+                FinancialEffect::UsableCredit { to, amount } => Some((to, amount)),
+                _ => None,
+            })
+            .ok_or_else(|| internal("validated bridge settlement lost its credit"))?;
+        let targets = match proof.outcome {
+            fin_domain::BridgeSettlementOutcome::Destination => &expectation.destination,
+            fin_domain::BridgeSettlementOutcome::Refund => &expectation.refund,
+        };
+        let permitted_target = targets.iter().find(|target| {
+            target.resource == *credit_resource
+                && target.asset == credit_amount.asset
+                && credit_amount.atoms.integer() >= target.minimum_atoms.integer()
+        });
+        let expected_asset = to_value(&credit_amount.asset)?;
+        if permitted_target.is_none()
+            || proof
+                .evidence
+                .get("recipient_resource")
+                .and_then(Value::as_str)
+                != Some(credit_resource.0.as_str())
+            || proof.evidence.get("asset") != Some(&expected_asset)
+            || proof.evidence.get("amount_atoms").and_then(Value::as_str)
+                != Some(credit_amount.atoms.as_str())
+            || !bridge_evidence_matches_resource(&proof.evidence, credit_resource)
+            || (credit_resource.0.starts_with("ethereum:")
+                && proof.evidence.get("recipient").and_then(Value::as_str)
+                    != credit_resource.0.rsplit(':').next())
+        {
+            return Err(FinError::new(
+                "BRIDGE_SETTLEMENT_OUT_OF_SCOPE",
+                "reconciliation",
+                "Final receipt credit does not match the reviewed destination/refund identity and minimum.",
+                "Keep the transfer unresolved and reconcile the exact correlated receipt against its saved quote.",
+            ));
+        }
+        if let Some(existing) = transfer
+            .settlement_proofs
+            .iter()
+            .find(|old| old.proof_digest == proof.proof_digest)
+        {
+            if existing == &proof {
+                return Ok(transfer);
+            }
+            return Err(FinError::new(
+                "BRIDGE_PROOF_CONFLICT",
+                "reconciliation",
+                "This proof digest already names different destination effects.",
+                "Preserve the transfer as unresolved and inspect the original proof record.",
+            ));
+        }
+        if transfer.transit.is_none()
+            || !matches!(
+                transfer.state,
+                fin_domain::BridgeTransferState::InTransit
+                    | fin_domain::BridgeTransferState::DestinationPending
+                    | fin_domain::BridgeTransferState::RefundPending
+            )
+        {
+            return Err(FinError::new(
+                "BRIDGE_TRANSFER_NOT_PENDING",
+                "reconciliation",
+                "This transfer has no unresolved proven principal to settle.",
+                "Inspect its existing destination or refund proof; never apply principal twice.",
+            ));
+        }
+        match proof.outcome {
+            fin_domain::BridgeSettlementOutcome::Destination => {
+                transfer.state = fin_domain::BridgeTransferState::Completed;
+            }
+            fin_domain::BridgeSettlementOutcome::Refund => {
+                transfer.state = fin_domain::BridgeTransferState::Refunded;
+            }
+        }
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or_else(|| internal("transfer version overflow"))?;
+        transfer.applied_proofs.push(proof.proof_digest.clone());
+        transfer.settlement_proofs.push(proof.clone());
+        transfer.transit = None;
+        store
+            .commit_bridge_transfer_settlement(&transfer, &proof, &now())
+            .map_err(map_store)?;
+        Ok(transfer)
     }
 
     pub fn recover_interrupted(&self) -> Result<RecoveryReport> {
@@ -2002,23 +2287,291 @@ impl Engine {
                 boundary.active_attempt = None;
                 account_boundary_effects(&mut boundary.authorization, record.effects.as_ref())?;
             }
-            self.store
+            let handoff = transfer_principal(&record)?;
+            let mut store = self
+                .store
                 .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .commit_boundary_settlement(
-                    &settlement,
-                    boundary_id,
-                    &to_value(&expected)?,
-                    &to_value(&boundary)?,
-                    &record.updated_at,
-                )
-                .map_err(map_store)
+                .map_err(|_| internal("store lock poisoned"))?;
+            if let Some(principal) = handoff {
+                let metadata = record
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY))
+                    .ok_or_else(|| {
+                        boundary_error("Transfer deposit lost its approved step identity.")
+                    })?;
+                let transfer_id = principal.transfer_id.clone();
+                let step_id = metadata
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| boundary_error("Transfer deposit has no approved step ID."))?;
+                if metadata.get("transfer_id").and_then(Value::as_str) != Some(transfer_id.as_str())
+                    || metadata.get("grant_id").and_then(Value::as_str) != Some(boundary_id)
+                {
+                    return Err(boundary_error(
+                        "Transfer deposit identity differs from its approved grant.",
+                    ));
+                }
+                let mut transfer = store
+                    .bridge_transfer(&transfer_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| boundary_error("The approved transfer record is missing."))?;
+                let planned_step = transfer
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.step_id == step_id)
+                    .ok_or_else(|| {
+                        boundary_error("The deposit step is not declared in this transfer.")
+                    })?;
+                if transfer.grant_id.as_deref() != Some(boundary_id)
+                    || planned_step.grant_id.as_deref() != Some(boundary_id)
+                    || planned_step.kind != fin_domain::BridgeStepKind::Deposit
+                    || planned_step.operation_id.as_deref() != Some(record.id.as_str())
+                    || planned_step.state != fin_domain::BridgeStepState::Submitted
+                {
+                    return Err(boundary_error(
+                        "The deposit step is already claimed or outside its finite grant.",
+                    ));
+                }
+                planned_step.operation_id = Some(record.id.clone());
+                planned_step.state = fin_domain::BridgeStepState::Settled;
+                transfer.version = transfer
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| boundary_error("Transfer version overflow."))?;
+                transfer.state = fin_domain::BridgeTransferState::InTransit;
+                transfer.allocation_owner = fin_domain::BridgeAllocationOwner::Transfer {
+                    transfer_id: transfer.id.clone(),
+                };
+                transfer.applied_proofs.push(principal.proof_digest.clone());
+                transfer.transit = Some(principal.clone());
+                let charge = ordinary_policy::record_charge(&record)?.to_string();
+                store
+                    .commit_boundary_bridge_source_handoff(
+                        &settlement,
+                        boundary_id,
+                        &to_value(&expected)?,
+                        &to_value(&boundary)?,
+                        &transfer,
+                        &principal,
+                        &charge,
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)
+            } else if record.status == Status::Completed {
+                if let Some((transfer_id, step_id, grant_id, kind)) = bridge_step_binding(&record)?
+                {
+                    if grant_id.as_deref() != Some(boundary_id) {
+                        return Err(boundary_error(
+                            "Settled bridge step differs from its boundary grant identity.",
+                        ));
+                    }
+                    store
+                        .commit_boundary_bridge_step_settlement(
+                            &settlement,
+                            &transfer_id,
+                            &step_id,
+                            boundary_id,
+                            &kind,
+                            boundary_id,
+                            &to_value(&expected)?,
+                            &to_value(&boundary)?,
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                } else {
+                    store
+                        .commit_boundary_settlement(
+                            &settlement,
+                            boundary_id,
+                            &to_value(&expected)?,
+                            &to_value(&boundary)?,
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                }
+            } else if record.status == Status::Failed
+                && record.submission.is_some()
+                && record.effects.is_some()
+            {
+                if let Some((transfer_id, step_id, grant_id, kind)) = bridge_step_binding(&record)?
+                {
+                    if kind == fin_domain::BridgeStepKind::Deposit
+                        && grant_id.as_deref() == Some(boundary_id)
+                    {
+                        store
+                            .commit_bridge_failed_deposit(
+                                &settlement,
+                                &transfer_id,
+                                &step_id,
+                                Some(boundary_id),
+                                &record.updated_at,
+                                Some((boundary_id, &to_value(&expected)?, &to_value(&boundary)?)),
+                            )
+                            .map_err(map_store)
+                    } else {
+                        store
+                            .commit_boundary_settlement(
+                                &settlement,
+                                boundary_id,
+                                &to_value(&expected)?,
+                                &to_value(&boundary)?,
+                                &record.updated_at,
+                            )
+                            .map_err(map_store)
+                    }
+                } else {
+                    store
+                        .commit_boundary_settlement(
+                            &settlement,
+                            boundary_id,
+                            &to_value(&expected)?,
+                            &to_value(&boundary)?,
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                }
+            } else {
+                store
+                    .commit_boundary_settlement(
+                        &settlement,
+                        boundary_id,
+                        &to_value(&expected)?,
+                        &to_value(&boundary)?,
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)
+            }
         } else {
-            self.store
-                .lock()
-                .map_err(|_| internal("store lock poisoned"))?
-                .commit_settlement(&settlement, &record.updated_at)
-                .map_err(map_store)
+            let handoff = transfer_principal(&record)?;
+            if let Some(principal) = handoff {
+                let metadata = record
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY))
+                    .ok_or_else(|| {
+                        boundary_error("Transfer deposit lost its approved step identity.")
+                    })?;
+                let transfer_id = principal.transfer_id.clone();
+                let step_id = metadata
+                    .get("step_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| boundary_error("Transfer deposit has no approved step ID."))?;
+                let grant_id = metadata.get("grant_id").and_then(Value::as_str);
+                if metadata.get("transfer_id").and_then(Value::as_str) != Some(transfer_id.as_str())
+                {
+                    return Err(boundary_error(
+                        "Transfer deposit identity differs from its approved step.",
+                    ));
+                }
+                let mut store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                let mut transfer = store
+                    .bridge_transfer(&transfer_id)
+                    .map_err(map_store)?
+                    .ok_or_else(|| boundary_error("The approved transfer record is missing."))?;
+                let planned_step = transfer
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.step_id == step_id)
+                    .ok_or_else(|| {
+                        boundary_error("The deposit step is not declared in this transfer.")
+                    })?;
+                if transfer.grant_id.as_deref() != grant_id
+                    || planned_step.grant_id.as_deref() != grant_id
+                    || planned_step.kind != fin_domain::BridgeStepKind::Deposit
+                    || planned_step.operation_id.as_deref() != Some(record.id.as_str())
+                    || planned_step.state != fin_domain::BridgeStepState::Submitted
+                {
+                    return Err(boundary_error(
+                        "The deposit step is already claimed or outside its finite plan.",
+                    ));
+                }
+                planned_step.state = fin_domain::BridgeStepState::Settled;
+                transfer.version = transfer
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| internal("transfer version overflow"))?;
+                transfer.state = fin_domain::BridgeTransferState::InTransit;
+                transfer.allocation_owner = fin_domain::BridgeAllocationOwner::Transfer {
+                    transfer_id: transfer.id.clone(),
+                };
+                transfer.applied_proofs.push(principal.proof_digest.clone());
+                transfer.transit = Some(principal.clone());
+                let charge = ordinary_policy::record_charge(&record)?.to_string();
+                store
+                    .commit_bridge_source_handoff(
+                        &settlement,
+                        &transfer,
+                        &principal,
+                        &charge,
+                        &record.updated_at,
+                    )
+                    .map_err(map_store)
+            } else if record.status == Status::Completed {
+                if let Some((transfer_id, step_id, grant_id, kind)) = bridge_step_binding(&record)?
+                {
+                    self.store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .commit_bridge_step_settlement(
+                            &settlement,
+                            &transfer_id,
+                            &step_id,
+                            grant_id.as_deref(),
+                            &kind,
+                            &record.updated_at,
+                        )
+                        .map_err(map_store)
+                } else {
+                    self.store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .commit_settlement(&settlement, &record.updated_at)
+                        .map_err(map_store)
+                }
+            } else if record.status == Status::Failed
+                && record.submission.is_some()
+                && record.effects.is_some()
+            {
+                if let Some((transfer_id, step_id, grant_id, kind)) = bridge_step_binding(&record)?
+                {
+                    if kind == fin_domain::BridgeStepKind::Deposit {
+                        self.store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .commit_bridge_failed_deposit(
+                                &settlement,
+                                &transfer_id,
+                                &step_id,
+                                grant_id.as_deref(),
+                                &record.updated_at,
+                                None,
+                            )
+                            .map_err(map_store)
+                    } else {
+                        self.store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .commit_settlement(&settlement, &record.updated_at)
+                            .map_err(map_store)
+                    }
+                } else {
+                    self.store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .commit_settlement(&settlement, &record.updated_at)
+                        .map_err(map_store)
+                }
+            } else {
+                self.store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?
+                    .commit_settlement(&settlement, &record.updated_at)
+                    .map_err(map_store)
+            }
         }
     }
 
@@ -2660,6 +3213,286 @@ fn cancellation_error() -> FinError {
     )
 }
 
+fn transfer_principal(record: &OperationRecord) -> Result<Option<fin_domain::TransitResource>> {
+    let Some(verified) = &record.effects else {
+        return Ok(None);
+    };
+    let principals = verified
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            FinancialEffect::TransitPrincipal {
+                transfer_id,
+                amount,
+            } => Some((transfer_id, amount)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if principals.is_empty() {
+        return Ok(None);
+    }
+    if principals.len() != 1 {
+        return Err(boundary_error(
+            "Source proof must identify exactly one transit principal.",
+        ));
+    }
+    let (transfer_id, amount) = principals[0];
+    let evidence_id = verified
+        .evidence
+        .get("evidence_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            FinError::new(
+                "INVALID_TRANSIT_EFFECT",
+                "reconciliation",
+                "Source proof has no stable receipt identity.",
+                "Keep the transfer unresolved and reconcile the original source receipt.",
+            )
+        })?
+        .to_owned();
+    let destination_locator = verified
+        .evidence
+        .get("destination_locator")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<fin_domain::BridgeDestinationLocator>(value.clone()).map_err(
+                |_| {
+                    FinError::new(
+                        "INVALID_TRANSIT_EFFECT",
+                        "reconciliation",
+                        "Source proof destination locator is malformed.",
+                        "Keep the transfer unresolved and reconcile the original source receipt.",
+                    )
+                },
+            )
+        })
+        .transpose()?;
+    if destination_locator
+        .as_ref()
+        .is_some_and(|locator| locator.source_evidence_id != evidence_id)
+    {
+        return Err(FinError::new(
+            "INVALID_TRANSIT_EFFECT",
+            "reconciliation",
+            "Destination locator is not bound to this exact source evidence identity.",
+            "Keep the transfer unresolved and reconcile the original source receipt.",
+        ));
+    }
+    Ok(Some(fin_domain::TransitResource {
+        transfer_id: transfer_id.clone(),
+        amount: amount.clone(),
+        evidence_id,
+        destination_locator,
+        proof_digest: verified.proof_digest.clone(),
+        observed_at: verified.observed_at.clone(),
+        spendable: false,
+    }))
+}
+
+fn bridge_event_identity_matches(evidence: &Value, transfer_id: &str, evidence_id: &str) -> bool {
+    let chain_id = evidence
+        .get("chain_id")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<u64>().ok())
+                .or_else(|| value.as_u64())
+        })
+        .map(|value| value.to_string());
+    let transaction_hash = evidence
+        .get("transaction_hash")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() == 66
+                && value.starts_with("0x")
+                && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(str::to_ascii_lowercase);
+    let log_index = evidence
+        .get("log_index")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|index| index.parse::<u64>().ok())
+                .or_else(|| value.as_u64())
+        })
+        .map(|value| value.to_string());
+    // Event-scoped evidence has a real receipt log index. Some EVM protocols
+    // instead prove a direct native transfer from the canonical transaction
+    // itself; those adapters must opt into this explicit transaction scope.
+    // Do not accept both forms at once: an event index cannot be silently
+    // discarded to turn event evidence into transaction evidence.
+    let receipt_scope = evidence.get("receipt_scope").and_then(Value::as_str);
+    let canonical = match receipt_scope {
+        None => match (chain_id, transaction_hash, log_index) {
+            (Some(chain), Some(hash), Some(index)) => {
+                Some(format!("ethereum:{chain}:{hash}:{index}"))
+            }
+            _ => None,
+        },
+        Some("transaction") if evidence.get("log_index").is_none_or(Value::is_null) => {
+            match (chain_id, transaction_hash) {
+                (Some(chain), Some(hash)) => Some(format!("ethereum:{chain}:{hash}:transaction")),
+                _ => None,
+            }
+        }
+        // Unknown scopes and transaction scope mixed with an event index are
+        // malformed evidence, even when its caller supplied a matching ID.
+        Some(_) => None,
+    };
+    evidence.get("transfer_id").and_then(Value::as_str) == Some(transfer_id)
+        && evidence.get("evidence_id").and_then(Value::as_str) == Some(evidence_id)
+        && canonical.as_deref() == Some(evidence_id)
+        && evidence
+            .get("correlation")
+            .is_some_and(|value| !value.is_null())
+}
+
+fn bridge_evidence_matches_resource(evidence: &Value, resource: &ResourceId) -> bool {
+    let Some(rest) = resource.0.strip_prefix("ethereum:") else {
+        return true;
+    };
+    let Some((expected_chain, address)) = rest.split_once(':') else {
+        return false;
+    };
+    let event_chain = evidence
+        .get("chain_id")
+        .and_then(|value| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<u64>().ok())
+                .or_else(|| value.as_u64())
+        })
+        .map(|value| value.to_string());
+    expected_chain
+        .parse::<u64>()
+        .ok()
+        .map(|value| value.to_string())
+        == event_chain
+        && !address.is_empty()
+}
+
+fn valid_bridge_target(target: &fin_domain::BridgeSettlementTarget) -> bool {
+    if target.minimum_atoms.integer().is_zero() {
+        return false;
+    }
+    let Some(rest) = target.resource.0.strip_prefix("ethereum:") else {
+        return false;
+    };
+    let Some((chain, address)) = rest.split_once(':') else {
+        return false;
+    };
+    let Ok(chain_id) = chain.parse::<u64>() else {
+        return false;
+    };
+    target.asset.network == format!("ethereum:{chain_id}")
+        && address.len() == 42
+        && address.starts_with("0x")
+        && address[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && address == address.to_ascii_lowercase()
+}
+
+fn bridge_step_binding(
+    record: &OperationRecord,
+) -> Result<Option<(String, String, Option<String>, fin_domain::BridgeStepKind)>> {
+    let Some(marker) = record
+        .preview
+        .as_ref()
+        .and_then(|preview| preview.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY))
+    else {
+        return Ok(None);
+    };
+    let parse_text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| boundary_error("Prepared bridge step binding is incomplete."))
+    };
+    let transfer_id = parse_text(marker.get("transfer_id"))?;
+    let step_id = parse_text(marker.get("step_id"))?;
+    let kind: fin_domain::BridgeStepKind = serde_json::from_value(
+        marker
+            .get("kind")
+            .cloned()
+            .ok_or_else(|| boundary_error("Prepared bridge step has no declared kind."))?,
+    )
+    .map_err(|_| boundary_error("Prepared bridge step has an unknown kind."))?;
+    let input = &record.input;
+    if bridge_input_field(input, "transfer_id", "transferId")?.and_then(Value::as_str)
+        != Some(transfer_id.as_str())
+        || bridge_input_field(input, "step_id", "stepId")?.and_then(Value::as_str)
+            != Some(step_id.as_str())
+        || bridge_input_field(input, "step_kind", "stepKind")?.and_then(Value::as_str)
+            != Some(match &kind {
+                fin_domain::BridgeStepKind::Approval => "approval",
+                fin_domain::BridgeStepKind::ResetAllowance => "reset_allowance",
+                fin_domain::BridgeStepKind::Deposit => "deposit",
+            })
+    {
+        return Err(boundary_error(
+            "Prepared bridge step identity differs from its immutable request.",
+        ));
+    }
+    let grant_id = marker
+        .get("grant_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(Some((transfer_id, step_id, grant_id, kind)))
+}
+
+pub(crate) fn bridge_input_field<'a>(
+    input: &'a Value,
+    snake_case: &str,
+    camel_case: &str,
+) -> Result<Option<&'a Value>> {
+    let snake = input.get(snake_case);
+    let camel = input.get(camel_case);
+    if snake.is_some() && camel.is_some() && snake != camel {
+        return Err(boundary_error(
+            "Bridge request contains conflicting step identities.",
+        ));
+    }
+    Ok(camel.or(snake))
+}
+
+fn partial_failed_transfer_matches(
+    expected: &[EffectConstraint],
+    effect: &FinancialEffect,
+) -> bool {
+    let FinancialEffect::Transfer {
+        from: actual_from,
+        to: actual_to,
+        debit,
+        credit,
+    } = effect
+    else {
+        return false;
+    };
+    expected.iter().any(|constraint| {
+        let EffectConstraint::Transfer {
+            from,
+            to,
+            debit_asset,
+            credit_asset,
+            maximum_debit,
+            minimum_credit,
+        } = constraint
+        else {
+            return false;
+        };
+        actual_from == from
+            && actual_to == to
+            && debit.asset == *debit_asset
+            && credit.asset == *credit_asset
+            && !debit.atoms.is_zero()
+            && !credit.atoms.is_zero()
+            && debit.atoms <= *maximum_debit
+            && credit.atoms < *minimum_credit
+    })
+}
+
 fn validate_effects(
     record: &OperationRecord,
     verified: &VerifiedEffects,
@@ -2715,9 +3548,103 @@ fn validate_effects(
         ));
     }
     let confirmed_failure = matches!(outcome, Status::Failed);
+    let transit_effects = verified
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            FinancialEffect::TransitPrincipal {
+                transfer_id,
+                amount,
+            } => Some((transfer_id, amount)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !transit_effects.is_empty() {
+        let marker = prepared
+            .binding
+            .get(fin_domain::BRIDGE_STEP_METADATA_KEY)
+            .ok_or_else(|| {
+                FinError::new(
+                    "INVALID_TRANSIT_EFFECT",
+                    "reconciliation",
+                    "Transit principal proof is not bound to a reviewed finite transfer step.",
+                    "Keep the operation unresolved and reconcile its original submission.",
+                )
+            })?;
+        let grant_id = prepared
+            .binding
+            .get(boundaries::BOUNDARY_METADATA_KEY)
+            .and_then(|value| value.get("authorization_id"))
+            .and_then(Value::as_str);
+        let matching_debits =
+            transit_effects
+                .first()
+                .map_or_else(Vec::new, |(_, transit_amount)| {
+                    verified
+                        .effects
+                        .iter()
+                        .filter_map(|effect| match effect {
+                            FinancialEffect::CashDebit { resource, amount }
+                                if amount == *transit_amount =>
+                            {
+                                Some((resource, amount))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+        let event_resource = verified
+            .evidence
+            .get("resource")
+            .or_else(|| verified.evidence.get("recipient_resource"));
+        let event_amount = verified.evidence.get("amount_atoms");
+        let event_asset = verified.evidence.get("asset");
+        let expected_asset = matching_debits
+            .first()
+            .and_then(|(_, amount)| to_value(&amount.asset).ok());
+        let event_identity_valid = transit_effects.first().is_some_and(|(transfer_id, _)| {
+            let evidence_id = verified
+                .evidence
+                .get("evidence_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            bridge_event_identity_matches(&verified.evidence, transfer_id, evidence_id)
+                && matching_debits.first().is_some_and(|(resource, _)| {
+                    bridge_evidence_matches_resource(&verified.evidence, resource)
+                })
+        });
+        if transit_effects.len() != 1
+            || marker.get("kind").and_then(Value::as_str) != Some("deposit")
+            || marker.get("transfer_id").and_then(Value::as_str)
+                != transit_effects.first().map(|entry| entry.0.as_str())
+            || marker.get("grant_id").and_then(Value::as_str) != grant_id
+            || matching_debits.len() != 1
+            || event_resource.and_then(Value::as_str)
+                != matching_debits
+                    .first()
+                    .map(|(resource, _)| resource.0.as_str())
+            || event_amount.and_then(Value::as_str)
+                != matching_debits
+                    .first()
+                    .map(|(_, amount)| amount.atoms.as_str())
+            || event_asset != expected_asset.as_ref()
+            || !event_identity_valid
+            || confirmed_failure
+        {
+            return Err(FinError::new(
+                "INVALID_TRANSIT_EFFECT",
+                "reconciliation",
+                "Transit principal must exactly match one proved source debit under the approved deposit step.",
+                "Keep the operation unresolved and reconcile its original submission.",
+            ));
+        }
+    }
     let mut matched = vec![false; prepared.intent.expected.len()];
     for effect in &verified.effects {
-        if confirmed_failure && !matches!(effect, FinancialEffect::Cost { .. }) {
+        if confirmed_failure
+            && !matches!(effect, FinancialEffect::Cost { .. })
+            && !partial_failed_transfer_matches(&prepared.intent.expected, effect)
+        {
             return Err(FinError::new(
                 "FAILED_EFFECT_MISMATCH",
                 "reconciliation",
@@ -2726,6 +3653,9 @@ fn validate_effects(
             ));
         }
         validate_effect_anchor(effect, &verified.observed_at)?;
+        if matches!(effect, FinancialEffect::TransitPrincipal { .. }) {
+            continue;
+        }
         let mut found = false;
         for (index, constraint) in prepared.intent.expected.iter().enumerate() {
             if constraint_matches(constraint, effect)? {
@@ -2737,7 +3667,10 @@ fn validate_effects(
                 break;
             }
         }
-        if !found && !cost_within_intent(effect, &prepared.intent, &verified.effects)? {
+        if !found
+            && !partial_failed_transfer_matches(&prepared.intent.expected, effect)
+            && !cost_within_intent(effect, &prepared.intent, &verified.effects)?
+        {
             return Err(FinError::new(
                 "UNEXPECTED_FINANCIAL_EFFECT",
                 "reconciliation",
@@ -8132,7 +9065,11 @@ fn validate_boundary_request(request: &BoundaryAuthorizationRequest) -> Result<(
     Ok(())
 }
 
-fn validate_boundary_spec(prepared: &PreparedOperation, spec: &BoundarySpec) -> Result<()> {
+fn validate_boundary_spec(
+    prepared: &PreparedOperation,
+    spec: &BoundarySpec,
+    prospective_debit: Option<&fin_domain::BridgeProspectiveDebit>,
+) -> Result<()> {
     if spec.summary.trim().is_empty() || spec.fixed.is_null() || spec.parameters.is_null() {
         return Err(boundary_error(
             "The adapter returned incomplete boundary scope.",
@@ -8146,6 +9083,10 @@ fn validate_boundary_spec(prepared: &PreparedOperation, spec: &BoundarySpec) -> 
     if spec.maximum_debits.iter().any(|limit| {
         !prepared.intent.debits.iter().any(|debit| {
             debit.resource == limit.resource && debit.amount.asset == limit.amount.asset
+        }) && !prospective_debit.is_some_and(|prospective| {
+            prospective.resource == limit.resource
+                && prospective.maximum.asset == limit.amount.asset
+                && prospective.maximum.atoms == limit.amount.atoms
         })
     }) {
         return Err(boundary_error(
@@ -8306,6 +9247,12 @@ fn inject_boundary_marker(
         .cloned()
         .ok_or_else(|| boundary_error("Prepared execution binding must be an object."))?;
     object.remove(fin_domain::value_bounds::KEY);
+    if let Some(bridge_step) = object
+        .get_mut(fin_domain::BRIDGE_STEP_METADATA_KEY)
+        .and_then(Value::as_object_mut)
+    {
+        bridge_step.insert("grant_id".to_owned(), json!(authorization.id));
+    }
     object.insert(
         boundaries::BOUNDARY_METADATA_KEY.to_owned(),
         json!({
@@ -8971,6 +9918,355 @@ mod tests {
         }
     }
 
+    /// End-to-end finite bridge fixture. Its transfer effects deliberately
+    /// consume cumulative approved debits so renewal tests exercise the same
+    /// authorization accounting path as an adapter with gas costs.
+    struct BridgeLifecycleAdapter {
+        complete: bool,
+        fail_before_submission: AtomicBool,
+        submissions: AtomicUsize,
+    }
+
+    impl BridgeLifecycleAdapter {
+        fn new(complete: bool) -> Self {
+            Self {
+                complete,
+                fail_before_submission: AtomicBool::new(false),
+                submissions: AtomicUsize::new(0),
+            }
+        }
+
+        fn rejected_before_submission() -> Self {
+            Self {
+                complete: true,
+                fail_before_submission: AtomicBool::new(true),
+                submissions: AtomicUsize::new(0),
+            }
+        }
+
+        fn expectation(minimum_atoms: &str) -> fin_domain::BridgeSettlementExpectation {
+            fin_domain::BridgeSettlementExpectation {
+                destination: vec![fin_domain::BridgeSettlementTarget {
+                    resource: resource("ethereum:42161:0x1111111111111111111111111111111111111111"),
+                    asset: asset("ethereum:42161", "USDC", 6),
+                    minimum_atoms: quantity(minimum_atoms),
+                }],
+                refund: vec![],
+            }
+        }
+
+        fn input_step(input: &Value) -> Result<(String, String, fin_domain::BridgeStepKind)> {
+            let transfer_id = bridge_input_field(input, "transfer_id", "transferId")?
+                .and_then(Value::as_str)
+                .ok_or_else(|| FinError::validation("Missing synthetic transfer ID."))?
+                .to_owned();
+            let step_id = bridge_input_field(input, "step_id", "stepId")?
+                .and_then(Value::as_str)
+                .ok_or_else(|| FinError::validation("Missing synthetic step ID."))?
+                .to_owned();
+            let kind = serde_json::from_value(
+                bridge_input_field(input, "step_kind", "stepKind")?
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .map_err(|_| FinError::validation("Invalid synthetic bridge step kind."))?;
+            Ok((transfer_id, step_id, kind))
+        }
+    }
+
+    #[async_trait]
+    impl Adapter for BridgeLifecycleAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            let mut definition = SyntheticAdapter::write_definition();
+            definition.name = "bridge.transfer".into();
+            vec![definition]
+        }
+
+        async fn read(&self, _operation: &str, _input: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut prepared = SyntheticAdapter::new().prepare(operation, input).await?;
+            let (transfer_id, step_id, kind) = Self::input_step(input)?;
+            let selected_bounds = input
+                .get("selectedBounds")
+                .cloned()
+                .ok_or_else(|| FinError::validation("Missing selected bridge bounds."))?;
+            let minimum = selected_bounds
+                .get("minimumReceiptAtoms")
+                .and_then(Value::as_str)
+                .ok_or_else(|| FinError::validation("Missing selected receipt floor."))?;
+            prepared.operation = operation.into();
+            prepared.input = input.clone();
+            if let Some(valuation) = prepared.valuation.as_mut() {
+                valuation.maximum_fee_usd_micros = quantity("10000");
+                valuation.prices.push(fin_domain::AssetPrice {
+                    asset: asset("binance", "ETH", 18),
+                    usd_micros_per_unit: quantity("1000000"),
+                    unit_atoms: quantity("1000000000000000000"),
+                    observed_at: valuation.observed_at.clone(),
+                    source: "SYNTHETIC bridge lifecycle price".into(),
+                });
+            }
+            prepared.intent.maximum_costs = vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource("binance-account"),
+                },
+                amount: Amount {
+                    asset: asset("binance", "ETH", 18),
+                    atoms: quantity("10000000000000000"),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }];
+            let mut step_marker = json!({
+                "transfer_id": transfer_id,
+                "step_id": step_id,
+                "kind": kind,
+                "bounds": selected_bounds,
+                "settlement_expectation": Self::expectation(minimum),
+            });
+            if let Some(prospective) = input.get("prospectiveDebit") {
+                step_marker["prospective_debit"] = prospective.clone();
+            }
+            prepared.binding = json!({
+                fin_domain::BRIDGE_STEP_METADATA_KEY: step_marker,
+                "route":"SYNTHETIC-frozen-route"
+            });
+            Ok(prepared)
+        }
+
+        fn prepare_boundaries(
+            &self,
+            prepared: &PreparedOperation,
+            bounds: &Value,
+        ) -> Result<BoundarySpec> {
+            let marker_bounds = prepared
+                .binding
+                .get(fin_domain::BRIDGE_STEP_METADATA_KEY)
+                .and_then(|marker| marker.get("bounds"))
+                .ok_or_else(|| FinError::validation("Missing marker bounds."))?;
+            if marker_bounds != bounds {
+                return Err(FinError::validation("Selected bridge bounds differ."));
+            }
+            let mut cap = prepared.intent.debits[0].clone();
+            cap.amount.atoms = quantity("3000000000000000000");
+            let mut cost_cap = prepared.intent.maximum_costs[0].clone();
+            cost_cap.amount.atoms = quantity("20000000000000000");
+            Ok(BoundarySpec {
+                fixed: json!({"transfer_id":prepared.input["transferId"],"route":"SYNTHETIC-frozen-route"}),
+                parameters: bounds.clone(),
+                maximum_debits: vec![cap],
+                maximum_costs: vec![cost_cap],
+                summary: "Synthetic finite bridge transfer".into(),
+            })
+        }
+
+        fn validate_boundary_candidate(
+            &self,
+            spec: &BoundarySpec,
+            prepared: &PreparedOperation,
+        ) -> Result<()> {
+            if spec.fixed.get("transfer_id") != prepared.input.get("transferId")
+                || prepared.operation != "bridge.transfer"
+            {
+                return Err(FinError::validation(
+                    "Bridge candidate changed fixed route identity.",
+                ));
+            }
+            Ok(())
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            journal.assert_authorized()?;
+            if self.fail_before_submission.load(Ordering::SeqCst) {
+                return Err(FinError::new(
+                    "SYNTHETIC_REJECTED",
+                    "synthetic",
+                    "Synthetic venue rejection before submission persistence.",
+                    "Retry only with a new operation identity after fresh authorization.",
+                ));
+            }
+            let step_id = prepared.binding[fin_domain::BRIDGE_STEP_METADATA_KEY]["step_id"]
+                .as_str()
+                .unwrap();
+            let submission = Submission {
+                kind: "SYNTHETIC-bridge".into(),
+                reference: format!("SYNTHETIC-{step_id}"),
+                data: json!({"step_id":step_id}),
+            };
+            journal.persist_submission(&submission)?;
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(submission)
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            if !self.complete {
+                return Ok(Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"fixture":"SYNTHETIC source broadcast unresolved"}),
+                    verified: None,
+                });
+            }
+            let mut verified = VerifiedEffects {
+                evidence_version: 1,
+                submission: record.submission.clone().ok_or_else(|| {
+                    FinError::validation("Synthetic bridge attempt has no submission.")
+                })?,
+                effects: vec![
+                    transfer_effect(),
+                    FinancialEffect::Cost {
+                        location: AccountingLocation::Cash {
+                            resource: resource("binance-account"),
+                        },
+                        amount: Amount {
+                            asset: asset("binance", "ETH", 18),
+                            atoms: quantity("10000000000000000"),
+                        },
+                        category: "SYNTHETIC-bridge-gas".into(),
+                        treatment: CostTreatment::AdditionalDebit,
+                    },
+                ],
+                evidence: json!({"fixture":"SYNTHETIC settled bridge step"}),
+                observed_at: now(),
+                proof_digest: String::new(),
+            };
+            verified.proof_digest = verified_effect_digest(&verified)?;
+            Ok(Reconciliation {
+                status: Status::Completed,
+                evidence: verified.evidence.clone(),
+                verified: Some(verified),
+            })
+        }
+    }
+
+    fn seed_lifecycle_transfer(
+        engine: &Engine,
+        transfer_id: &str,
+        kinds: &[fin_domain::BridgeStepKind],
+    ) {
+        let mut transfer = fin_domain::BridgeTransferRecord {
+            version: 1,
+            id: transfer_id.into(),
+            grant_id: None,
+            metadata: json!({"route":"SYNTHETIC-frozen-route","intent":"SYNTHETIC-frozen-intent"}),
+            settlement_expectation: None,
+            approved_bounds: None,
+            prospective_debit: None,
+            state: fin_domain::BridgeTransferState::Prepared,
+            quote_revisions: vec![],
+            steps: vec![],
+            allocation_owner: fin_domain::BridgeAllocationOwner::Operation { operation_id: None },
+            transit: None,
+            applied_proofs: vec![],
+            settlement_proofs: vec![],
+        };
+        let mut store = engine.store.lock().unwrap();
+        store.save_bridge_transfer(&transfer).unwrap();
+        for (index, kind) in kinds.iter().enumerate() {
+            let step_id = format!("SYNTHETIC-step-{index}");
+            store
+                .link_bridge_step(&fin_domain::BridgeStepLink {
+                    transfer_id: transfer_id.into(),
+                    grant_id: None,
+                    step_id,
+                    operation_id: None,
+                    kind: kind.clone(),
+                    depends_on: index
+                        .checked_sub(1)
+                        .map(|prior| vec![format!("SYNTHETIC-step-{prior}")])
+                        .unwrap_or_default(),
+                    state: fin_domain::BridgeStepState::Unsubmitted,
+                })
+                .unwrap();
+        }
+        transfer = store.bridge_transfer(transfer_id).unwrap().unwrap();
+        assert_eq!(transfer.steps.len(), kinds.len());
+    }
+
+    fn seed_prospective_debit_transfer(engine: &Engine, transfer_id: &str) {
+        seed_lifecycle_transfer(
+            engine,
+            transfer_id,
+            &[
+                fin_domain::BridgeStepKind::Approval,
+                fin_domain::BridgeStepKind::Deposit,
+            ],
+        );
+        let mut store = engine.store.lock().unwrap();
+        let mut transfer = store.bridge_transfer(transfer_id).unwrap().unwrap();
+        transfer.version += 1;
+        transfer.prospective_debit = Some(fin_domain::BridgeProspectiveDebit {
+            deposit_step_id: "SYNTHETIC-step-1".into(),
+            resource: resource("binance-account"),
+            maximum: Amount {
+                asset: asset("binance", "ETH", 18),
+                atoms: quantity("3000000000000000000"),
+            },
+        });
+        store.save_bridge_transfer(&transfer).unwrap();
+    }
+
+    fn lifecycle_bounds(minimum_receipt: &str) -> Value {
+        json!({
+            "maximumSourceDebitAtoms":"3000000000000000000",
+            "minimumReceiptAtoms":minimum_receipt,
+            "authorization_seconds":300
+        })
+    }
+
+    fn lifecycle_boundary_request(
+        request_id: &str,
+        transfer_id: &str,
+        step_id: &str,
+        step_kind: fin_domain::BridgeStepKind,
+        minimum_receipt: &str,
+        replaces: Option<String>,
+    ) -> BoundaryAuthorizationRequest {
+        let bounds = lifecycle_bounds(minimum_receipt);
+        BoundaryAuthorizationRequest {
+            request_id: request_id.into(),
+            operation: "bridge.transfer".into(),
+            input: json!({
+                "transferId":transfer_id,
+                "stepId":step_id,
+                "stepKind":step_kind,
+                "selectedBounds":bounds
+            }),
+            bounds,
+            valid_for_seconds: 1,
+            replaces,
+        }
+    }
+
+    fn lifecycle_operation_request(
+        request_id: &str,
+        transfer_id: &str,
+        step_id: &str,
+        step_kind: fin_domain::BridgeStepKind,
+        minimum_receipt: &str,
+    ) -> OperationRequest {
+        OperationRequest {
+            request_id: request_id.into(),
+            operation: "bridge.transfer".into(),
+            input: json!({
+                "transferId":transfer_id,
+                "stepId":step_id,
+                "stepKind":step_kind,
+                "selectedBounds":lifecycle_bounds(minimum_receipt)
+            }),
+            run_id: None,
+        }
+    }
+
     struct PersistThenErrorAdapter {
         inner: SyntheticAdapter,
         reconciliations: Mutex<VecDeque<Result<Reconciliation>>>,
@@ -9471,6 +10767,261 @@ mod tests {
         assert_eq!(
             validate_effects(&record, &verified, &Status::Failed),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn failed_partial_transfer_records_bounded_net_credit_and_included_fee() {
+        let source = resource("binance-account");
+        let destination = resource("ethereum-wallet");
+        let source_asset = asset("binance", "ETH", 18);
+        let destination_asset = asset("ethereum:1", "native", 18);
+        let fee = quantity("150000000000000");
+        let operation = record(
+            vec![EffectConstraint::Transfer {
+                from: source.clone(),
+                to: destination.clone(),
+                debit_asset: source_asset.clone(),
+                credit_asset: destination_asset.clone(),
+                maximum_debit: quantity("20000000000000000"),
+                minimum_credit: quantity("12500000000000000"),
+            }],
+            vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: source.clone(),
+                },
+                amount: Amount {
+                    asset: source_asset.clone(),
+                    atoms: fee.clone(),
+                },
+                treatment: CostTreatment::IncludedInDebit,
+            }],
+        );
+        let verified = proof(
+            &operation,
+            vec![
+                FinancialEffect::Transfer {
+                    from: source.clone(),
+                    to: destination,
+                    debit: Amount {
+                        asset: source_asset.clone(),
+                        atoms: quantity("12500000000000000"),
+                    },
+                    credit: Amount {
+                        asset: destination_asset,
+                        atoms: quantity("12350000000000000"),
+                    },
+                },
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash { resource: source },
+                    amount: Amount {
+                        asset: source_asset,
+                        atoms: fee,
+                    },
+                    category: "binance_withdrawal_fee".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+            ],
+        );
+        let frozen_intent = operation.preview.as_ref().unwrap().intent.clone();
+        let frozen_binding_hash = operation.approval.as_ref().unwrap().binding_hash.clone();
+        assert_eq!(
+            validate_effects(&operation, &verified, &Status::Failed),
+            Ok(())
+        );
+        assert_eq!(operation.preview.as_ref().unwrap().intent, frozen_intent);
+        assert_eq!(
+            operation.approval.as_ref().unwrap().binding_hash,
+            frozen_binding_hash
+        );
+        assert_eq!(
+            validate_effects(&operation, &verified, &Status::Completed)
+                .unwrap_err()
+                .code,
+            "EXPECTED_EFFECT_MISSING"
+        );
+
+        // Previously approved previews reserve withdrawal fees as an
+        // additional debit, with transfer principal recorded net of fee.
+        let legacy_record = record(
+            vec![EffectConstraint::Transfer {
+                from: resource("binance-account"),
+                to: resource("ethereum-wallet"),
+                debit_asset: asset("binance", "ETH", 18),
+                credit_asset: asset("ethereum:1", "native", 18),
+                maximum_debit: quantity("12500000000000000"),
+                minimum_credit: quantity("12500000000000000"),
+            }],
+            vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource("binance-account"),
+                },
+                amount: Amount {
+                    asset: asset("binance", "ETH", 18),
+                    atoms: quantity("150000000000000"),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }],
+        );
+        let legacy_verified = proof(
+            &legacy_record,
+            vec![
+                FinancialEffect::Transfer {
+                    from: resource("binance-account"),
+                    to: resource("ethereum-wallet"),
+                    debit: Amount {
+                        asset: asset("binance", "ETH", 18),
+                        atoms: quantity("12350000000000000"),
+                    },
+                    credit: Amount {
+                        asset: asset("ethereum:1", "native", 18),
+                        atoms: quantity("12350000000000000"),
+                    },
+                },
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: resource("binance-account"),
+                    },
+                    amount: Amount {
+                        asset: asset("binance", "ETH", 18),
+                        atoms: quantity("150000000000000"),
+                    },
+                    category: "binance_withdrawal_fee".into(),
+                    treatment: CostTreatment::AdditionalDebit,
+                },
+            ],
+        );
+        assert_eq!(
+            validate_effects(&legacy_record, &legacy_verified, &Status::Failed),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn partial_failed_transfer_uses_legacy_constraint_and_stays_within_approved_identity() {
+        let source = resource("binance-account");
+        let destination = resource("ethereum-wallet");
+        let source_asset = asset("binance", "ETH", 18);
+        let destination_asset = asset("ethereum:1", "native", 18);
+        let effect = FinancialEffect::Transfer {
+            from: source.clone(),
+            to: destination.clone(),
+            debit: Amount {
+                asset: source_asset.clone(),
+                atoms: quantity("12500000000000000"),
+            },
+            credit: Amount {
+                asset: destination_asset.clone(),
+                atoms: quantity("12350000000000000"),
+            },
+        };
+        let existing_transfer = EffectConstraint::Transfer {
+            from: source.clone(),
+            to: destination,
+            debit_asset: source_asset,
+            credit_asset: destination_asset,
+            maximum_debit: quantity("20000000000000000"),
+            minimum_credit: quantity("12500000000000000"),
+        };
+
+        let ordinary = record(vec![transfer_constraint()], vec![]);
+        let ordinary_verified = proof(&ordinary, vec![effect.clone()]);
+        assert_eq!(
+            validate_effects(&ordinary, &ordinary_verified, &Status::Failed),
+            Ok(())
+        );
+        assert_eq!(
+            validate_effects(&ordinary, &ordinary_verified, &Status::Completed)
+                .unwrap_err()
+                .code,
+            "EXPECTED_EFFECT_MISSING"
+        );
+
+        let over_cap = record(vec![existing_transfer.clone()], vec![]);
+        let over_cap_effect = FinancialEffect::Transfer {
+            from: source.clone(),
+            to: resource("ethereum-wallet"),
+            debit: Amount {
+                asset: asset("binance", "ETH", 18),
+                atoms: quantity("21000000000000000"),
+            },
+            credit: Amount {
+                asset: asset("ethereum:1", "native", 18),
+                atoms: quantity("12350000000000000"),
+            },
+        };
+        let over_cap_verified = proof(&over_cap, vec![over_cap_effect]);
+        assert_eq!(
+            validate_effects(&over_cap, &over_cap_verified, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "FAILED_EFFECT_MISMATCH"
+        );
+        let zero_credit = FinancialEffect::Transfer {
+            from: source.clone(),
+            to: resource("ethereum-wallet"),
+            debit: Amount {
+                asset: asset("binance", "ETH", 18),
+                atoms: quantity("12500000000000000"),
+            },
+            credit: Amount {
+                asset: asset("ethereum:1", "native", 18),
+                atoms: quantity("0"),
+            },
+        };
+        let zero_record = record(vec![existing_transfer.clone()], vec![]);
+        let zero_verified = proof(&zero_record, vec![zero_credit]);
+        assert_eq!(
+            validate_effects(&zero_record, &zero_verified, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "FAILED_EFFECT_MISMATCH"
+        );
+
+        let wrong_destination = FinancialEffect::Transfer {
+            from: source.clone(),
+            to: resource("unreviewed-wallet"),
+            debit: Amount {
+                asset: asset("binance", "ETH", 18),
+                atoms: quantity("12500000000000000"),
+            },
+            credit: Amount {
+                asset: asset("ethereum:1", "native", 18),
+                atoms: quantity("12350000000000000"),
+            },
+        };
+        let wrong_destination_record = record(vec![existing_transfer.clone()], vec![]);
+        let wrong_destination_verified = proof(&wrong_destination_record, vec![wrong_destination]);
+        assert_eq!(
+            validate_effects(
+                &wrong_destination_record,
+                &wrong_destination_verified,
+                &Status::Failed
+            )
+            .unwrap_err()
+            .code,
+            "FAILED_EFFECT_MISMATCH"
+        );
+
+        let wrong_asset = FinancialEffect::Transfer {
+            from: source.clone(),
+            to: resource("ethereum-wallet"),
+            debit: Amount {
+                asset: asset("binance", "USDC", 6),
+                atoms: quantity("12500"),
+            },
+            credit: Amount {
+                asset: asset("ethereum:1", "native", 18),
+                atoms: quantity("12350000000000000"),
+            },
+        };
+        let wrong_asset_record = record(vec![existing_transfer], vec![]);
+        let wrong_asset_verified = proof(&wrong_asset_record, vec![wrong_asset]);
+        assert_eq!(
+            validate_effects(&wrong_asset_record, &wrong_asset_verified, &Status::Failed)
+                .unwrap_err()
+                .code,
+            "FAILED_EFFECT_MISMATCH"
         );
     }
 
@@ -13327,6 +14878,989 @@ mod tests {
         aged.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
         restarted.update_record(&aged).unwrap();
         assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "0");
+    }
+
+    #[tokio::test]
+    async fn bridge_handoff_keeps_one_allocation_owner_after_24h_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bridge-allocation.sqlite3");
+        let adapter = Arc::new(SyntheticAdapter::new());
+        adapter.completed_response();
+        let engine = synthetic_engine(&path, adapter.clone());
+        let source = engine
+            .execute(ordinary_request("bridge-source-budget-op"))
+            .await
+            .unwrap();
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+        let principal = fin_domain::TransitResource {
+            transfer_id: "SYNTHETIC-transfer-budget".into(),
+            amount: Amount {
+                asset: asset("synthetic", "USDC", 6),
+                atoms: quantity("1000000"),
+            },
+            evidence_id: "SYNTHETIC:source-event".into(),
+            destination_locator: None,
+            proof_digest: "SYNTHETIC-source-proof".into(),
+            observed_at: now(),
+            spendable: false,
+        };
+        let transfer = fin_domain::BridgeTransferRecord {
+            version: 1,
+            id: principal.transfer_id.clone(),
+            grant_id: None,
+            metadata: json!({"fixture":"synthetic frozen bridge scope"}),
+            settlement_expectation: Some(fin_domain::BridgeSettlementExpectation {
+                destination: vec![fin_domain::BridgeSettlementTarget {
+                    resource: ResourceId(
+                        "ethereum:42161:0x1111111111111111111111111111111111111111".into(),
+                    ),
+                    asset: asset("ethereum:42161", "USDC", 6),
+                    minimum_atoms: quantity("995000"),
+                }],
+                refund: vec![],
+            }),
+            approved_bounds: Some(json!({"synthetic":"approved bounds"})),
+            prospective_debit: None,
+            state: fin_domain::BridgeTransferState::InTransit,
+            quote_revisions: vec![],
+            steps: vec![],
+            allocation_owner: fin_domain::BridgeAllocationOwner::Transfer {
+                transfer_id: principal.transfer_id.clone(),
+            },
+            transit: Some(principal),
+            applied_proofs: vec!["SYNTHETIC-source-proof".into()],
+            settlement_proofs: vec![],
+        };
+        {
+            let mut store = engine.store.lock().unwrap();
+            store.save_bridge_transfer(&transfer).unwrap();
+            store
+                .record_bridge_transit(transfer.transit.as_ref().unwrap())
+                .unwrap();
+            store
+                .handoff_bridge_allocation(&source.id, &transfer.id, "1000000", &source.updated_at)
+                .unwrap();
+        }
+        // The source OperationRecord and its transfer owner are one charge.
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+        let mut old_source = source.clone();
+        old_source.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        engine.update_record(&old_source).unwrap();
+        // An unresolved transfer keeps the same charge past the operation's 24h window.
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+        drop(engine);
+        let restarted = synthetic_engine(&path, adapter);
+        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
+        let mut final_proof = fin_domain::BridgeSettlementProof {
+            transfer_id: transfer.id.clone(),
+            outcome: fin_domain::BridgeSettlementOutcome::Destination,
+            evidence_id: format!("ethereum:42161:0x{}:1", "a".repeat(64)),
+            effects: vec![FinancialEffect::UsableCredit {
+                to: ResourceId("ethereum:42161:0x1111111111111111111111111111111111111111".into()),
+                amount: Amount {
+                    asset: asset("ethereum:42161", "USDC", 6),
+                    atoms: quantity("995000"),
+                },
+            }],
+            evidence: json!({
+                "transfer_id": transfer.id,
+                "evidence_id": format!("ethereum:42161:0x{}:1", "a".repeat(64)),
+                "chain_id": "42161",
+                "transaction_hash": format!("0x{}", "a".repeat(64)),
+                "log_index": "1",
+                "correlation": "SYNTHETIC-correlated receipt",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "recipient_resource": "ethereum:42161:0x1111111111111111111111111111111111111111",
+                "asset": asset("ethereum:42161", "USDC", 6),
+                "amount_atoms": "995000"
+            }),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        final_proof.proof_digest = fin_domain::bridge_settlement_digest(&final_proof).unwrap();
+        let settled = restarted
+            .commit_bridge_external_settlement(final_proof.clone())
+            .unwrap();
+        assert_eq!(settled.state, fin_domain::BridgeTransferState::Completed);
+        assert!(settled.transit.is_none());
+        assert_eq!(settled.settlement_proofs, vec![final_proof.clone()]);
+        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
+        assert_eq!(
+            restarted
+                .commit_bridge_external_settlement(final_proof)
+                .unwrap(),
+            settled
+        );
+        assert_eq!(restarted.allocation_used_usd_micros().unwrap(), "1000000");
+    }
+
+    #[test]
+    fn bridge_receipt_identity_accepts_explicit_transaction_scope_without_event_index() {
+        let transaction_hash = format!("0x{}", "a".repeat(64));
+        let evidence_id = format!("ethereum:1:{transaction_hash}:transaction");
+        let evidence = json!({
+            "transfer_id":"SYNTHETIC-transfer",
+            "evidence_id":evidence_id,
+            "receipt_scope":"transaction",
+            "chain_id":"1",
+            "transaction_hash":transaction_hash,
+            "correlation":"SYNTHETIC-protocol-order"
+        });
+        assert!(bridge_event_identity_matches(
+            &evidence,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+
+        let mut mixed_scope = evidence.clone();
+        mixed_scope["log_index"] = json!(0);
+        assert!(!bridge_event_identity_matches(
+            &mixed_scope,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+
+        let mut wrong_identity = evidence.clone();
+        wrong_identity["chain_id"] = json!(42161);
+        assert!(!bridge_event_identity_matches(
+            &wrong_identity,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+        assert!(!bridge_event_identity_matches(
+            &evidence,
+            "SYNTHETIC-other-transfer",
+            &evidence_id
+        ));
+        let mut wrong_hash = evidence.clone();
+        wrong_hash["transaction_hash"] = json!(format!("0x{}", "c".repeat(64)));
+        assert!(!bridge_event_identity_matches(
+            &wrong_hash,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+        let mut missing_correlation = evidence.clone();
+        missing_correlation["correlation"] = Value::Null;
+        assert!(!bridge_event_identity_matches(
+            &missing_correlation,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+        let mut unsupported_scope = evidence.clone();
+        unsupported_scope["receipt_scope"] = json!("block");
+        assert!(!bridge_event_identity_matches(
+            &unsupported_scope,
+            "SYNTHETIC-transfer",
+            &evidence_id
+        ));
+
+        // Legacy event identities remain event-scoped and require a numeric
+        // receipt log index.
+        let event_id = format!("ethereum:1:{transaction_hash}:7");
+        let event = json!({
+            "transfer_id":"SYNTHETIC-transfer",
+            "evidence_id":event_id,
+            "chain_id":1,
+            "transaction_hash":transaction_hash,
+            "log_index":"7",
+            "correlation":"SYNTHETIC-protocol-order"
+        });
+        assert!(bridge_event_identity_matches(
+            &event,
+            "SYNTHETIC-transfer",
+            &event_id
+        ));
+    }
+
+    #[test]
+    fn transfer_principal_carries_only_source_bound_neutral_locator() {
+        let mut operation = record(vec![], vec![]);
+        let amount = Amount {
+            asset: asset("ethereum:1", "native", 18),
+            atoms: quantity("10000000000000000"),
+        };
+        let source_evidence_id = format!("ethereum:1:0x{}:transaction", "a".repeat(64));
+        let locator = fin_domain::BridgeDestinationLocator {
+            scheme: "SYNTHETIC-message-v1".into(),
+            source_evidence_id: source_evidence_id.clone(),
+            destination_chain_id: 42161,
+            transaction_hash: format!("0x{}", "b".repeat(64)),
+            proof: json!({"message_index":"42"}),
+        };
+        let mut verified = proof(
+            &operation,
+            vec![FinancialEffect::TransitPrincipal {
+                transfer_id: "SYNTHETIC-transfer-locator".into(),
+                amount,
+            }],
+        );
+        verified.evidence = json!({
+            "evidence_id":source_evidence_id,
+            "destination_locator":locator
+        });
+        operation.effects = Some(verified);
+
+        let transit = transfer_principal(&operation).unwrap().unwrap();
+        assert_eq!(transit.destination_locator, Some(locator.clone()));
+        assert_eq!(transit.evidence_id, locator.source_evidence_id);
+
+        let mut mismatched = operation.clone();
+        mismatched.effects.as_mut().unwrap().evidence["destination_locator"]["source_evidence_id"] =
+            json!("ethereum:1:unrelated");
+        assert_eq!(
+            transfer_principal(&mismatched).unwrap_err().code,
+            "INVALID_TRANSIT_EFFECT"
+        );
+    }
+
+    #[test]
+    fn transaction_scoped_identity_without_verified_credit_cannot_settle_transfer() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = Arc::new(SyntheticAdapter::new());
+        let path = directory.path().join("bridge-no-credit.sqlite3");
+        let engine = synthetic_engine(&path, adapter);
+        let transaction_hash = format!("0x{}", "b".repeat(64));
+        let mut proof = fin_domain::BridgeSettlementProof {
+            transfer_id: "SYNTHETIC-no-credit-transfer".into(),
+            outcome: fin_domain::BridgeSettlementOutcome::Destination,
+            evidence_id: format!("ethereum:42161:{transaction_hash}:transaction"),
+            effects: vec![],
+            evidence: json!({
+                "transfer_id":"SYNTHETIC-no-credit-transfer",
+                "evidence_id":format!("ethereum:42161:{transaction_hash}:transaction"),
+                "receipt_scope":"transaction",
+                "chain_id":42161,
+                "transaction_hash":transaction_hash,
+                "correlation":"SYNTHETIC-protocol-order"
+            }),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        proof.proof_digest = fin_domain::bridge_settlement_digest(&proof).unwrap();
+        let error = engine.commit_bridge_external_settlement(proof).unwrap_err();
+        assert_eq!(error.code, "BRIDGE_SETTLEMENT_INVALID");
+    }
+
+    #[test]
+    fn bridge_attempt_identity_accepts_public_camel_case_and_rejects_alias_conflicts() {
+        let input = json!({
+            "transferId":"SYNTHETIC-transfer",
+            "stepId":"SYNTHETIC-step",
+            "stepKind":"reset_allowance"
+        });
+        assert_eq!(
+            bridge_input_field(&input, "transfer_id", "transferId")
+                .unwrap()
+                .and_then(Value::as_str),
+            Some("SYNTHETIC-transfer")
+        );
+        assert_eq!(
+            bridge_input_field(&input, "step_id", "stepId")
+                .unwrap()
+                .and_then(Value::as_str),
+            Some("SYNTHETIC-step")
+        );
+        assert_eq!(
+            bridge_input_field(&input, "step_kind", "stepKind")
+                .unwrap()
+                .and_then(Value::as_str),
+            Some("reset_allowance")
+        );
+        assert!(
+            bridge_input_field(
+                &json!({"transferId":"SYNTHETIC-a","transfer_id":"SYNTHETIC-b"}),
+                "transfer_id",
+                "transferId",
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn finite_bridge_claim_accepts_camel_case_public_request_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = synthetic_engine(
+            &directory.path().join("bridge-camel-case.sqlite"),
+            Arc::new(SyntheticAdapter::new()),
+        );
+        let transfer_id = "SYNTHETIC-camel-case-transfer";
+        let step = fin_domain::BridgeStepLink {
+            transfer_id: transfer_id.into(),
+            grant_id: None,
+            step_id: "SYNTHETIC-camel-case-step".into(),
+            operation_id: None,
+            kind: fin_domain::BridgeStepKind::ResetAllowance,
+            depends_on: vec![],
+            state: fin_domain::BridgeStepState::Unsubmitted,
+        };
+        let transfer = fin_domain::BridgeTransferRecord {
+            version: 1,
+            id: transfer_id.into(),
+            grant_id: None,
+            metadata: json!({"synthetic":"camel-case wire test"}),
+            settlement_expectation: None,
+            approved_bounds: None,
+            prospective_debit: None,
+            state: fin_domain::BridgeTransferState::Prepared,
+            quote_revisions: vec![],
+            steps: vec![step.clone()],
+            allocation_owner: fin_domain::BridgeAllocationOwner::Operation { operation_id: None },
+            transit: None,
+            applied_proofs: vec![],
+            settlement_proofs: vec![],
+        };
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .save_bridge_transfer(&transfer)
+            .unwrap();
+        let request = OperationRequest {
+            request_id: "SYNTHETIC-camel-case-request".into(),
+            operation: "bridge.transfer".into(),
+            input: json!({
+                "transferId":transfer_id,
+                "stepId":step.step_id,
+                "stepKind":"reset_allowance"
+            }),
+            run_id: None,
+        };
+        let claim = boundary_authorizations::bridge_step_claim(
+            &request,
+            None,
+            "SYNTHETIC-camel-case-operation",
+            &engine,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claim.transfer_id, transfer_id);
+        assert_eq!(claim.step_id, step.step_id);
+        assert_eq!(claim.kind, fin_domain::BridgeStepKind::ResetAllowance);
+        assert_eq!(
+            claim.operation_id.as_deref(),
+            Some("SYNTHETIC-camel-case-operation")
+        );
+    }
+
+    #[tokio::test]
+    async fn prospective_bridge_principal_is_limited_to_the_durable_declared_deposit() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-prospective-debit-transfer";
+        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-prospective-debit.sqlite")).unwrap(),
+            vec![adapter.clone()],
+            Arc::new(ChallengeValidatingAuthorizer::default()),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_prospective_debit_transfer(&engine, transfer_id);
+        let durable = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap()
+            .prospective_debit
+            .unwrap();
+        let mut request = lifecycle_operation_request(
+            "SYNTHETIC-prospective-debit-request",
+            transfer_id,
+            "SYNTHETIC-step-0",
+            fin_domain::BridgeStepKind::Approval,
+            "900000",
+        );
+        request.input["prospectiveDebit"] = serde_json::to_value(&durable).unwrap();
+        let mut prepared = adapter
+            .prepare(&request.operation, &request.input)
+            .await
+            .unwrap();
+        prepared.intent.debits.clear();
+        prepared.intent.locks = vec![durable.resource.clone()];
+        let scope = boundary_authorizations::bridge_boundary_scope(&prepared, &request.input)
+            .unwrap()
+            .unwrap();
+        let spec = BoundarySpec {
+            fixed: json!({"transfer_id":transfer_id,"route":"SYNTHETIC-frozen-route"}),
+            parameters: lifecycle_bounds("900000"),
+            maximum_debits: vec![fin_domain::ResourceAmount {
+                resource: durable.resource.clone(),
+                amount: durable.maximum.clone(),
+            }],
+            maximum_costs: vec![],
+            summary: "Synthetic finite bridge transfer".into(),
+        };
+        let prospective = engine
+            .bridge_boundary_prospective_debit(Some(&scope), &prepared, &spec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(prospective, durable);
+        validate_boundary_spec(&prepared, &spec, Some(&prospective)).unwrap();
+
+        let mut changed_cap = spec.clone();
+        changed_cap.maximum_debits[0].amount.atoms = quantity("3000000000000000001");
+        assert_eq!(
+            engine
+                .bridge_boundary_prospective_debit(Some(&scope), &prepared, &changed_cap)
+                .unwrap_err()
+                .code,
+            "BOUNDARY_AUTHORIZATION_INVALID"
+        );
+
+        let mut undeclared = prepared.clone();
+        undeclared.binding[fin_domain::BRIDGE_STEP_METADATA_KEY]["prospective_debit"]["deposit_step_id"] =
+            json!("SYNTHETIC-unlisted-deposit");
+        let undeclared_scope =
+            boundary_authorizations::bridge_boundary_scope(&undeclared, &request.input)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            engine
+                .bridge_boundary_prospective_debit(Some(&undeclared_scope), &undeclared, &spec,)
+                .unwrap_err()
+                .code,
+            "BOUNDARY_AUTHORIZATION_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_bridge_retry_deduplicates_before_settled_step_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-exact-retry-transfer";
+        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
+        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-exact-retry.sqlite")).unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_lifecycle_transfer(
+            &engine,
+            transfer_id,
+            &[
+                fin_domain::BridgeStepKind::Approval,
+                fin_domain::BridgeStepKind::ResetAllowance,
+            ],
+        );
+        let request = lifecycle_operation_request(
+            "SYNTHETIC-exact-retry-request",
+            transfer_id,
+            "SYNTHETIC-step-0",
+            fin_domain::BridgeStepKind::Approval,
+            "900000",
+        );
+
+        let first = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(first.status, Status::Completed, "{:?}", first.error);
+        let duplicate = engine.execute(request.clone()).await.unwrap();
+        assert_eq!(duplicate.id, first.id);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+
+        // A reused request ID with changed parameters is rejected before the
+        // engine inspects the now-settled finite step or claims another one.
+        let mut changed = request.clone();
+        changed.input["stepId"] = json!("SYNTHETIC-step-1");
+        changed.input["stepKind"] = json!(fin_domain::BridgeStepKind::ResetAllowance);
+        assert_eq!(
+            engine.execute(changed).await.unwrap_err().code,
+            "REQUEST_ID_CONFLICT"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+
+        // A fresh request identity still cannot claim the settled step.
+        let mut fresh = request;
+        fresh.request_id = "SYNTHETIC-exact-retry-fresh-request".into();
+        assert_eq!(
+            engine.execute(fresh).await.unwrap_err().code,
+            "BOUNDARY_AUTHORIZATION_INVALID"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bridge_grant_renews_after_settled_approval_without_resetting_cumulative_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-renew-after-approval";
+        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
+        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-renew.sqlite")).unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_lifecycle_transfer(
+            &engine,
+            transfer_id,
+            &[
+                fin_domain::BridgeStepKind::Approval,
+                fin_domain::BridgeStepKind::ResetAllowance,
+            ],
+        );
+
+        let first = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-renew-grant-1",
+                transfer_id,
+                "SYNTHETIC-step-0",
+                fin_domain::BridgeStepKind::Approval,
+                "900000",
+                None,
+            ))
+            .await
+            .unwrap();
+        let first_operation = engine
+            .execute_boundary(
+                &first.id,
+                lifecycle_operation_request(
+                    "SYNTHETIC-renew-op-1",
+                    transfer_id,
+                    "SYNTHETIC-step-0",
+                    fin_domain::BridgeStepKind::Approval,
+                    "900000",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first_operation.status,
+            Status::Completed,
+            "{:?}",
+            first_operation.error
+        );
+        let first_transfer = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_transfer.steps[0].state,
+            fin_domain::BridgeStepState::Settled
+        );
+        assert_eq!(
+            first_transfer.steps[0].grant_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        let first_grant: BoundaryAuthorizationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .boundary_authorization(&first.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first_grant.authorization.spent_debits.len(), 1);
+        let cumulative_debits = first_grant.authorization.spent_debits.clone();
+        assert_eq!(first_grant.authorization.spent_costs.len(), 1);
+        let cumulative_costs = first_grant.authorization.spent_costs.clone();
+
+        // Let the first grant expire after its approval step consumed authority.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(
+            engine
+                .boundary_status(&first.id)
+                .await
+                .unwrap()
+                .authorization
+                .status,
+            BoundaryAuthorizationStatus::Expired
+        );
+        let mut changed_ceiling = lifecycle_boundary_request(
+            "SYNTHETIC-renew-grant-changed-ceiling",
+            transfer_id,
+            "SYNTHETIC-step-1",
+            fin_domain::BridgeStepKind::ResetAllowance,
+            "850000",
+            Some(first.id.clone()),
+        );
+        changed_ceiling.bounds["authorization_seconds"] = json!(600);
+        changed_ceiling.input["selectedBounds"]["authorization_seconds"] = json!(600);
+        assert_eq!(
+            engine
+                .authorize_boundary(changed_ceiling)
+                .await
+                .unwrap_err()
+                .code,
+            "BOUNDARY_VIOLATION"
+        );
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
+        let renewed = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-renew-grant-2",
+                transfer_id,
+                "SYNTHETIC-step-1",
+                fin_domain::BridgeStepKind::ResetAllowance,
+                "850000",
+                Some(first.id.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(authorizer.challenges.lock().unwrap().len(), 2);
+        assert_eq!(renewed.replaces.as_deref(), Some(first.id.as_str()));
+        assert_eq!(renewed.spent_debits, cumulative_debits);
+        assert_eq!(renewed.spent_costs, cumulative_costs);
+        assert_eq!(
+            renewed.remaining_debits[0].amount.atoms,
+            quantity("2000000000000000000")
+        );
+        assert_eq!(
+            renewed.remaining_costs[0].amount.atoms,
+            quantity("10000000000000000")
+        );
+
+        let second_operation = engine
+            .execute_boundary(
+                &renewed.id,
+                lifecycle_operation_request(
+                    "SYNTHETIC-renew-op-2",
+                    transfer_id,
+                    "SYNTHETIC-step-1",
+                    fin_domain::BridgeStepKind::ResetAllowance,
+                    "850000",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second_operation.status,
+            Status::Completed,
+            "{:?}",
+            second_operation.error
+        );
+        let final_transfer = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            final_transfer.grant_id.as_deref(),
+            Some(renewed.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.approved_bounds,
+            Some(lifecycle_bounds("850000"))
+        );
+        assert_eq!(
+            final_transfer.steps[0].grant_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[0].operation_id.as_deref(),
+            Some(first_operation.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[0].state,
+            fin_domain::BridgeStepState::Settled
+        );
+        assert_eq!(
+            final_transfer.steps[1].grant_id.as_deref(),
+            Some(renewed.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[1].operation_id.as_deref(),
+            Some(second_operation.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[1].state,
+            fin_domain::BridgeStepState::Settled
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        let final_grant: BoundaryAuthorizationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .boundary_authorization(&renewed.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            final_grant.authorization.spent_debits[0].amount.atoms,
+            quantity("2000000000000000000")
+        );
+        assert_eq!(
+            final_grant.authorization.spent_costs[0].amount.atoms,
+            quantity("20000000000000000")
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_authorization_duration_ceiling_rejects_before_touch_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-authorization-duration";
+        let adapter = Arc::new(BridgeLifecycleAdapter::new(true));
+        let authorizer = Arc::new(ChallengeValidatingAuthorizer::default());
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-duration.sqlite")).unwrap(),
+            vec![adapter],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_lifecycle_transfer(
+            &engine,
+            transfer_id,
+            &[fin_domain::BridgeStepKind::Approval],
+        );
+
+        let mut zero_ceiling = lifecycle_boundary_request(
+            "SYNTHETIC-zero-duration",
+            transfer_id,
+            "SYNTHETIC-step-0",
+            fin_domain::BridgeStepKind::Approval,
+            "900000",
+            None,
+        );
+        zero_ceiling.bounds["authorization_seconds"] = json!(0);
+        zero_ceiling.input["selectedBounds"]["authorization_seconds"] = json!(0);
+        assert_eq!(
+            engine
+                .authorize_boundary(zero_ceiling)
+                .await
+                .unwrap_err()
+                .code,
+            "BOUNDARY_VIOLATION"
+        );
+        assert!(authorizer.challenges.lock().unwrap().is_empty());
+
+        let mut exceeded = lifecycle_boundary_request(
+            "SYNTHETIC-exceeded-duration",
+            transfer_id,
+            "SYNTHETIC-step-0",
+            fin_domain::BridgeStepKind::Approval,
+            "900000",
+            None,
+        );
+        exceeded.bounds["authorization_seconds"] = json!(5);
+        exceeded.input["selectedBounds"]["authorization_seconds"] = json!(5);
+        exceeded.valid_for_seconds = 6;
+        let error = engine.authorize_boundary(exceeded).await.unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_VIOLATION");
+        assert!(
+            error.details.is_some(),
+            "duration violations must be structured"
+        );
+        assert!(authorizer.challenges.lock().unwrap().is_empty());
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .bridge_transfer(transfer_id)
+                .unwrap()
+                .unwrap()
+                .grant_id,
+            None,
+            "invalid duration requests must not partially bind the transfer"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_grant_cannot_renew_after_source_deposit_broadcast_is_uncertain() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-renew-after-broadcast";
+        let adapter = Arc::new(BridgeLifecycleAdapter::new(false));
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-broadcast.sqlite")).unwrap(),
+            vec![adapter.clone()],
+            Arc::new(ChallengeValidatingAuthorizer::default()),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_lifecycle_transfer(&engine, transfer_id, &[fin_domain::BridgeStepKind::Deposit]);
+        let first = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-broadcast-grant-1",
+                transfer_id,
+                "SYNTHETIC-step-0",
+                fin_domain::BridgeStepKind::Deposit,
+                "900000",
+                None,
+            ))
+            .await
+            .unwrap();
+        let attempt = engine
+            .execute_boundary(
+                &first.id,
+                lifecycle_operation_request(
+                    "SYNTHETIC-broadcast-op-1",
+                    transfer_id,
+                    "SYNTHETIC-step-0",
+                    fin_domain::BridgeStepKind::Deposit,
+                    "900000",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attempt.status, Status::Pending);
+        assert!(attempt.submission.is_some());
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        let error = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-broadcast-grant-2",
+                transfer_id,
+                "SYNTHETIC-step-0",
+                fin_domain::BridgeStepKind::Deposit,
+                "850000",
+                Some(first.id.clone()),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RESOURCE_RESERVED");
+        let transfer = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(transfer.grant_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(
+            transfer.steps[0].grant_id.as_deref(),
+            Some(first.id.as_str())
+        );
+        assert_eq!(
+            transfer.steps[0].operation_id.as_deref(),
+            Some(attempt.id.as_str())
+        );
+        assert_eq!(
+            transfer.steps[0].state,
+            fin_domain::BridgeStepState::Submitted
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn bridge_terminal_pre_submit_rejection_releases_claim_for_explicit_new_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let transfer_id = "SYNTHETIC-explicit-retry-transfer";
+        let adapter = Arc::new(BridgeLifecycleAdapter::rejected_before_submission());
+        let engine = Engine::new(
+            Store::open(directory.path().join("bridge-explicit-retry.sqlite")).unwrap(),
+            vec![adapter.clone()],
+            Arc::new(ChallengeValidatingAuthorizer::default()),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        seed_lifecycle_transfer(
+            &engine,
+            transfer_id,
+            &[fin_domain::BridgeStepKind::ResetAllowance],
+        );
+        let first = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-explicit-grant-1",
+                transfer_id,
+                "SYNTHETIC-step-0",
+                fin_domain::BridgeStepKind::ResetAllowance,
+                "900000",
+                None,
+            ))
+            .await
+            .unwrap();
+        let rejected = engine
+            .execute_boundary(
+                &first.id,
+                lifecycle_operation_request(
+                    "SYNTHETIC-explicit-op-1",
+                    transfer_id,
+                    "SYNTHETIC-step-0",
+                    fin_domain::BridgeStepKind::ResetAllowance,
+                    "900000",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status, Status::Rejected);
+        assert!(rejected.submission.is_none());
+        let released = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(released.grant_id.as_deref(), Some(first.id.as_str()));
+        assert_eq!(released.steps[0].operation_id, None);
+        assert_eq!(
+            released.steps[0].state,
+            fin_domain::BridgeStepState::Unsubmitted
+        );
+
+        let renewed = engine
+            .authorize_boundary(lifecycle_boundary_request(
+                "SYNTHETIC-explicit-grant-2",
+                transfer_id,
+                "SYNTHETIC-step-0",
+                fin_domain::BridgeStepKind::ResetAllowance,
+                "850000",
+                Some(first.id.clone()),
+            ))
+            .await
+            .unwrap();
+        adapter
+            .fail_before_submission
+            .store(false, Ordering::SeqCst);
+        let retried = engine
+            .execute_boundary(
+                &renewed.id,
+                lifecycle_operation_request(
+                    "SYNTHETIC-explicit-op-2",
+                    transfer_id,
+                    "SYNTHETIC-step-0",
+                    fin_domain::BridgeStepKind::ResetAllowance,
+                    "850000",
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried.status, Status::Completed, "{:?}", retried.error);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        let original: OperationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&rejected.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(original.status, Status::Rejected);
+        assert_eq!(original.submission, None);
+        let final_transfer = engine
+            .store
+            .lock()
+            .unwrap()
+            .bridge_transfer(transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            final_transfer.steps[0].grant_id.as_deref(),
+            Some(renewed.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[0].operation_id.as_deref(),
+            Some(retried.id.as_str())
+        );
+        assert_eq!(
+            final_transfer.steps[0].state,
+            fin_domain::BridgeStepState::Settled
+        );
     }
 
     #[tokio::test]

@@ -206,11 +206,12 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
  {
     let transport = Arc::new(TransferTransport::new(PostResult::Success));
     let execution_adapter = adapter(transport.clone());
+    let mut request = input("child", "child", "master", "sub-success");
+    // The durable input keeps the user's decimal spelling; the adapter sends
+    // Binance the same exact quantity in canonical decimal form.
+    request["amount"] = json!("0.2500");
     let preview = execution_adapter
-        .prepare(
-            "binance.transfer",
-            &input("child", "child", "master", "sub-success"),
-        )
+        .prepare("binance.transfer", &request)
         .await
         .unwrap();
     assert_eq!(preview.binding["route"], "sub_to_master");
@@ -254,6 +255,15 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
     assert_eq!(history_transport.posts.load(Ordering::SeqCst), 0);
     assert_eq!(history_transport.history_reads.load(Ordering::SeqCst), 1);
 
+    let mut changed_amount = record.clone();
+    changed_amount.input["amount"] = json!("0.251");
+    changed_amount.submission.as_mut().unwrap().data["amount"] = json!("0.251");
+    let error = receipt_adapter
+        .reconcile(&changed_amount)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "RECONCILIATION_INVALID");
+
     let mismatched_history = Arc::new(HistoryTransport {
         wrong: true,
         ..HistoryTransport::success()
@@ -262,6 +272,22 @@ async fn sub_to_master_uses_child_signature_and_durable_receipt_then_reconciles_
     let mismatch = mismatch_adapter.reconcile(&record).await.unwrap();
     assert_eq!(mismatch.status, fin_domain::Status::Unknown);
     assert!(mismatch.verified.is_none());
+
+    for transport in [
+        Arc::new(HistoryTransport {
+            wrong_transaction_id: true,
+            ..HistoryTransport::success()
+        }),
+        Arc::new(HistoryTransport {
+            wrong_quantity: true,
+            ..HistoryTransport::success()
+        }),
+    ] {
+        let strict_adapter = adapter(transport);
+        let result = strict_adapter.reconcile(&record).await.unwrap();
+        assert_eq!(result.status, fin_domain::Status::Unknown);
+        assert!(result.verified.is_none());
+    }
 }
 
 struct HistoryTransport {
@@ -270,6 +296,9 @@ struct HistoryTransport {
     child_free: Mutex<String>,
     master_free: Mutex<String>,
     wrong: bool,
+    wrong_transaction_id: bool,
+    wrong_quantity: bool,
+    timestamp_offset_ms: i64,
 }
 impl HistoryTransport {
     fn success() -> Self {
@@ -279,6 +308,10 @@ impl HistoryTransport {
             child_free: Mutex::new("0.25".into()),
             master_free: Mutex::new("1.25".into()),
             wrong: false,
+            wrong_transaction_id: false,
+            wrong_quantity: false,
+            // Binance may round its history time just before local submission.
+            timestamp_offset_ms: -2_000,
         }
     }
 }
@@ -304,8 +337,20 @@ impl BinanceTransport for HistoryTransport {
             E::ApiRestrictions => Ok(json!({"enableSpotAndMarginTrading":true})),
             E::SubAccountTransferHistory => {
                 self.history_reads.fetch_add(1, Ordering::SeqCst);
+                let timestamp = chrono::Utc::now().timestamp_millis() + self.timestamp_offset_ms;
+                let request_start = request
+                    .get("startTime")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap();
+                let request_end = request
+                    .get("endTime")
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap();
+                if timestamp < request_start || timestamp > request_end {
+                    return Ok(json!([]));
+                }
                 Ok(
-                    json!([{"counterParty":"master","email":"master@example.invalid","type":2,"asset":if self.wrong {"BTC"} else {"ETH"},"qty":"0.25","fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS","tranId":123456789,"time":chrono::Utc::now().timestamp_millis()}]),
+                    json!([{"counterParty":"master","email":"master@example.invalid","type":2,"asset":if self.wrong {"BTC"} else {"ETH"},"qty":if self.wrong_quantity {"0.251"} else {"0.25"},"fromAccountType":"SPOT","toAccountType":"SPOT","status":"SUCCESS","tranId":if self.wrong_transaction_id {123456788} else {123456789},"time":timestamp}]),
                 )
             }
             endpoint => panic!("unexpected recovery endpoint {endpoint:?}"),

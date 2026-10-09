@@ -2655,7 +2655,7 @@ async fn withdrawal_preview_keeps_binance_debit_and_ethereum_credit_price_units_
     );
     assert_eq!(
         preview.intent.maximum_costs[0].treatment,
-        fin_domain::CostTreatment::AdditionalDebit
+        fin_domain::CostTreatment::IncludedInDebit
     );
 }
 
@@ -2709,14 +2709,14 @@ async fn withdrawal_reserves_principal_and_fee_once_at_exact_balance_boundary() 
             .await
     }
 
-    let exact = preview_with_free("0.011").await.unwrap();
+    let exact = preview_with_free("0.01").await.unwrap();
     assert_eq!(exact.intent.debits[0].amount.atoms.to_decimal(36), "0.01");
     assert_eq!(
         exact.intent.maximum_costs[0].amount.atoms.to_decimal(36),
         "0.001"
     );
     assert!(
-        preview_with_free("0.010999999999999999999999999999999999")
+        preview_with_free("0.009999999999999999999999999999999999")
             .await
             .is_err()
     );
@@ -2875,6 +2875,108 @@ async fn ccxt_transport_keeps_exact_parameters_closed_endpoint_and_large_integer
     assert_eq!(params["signature"].len(), 64);
     assert!(params["timestamp"].parse::<u64>().is_ok());
     assert!(!wire.contains("synthetic-fixture-hmac-secret-not-a-real-key"));
+}
+
+#[tokio::test]
+async fn universal_transfer_transport_ed25519_signs_encoded_route_email_exactly() {
+    use base64::Engine as _;
+    use ed25519_dalek::{Verifier, pkcs8::EncodePrivateKey};
+    use tokio::io::AsyncWriteExt;
+
+    struct Ed25519Credentials(String);
+    impl fin_exchange::ccxt::CredentialProvider for Ed25519Credentials {
+        fn credentials(
+            &self,
+            reference: &str,
+        ) -> std::result::Result<fin_exchange::ccxt::Credentials, fin_exchange::ccxt::CcxtError>
+        {
+            assert_eq!(reference, "test-only-ed25519-transfer");
+            Ok(fin_exchange::ccxt::Credentials {
+                api_key: "synthetic-ed25519-api-key".to_owned().into(),
+                secret: self.0.clone().into(),
+            })
+        }
+    }
+
+    let key = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+    let private_key = key.to_pkcs8_pem(Default::default()).unwrap().to_string();
+    let email = "synthetic+route&percent%雪@example.invalid";
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let wire = read_fixture_http_request(&mut stream).await;
+        let body = r#"{"tranId":9007199254740993}"#;
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        wire
+    });
+    let transport = fin_binance::BinanceCcxtTransport::new(
+        std::sync::Arc::new(
+            fin_exchange::ccxt::CcxtClient::for_test(&format!("http://{address}")).unwrap(),
+        ),
+        std::sync::Arc::new(Ed25519Credentials(private_key)),
+    );
+    let intent = fin_binance::UniversalTransferIntent {
+        asset: "ETH".into(),
+        amount: amount("0.01265"),
+        from_email: None,
+        to_email: Some(email.into()),
+        client_id: fin_binance::ClientIdentity::transfer("synthetic-ed25519-transfer-1").unwrap(),
+    };
+    let response = fin_binance::BinanceTransport::request(
+        &transport,
+        &fin_binance::CredentialHandle::new("test-only-ed25519-transfer").unwrap(),
+        intent.request().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["tranId"].as_u64(), Some(9_007_199_254_740_993));
+
+    let wire = server.await.unwrap();
+    assert!(wire.starts_with("POST /sapi/v1/sub-account/universalTransfer "));
+    assert!(
+        wire.to_ascii_lowercase()
+            .contains("x-mbx-apikey: synthetic-ed25519-api-key")
+    );
+    let params = request_parameters(&wire);
+    assert_eq!(params["toEmail"], email);
+    assert_eq!(params["amount"], "0.01265");
+    let body = wire.split_once("\r\n\r\n").unwrap().1;
+    let (payload, signature) = body.rsplit_once("&signature=").unwrap();
+    assert!(payload.contains("toEmail=synthetic%2Broute%26percent%25%E9%9B%AA%40example.invalid"));
+    assert!(!payload.contains("%2540"));
+    let signature = percent_decode_component(signature);
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(signature)
+        .unwrap();
+    key.verifying_key()
+        .verify(
+            payload.as_bytes(),
+            &ed25519_dalek::Signature::from_slice(&signature).unwrap(),
+        )
+        .unwrap();
+    let unencoded_payload = payload.replace(
+        "synthetic%2Broute%26percent%25%E9%9B%AA%40example.invalid",
+        email,
+    );
+    assert!(
+        key.verifying_key()
+            .verify(
+                unencoded_payload.as_bytes(),
+                &ed25519_dalek::Signature::from_slice(&signature).unwrap(),
+            )
+            .is_err()
+    );
+    assert!(!wire.contains("-----BEGIN PRIVATE KEY-----"));
 }
 
 #[tokio::test]
@@ -3256,6 +3358,15 @@ struct WithdrawalLifecycleTransport {
     account_reads: std::sync::atomic::AtomicUsize,
     events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     timeout_withdrawal: bool,
+    coin: String,
+    network: String,
+    api_amount: String,
+    history_amount: String,
+    transaction_fee: String,
+    source_free_before: String,
+    source_free_after: String,
+    published_fee: String,
+    contract_address: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -3274,11 +3385,12 @@ impl fin_binance::BinanceTransport for WithdrawalLifecycleTransport {
             E::ApiRestrictions => Ok(json!({"enableReading":true,"enableWithdrawals":true})),
             E::TravelRuleRequirements => Ok(json!({"questionnaireCountryCode":"NIL"})),
             E::CapitalConfig => Ok(json!([{
-                "coin":"ETH", "withdrawAllEnable":true, "depositAllEnable":true,
-                "networkList":[{
-                    "network":"ETH", "coin":"ETH", "depositEnable":true,
+                "coin":self.coin, "withdrawAllEnable":true, "depositAllEnable":true,
+            "networkList":[{
+                "network":self.network, "coin":self.coin, "depositEnable":true,
                     "withdrawEnable":true, "withdrawIntegerMultiple":"0.00000001",
-                    "withdrawFee":"0.0004", "withdrawMin":"0.001", "withdrawMax":"1000",
+                    "withdrawFee":self.published_fee, "withdrawMin":"0.001", "withdrawMax":"1000",
+                    "contractAddress":self.contract_address,
                     "withdrawTag":false, "busy":false
                 }]
             }])),
@@ -3286,13 +3398,18 @@ impl fin_binance::BinanceTransport for WithdrawalLifecycleTransport {
                 let read = self
                     .account_reads
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let free = if read < 3 { "1.2345" } else { "1.2241" };
-                Ok(json!({"balances":[{"asset":"ETH","free":free,"locked":"0"}]}))
+                let free = if read < 3 {
+                    self.source_free_before.as_str()
+                } else {
+                    self.source_free_after.as_str()
+                };
+                Ok(json!({"balances":[{"asset":self.coin,"free":free,"locked":"0"}]}))
             }
             E::StandardWithdrawal => {
-                assert_eq!(request.get("network"), Some("ETH"));
+                assert_eq!(request.get("network"), Some(self.network.as_str()));
                 assert_eq!(request.get("walletType"), Some("0"));
-                assert_eq!(request.get("amount"), Some("0.01"));
+                assert_eq!(request.get("coin"), Some(self.coin.as_str()));
+                assert_eq!(request.get("amount"), Some(self.api_amount.as_str()));
                 if self.timeout_withdrawal {
                     Err(fin_binance::TransportError::Timeout)
                 } else {
@@ -3300,8 +3417,8 @@ impl fin_binance::BinanceTransport for WithdrawalLifecycleTransport {
                 }
             }
             E::WithdrawalHistory => Ok(json!([{
-                "id":"withdraw-fixture-01", "coin":"ETH", "amount":"0.01",
-                "transactionFee":"0.0004", "network":"ETH",
+                "id":"withdraw-fixture-01", "coin":self.coin, "amount":self.history_amount,
+                "transactionFee":self.transaction_fee, "network":self.network,
                 "address":"0x1111111111111111111111111111111111111111",
                 "txId":format!("0x{}", "a".repeat(64)), "status":6,
                 "completeTime":"2026-09-01 12:30:45",
@@ -3313,46 +3430,149 @@ impl fin_binance::BinanceTransport for WithdrawalLifecycleTransport {
     }
 }
 
-struct CompletedRecipientVerifier;
+struct CompletedRecipientVerifier {
+    asset: fin_domain::AssetId,
+    amount_atoms: Option<fin_domain::Quantity>,
+    chain_id: u64,
+    status: fin_domain::Status,
+    evidence: Value,
+}
 
 #[async_trait::async_trait]
 impl fin_binance::BinanceRecipientVerifier for CompletedRecipientVerifier {
     async fn verify(&self, request: fin_binance::PayoutRequest) -> fin_binance::PayoutResult {
-        assert_eq!(request.chain_id, 1);
+        assert_eq!(request.chain_id, self.chain_id);
         assert_eq!(
             request.recipient,
             "0x1111111111111111111111111111111111111111"
         );
-        assert_eq!(request.asset.network, "ethereum:1");
-        assert_eq!(request.asset.decimals, 18);
+        assert_eq!(request.asset, self.asset);
         fin_binance::PayoutResult {
-            status: fin_domain::Status::Completed,
-            amount_atoms: Some(fin_domain::Quantity::new("10000000000000000").unwrap()),
-            evidence: json!({"fixture":"synthetic Ethereum mainnet receipt"}),
+            status: self.status.clone(),
+            amount_atoms: self.amount_atoms.clone(),
+            evidence: self.evidence.clone(),
         }
     }
 }
 
-#[tokio::test]
-async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt() {
-    use fin_domain::Adapter;
-    use std::collections::BTreeMap;
+fn withdrawal_destination(coin: &str, asset: fin_domain::AssetId) -> fin_binance::BinanceConfig {
     let mut config = one_main_config();
     config.destinations.push(fin_binance::EthereumDestination {
         name: "wallet-fixture".into(),
         resource: fin_domain::ResourceId("ethereum:synthetic-wallet".into()),
         address: "0x1111111111111111111111111111111111111111".into(),
         chain_id: 1,
-        assets: BTreeMap::from([(
-            "ETH".into(),
-            fin_domain::AssetId {
-                network: "ethereum:1".into(),
-                reference: "native".into(),
-                decimals: 18,
-            },
-        )]),
+        assets: std::collections::BTreeMap::from([(coin.to_owned(), asset)]),
         confirmations: 2,
     });
+    config
+}
+
+async fn reconcile_eth_withdrawal_fixture(
+    request_id: &str,
+    gross: &str,
+    history_net: &str,
+    fee: &str,
+    source_free_after: &str,
+    maximum_fee: &str,
+    minimum_receive: &str,
+    receipt_status: fin_domain::Status,
+    receipt_atoms: Option<&str>,
+    legacy_minimum_receive: Option<&str>,
+) -> fin_domain::Result<fin_domain::Reconciliation> {
+    use fin_domain::Adapter;
+    let asset = fin_domain::AssetId {
+        network: "ethereum:1".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let adapter = fin_binance::BinanceAdapter::new(
+        withdrawal_destination("ETH", asset.clone()),
+        std::sync::Arc::new(WithdrawalLifecycleTransport {
+            account_reads: std::sync::atomic::AtomicUsize::new(0),
+            events: events.clone(),
+            timeout_withdrawal: false,
+            coin: "ETH".into(),
+            network: "ETH".into(),
+            api_amount: gross.into(),
+            history_amount: history_net.into(),
+            transaction_fee: fee.into(),
+            source_free_before: "1.2345".into(),
+            source_free_after: source_free_after.into(),
+            published_fee: maximum_fee.into(),
+            contract_address: None,
+        }),
+        None,
+        Some(std::sync::Arc::new(CompletedRecipientVerifier {
+            asset,
+            amount_atoms: receipt_atoms.map(fin_domain::Quantity::new).transpose()?,
+            chain_id: 1,
+            status: receipt_status,
+            evidence: json!({"fixture":"synthetic selected-chain receipt"}),
+        })),
+    )?;
+    let input = json!({
+        "requestId":request_id, "account":"main-fixture", "destination":"wallet-fixture",
+        "coin":"ETH", "amount":gross, "network":"ETH", "walletType":"SPOT",
+        "maxFee":maximum_fee, "minReceiveAmount":minimum_receive
+    });
+    let mut preview = adapter.prepare("binance.withdraw", &input).await?;
+    let mut persisted_input = input;
+    let journal = std::sync::Arc::new(RecordingJournal {
+        events,
+        persisted: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut submission = adapter.submit(&preview, journal).await?;
+    if let Some(old_floor) = legacy_minimum_receive {
+        // Simulate a saved preview approved by an older build. Its immutable
+        // minimum was gross amount even though Binance later paid gross-fee.
+        preview.binding["minimumReceive"] = json!(old_floor);
+        preview.input["minReceiveAmount"] = json!(old_floor);
+        persisted_input["minReceiveAmount"] = json!(old_floor);
+        submission.data["binding"]["minimumReceive"] = json!(old_floor);
+        submission.data["minimumReceive"] = json!(old_floor);
+        let atoms = fin_domain::Quantity::from_decimal(old_floor, 18)?;
+        for constraint in &mut preview.intent.expected {
+            if let fin_domain::EffectConstraint::Transfer { minimum_credit, .. } = constraint {
+                *minimum_credit = atoms.clone();
+            }
+        }
+        for cost in &mut preview.intent.maximum_costs {
+            cost.treatment = fin_domain::CostTreatment::AdditionalDebit;
+        }
+    }
+    let record = fin_domain::OperationRecord {
+        id: format!("{request_id}-operation"),
+        request_id: request_id.into(),
+        fingerprint: format!("{request_id}-fingerprint"),
+        fingerprint_version: 1,
+        operation: "binance.withdraw".into(),
+        input: persisted_input,
+        status: fin_domain::Status::Submitted,
+        created_at: fin_domain::now(),
+        updated_at: fin_domain::now(),
+        preview: Some(preview),
+        approval: None,
+        submission: Some(submission),
+        dispatch_evidence: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    adapter.reconcile(&record).await
+}
+
+#[tokio::test]
+async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt() {
+    use fin_domain::Adapter;
+    let asset = fin_domain::AssetId {
+        network: "ethereum:1".into(),
+        reference: "native".into(),
+        decimals: 18,
+    };
+    let config = withdrawal_destination("ETH", asset.clone());
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let adapter = fin_binance::BinanceAdapter::new(
         config,
@@ -3360,16 +3580,31 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: false,
+            coin: "ETH".into(),
+            network: "ETH".into(),
+            api_amount: "0.0125".into(),
+            history_amount: "0.01235".into(),
+            transaction_fee: "0.00015".into(),
+            source_free_before: "1.2345".into(),
+            source_free_after: "1.2220".into(),
+            published_fee: "0.00015".into(),
+            contract_address: None,
         }),
         None,
-        Some(std::sync::Arc::new(CompletedRecipientVerifier)),
+        Some(std::sync::Arc::new(CompletedRecipientVerifier {
+            asset,
+            amount_atoms: Some(fin_domain::Quantity::new("12350000000000000").unwrap()),
+            chain_id: 1,
+            status: fin_domain::Status::Completed,
+            evidence: json!({"fixture":"exact synthetic Ethereum receipt"}),
+        })),
     )
     .unwrap();
     let input = json!({
         "requestId":"synthetic-withdraw-lifecycle", "account":"main-fixture",
-        "destination":"wallet-fixture", "coin":"ETH", "amount":"0.01",
-        "network":"ETH", "walletType":"SPOT", "maxFee":"0.001",
-        "minReceiveAmount":"0.009"
+        "destination":"wallet-fixture", "coin":"ETH", "amount":"0.0125",
+        "network":"ETH", "walletType":"SPOT", "maxFee":"0.00015",
+        "minReceiveAmount":"0.01235"
     });
     let preview = adapter.prepare("binance.withdraw", &input).await.unwrap();
     let journal = std::sync::Arc::new(RecordingJournal {
@@ -3411,10 +3646,10 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
         fin_domain::FinancialEffect::Transfer { debit, credit, .. } => {
             assert_eq!(debit.asset.network, "binance");
             assert_eq!(debit.asset.decimals, 36);
-            assert_eq!(debit.atoms.to_decimal(36), "0.01");
+            assert_eq!(debit.atoms.to_decimal(36), "0.0125");
             assert_eq!(credit.asset.network, "ethereum:1");
             assert_eq!(credit.asset.decimals, 18);
-            assert_eq!(credit.atoms.to_decimal(18), "0.01");
+            assert_eq!(credit.atoms.to_decimal(18), "0.01235");
         }
         other => panic!("unexpected withdrawal effect {other:?}"),
     }
@@ -3432,11 +3667,12 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
                 }
             );
             assert_eq!(amount.asset.network, "binance");
-            assert_eq!(amount.atoms.to_decimal(36), "0.0004");
-            assert_eq!(treatment, &fin_domain::CostTreatment::AdditionalDebit);
+            assert_eq!(amount.atoms.to_decimal(36), "0.00015");
+            assert_eq!(treatment, &fin_domain::CostTreatment::IncludedInDebit);
         }
         other => panic!("unexpected withdrawal cost effect {other:?}"),
     }
+    assert_eq!(proof.evidence["sourceDebitObserved"], "0.0125");
     let events = events.lock().unwrap();
     let withdraw_dispatch = events
         .iter()
@@ -3448,6 +3684,240 @@ async fn withdrawal_lifecycle_correlates_order_fee_and_cross_asset_chain_receipt
         .unwrap();
     assert!(before_dispatch_persist < withdraw_dispatch);
     assert_eq!(journal.persisted.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn usdc_withdrawal_gross_api_amount_net_history_and_fee_are_accounted_once() {
+    use fin_domain::Adapter;
+    let asset = fin_domain::AssetId {
+        network: "ethereum:1".into(),
+        reference: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into(),
+        decimals: 6,
+    };
+    let config = withdrawal_destination("USDC", asset.clone());
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let adapter = fin_binance::BinanceAdapter::new(
+        config,
+        std::sync::Arc::new(WithdrawalLifecycleTransport {
+            account_reads: std::sync::atomic::AtomicUsize::new(0),
+            events: events.clone(),
+            timeout_withdrawal: false,
+            coin: "USDC".into(),
+            network: "ETH".into(),
+            api_amount: "20.5".into(),
+            history_amount: "20".into(),
+            transaction_fee: "0.5".into(),
+            source_free_before: "1000".into(),
+            source_free_after: "979.5".into(),
+            published_fee: "0.5".into(),
+            contract_address: Some("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into()),
+        }),
+        None,
+        Some(std::sync::Arc::new(CompletedRecipientVerifier {
+            asset,
+            amount_atoms: Some(fin_domain::Quantity::new("20000000").unwrap()),
+            chain_id: 1,
+            status: fin_domain::Status::Completed,
+            evidence: json!({"fixture":"exact synthetic Ethereum USDC receipt"}),
+        })),
+    )
+    .unwrap();
+    let input = json!({
+        "requestId":"synthetic-usdc-withdraw-lifecycle", "account":"main-fixture",
+        "destination":"wallet-fixture", "coin":"USDC", "amount":"20.5",
+        "network":"ETH", "walletType":"SPOT", "maxFee":"0.5",
+        "minReceiveAmount":"20"
+    });
+    let preview = adapter.prepare("binance.withdraw", &input).await.unwrap();
+    let journal = std::sync::Arc::new(RecordingJournal {
+        events: events.clone(),
+        persisted: std::sync::Mutex::new(Vec::new()),
+    });
+    let submission = adapter.submit(&preview, journal).await.unwrap();
+    let record = fin_domain::OperationRecord {
+        id: "synthetic-usdc-withdraw-op".into(),
+        request_id: "synthetic-usdc-withdraw-lifecycle".into(),
+        fingerprint: "synthetic-usdc-withdraw-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "binance.withdraw".into(),
+        input,
+        status: fin_domain::Status::Submitted,
+        created_at: fin_domain::now(),
+        updated_at: fin_domain::now(),
+        preview: Some(preview),
+        approval: None,
+        submission: Some(submission),
+        dispatch_evidence: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    let result = adapter.reconcile(&record).await.unwrap();
+    assert_eq!(
+        result.status,
+        fin_domain::Status::Completed,
+        "evidence={}",
+        result.evidence
+    );
+    let proof = result.verified.unwrap();
+    assert_eq!(proof.effects.len(), 2);
+    match &proof.effects[0] {
+        fin_domain::FinancialEffect::Transfer { debit, credit, .. } => {
+            assert_eq!(debit.asset.reference, "USDC");
+            assert_eq!(debit.atoms.to_decimal(36), "20.5");
+            assert_eq!(
+                credit.asset.reference,
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            );
+            assert_eq!(credit.atoms.to_decimal(6), "20");
+        }
+        other => panic!("unexpected USDC withdrawal effect {other:?}"),
+    }
+    match &proof.effects[1] {
+        fin_domain::FinancialEffect::Cost {
+            amount, treatment, ..
+        } => {
+            assert_eq!(amount.atoms.to_decimal(36), "0.5");
+            assert_eq!(treatment, &fin_domain::CostTreatment::IncludedInDebit);
+        }
+        other => panic!("unexpected USDC withdrawal fee effect {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn legacy_gross_receipt_floor_is_a_verified_failed_shortfall_not_completion() {
+    let result = reconcile_eth_withdrawal_fixture(
+        "synthetic-legacy-gross-floor",
+        "0.0125",
+        "0.01235",
+        "0.00015",
+        "1.2220",
+        "0.00015",
+        "0.01235", // valid under the current preview contract
+        fin_domain::Status::Completed,
+        Some("12350000000000000"),
+        Some("0.0125"), // immutable floor from the older approved preview
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.status,
+        fin_domain::Status::Failed,
+        "known net shortfall must be terminally recorded as failed: {}",
+        result.evidence
+    );
+    let proof = result
+        .verified
+        .expect("verified payout and typed partial effects are preserved");
+    assert_eq!(proof.effects.len(), 2);
+    match &proof.effects[0] {
+        fin_domain::FinancialEffect::Transfer { debit, credit, .. } => {
+            assert_eq!(debit.atoms.to_decimal(36), "0.01235");
+            assert_eq!(credit.atoms.to_decimal(18), "0.01235");
+        }
+        other => panic!("expected actual partial payout transfer, got {other:?}"),
+    }
+    match &proof.effects[1] {
+        fin_domain::FinancialEffect::Cost {
+            amount, treatment, ..
+        } => {
+            assert_eq!(amount.atoms.to_decimal(36), "0.00015");
+            assert_eq!(*treatment, fin_domain::CostTreatment::AdditionalDebit);
+        }
+        other => panic!("expected separately charged fee from legacy approval, got {other:?}"),
+    }
+    assert_eq!(proof.evidence["apiGrossAmount"], "0.0125");
+    assert_eq!(proof.evidence["historyNetAmount"], "0.01235");
+    assert_eq!(proof.evidence["sourceDebitObserved"], "0.0125");
+    assert_eq!(proof.evidence["actual_gross_debit"], "0.0125");
+    assert_eq!(proof.evidence["actual_net_receipt"], "0.01235");
+    assert_eq!(proof.evidence["actual_fee"], "0.00015");
+    assert_eq!(proof.evidence["approved_minimum"], "0.0125");
+    assert_eq!(proof.evidence["minimum_receipt_met"], false);
+    assert_eq!(proof.evidence["partial_payout_reconciled"], true);
+}
+
+#[tokio::test]
+async fn withdrawal_reconciliation_rejects_wrong_receipt_overfee_and_gross_debit_mismatch() {
+    let wrong_receipt = reconcile_eth_withdrawal_fixture(
+        "synthetic-wrong-payout-receipt",
+        "0.0125",
+        "0.01235",
+        "0.00015",
+        "1.2220",
+        "0.00015",
+        "0.01235",
+        fin_domain::Status::Failed,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wrong_receipt.status, fin_domain::Status::Unknown);
+    assert!(
+        wrong_receipt.verified.is_none(),
+        "an unverified/wrong selected-chain receipt cannot produce a terminal proof"
+    );
+
+    let overfee = reconcile_eth_withdrawal_fixture(
+        "synthetic-overfee",
+        "0.0125",
+        "0.0123",
+        "0.0002",
+        "1.2220",
+        "0.00015",
+        "0.0123",
+        fin_domain::Status::Completed,
+        Some("12300000000000000"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(overfee.status, fin_domain::Status::Unknown);
+    assert!(
+        overfee.verified.is_none(),
+        "actual fee over its approved cap is unresolved"
+    );
+
+    let source_mismatch = reconcile_eth_withdrawal_fixture(
+        "synthetic-source-gross-mismatch",
+        "0.0125",
+        "0.01234",
+        "0.00015",
+        "1.22201",
+        "0.00015",
+        "0.01234",
+        fin_domain::Status::Completed,
+        Some("12340000000000000"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(source_mismatch.status, fin_domain::Status::Unknown);
+    assert!(
+        source_mismatch.verified.is_none(),
+        "authoritative history net plus fee must equal the exact gross API amount"
+    );
+}
+
+#[tokio::test]
+async fn withdrawal_minimum_cannot_exceed_net_after_the_explicit_fee_cap() {
+    let error = reconcile_eth_withdrawal_fixture(
+        "synthetic-infeasible-receipt-bound",
+        "0.0125",
+        "0.01235",
+        "0.00015",
+        "1.2220",
+        "0.00015",
+        "0.0125",
+        fin_domain::Status::Completed,
+        Some("12350000000000000"),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "RECEIPT_BOUND_UNSUPPORTED");
 }
 
 struct PaginatedWithdrawalHistoryTransport {
@@ -3659,16 +4129,35 @@ async fn withdrawal_timeout_recovers_from_original_withdraw_order_id_without_rep
             account_reads: std::sync::atomic::AtomicUsize::new(0),
             events: events.clone(),
             timeout_withdrawal: true,
+            coin: "ETH".into(),
+            network: "ETH".into(),
+            api_amount: "0.0125".into(),
+            history_amount: "0.01235".into(),
+            transaction_fee: "0.00015".into(),
+            source_free_before: "1.2345".into(),
+            source_free_after: "1.2220".into(),
+            published_fee: "0.00015".into(),
+            contract_address: None,
         }),
         None,
-        Some(std::sync::Arc::new(CompletedRecipientVerifier)),
+        Some(std::sync::Arc::new(CompletedRecipientVerifier {
+            asset: fin_domain::AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            },
+            amount_atoms: Some(fin_domain::Quantity::new("12350000000000000").unwrap()),
+            chain_id: 1,
+            status: fin_domain::Status::Completed,
+            evidence: json!({"fixture":"exact synthetic Ethereum receipt"}),
+        })),
     )
     .unwrap();
     let input = json!({
         "requestId":"synthetic-withdraw-timeout", "account":"main-fixture",
-        "destination":"wallet-fixture", "coin":"ETH", "amount":"0.01",
-        "network":"ETH", "walletType":"SPOT", "maxFee":"0.001",
-        "minReceiveAmount":"0.009"
+        "destination":"wallet-fixture", "coin":"ETH", "amount":"0.0125",
+        "network":"ETH", "walletType":"SPOT", "maxFee":"0.00015",
+        "minReceiveAmount":"0.01235"
     });
     let preview = adapter.prepare("binance.withdraw", &input).await.unwrap();
     let journal = std::sync::Arc::new(RecordingJournal {

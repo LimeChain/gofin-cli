@@ -95,7 +95,25 @@ def wait_ready(endpoint: str, owned: Any) -> dict[str, Any] | None:
     return None
 
 
+def selected_test_filter() -> list[str]:
+    value = os.environ.get("FIN_FORK_TEST_FILTER", "")
+    if not value:
+        return []
+    if value not in {
+        "deployed_protocol_roundtrip_via_broker_restores_exact_state",
+        "deployed_relay_native_source_proof_keeps_principal_in_transit",
+        "deployed_canonical_native_source_proof_on_both_children",
+    }:
+        raise RuntimeError("FIN_FORK_TEST_FILTER must select a documented deployed-contract test; arbitrary filters could falsely pass with no tests.")
+    return [value]
+
 def verify(source: Path, anvil: Path) -> int:
+    test_filter = selected_test_filter()
+    test_target = (
+        "canonical_orchestration"
+        if test_filter == ["deployed_canonical_native_source_proof_on_both_children"]
+        else "fork_roundtrip"
+    )
     work = source / "work"
     work.mkdir(mode=0o700, exist_ok=True)
     work.chmod(0o700)
@@ -104,7 +122,7 @@ def verify(source: Path, anvil: Path) -> int:
     print(f"Fork evidence: {evidence}", flush=True)
 
     compile_result = subprocess.run(
-        ["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", "fork_roundtrip", "--no-run"],
+        ["cargo", "test", "--locked", "--offline", "-p", "fin-broker", "--test", test_target, "--no-run"],
         cwd=source,
     )
     if compile_result.returncode:
@@ -157,7 +175,7 @@ def verify(source: Path, anvil: Path) -> int:
             )
             print(f"Owned fork instance {metadata['instanceId']} at {endpoint}", flush=True)
             test_owned = start_owned_process(
-                ["cargo", "test", "--manifest-path", str(source / "Cargo.toml"), "--locked", "--offline", "-p", "fin-broker", "--test", "fork_roundtrip", "--", "--ignored", "--nocapture"],
+                ["cargo", "test", "--manifest-path", str(source / "Cargo.toml"), "--locked", "--offline", "-p", "fin-broker", "--test", test_target, "--", "--ignored", *test_filter, "--nocapture"],
                 log_path=evidence / "test.log",
                 marker_path=evidence / "test.owner.json",
                 env=env,

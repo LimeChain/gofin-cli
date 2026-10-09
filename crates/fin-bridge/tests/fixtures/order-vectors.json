@@ -1,0 +1,238 @@
+{
+  "sdk_version": "0.0.146",
+  "sdk_git_head": "8e7d794475836ae77e7f4cf3fc788f02ed079150",
+  "synthetic": true,
+  "chains": {
+    "ethereum": "ethereum-vm",
+    "arbitrum": "ethereum-vm",
+    "robinhood": "ethereum-vm",
+    "base": "ethereum-vm"
+  },
+  "vectors": [
+    {
+      "name": "synthetic-native-arbitrum",
+      "order": {
+        "version": "v1",
+        "solverChainId": "base",
+        "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "inputs": [
+          {
+            "payment": {
+              "chainId": "ethereum",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "amount": "3000000000000000",
+              "weight": "1"
+            },
+            "refunds": [
+              {
+                "chainId": "ethereum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              },
+              {
+                "chainId": "arbitrum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              }
+            ]
+          }
+        ],
+        "output": {
+          "chainId": "arbitrum",
+          "payments": [
+            {
+              "recipient": "0x1111111111111111111111111111111111111111",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "minimumAmount": "2929788992860002",
+              "expectedAmount": "2989580604959185"
+            }
+          ],
+          "calls": [],
+          "deadline": 2000000000,
+          "extraData": "0x"
+        },
+        "fees": []
+      },
+      "order_id": "0xc4e34296dec661fba362640eecd413627700c0bb0f3d737c1da5245edaa8dc51",
+      "deposit_calldata": "0x49290c1c0000000000000000000000001111111111111111111111111111111111111111c4e34296dec661fba362640eecd413627700c0bb0f3d737c1da5245edaa8dc51"
+    },
+    {
+      "name": "synthetic-usdc-arbitrum",
+      "order": {
+        "version": "v1",
+        "solverChainId": "base",
+        "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "inputs": [
+          {
+            "payment": {
+              "chainId": "ethereum",
+              "currency": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+              "amount": "10000000",
+              "weight": "1"
+            },
+            "refunds": [
+              {
+                "chainId": "ethereum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              },
+              {
+                "chainId": "arbitrum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              }
+            ]
+          }
+        ],
+        "output": {
+          "chainId": "arbitrum",
+          "payments": [
+            {
+              "recipient": "0x1111111111111111111111111111111111111111",
+              "currency": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+              "minimumAmount": "9925944",
+              "expectedAmount": "9975823"
+            }
+          ],
+          "calls": [],
+          "deadline": 2000000000,
+          "extraData": "0x"
+        },
+        "fees": []
+      },
+      "order_id": "0x613aed2b54b21467417260f52cfa7625e2ef50f47ffee65e2298fe99930b6dda",
+      "deposit_calldata": "0xe80179520000000000000000000000001111111111111111111111111111111111111111000000000000000000000000a0b86991c6218b36c1d19d4a2e9eb0ce3606eb480000000000000000000000000000000000000000000000000000000000989680613aed2b54b21467417260f52cfa7625e2ef50f47ffee65e2298fe99930b6dda"
+    },
+    {
+      "name": "synthetic-native-robinhood",
+      "order": {
+        "version": "v1",
+        "solverChainId": "base",
+        "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "inputs": [
+          {
+            "payment": {
+              "chainId": "ethereum",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "amount": "3000000000000000",
+              "weight": "1"
+            },
+            "refunds": [
+              {
+                "chainId": "ethereum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              },
+              {
+                "chainId": "robinhood",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              }
+            ]
+          }
+        ],
+        "output": {
+          "chainId": "robinhood",
+          "payments": [
+            {
+              "recipient": "0x1111111111111111111111111111111111111111",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "minimumAmount": "2929331486053602",
+              "expectedAmount": "2989113761279185"
+            }
+          ],
+          "calls": [],
+          "deadline": 2000000000,
+          "extraData": "0x"
+        },
+        "fees": []
+      },
+      "order_id": "0x6909e2f6d9bf35cecb96d3188bc75a9b96c07ed0562a19236bd17248b92b135c",
+      "deposit_calldata": "0x49290c1c00000000000000000000000011111111111111111111111111111111111111116909e2f6d9bf35cecb96d3188bc75a9b96c07ed0562a19236bd17248b92b135c"
+    },
+    {
+      "name": "synthetic-hash-only-dynamic-bytes-fees",
+      "order": {
+        "version": "v1",
+        "solverChainId": "base",
+        "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "inputs": [
+          {
+            "payment": {
+              "chainId": "ethereum",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "amount": "3000000000000000",
+              "weight": "1"
+            },
+            "refunds": [
+              {
+                "chainId": "ethereum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0xabcd"
+              },
+              {
+                "chainId": "arbitrum",
+                "recipient": "0x1111111111111111111111111111111111111111",
+                "currency": "0x0000000000000000000000000000000000000000",
+                "minimumAmount": "0",
+                "deadline": 2000000000,
+                "extraData": "0x"
+              }
+            ]
+          }
+        ],
+        "output": {
+          "chainId": "arbitrum",
+          "payments": [
+            {
+              "recipient": "0x1111111111111111111111111111111111111111",
+              "currency": "0x0000000000000000000000000000000000000000",
+              "minimumAmount": "2929788992860002",
+              "expectedAmount": "2989580604959185"
+            }
+          ],
+          "calls": [
+            "0xdeadbeef"
+          ],
+          "deadline": 2000000000,
+          "extraData": "0x1234"
+        },
+        "fees": [
+          {
+            "recipientChainId": "base",
+            "recipient": "0x2222222222222222222222222222222222222222",
+            "currencyChainId": "ethereum",
+            "currency": "0x0000000000000000000000000000000000000000",
+            "amount": "7"
+          }
+        ]
+      },
+      "order_id": "0x8fe3ff0ac0a394cb08d60de02215f355a1f0dc20857c153450716460874cb9cd"
+    }
+  ]
+}

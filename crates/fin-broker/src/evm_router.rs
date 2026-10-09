@@ -204,16 +204,31 @@ mod tests {
         config.validate().unwrap();
         let applications =
             build_protected_applications(&config, Arc::new(NoCredentialAccess)).unwrap();
-        assert_eq!(applications.adapters.len(), 2);
-        assert!(applications.adapters[1].connections().is_empty());
+        assert_eq!(applications.adapters.len(), 3);
+        let exchange = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "exchange.markets")
+            })
+            .expect("exchange adapter is composed");
+        assert!(exchange.connections().is_empty());
         assert!(
-            applications.adapters[1]
+            exchange
                 .definitions()
                 .iter()
                 .any(|definition| definition.name == "exchange.markets")
         );
-        assert_eq!(applications.adapters[0].connections().len(), 1);
-        let networks = &applications.adapters[0].connections()[0].details["networks"];
+        let evm = applications
+            .adapters
+            .iter()
+            .find(|adapter| !adapter.connections().is_empty())
+            .expect("shared EVM adapter is composed");
+        assert_eq!(evm.connections().len(), 1);
+        let networks = &evm.connections()[0].details["networks"];
         let ids = networks
             .as_array()
             .unwrap()
@@ -222,8 +237,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(ids, [1, 42161, 4663].into_iter().collect());
         assert!(
-            !applications.adapters[0]
-                .definitions()
+            !evm.definitions()
                 .iter()
                 .any(|definition| definition.name.starts_with("aave.")
                     || definition.name.starts_with("uniswap."))
