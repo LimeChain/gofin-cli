@@ -2,7 +2,7 @@
 
 Captured from the user's requests on 2026-10-09. All entries below are roadmap requests, not implementation or verification claims. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–23 inclusive**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work. This release boundary was explicitly set by the user on 2026-10-09.
+The first release requires **backlog items 1–23 inclusive**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release boundary was explicitly set by the user on 2026-10-09.
 
 ## Shared scoping rules
 
@@ -92,3 +92,13 @@ Integrate SaucerSwap on Hedera. Agree supported versions/products and actions, i
 Add Across.to bridge support as later roadmap work. “Accross.to” is interpreted as Across.to. Select supported source/destination networks, assets and actions after verifying current official capabilities; do not assume Solana or any other network is supported.
 
 Integrate discovery, bounded previews, plan-authorized execution, verified destination receipt and recovery using shared Fin contracts. Keep quoted timing and fees distinct from verified execution results. This entry remains separate from item 23 unless the user later selects it for first-release bridge coverage.
+
+## 29. Ethereum Smart Wallet support
+
+Requested on 2026-10-09. Support Ethereum smart wallets through Fin. The wallet standard/provider, precise capabilities and target release remain to be defined; this request does not automatically expand the first-release scope.
+
+During scoping, agree whether Fin should connect existing smart wallets, create new accounts, or both, and identify required transaction, batching, signing and recovery capabilities. Clarify whether coverage starts on Ethereum mainnet only or extends to other supported EVM networks. Verify the selected wallet's actual account and execution model rather than treating all smart wallets as interchangeable.
+
+Preserve Fin's protected signer and plan/authorization boundaries. Distinguish the controlling signer from the smart-account address and its assets; bind the actual account, calls, recipients, permissions and fees to approved intent. Any ownership, module, recovery or delegated-permission changes require explicit scope and appropriate independent authorization rather than being inferred from an ordinary financial plan.
+
+Reuse shared discovery, financial effects and durable recovery contracts while implementing wallet-specific simulation, submission identities and receipt interpretation. Verify actual execution outcomes, duplicate prevention and restart recovery; acceptance or inclusion of an outer transaction/request alone must not establish success of its inner actions. Detailed implementation and test coverage will be agreed when this item is selected.
