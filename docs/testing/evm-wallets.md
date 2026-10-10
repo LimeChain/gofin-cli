@@ -117,18 +117,15 @@ and authenticated freshness independently from anonymous public probes.
 - Native transfers currently require a recipient with no deployed code, matching
   the existing reviewed wallet profile. Sending ETH to a contract wallet is not
   implemented; ERC-20 transfers retain exact simulation and receipt checks.
-- Fin-originated L2 writes, including wallet-to-Binance deposits, require the
-  original receipt at the RPC finalized block. Earlier sequencer inclusion
-  remains pending under the same identity. This RPC marker is not independent
-  proof of the full rollup challenge period; unavailable finality keeps the
-  write unresolved without replacement submission.
-- Binance withdrawals to Arbitrum One or Robinhood Chain use a separate
-  recipient-proof rule: one canonical sequencer-included block is sufficient
-  when the original withdrawal hash, chain, recipient, asset identity and
-  expected net amount match. Record the evidence as sequencer inclusion, not
-  parent-chain finality. This observer policy does not prove Binance currently
-  offers a route; its Robinhood network mapping is unavailable/unverified.
-  Ethereum-mainnet withdrawals retain their configured confirmation rule.
+- All reviewed rollup writes and external credits settle on canonical sequencer
+  inclusion, including wallet transfers, Binance deposits, swaps and permission
+  changes. Verify the original envelope, canonical receipt, exact effects,
+  permissions and costs. Arbitrum One and Robinhood Chain do not wait for the
+  RPC finalized marker. Label evidence `sequencer-inclusion`; it does not claim
+  parent-chain finality. Missing or noncanonical receipts remain unresolved.
+  Binance route availability remains independent and Robinhood's Binance
+  mapping is unavailable/unverified. Ethereum-mainnet retains its configured
+  confirmation/finality policy.
 
 ## Reproducible offline tests
 
@@ -146,7 +143,7 @@ valuation responses. Cover canonical/legacy providers, no required enrollment
 network, reviewed-network dispatch, wrong chain, missing dapp deployments,
 candidate discovery failure/cache/partial output, exact balances, USD mapping
 failures, raw numeric/exponent normalization, provider timestamps and freshness,
-cache coalescing/outage behavior, exact contract/coin-ID routing, envelope/fee bounds, finalized-before-terminal settlement for Fin-originated writes, canonical one-block sequencer-inclusion proof for Binance withdrawal recipients, response
+cache coalescing/outage behavior, exact contract/coin-ID routing, envelope/fee bounds, canonical sequencer-inclusion settlement for reviewed rollup writes and external credits, configured finality checks for other networks, response
 loss and original-hash recovery. They must not access installed configuration,
 load production keys or broadcast. Existing fixed Ethereum fork verification
 does not establish Arbitrum or Robinhood behavior.
@@ -190,18 +187,15 @@ Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
    recipient scope, select less than $100 including the full return gas reserve,
    and prepare the exact reverse movement. The receiving wallet must be enrolled
    and funded to return funds. Track both native and reviewed ERC-20 cases.
-5. For Fin-originated L2 transfers, observe sequencer receipt versus finalized
-   settlement and reconcile the same operation after interrupted output;
-   duplicate/restart attempts must not create a second transfer. For Binance
-   withdrawals to Arbitrum or Robinhood, synthetic tests verify the exact
-   transaction, chain, recipient, asset and expected amount in one canonical
-   sequencer-included block. Keep the two proof labels distinct. Binance's
-   Robinhood network mapping remains unavailable/unverified; no live withdrawal
-   settlement is established by this checklist. Authorize every cleanup write
-   separately.
+5. For L2 writes, observe canonical sequencer inclusion and reconcile the same
+   operation after interrupted output. Duplicate/restart attempts must not
+   create another transfer. Verify original transaction, chain, recipient,
+   asset and protocol effects. Binance's Robinhood mapping remains unavailable/
+   unverified; this checklist does not establish a live withdrawal route.
+   Authorize every cleanup write separately.
 6. Restore starting custody and asset holdings net proved costs, reconcile fees
    and dust, and record independent final snapshots establishing restoration.
-   Unresolved finality or incomplete cleanup cannot pass.
+   Unresolved inclusion or incomplete cleanup cannot pass.
 
 Follow the [live-test contract](README.md#live-test-contract). Record automated,
 public read-only, human approval/isolation and fully restored live results

@@ -119,6 +119,32 @@ impl Adapter for EvmNetworkRouter {
     ) -> fin_domain::Result<PreparedOperation> {
         self.route(input)?.prepare(operation, input).await
     }
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> fin_domain::Result<fin_domain::boundaries::BoundarySpec> {
+        self.prepared(prepared)?
+            .prepare_boundaries(prepared, bounds)
+    }
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> fin_domain::Result<fin_domain::financial_plans::PlanPermission> {
+        self.route(input)?
+            .prepare_plan_permission(operation, input, bounds)
+            .await
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &fin_domain::boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> fin_domain::Result<()> {
+        self.prepared(prepared)?
+            .validate_boundary_candidate(spec, prepared)
+    }
     async fn prepare_with_context(
         &self,
         operation: &str,

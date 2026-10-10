@@ -122,16 +122,9 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         "add" | "update" => {
             let args: AddConnectionArgs = parse(request)?;
             validate_add(&args)?;
+            let mut configuration_warnings = Vec::new();
             if args.provider == Provider::Evm {
-                for network in NetworkConfig::reviewed_evm_networks() {
-                    if !config
-                        .networks
-                        .iter()
-                        .any(|existing| existing.chain_id == network.chain_id)
-                    {
-                        config.networks.push(network);
-                    }
-                }
+                configuration_warnings = expand_reviewed_evm_coverage(&mut config);
             }
             let existing = config
                 .connections
@@ -154,7 +147,8 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 .map(|material| store.put(material))
                 .transpose()?;
             let result=async {
-                let (connection,checks,warnings)=validate_connection(&args,&config,store.clone(),staged.as_ref(),material.as_ref(),ui).await?;
+                let (connection,checks,mut warnings)=validate_connection(&args,&config,store.clone(),staged.as_ref(),material.as_ref(),ui).await?;
+                warnings.extend(configuration_warnings.clone());
                 if let Some(index)=existing {
                     if immutable_identity(&config.connections[index])!=immutable_identity(&connection) {
                         return Err(error("CONNECTION_RESOURCE_CHANGED","Credential replacement must preserve provider, physical identity, network and account relationships. Enroll a separately named connection for a different identity."));
@@ -290,7 +284,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
         version: 2,
         approver_uid: args.approver_uid,
         networks: NetworkConfig::reviewed_evm_networks(),
-        deployments: vec![DeploymentConfig::ethereum_mainnet()],
+        deployments: DeploymentConfig::reviewed_uniswap_networks(),
         connections: vec![],
         policy,
         extensions: BTreeMap::new(),
@@ -366,6 +360,70 @@ fn collect_material(
     };
     material.validate_present()?;
     Ok(Some(material))
+}
+
+/// Add only missing reviewed chain and Uniswap coverage during the human's
+/// protected EVM enrollment. Existing deployment choices remain authoritative.
+fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
+    let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+    let mut warnings = Vec::new();
+    for network in &reviewed_networks {
+        if !config
+            .networks
+            .iter()
+            .any(|existing| existing.chain_id == network.chain_id)
+        {
+            config.networks.push(network.clone());
+            warnings.push(format!(
+                "Added reviewed EVM network {} (chain {}).",
+                network.id, network.chain_id
+            ));
+        }
+    }
+
+    for reviewed in DeploymentConfig::reviewed_uniswap_networks() {
+        let Some(reviewed_uniswap) = reviewed.uniswap.as_ref() else {
+            continue;
+        };
+        let Some(index) = config
+            .deployments
+            .iter()
+            .position(|existing| existing.network == reviewed.network)
+        else {
+            config.deployments.push(DeploymentConfig {
+                network: reviewed.network.clone(),
+                weth: None,
+                snapshot_tokens: Vec::new(),
+                uniswap: Some(reviewed_uniswap.clone()),
+                aave: None,
+            });
+            warnings.push(format!(
+                "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
+                reviewed.network
+            ));
+            continue;
+        };
+
+        let existing = &mut config.deployments[index];
+        match existing.uniswap.as_mut() {
+            None => {
+                existing.uniswap = Some(reviewed_uniswap.clone());
+                warnings.push(format!(
+                    "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
+                    reviewed.network
+                ));
+            }
+            Some(uniswap) if uniswap.v4.is_none() && reviewed_uniswap.v4.is_some() => {
+                uniswap.v4 = reviewed_uniswap.v4.clone();
+                warnings.push(format!(
+                    "Added reviewed Uniswap v4 deployment coverage for {} while preserving the existing v3 deployment.",
+                    reviewed.network
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    warnings
 }
 
 async fn validate_connection(
@@ -951,6 +1009,120 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_config(
+        networks: Vec<NetworkConfig>,
+        deployments: Vec<DeploymentConfig>,
+    ) -> BrokerConfigV2 {
+        BrokerConfigV2 {
+            version: 2,
+            approver_uid: 501,
+            networks,
+            deployments,
+            connections: vec![],
+            policy: BrokerPolicy::beta(),
+            extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn reviewed_evm_expansion_adds_missing_network_and_deployment_coverage() {
+        let mut config = empty_config(vec![NetworkConfig::ethereum_mainnet()], vec![]);
+        let warnings = expand_reviewed_evm_coverage(&mut config);
+        assert!(
+            config
+                .networks
+                .iter()
+                .any(|network| network.chain_id == 42161)
+        );
+        assert!(
+            config
+                .networks
+                .iter()
+                .any(|network| network.chain_id == 4663)
+        );
+        for network in ["ethereum:1", "ethereum:42161", "ethereum:4663"] {
+            let deployment = config
+                .deployments
+                .iter()
+                .find(|deployment| deployment.network == network)
+                .unwrap();
+            assert!(deployment.uniswap.as_ref().unwrap().v4.is_some());
+            assert!(warnings.iter().any(|warning| warning.contains(network)));
+        }
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Added reviewed EVM network"))
+        );
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn reviewed_evm_expansion_preserves_existing_custom_v3_and_deployment_scope() {
+        let reviewed = DeploymentConfig::reviewed_uniswap_networks()
+            .into_iter()
+            .find(|deployment| deployment.network == "ethereum:1")
+            .unwrap();
+        let mut custom_uniswap = reviewed.uniswap.unwrap();
+        custom_uniswap.factory = "0x1111111111111111111111111111111111111111".into();
+        custom_uniswap.quoter = "0x2222222222222222222222222222222222222222".into();
+        custom_uniswap.router = "0x3333333333333333333333333333333333333333".into();
+        custom_uniswap.v4 = None;
+        let custom_aave = fin_ethereum::AaveConfig {
+            pool: "0x4444444444444444444444444444444444444444".into(),
+            oracle: "0x5555555555555555555555555555555555555555".into(),
+        };
+        let deployment = DeploymentConfig {
+            network: "ethereum:1".into(),
+            weth: Some("0x6666666666666666666666666666666666666666".into()),
+            snapshot_tokens: vec!["0x7777777777777777777777777777777777777777".into()],
+            uniswap: Some(custom_uniswap.clone()),
+            aave: Some(custom_aave.clone()),
+        };
+        let mut config = empty_config(
+            NetworkConfig::reviewed_evm_networks(),
+            vec![deployment.clone()],
+        );
+        let warnings = expand_reviewed_evm_coverage(&mut config);
+        let updated = config
+            .deployments
+            .iter()
+            .find(|deployment| deployment.network == "ethereum:1")
+            .unwrap();
+        let uniswap = updated.uniswap.as_ref().unwrap();
+        assert_eq!(uniswap.factory, custom_uniswap.factory);
+        assert_eq!(uniswap.quoter, custom_uniswap.quoter);
+        assert_eq!(uniswap.router, custom_uniswap.router);
+        assert_eq!(uniswap.router_kind, custom_uniswap.router_kind);
+        assert!(uniswap.v4.is_some());
+        assert_eq!(updated.weth, deployment.weth);
+        assert_eq!(updated.snapshot_tokens, deployment.snapshot_tokens);
+        assert_eq!(updated.aave.as_ref().unwrap().pool, custom_aave.pool);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("preserving the existing v3"))
+        );
+    }
+
+    #[test]
+    fn reviewed_evm_expansion_is_idempotent_and_keeps_custom_v4() {
+        let mut reviewed = DeploymentConfig::reviewed_uniswap_networks();
+        let mainnet = reviewed
+            .iter_mut()
+            .find(|deployment| deployment.network == "ethereum:1")
+            .unwrap();
+        let custom_v4 = mainnet.uniswap.as_mut().unwrap().v4.as_mut().unwrap();
+        custom_v4.router = "0x8888888888888888888888888888888888888888".into();
+        let mut config = empty_config(NetworkConfig::reviewed_evm_networks(), reviewed);
+        let before = serde_json::to_value(&config.deployments).unwrap();
+        assert!(expand_reviewed_evm_coverage(&mut config).is_empty());
+        assert_eq!(serde_json::to_value(&config.deployments).unwrap(), before);
+        let again = expand_reviewed_evm_coverage(&mut config);
+        assert!(again.is_empty());
+    }
+
     fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {
         ConnectionConfig::CoinGecko {
             name: "synthetic-pricing".into(),

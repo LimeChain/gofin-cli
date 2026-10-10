@@ -1,7 +1,7 @@
 use crate::{dev_credentials, dotenv, identity};
 use fin_broker::{BrokerConfigV2, BrokerPolicy, ConnectionConfig, DeploymentConfig, NetworkConfig};
 use fin_credentials::{CredentialRef, SecretMaterial};
-use fin_domain::ResourceId;
+use fin_domain::{Quantity, ResourceId};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -20,6 +20,36 @@ pub struct CredentialReferences {
     pub binance_sub: Option<String>,
     pub evm_primary: Option<String>,
     pub evm_secondary: Option<String>,
+}
+
+/// Optional per-development-environment ceilings. These can only tighten the
+/// beta defaults and are persisted with the environment, independently of its
+/// disposable credentials.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyLimits {
+    pub max_movement_usd_micros: Quantity,
+    pub max_allocation_usd_micros: Quantity,
+}
+
+impl PolicyLimits {
+    fn validate(&self) -> Result<(), String> {
+        let maximum = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
+        for (name, value) in [
+            ("max_movement_usd_micros", &self.max_movement_usd_micros),
+            ("max_allocation_usd_micros", &self.max_allocation_usd_micros),
+        ] {
+            let parsed = value.as_str().parse::<u64>().map_err(|_| {
+                format!("development {name} must be a finite positive USD-micros quantity")
+            })?;
+            if parsed == 0 || parsed > maximum {
+                return Err(format!(
+                    "development {name} must be between 1 and {maximum} USD micros"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +80,8 @@ pub struct EnvironmentConfig {
     pub binance_sub_email_matched_by_venue_id: bool,
     #[serde(default)]
     pub evm_addresses: Vec<String>,
+    #[serde(default)]
+    pub policy_limits: Option<PolicyLimits>,
 }
 
 fn synthetic() -> String {
@@ -78,6 +110,7 @@ impl EnvironmentConfig {
             binance_sub_email: None,
             binance_sub_email_matched_by_venue_id: false,
             evm_addresses: Vec::new(),
+            policy_limits: None,
         }
     }
     pub fn read(path: &Path, environment_id: &str) -> Result<Self, String> {
@@ -96,6 +129,9 @@ impl EnvironmentConfig {
             )
         {
             return Err("development configuration identity mismatch".into());
+        }
+        if let Some(limits) = &config.policy_limits {
+            limits.validate()?;
         }
         Ok(config)
     }
@@ -552,12 +588,46 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             network.rpc_urls = rpc_urls.clone();
         }
     }
+    let mut policy = config.policy.clone().unwrap_or_else(BrokerPolicy::beta);
+    if let Some(limits) = &config.policy_limits {
+        limits.validate()?;
+        let movement = limits
+            .max_movement_usd_micros
+            .as_str()
+            .parse::<u64>()
+            .map_err(|_| "development movement ceiling is invalid")?;
+        let allocation = limits
+            .max_allocation_usd_micros
+            .as_str()
+            .parse::<u64>()
+            .map_err(|_| "development allocation ceiling is invalid")?;
+        let current_movement = policy
+            .max_movement_usd_micros
+            .parse::<u64>()
+            .map_err(|_| "development movement policy is invalid")?;
+        let current_allocation = policy
+            .max_run_allocation_usd_micros
+            .parse::<u64>()
+            .map_err(|_| "development allocation policy is invalid")?;
+        policy.max_movement_usd_micros = if current_movement == 0 {
+            movement
+        } else {
+            current_movement.min(movement)
+        }
+        .to_string();
+        policy.max_run_allocation_usd_micros = if current_allocation == 0 {
+            allocation
+        } else {
+            current_allocation.min(allocation)
+        }
+        .to_string();
+    }
     let runtime_config = BrokerConfigV2 {
         version: 2,
         networks,
-        deployments: vec![DeploymentConfig::ethereum_mainnet()],
+        deployments: DeploymentConfig::reviewed_uniswap_networks(),
         connections,
-        policy: config.policy.clone().unwrap_or_else(BrokerPolicy::beta),
+        policy,
         approver_uid: unsafe { libc::geteuid() },
         extensions: BTreeMap::new(),
     };
@@ -591,6 +661,13 @@ mod tests {
             max_run_allocation_usd_micros: "200000000".into(),
             preview_ttl_seconds: 90,
             allow_unpriced_exchange_assets: false,
+        }
+    }
+
+    fn limits(movement: &str, allocation: &str) -> PolicyLimits {
+        PolicyLimits {
+            max_movement_usd_micros: Quantity::new(movement).unwrap(),
+            max_allocation_usd_micros: Quantity::new(allocation).unwrap(),
         }
     }
 
@@ -648,6 +725,88 @@ mod tests {
             .rpc_urls
             .insert(31337, vec!["https://rpc.example.invalid".into()]);
         assert!(broker_config(&config).is_err());
+    }
+
+    #[test]
+    fn legacy_profile_defaults_to_beta_limits_and_keeps_connections() {
+        let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
+        legacy.as_object_mut().unwrap().remove("policy_limits");
+        legacy["credentials"]["binance"] =
+            serde_json::json!("550e8400-e29b-41d4-a716-446655440000");
+        legacy["binance_uid"] = serde_json::json!("100");
+        let parsed: EnvironmentConfig = serde_json::from_value(legacy).unwrap();
+        assert!(parsed.policy_limits.is_none());
+
+        let config = broker_config(&parsed).unwrap();
+        assert_eq!(
+            config.policy.max_movement_usd_micros,
+            fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
+        );
+        assert_eq!(
+            config.policy.max_run_allocation_usd_micros,
+            fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
+        );
+        assert!(matches!(
+            config.connections.as_slice(),
+            [ConnectionConfig::Binance { credential_ref, .. }]
+                if credential_ref == "550e8400-e29b-41d4-a716-446655440000"
+        ));
+    }
+
+    #[test]
+    fn policy_limits_persist_and_tighten_only_the_development_broker_policy() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let mut profile = EnvironmentConfig::empty("env");
+        profile.credentials.binance = Some("550e8400-e29b-41d4-a716-446655440000".into());
+        profile.binance_uid = Some("100".into());
+        profile.policy_limits = Some(limits("10000000", "100000000"));
+        profile.write_atomic(&config_path).unwrap();
+
+        let restored = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(restored.policy_limits, profile.policy_limits);
+        assert_eq!(restored.credentials.binance, profile.credentials.binance);
+        let broker = broker_config(&restored).unwrap();
+        assert_eq!(broker.policy.max_movement_usd_micros, "10000000");
+        assert_eq!(broker.policy.max_run_allocation_usd_micros, "100000000");
+        assert_eq!(broker.connections.len(), 1);
+    }
+
+    #[test]
+    fn zero_or_above_default_environment_policy_limits_fail_closed() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        for candidate in [limits("0", "100000000"), limits("10000000", "100000001")] {
+            let mut profile = EnvironmentConfig::empty("env");
+            profile.policy_limits = Some(candidate);
+            profile.write_atomic(&config_path).unwrap();
+            assert!(EnvironmentConfig::read(&config_path, "env").is_err());
+            assert!(broker_config(&profile).is_err());
+        }
+    }
+
+    #[test]
+    fn development_policy_limits_tighten_custom_policy_and_rpc_override_is_preserved() {
+        let mut profile = EnvironmentConfig::empty("env");
+        profile.policy = Some(custom_development_policy());
+        profile.policy_limits = Some(limits("50000000", "100000000"));
+        profile
+            .rpc_urls
+            .insert(1, vec!["https://eth.drpc.org".into()]);
+        let runtime = broker_config(&profile).unwrap();
+        assert_eq!(runtime.policy.max_movement_usd_micros, "50000000");
+        assert_eq!(runtime.policy.max_run_allocation_usd_micros, "100000000");
+        assert_eq!(runtime.networks[0].rpc_urls, profile.rpc_urls[&1]);
+
+        profile.policy = Some(BrokerPolicy {
+            max_movement_usd_micros: "0".into(),
+            max_run_allocation_usd_micros: "0".into(),
+            ..custom_development_policy()
+        });
+        profile.policy_limits = Some(limits("10000000", "20000000"));
+        let runtime = broker_config(&profile).unwrap();
+        assert_eq!(runtime.policy.max_movement_usd_micros, "10000000");
+        assert_eq!(runtime.policy.max_run_allocation_usd_micros, "20000000");
     }
 
     #[test]
@@ -802,12 +961,18 @@ mod tests {
         let config_path = dir.path().join("config.json");
         let credential_dir = dir.path().join("credentials");
         let dotenv_path = dir.path().join("keys.env");
+        let mut profile = EnvironmentConfig::empty("env");
+        profile.policy_limits = Some(limits("10000000", "100000000"));
+        profile.write_atomic(&config_path).unwrap();
         let key = "0000000000000000000000000000000000000000000000000000000000000001";
         fs::write(&dotenv_path, format!("FIN_DEV_EVM_PRIVATE_KEY={key}\n")).unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
         import(&config_path, "env", &dotenv_path, &credential_dir, false)
             .await
             .unwrap();
+        let imported = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(imported.policy_limits, profile.policy_limits);
+        assert!(imported.credentials.evm_primary.is_some());
         let old_config = fs::read(&config_path).unwrap();
         let old_credential_files = fs::read_dir(&credential_dir).unwrap().count();
 

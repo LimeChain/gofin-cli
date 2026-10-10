@@ -103,7 +103,7 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), ['cli', 'unavailable', '--', 'operations', '--json'])
 
     def test_environment_tests_and_fork_are_separate_targets(self):
-        scripts = ('test-fin-dev.py', 'test-dev-runtime.py', 'test-fork-runner.py', 'test-dev-workflow.py')
+        scripts = ('test-fin-dev.py', 'test-dev-runtime.py', 'test-fork-runner.py', 'test-amm-fork-runner.py', 'test-dev-workflow.py')
         for script in scripts:
             (self.root / 'scripts' / script).write_text('print(' + repr(script) + ')\n')
         (self.root / 'scripts/verify-rust-fork.sh').write_text('#!/bin/sh\nprintf "fork-fixture\\n"\n')

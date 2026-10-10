@@ -739,6 +739,7 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot
+        | BrokerRequest::Read { .. }
         | BrokerRequest::PlanStatus { .. } => OBSERVER_TIMEOUT,
         BrokerRequest::Preview { .. }
         | BrokerRequest::PreviewBoundaryAuthorization { .. }
@@ -2731,27 +2732,22 @@ mod tests {
             broker_response_timeout(&BrokerRequest::Doctor),
             BROKER_TIMEOUT
         );
-        assert_eq!(
-            broker_response_timeout(&BrokerRequest::Read {
-                operation: "bridge.quotes".into(),
-                input: json!({}),
-            }),
-            OBSERVER_TIMEOUT
-        );
-        assert_eq!(
-            broker_response_timeout(&BrokerRequest::Read {
-                operation: "bridge.status".into(),
-                input: json!({}),
-            }),
-            OBSERVER_TIMEOUT
-        );
-        assert_eq!(
-            broker_response_timeout(&BrokerRequest::Read {
-                operation: "wallet.balances".into(),
-                input: json!({}),
-            }),
-            BROKER_TIMEOUT
-        );
+        for operation in [
+            "bridge.quotes",
+            "bridge.status",
+            "wallet.balances",
+            "wallet.token",
+            "uniswap.quote",
+        ] {
+            assert_eq!(
+                broker_response_timeout(&BrokerRequest::Read {
+                    operation: operation.into(),
+                    input: json!({"wallet":"synthetic","request_id":"read-only"}),
+                }),
+                OBSERVER_TIMEOUT,
+                "financial read {operation} uses the observer timeout without write authority"
+            );
+        }
     }
 
     #[test]
@@ -2858,7 +2854,15 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 53);
+        assert_eq!(financial_catalog().len(), 55);
+        for name in ["wallet.permit2.allowance", "wallet.permit2.approve"] {
+            assert!(
+                financial_catalog()
+                    .iter()
+                    .any(|definition| definition["name"] == name)
+            );
+        }
+
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 

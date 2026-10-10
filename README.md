@@ -7,9 +7,9 @@ operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
-Relay transfers plus a narrow canonical native-ETH route to those reviewed
-wallet networks, plus Ethereum
-mainnet Uniswap and Aave. The [product concept](docs/fin-product-concept.md)
+Relay transfers, including narrow canonical native-ETH routes, between reviewed
+EVM networks; Uniswap v3/v4 on reviewed deployments; and Ethereum mainnet Aave.
+The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
 bridge providers follow later. Fin is open source; license selection is pending.
 
@@ -100,7 +100,8 @@ For later compatible local edits, run `make update` in your own Terminal instead
 of uninstalling. It rebuilds the debug bundle, pauses the broker, updates the CLI,
 broker and Touch ID helper with your Mac login password, and restores the broker's
 previous running/stopped state. Connections, credentials, stored personal limits
-and financial history are kept. If replacement fails, the broker stays stopped for inspection; no
+and financial history are kept. A schema preflight rejects a bundle that cannot
+support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update, not a general
 schema-migration or published-version updater.
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
@@ -695,7 +696,10 @@ debug macOS bundle; `make release` creates an optimized bundle without installin
 `make update` builds a debug bundle and runs the reviewed runtime updater in your
 own Terminal; it preserves protected state and refreshes unmodified managed skills.
 Review the local changes first; this path also accepts bundled installer/helper
-updates. It does not restart the broker or reinstall.
+updates. It checks the incoming broker's supported journal schema against only
+the existing database's schema metadata, then restores the prior service state
+after replacing the runtime. An already stopped broker stays stopped; use
+`fin daemon start` explicitly when ready. It does not reinstall or replay writes.
 `make uninstall` asks for confirmation in your own Terminal, then deletes the
 installed runtime, saved credentials, configuration and all financial history,
 including pending-operation recovery records. Existing history does not block
@@ -834,6 +838,27 @@ operations use the same path when the adapter exposes an exact or reviewed plan
 permission. Bridge steps are adapter-reviewed and remain tied to one persisted
 provider, route and transfer. Credential and protected policy changes retain
 their separate human configuration approval.
+
+Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
+Uniswap v3/v4 exact-input swaps through the shared `fin-amm` interface.
+Swap previews bind recipient, route, output floor, slippage, fee and deadline;
+typed EIP-2612/Permit2 signatures, when required, are created only after the
+approved attempt is journaled. Its native approval reason uses a separate
+1,024-character application cap for the material swap scope; actual macOS dialog
+display remains to be checked. See the [Uniswap verification and human handoff
+guide](docs/testing/uniswap-amm.md) for exact discovery, boundary/plan commands,
+permit behavior and pending protected Touch ID checks. Rollup transactions
+settle on verified canonical sequencer inclusion. Caller-supplied token contracts
+are verified through pinned reads; token contracts are not product defaults.
+
+```sh
+fin schema uniswap.swap --json
+fin read uniswap.quote --input "$QUOTE_JSON" --json
+fin preview uniswap.swap --input "$SWAP_JSON" --json
+cargo test --locked -p fin-amm -p fin-ethereum
+make test-amm-fork
+python3 scripts/prepare-amm-touch-id-checklist.py --help
+```
 
 ```sh
 fin plans preview --input PLAN_JSON --json

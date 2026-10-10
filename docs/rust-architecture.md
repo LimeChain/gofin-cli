@@ -79,6 +79,17 @@ same root ownership, hardened signature and ACL validation as other runtime code
 
 Wallet, Uniswap, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
 
+Uniswap v3/v4 swaps use exact-input, single-pool requests with a wallet-bound
+recipient, fresh quote, minimum-output floor, bounded slippage/impact, native
+fee cap and short deadline. EIP-2612 and Permit2 use typed permit structures
+bound to verified domains, chain, owner, token, finite amount, nonce and the
+configured router. A preview may persist an unsigned permit transaction
+template; only the post-approval journal path can sign, materialize the reviewed
+signature slots, simulate that exact transaction and submit it. Swap deadlines
+are also checked against financial-authority expiry. See the
+[Uniswap handoff and verification guide](testing/uniswap-amm.md); its human
+Touch ID/mainnet cases remain separate from synthetic verification.
+
 ### Reusable wallet and network profiles
 
 `ConnectionConfig::Evm` stores an address and protected signer once, independently
@@ -145,22 +156,20 @@ Legacy `binance` financial identities are unchanged; additional integrations can
 use `exchange:<venue>` with explicitly registered market readers.
 CoinGecko remains responsible for verified EVM platform/contract and native ETH
 identity. Aave health/collateral oracles remain protocol-specific checks.
-Fee preparation freezes the RPC-estimated envelope. Fin-originated wallet
-transfers, Binance deposits and bridge payouts on Arbitrum One and Robinhood
-complete after successful inclusion in one canonical sequencer-produced block.
-RPC finalized-head availability is not required on these two L2s. Original
-transaction envelopes, block/hash inclusion and exact payment proofs still
-apply. Other networks retain their configured confirmation/finality policy;
-sequencer inclusion does not claim parent-chain finality.
-
-Binance withdrawals to EVM wallets use a separate recipient-proof rule. For a
-withdrawal mapped to Arbitrum One or Robinhood Chain, one canonical
-sequencer-included block is sufficient when the saved withdrawal transaction
-hash, chain, recipient, asset identity and expected amount all match. This
-evidence is labeled `sequencer-inclusion`; it does not claim parent-chain
-finality. A receipt observer does not establish that Binance offers a route:
-the Robinhood network mapping is currently unavailable/unverified. The original
-withdrawal identity remains the recovery key after response loss or restart.
+Fee preparation freezes the RPC-estimated envelope. All writes and external
+credits on reviewed rollups settle on canonical sequencer inclusion, including
+wallet transfers, Binance deposits, AMM swaps and permission changes. Arbitrum
+One and Robinhood Chain share this explicit network classification and do not
+wait for the RPC `finalized` marker. Reconciliation verifies the original
+envelope and canonical receipt, exact protocol effects, permissions and actual
+costs before terminal settlement. Evidence is labeled `sequencer-inclusion`
+and does not claim parent-chain finality. Other networks retain configured
+confirmation/finality policy. For mapped Binance withdrawals, one canonical
+sequencer-included block suffices when the original hash, chain, recipient,
+asset identity and expected amount match. Missing or noncanonical receipts stay
+unresolved under the same identity after response loss or restart. A receipt
+observer does not establish a Binance route; Robinhood's mapping remains
+unavailable/unverified.
 
 RPC customization belongs to protected network configuration and will need a
 human-authorized setting; no public RPC-changing command is implemented.

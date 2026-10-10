@@ -1847,6 +1847,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "fin-amm"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fin-domain",
+ "fin-engine",
+ "fin-store",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fin-authorization"
 version = "0.2.0-beta.1"
 dependencies = [
@@ -2040,6 +2056,7 @@ version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "fin-amm",
  "fin-domain",
  "fin-engine",
  "fin-evm",

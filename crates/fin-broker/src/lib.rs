@@ -4,6 +4,7 @@
 //! is rooted at the installed paths; the separately named composition entry
 //! point exists for synthetic adapter/credential harnesses.
 
+mod amm_deployments;
 mod bridge;
 pub mod deposit;
 pub mod enrollment;
@@ -12,6 +13,7 @@ mod evm_router;
 mod policy;
 mod pricing;
 mod pricing_cache;
+mod public_submission;
 pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
 pub use pricing::SharedUsdValuator;
@@ -92,10 +94,14 @@ pub struct NetworkConfig {
 #[serde(deny_unknown_fields)]
 pub struct DeploymentConfig {
     pub network: String,
-    pub weth: String,
+    #[serde(default)]
+    pub weth: Option<String>,
+    #[serde(default)]
     pub snapshot_tokens: Vec<String>,
-    pub uniswap: fin_ethereum::UniswapConfig,
-    pub aave: fin_ethereum::AaveConfig,
+    #[serde(default)]
+    pub uniswap: Option<fin_ethereum::UniswapConfig>,
+    #[serde(default)]
+    pub aave: Option<fin_ethereum::AaveConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -165,7 +171,7 @@ impl NetworkConfig {
                 "https://eth.drpc.org".into(),
             ],
             confirmations: 2,
-            snapshot_tokens: vec![fin_ethereum::WETH.into(), fin_ethereum::USDC.into()],
+            snapshot_tokens: vec![],
         }
     }
     pub fn reviewed_evm_networks() -> Vec<Self> {
@@ -176,34 +182,46 @@ impl NetworkConfig {
                 chain_id: 42161,
                 rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
                 confirmations: 1,
-                snapshot_tokens: vec![
-                    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1".into(),
-                    "0xaf88d065e77c8cc2239327c5edb3a432268e5831".into(),
-                ],
+                snapshot_tokens: vec![],
             },
             Self {
                 id: "ethereum:4663".into(),
                 chain_id: 4663,
                 rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
                 confirmations: 1,
-                snapshot_tokens: vec![
-                    "0x0bd7d308f8e1639fab988df18a8011f41eacad73".into(),
-                    "0x5fc5360d0400a0fd4f2af552add042d716f1d168".into(),
-                ],
+                snapshot_tokens: vec![],
             },
         ]
     }
 }
 
 impl DeploymentConfig {
+    pub fn reviewed_uniswap_networks() -> Vec<Self> {
+        NetworkConfig::reviewed_evm_networks()
+            .into_iter()
+            .filter_map(|network| {
+                amm_deployments::reviewed_uniswap(network.chain_id).map(|uniswap| Self {
+                    network: network.id,
+                    weth: None,
+                    snapshot_tokens: vec![],
+                    uniswap: Some(uniswap),
+                    aave: if network.chain_id == 1 {
+                        fin_ethereum::EthereumConfig::default().aave
+                    } else {
+                        None
+                    },
+                })
+            })
+            .collect()
+    }
     pub fn ethereum_mainnet() -> Self {
         let defaults = fin_ethereum::EthereumConfig::default();
         Self {
             network: "ethereum:1".into(),
-            weth: defaults.weth.expect("mainnet WETH"),
+            weth: defaults.weth,
             snapshot_tokens: defaults.snapshot_tokens,
-            uniswap: defaults.uniswap.expect("mainnet Uniswap"),
-            aave: defaults.aave.expect("mainnet Aave"),
+            uniswap: amm_deployments::reviewed_uniswap(1),
+            aave: defaults.aave,
         }
     }
 }
@@ -740,6 +758,21 @@ impl fin_evm::EnvelopeSigner for MappedEnvelopeSigner {
             })?;
         signer.sign_prepared(transaction).await
     }
+    async fn sign_authorized_permit(
+        &self,
+        permit: &fin_evm::AuthorizedPermit,
+    ) -> fin_domain::Result<fin_evm::alloy::primitives::Bytes> {
+        let owner = fin_evm::lower_address(permit.owner()?);
+        let signer = self.signers.get(&owner).ok_or_else(|| {
+            error(
+                "SIGNER_MISMATCH",
+                "signing",
+                "No protected signer is mapped to the permit owner.",
+                "Use the enrolled wallet that owns this exact permit scope.",
+            )
+        })?;
+        signer.sign_authorized_permit(permit).await
+    }
 }
 
 #[async_trait]
@@ -891,11 +924,14 @@ pub fn build_applications_with_price_source(
             fin_ethereum::EthereumConfig {
                 chain_id: network.chain_id,
                 confirmations: network.confirmations,
-                require_finalized: false,
-                weth: Some(deployment.weth.clone()),
+                require_finalized: network.chain_id != 1
+                    && !fin_ethereum::EthereumConfig::is_reviewed_sequencer_rollup(
+                        network.chain_id,
+                    ),
+                weth: deployment.weth.clone(),
                 snapshot_tokens: deployment.snapshot_tokens.clone(),
-                uniswap: Some(deployment.uniswap.clone()),
-                aave: Some(deployment.aave.clone()),
+                uniswap: deployment.uniswap.clone(),
+                aave: deployment.aave.clone(),
             }
         } else {
             fin_ethereum::EthereumConfig::wallet_only(
@@ -1433,7 +1469,10 @@ impl BrokerRuntime {
 
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
         match self.handle_result(request).await {
-            Ok(value) => BrokerResponse::success(value),
+            Ok(mut value) => {
+                public_submission::redact_public_payload(&mut value);
+                BrokerResponse::success(value)
+            }
             Err(error) => BrokerResponse::failure(error),
         }
     }
@@ -2204,14 +2243,83 @@ pub async fn handle_request(runtime: &BrokerRuntime, request: BrokerRequest) -> 
 pub fn open_protected_store() -> fin_domain::Result<Store> {
     validate_installation()?;
     validate_private_file_parent(Path::new(OPERATIONS_PATH))?;
-    Store::open(OPERATIONS_PATH).map_err(|_| {
-        error(
-            "STORE_UNAVAILABLE",
-            "startup",
-            "The protected operation store is unavailable.",
-            "Repair the protected installation and preserve the existing journal.",
+    Store::open(OPERATIONS_PATH).map_err(store_startup_error)
+}
+
+fn store_startup_error(store_error: fin_store::StoreError) -> FinError {
+    let (error_class, sqlite_extended_code) = store_error.startup_diagnostic();
+    store_startup_error_from_diagnostic(error_class, sqlite_extended_code)
+}
+
+fn store_startup_error_from_diagnostic(
+    error_class: &'static str,
+    sqlite_extended_code: Option<i32>,
+) -> FinError {
+    let (message, next_action) = if error_class == "sqlite_cannot_open" {
+        (
+            "SQLite could not open the protected journal or its support files.",
+            "Preserve the journal. Have a human inspect protected storage permissions and available disk space; do not reset or delete it.",
         )
-    })
+    } else {
+        (
+            "The protected operation store is unavailable.",
+            "Preserve the journal. Have a human inspect the protected store diagnostics; do not reset or delete it.",
+        )
+    };
+    let mut details = serde_json::Map::new();
+    details.insert("error_class".into(), json!(error_class));
+    if let Some(code) = sqlite_extended_code {
+        details.insert("sqlite_extended_code".into(), json!(code));
+    }
+    // launchd captures the concise human error output, where JSON details are
+    // absent. Include only the same static class/numeric code in that output.
+    let diagnostic = match sqlite_extended_code {
+        Some(code) => format!("{error_class}, SQLite code {code}"),
+        None => error_class.to_owned(),
+    };
+    error(
+        "STORE_UNAVAILABLE",
+        "startup",
+        &format!("{message} ({diagnostic})"),
+        next_action,
+    )
+    .with_details(Value::Object(details))
+}
+
+#[cfg(test)]
+mod store_startup_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn store_error_keeps_public_code_and_exposes_only_safe_classification() {
+        let error = store_startup_error(fin_store::StoreError::Io(
+            "secret /Library/Fin/private/operations.sqlite detail".into(),
+        ));
+        assert_eq!(error.code, "STORE_UNAVAILABLE");
+        assert_eq!(error.stage, "startup");
+        assert_eq!(
+            error.details.unwrap().as_ref(),
+            &json!({"error_class":"filesystem"})
+        );
+        assert!(!error.message.contains("operations.sqlite"));
+        assert!(!error.next_action.contains("operations.sqlite"));
+    }
+
+    #[test]
+    fn sqlite_open_failure_gets_preserve_first_guidance_and_numeric_code() {
+        let error = store_startup_error_from_diagnostic("sqlite_cannot_open", Some(14));
+        assert_eq!(error.code, "STORE_UNAVAILABLE");
+        assert!(error.message.contains("support files"));
+        assert!(error.next_action.contains("Preserve the journal"));
+        assert!(error.next_action.contains("do not reset or delete"));
+        assert_eq!(
+            error.details.unwrap().as_ref(),
+            &json!({
+                "error_class":"sqlite_cannot_open",
+                "sqlite_extended_code":14
+            })
+        );
+    }
 }
 
 pub fn load_protected_config() -> fin_domain::Result<BrokerConfigV2> {
@@ -3218,6 +3326,8 @@ mod tests {
         let native = asset("ethereum:1", "native", 18);
         let weth = asset("ethereum:1", fin_ethereum::WETH, 18);
         let usdc = asset("ethereum:1", fin_ethereum::USDC, 6);
+        config.deployments[0].snapshot_tokens =
+            vec![weth.reference.clone(), usdc.reference.clone()];
         let noise = asset("ethereum:1", "synthetic-indexer-noise", 6);
         let other_chain = asset(
             "ethereum:4663",
@@ -5092,5 +5202,27 @@ mod tests {
                 "BOUNDARY_AUTHORIZATION_NOT_FOUND"
             );
         }
+    }
+    #[test]
+    fn reviewed_rollups_default_to_one_sequenced_block() {
+        let networks = NetworkConfig::reviewed_evm_networks();
+        for chain_id in [42161, 4663] {
+            let network = networks
+                .iter()
+                .find(|network| network.chain_id == chain_id)
+                .unwrap();
+            assert!(fin_ethereum::EthereumConfig::is_reviewed_sequencer_rollup(
+                chain_id
+            ));
+            assert_eq!(network.confirmations, 1);
+        }
+        assert_eq!(
+            networks
+                .iter()
+                .find(|network| network.chain_id == 1)
+                .unwrap()
+                .confirmations,
+            2
+        );
     }
 }

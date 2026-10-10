@@ -533,6 +533,15 @@ impl Ui {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
             }
             Ok(())
+        } else if command == "read"
+            && !self.is_verbose()
+            && let Some(summary) = value.get("summary").and_then(Value::as_str)
+        {
+            writeln!(
+                output,
+                "{}",
+                self.styled(&format!("→ {}", safe_text(summary)), "36")
+            )
         } else {
             output.write_all(render_human(command, value, self.is_verbose()).as_bytes())
         }
@@ -856,6 +865,11 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
             0,
             "Use --verbose for full details and schemas.",
         );
+    } else if command == "read"
+        && !verbose
+        && let Some(summary) = value.get("summary").and_then(Value::as_str)
+    {
+        line(&mut output, 0, &format!("→ {}", safe_text(summary)));
     } else {
         render_value(&mut output, value, 0);
     }
@@ -2000,6 +2014,49 @@ mod tests {
             assert!(text.contains(expected), "missing {expected}: {text}");
         }
         assert!(!text.contains("\"amount\""));
+    }
+
+    #[test]
+    fn generic_read_summary_is_brief_safe_and_preserves_machine_and_verbose_contracts() {
+        let value = json!({
+            "summary":"Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC",
+            "binding":{"technical":"full synthetic details"}
+        });
+        let concise = render_human("read", &value, false);
+        assert_eq!(
+            concise,
+            "→ Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC\n"
+        );
+        assert!(!concise.contains("technical"));
+        assert!(render_human("read", &value, true).contains("technical: full synthetic details"));
+
+        let mut tty = Vec::new();
+        ui(false, false, true, true, false, false)
+            .write_result_to(&value, "read", &mut tty)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(tty).unwrap(),
+            "\x1b[36m→ Quote on ethereum:1 via Uniswap v3: 1 WETH → 3000 USDC\x1b[0m\n"
+        );
+
+        for terminal in [
+            ui(false, false, true, true, false, true),
+            ui(false, false, false, false, false, false),
+        ] {
+            let mut output = Vec::new();
+            terminal
+                .write_result_to(&value, "read", &mut output)
+                .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("Quote on ethereum:1"));
+            assert!(!output.contains('\x1b'));
+        }
+
+        let mut machine = Vec::new();
+        ui(true, false, true, true, false, false)
+            .write_result_to(&value, "read", &mut machine)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&machine).unwrap(), value);
     }
 
     #[test]

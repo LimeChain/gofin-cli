@@ -109,7 +109,7 @@ pub struct CompletionInput {
 
 /// Reviewed network capabilities available before enrollment or broker setup.
 pub fn evm_network_profiles() -> Value {
-    json!([{"network":"ethereum:1","name":"Ethereum Mainnet","chain_id":1,"native_coin":"ETH","operations":["wallet","Uniswap","Aave"]},{"network":"ethereum:42161","name":"Arbitrum One","chain_id":42161,"native_coin":"ETH","operations":["wallet"]},{"network":"ethereum:4663","name":"Robinhood Chain","chain_id":4663,"native_coin":"ETH","operations":["wallet"]}])
+    json!([{"network":"ethereum:1","name":"Ethereum Mainnet","chain_id":1,"native_coin":"ETH","operations":["wallet","Uniswap","Aave"]},{"network":"ethereum:42161","name":"Arbitrum One","chain_id":42161,"native_coin":"ETH","operations":["wallet","Uniswap"]},{"network":"ethereum:4663","name":"Robinhood Chain","chain_id":4663,"native_coin":"ETH","operations":["wallet","Uniswap"]}])
 }
 
 /// Offline bridge scope. The Relay settlement observer is intentionally kept
@@ -451,7 +451,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":"Optional read-only enrollment check; defaults to ethereum:1 and does not scope the wallet key.","networks":["ethereum:1","ethereum:42161","ethereum:4663"],"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap and Aave remain Ethereum mainnet only; other networks support wallet discovery and same-chain native/ERC-20 transfers."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":"Optional read-only enrollment check; defaults to ethereum:1 and does not scope the wallet key.","networks":["ethereum:1","ethereum:42161","ethereum:4663"],"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Aave remains Ethereum mainnet only. Tokens are supplied by exact contract identity."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
         "next_check":"fin connections list --json"
@@ -1248,7 +1248,14 @@ mod tests {
         );
         assert_eq!(evm["network_profiles"][1]["name"], "Arbitrum One");
         assert_eq!(evm["network_profiles"][2]["name"], "Robinhood Chain");
-        assert_eq!(evm["network_profiles"][1]["operations"], json!(["wallet"]));
+        assert_eq!(
+            evm["network_profiles"][1]["operations"],
+            json!(["wallet", "Uniswap"])
+        );
+        assert_eq!(
+            evm["network_profiles"][2]["operations"],
+            json!(["wallet", "Uniswap"])
+        );
         assert!(evm["wallet_scope"].as_str().unwrap().contains("reusable"));
         for example in add.semantics["command_line_examples"]
             .as_array()

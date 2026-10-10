@@ -588,6 +588,12 @@ impl Engine {
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, operation, Utc::now())?;
+        super::validate_authority_expiry_for_adapter(
+            adapter.as_ref(),
+            operation,
+            &prepared,
+            &authorization.expires_at,
+        )?;
         adapter.validate_boundary_candidate(&authorization.spec, &prepared)?;
         validate_candidate_caps(&authorization, &prepared)?;
         prepared.summary = authorization.spec.summary.clone();

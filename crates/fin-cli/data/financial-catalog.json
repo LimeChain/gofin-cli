@@ -5,6 +5,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -906,7 +939,7 @@
         "min_health_factor": "1.5",
         "network": "evm",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -947,6 +980,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -1839,7 +1905,7 @@
         "max_fee_eth": "0.001",
         "network": "evm",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -1880,6 +1946,39 @@
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -1998,6 +2097,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "allOf": [
@@ -2930,7 +3062,7 @@
         "max_fee_eth": "0.001",
         "network": "evm",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       },
       {
@@ -2940,7 +3072,7 @@
         "max_fee_eth": "0.001",
         "network": "evm",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -2981,6 +3113,39 @@
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -3099,6 +3264,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -3993,7 +4191,7 @@
         "max_fee_eth": "0.001",
         "network": "evm",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -4034,6 +4232,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "allOf": [
@@ -4972,7 +5203,7 @@
         "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       },
       {
@@ -4983,7 +5214,7 @@
         "network": "evm",
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -11761,10 +11992,43 @@
   },
   {
     "name": "uniswap.quote",
-    "description": "Quote supported Uniswap v3 single-pool fee tiers using QuoterV2.",
+    "description": "Quote configured Uniswap v3 fee tiers or an explicitly selected supported v4 pool.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -11793,13 +12057,68 @@
           ],
           "type": "string"
         },
-        "token_in": {
-          "pattern": "^0x[0-9a-fA-F]{40}$",
+        "protocol": {
+          "default": "v3",
+          "enum": [
+            "v3",
+            "v4"
+          ],
           "type": "string"
         },
+        "token_in": {
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
         "token_out": {
-          "pattern": "^0x[0-9a-fA-F]{40}$",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "v4_pool_key": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "title": "V4PoolKey",
+          "type": "object"
         },
         "wallet": {
           "maxLength": 80,
@@ -11860,8 +12179,25 @@
         "amount": "1",
         "chain_id": 1,
         "network": "evm",
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "protocol": "v3",
+        "token_in": "native",
+        "token_out": "0x0000000000000000000000000000000000000065",
+        "wallet": "main-wallet"
+      },
+      {
+        "amount": "1",
+        "chain_id": 1,
+        "network": "evm",
+        "protocol": "v4",
+        "token_in": "0x0000000000000000000000000000000000000065",
+        "token_out": "native",
+        "v4_pool_key": {
+          "currency0": "0x0000000000000000000000000000000000000000",
+          "currency1": "0x0000000000000000000000000000000000000065",
+          "fee": 500,
+          "hooks": "0x0000000000000000000000000000000000000000",
+          "tick_spacing": 10
+        },
         "wallet": "main-wallet"
       }
     ],
@@ -11872,6 +12208,7 @@
       "authorization": "read-only",
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
       "plan_authorization": {
         "approval_requires_future_balances": false,
@@ -11898,10 +12235,43 @@
   },
   {
     "name": "uniswap.swap",
-    "description": "Execute bounded exact-input Uniswap v3 single-pool swap.",
+    "description": "Execute bounded exact-input Uniswap v3 or v4 single-pool swap.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "allOf": [
@@ -11971,6 +12341,12 @@
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
           "type": "string"
         },
+        "max_price_impact_bps": {
+          "default": 10000,
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
         "min_output": {
           "maxLength": 100,
           "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
@@ -11980,6 +12356,14 @@
           "enum": [
             "evm",
             "ethereum"
+          ],
+          "type": "string"
+        },
+        "protocol": {
+          "default": "v3",
+          "enum": [
+            "v3",
+            "v4"
           ],
           "type": "string"
         },
@@ -11998,12 +12382,59 @@
           "type": "integer"
         },
         "token_in": {
-          "pattern": "^0x[0-9a-fA-F]{40}$",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
         },
         "token_out": {
-          "pattern": "^0x[0-9a-fA-F]{40}$",
-          "type": "string"
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "v4_pool_key": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "title": "V4PoolKey",
+          "type": "object"
         },
         "wallet": {
           "maxLength": 80,
@@ -12867,8 +13298,8 @@
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "slippage_bps": 50,
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token_in": "native",
+        "token_out": "0x0000000000000000000000000000000000000065",
         "wallet": "main-wallet"
       },
       {
@@ -12882,8 +13313,8 @@
         "recipient": "0x0000000000000000000000000000000000000001",
         "request_id": "unique-logical-request",
         "slippage_bps": 50,
-        "token_in": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-        "token_out": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token_in": "native",
+        "token_out": "0x0000000000000000000000000000000000000065",
         "wallet": "main-wallet"
       }
     ],
@@ -12891,9 +13322,199 @@
     "completion": "Writes require canonical original transaction proof, confirmations, bounded actual gas, application-specific events and inclusion-block post-state.",
     "semantics": {
       "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
+      "authority_expiry_fields": [
+        {
+          "format": "unix_seconds",
+          "pointer": "/deadline"
+        }
+      ],
       "authorization": "fresh human per-write authorization",
+      "boundary_authorization": {
+        "asset_endpoints": "token_in and token_out may be ERC-20 contract addresses or native; native is priced and proven through reviewed WETH settlement.",
+        "bounds_schema": {
+          "$defs": {
+            "Quantity": {
+              "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+              "type": "string"
+            },
+            "RateFloor": {
+              "additionalProperties": false,
+              "properties": {
+                "input_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output_atoms": {
+                  "$ref": "#/$defs/Quantity"
+                }
+              },
+              "required": [
+                "output_atoms",
+                "input_atoms"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "absolute_minimum_output": {
+              "default": null,
+              "description": "Optional absolute minimum output in human-readable output-token units.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "allowed_fee_tiers": {
+              "description": "Allowed Uniswap v3 fee tiers; must be empty for v4, whose pool key fixes its fee.",
+              "items": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "max_deadline_seconds": {
+              "default": 600,
+              "description": "Maximum deadline horizon in seconds, capped at 600.",
+              "format": "uint64",
+              "maximum": 600,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_fee_eth": {
+              "description": "Maximum native transaction fee in human-readable ETH units.",
+              "type": "string"
+            },
+            "max_input": {
+              "description": "Maximum input amount in human-readable units of the input token.",
+              "type": "string"
+            },
+            "max_price_impact_bps": {
+              "description": "Maximum permitted quoted price impact in basis points.",
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_slippage_bps": {
+              "description": "Maximum selected swap slippage in basis points; at most 1000 bps (10%).",
+              "format": "uint16",
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "minimum_rate": {
+              "$ref": "#/$defs/RateFloor",
+              "description": "Minimum output-atoms per input-atom rational rate. Both values are positive integers in atomic units."
+            }
+          },
+          "required": [
+            "max_input",
+            "max_fee_eth",
+            "max_slippage_bps",
+            "max_price_impact_bps",
+            "minimum_rate",
+            "allowed_fee_tiers"
+          ],
+          "title": "SwapBounds",
+          "type": "object"
+        },
+        "broker_generated_attempt_input_fields": [
+          "/request_id"
+        ],
+        "cumulative_scope": "Input and native gas costs are lifetime cumulative caps; every attempt retains its own immutable quote, calldata, fee and reconciliation identity.",
+        "default_consent_seconds": 600,
+        "fixed_fields": [
+          "wallet",
+          "network",
+          "chain_id",
+          "signer",
+          "recipient",
+          "token_in",
+          "token_out",
+          "protocol",
+          "v4_pool_key"
+        ],
+        "permitted_variations": {
+          "amount": "Each attempt input is bounded by cumulative max_input.",
+          "deadline": "Each attempt deadline must be current and no farther ahead than max_deadline_seconds.",
+          "fee_tier": "For v3, only allowed_fee_tiers may be selected. For v4, fee is fixed by v4_pool_key.",
+          "max_fee_eth": "Each attempt's maximum native gas cost is bounded by cumulative max_fee_eth.",
+          "max_price_impact_bps": "The observed pool-price impact, excluding the separately charged pool fee, must not exceed this approved ceiling.",
+          "min_output": "Each attempt must satisfy the approved rational minimum_rate and optional absolute_minimum_output.",
+          "request_id": "The broker generates a fresh correlation identifier for every attempt.",
+          "slippage_bps": "Selected slippage may not exceed max_slippage_bps; the fresh quote and exact minimum output are checked for every attempt."
+        },
+        "quote_and_checks": {
+          "freshness": "Every attempt obtains and validates a fresh protocol quote, route identity, price-impact measurement and exact output floor.",
+          "permit_signature_simulation": "Unchecked in preview. Typed permit signatures are created only after authorization, then the exact materialized transaction is simulated before submission."
+        },
+        "replacement": "Changed fixed route or authorization bounds require fresh approval; in-bound attempts require a new preview and are checked against remaining cumulative authority.",
+        "requirements_by_protocol": {
+          "v3": [
+            "fixed token pair and router",
+            "explicit allowed_fee_tiers",
+            "fresh quote no older than 120 seconds"
+          ],
+          "v4": [
+            "fixed token pair, router and exact v4_pool_key",
+            "allowed_fee_tiers must be empty",
+            "fresh quote no older than 120 seconds"
+          ]
+        },
+        "scope": "Single-pool exact-input Uniswap v3 or v4 swap with output returned to the signing wallet.",
+        "structured_violations": {
+          "path": "error.details.boundary_violation",
+          "schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "additionalProperties": false,
+            "properties": {
+              "approved_bound": true,
+              "candidate_value": true,
+              "constraint": {
+                "type": "string"
+              },
+              "evidence_time": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reauthorization_required": {
+                "description": "Accepting this candidate as proposed requires changed human-approved\nboundaries; revising the candidate to existing bounds may still work.",
+                "type": "boolean"
+              },
+              "reconciliation_required": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "constraint",
+              "approved_bound",
+              "candidate_value",
+              "reauthorization_required",
+              "reconciliation_required"
+            ],
+            "title": "BoundaryViolation",
+            "type": "object"
+          }
+        },
+        "supported": true,
+        "unsupported": [
+          "arbitrary calldata",
+          "hook execution",
+          "multi-hop routes",
+          "recipient changes",
+          "v4 pool-key changes"
+        ]
+      },
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "broker_generated_attempt_input_fields": [
+        "/request_id"
+      ],
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
       "plan_authorization": {
         "approval_requires_future_balances": false,
@@ -12924,6 +13545,39 @@
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -13011,7 +13665,7 @@
         "chain_id": 1,
         "network": "evm",
         "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -13052,6 +13706,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -13952,7 +14639,7 @@
         "network": "evm",
         "request_id": "unique-logical-request",
         "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -13993,6 +14680,39 @@
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -14106,11 +14826,1186 @@
     }
   },
   {
+    "name": "wallet.permit2.allowance",
+    "description": "Observe exact Uniswap Permit2 allowance and nonce.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "chain_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "network": {
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
+          "type": "string"
+        },
+        "spender": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "type": "string"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "wallet": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "chain_id",
+        "token",
+        "spender"
+      ],
+      "title": "Request",
+      "type": "object"
+    },
+    "output_schema": {
+      "required": [
+        "operation",
+        "resource",
+        "chain_id",
+        "observed_at",
+        "data"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "chain_id": 1,
+        "network": "evm",
+        "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+        "token": "0x0000000000000000000000000000000000000064",
+        "wallet": "main-wallet"
+      }
+    ],
+    "coverage": "Rust implementation; synthetic and fixed-fork evidence recorded separately. Human/mainnet acceptance remains pending.",
+    "completion": "Writes require canonical original transaction proof, confirmations, bounded actual gas, application-specific events and inclusion-block post-state.",
+    "semantics": {
+      "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
+      "authorization": "read-only",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "retry": "Reconcile the original persisted hash, never blind replay."
+    }
+  },
+  {
+    "name": "wallet.permit2.approve",
+    "description": "Set finite exact Uniswap Permit2 allowance and expiration.",
+    "kind": "write",
+    "execution_actor": "agent_invocable",
+    "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "chain_id": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expiration": {
+          "maximum": 281474976710655,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_fee_eth": {
+          "description": "Maximum total native ETH gas cost. Preparation adds 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap. Changes inside the approved envelope do not require a new gas approval. Fresh USD quotes must remain within the separate displayed approval ceilings.",
+          "maxLength": 100,
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "evm",
+            "ethereum"
+          ],
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "spender": {
+          "pattern": "^0x[0-9a-fA-F]{40}$",
+          "type": "string"
+        },
+        "token": {
+          "anyOf": [
+            {
+              "pattern": "^0x[0-9a-fA-F]{40}$",
+              "type": "string"
+            },
+            {
+              "const": "native"
+            }
+          ]
+        },
+        "wallet": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "wallet",
+        "network",
+        "chain_id",
+        "token",
+        "spender",
+        "amount",
+        "expiration",
+        "request_id",
+        "max_fee_eth"
+      ],
+      "title": "Request",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AccountingLocation": {
+          "description": "A link identifies principal flow; application-owned receipt verification proves its cash/position legs.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "cash",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "position",
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "position_kind"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "AssetPrice": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "unit_atoms": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "usd_micros_per_unit": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "usd_micros_per_unit",
+            "unit_atoms",
+            "observed_at",
+            "source"
+          ],
+          "type": "object"
+        },
+        "Check": {
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/CheckStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status",
+            "detail"
+          ],
+          "type": "object"
+        },
+        "CheckStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "unchecked"
+          ],
+          "type": "string"
+        },
+        "CostBound": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "location": {
+              "$ref": "#/$defs/AccountingLocation"
+            },
+            "treatment": {
+              "$ref": "#/$defs/CostTreatment"
+            }
+          },
+          "required": [
+            "location",
+            "amount",
+            "treatment"
+          ],
+          "type": "object"
+        },
+        "CostTreatment": {
+          "description": "Prevent a proved expense included in a repayment/supply debit being charged twice.",
+          "oneOf": [
+            {
+              "enum": [
+                "additional_debit",
+                "included_in_debit"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deducted_from_credit",
+              "description": "Withheld from the gross proved credit, applied exactly once by the ledger.",
+              "type": "string"
+            }
+          ]
+        },
+        "Direction": {
+          "enum": [
+            "increase",
+            "decrease"
+          ],
+          "type": "string"
+        },
+        "EffectConstraint": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "A separately authorized request to remove the remainder of one durable submission.",
+              "properties": {
+                "kind": {
+                  "const": "submission_cancellation",
+                  "type": "string"
+                },
+                "operation_id": {
+                  "type": "string"
+                },
+                "submission": {
+                  "$ref": "#/$defs/Submission"
+                }
+              },
+              "required": [
+                "kind",
+                "operation_id",
+                "submission"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "credit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "from": {
+                  "$ref": "#/$defs/AccountingLocation"
+                },
+                "kind": {
+                  "const": "origin_movement",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/AccountingLocation"
+                }
+              },
+              "required": [
+                "kind",
+                "from",
+                "to",
+                "debit_asset",
+                "credit_asset",
+                "maximum_debit",
+                "minimum_credit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "accrual",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "debit",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "maximum_debit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "credit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debit_asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "from": {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                "kind": {
+                  "const": "transfer",
+                  "type": "string"
+                },
+                "maximum_debit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "from",
+                "to",
+                "debit_asset",
+                "credit_asset",
+                "maximum_debit",
+                "minimum_credit"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "input": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "conversion",
+                  "type": "string"
+                },
+                "maximum_input": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "minimum_output": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "output": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "input",
+                "maximum_input",
+                "output",
+                "minimum_output"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "direction": {
+                  "$ref": "#/$defs/Direction"
+                },
+                "kind": {
+                  "const": "position",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Long/short exposure quantities, never custody or borrowed principal.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "derivative_position",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "position": {
+                  "type": "string"
+                },
+                "position_kind": {
+                  "$ref": "#/$defs/PositionKind"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "position",
+                "asset",
+                "position_kind",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Realized collateral only; mark-to-market and unrealized PnL are excluded.",
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "category": {
+                  "$ref": "#/$defs/SettlementCategory"
+                },
+                "kind": {
+                  "const": "settlement",
+                  "type": "string"
+                },
+                "maximum_delta": {
+                  "type": "string"
+                },
+                "minimum_delta": {
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "asset",
+                "category",
+                "minimum_delta",
+                "maximum_delta"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "debt": {
+                  "type": "string"
+                },
+                "direction": {
+                  "$ref": "#/$defs/Direction"
+                },
+                "kind": {
+                  "const": "debt",
+                  "type": "string"
+                },
+                "maximum_change": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "debt",
+                "asset",
+                "direction",
+                "maximum_change"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "after": {
+                  "type": "string"
+                },
+                "authority": {
+                  "type": "string"
+                },
+                "before": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "authority",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "authority",
+                "before",
+                "after"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "allowed_after": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "authority": {
+                  "type": "string"
+                },
+                "before": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "authority_transition",
+                  "type": "string"
+                },
+                "resource": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "resource",
+                "authority",
+                "before",
+                "allowed_after"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "asset": {
+                  "$ref": "#/$defs/AssetId"
+                },
+                "kind": {
+                  "const": "credit",
+                  "type": "string"
+                },
+                "minimum_credit": {
+                  "$ref": "#/$defs/Quantity"
+                },
+                "to": {
+                  "$ref": "#/$defs/ResourceId"
+                }
+              },
+              "required": [
+                "kind",
+                "to",
+                "asset",
+                "minimum_credit"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "FinancialIntent": {
+          "additionalProperties": false,
+          "properties": {
+            "debits": {
+              "items": {
+                "$ref": "#/$defs/ResourceAmount"
+              },
+              "type": "array"
+            },
+            "expected": {
+              "items": {
+                "$ref": "#/$defs/EffectConstraint"
+              },
+              "type": "array"
+            },
+            "locks": {
+              "items": {
+                "$ref": "#/$defs/ResourceId"
+              },
+              "type": "array"
+            },
+            "maximum_costs": {
+              "items": {
+                "$ref": "#/$defs/CostBound"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "debits",
+            "maximum_costs",
+            "expected",
+            "locks"
+          ],
+          "type": "object"
+        },
+        "PositionKind": {
+          "enum": [
+            "supply",
+            "stable_debt",
+            "variable_debt",
+            "derivative_long",
+            "derivative_short"
+          ],
+          "type": "string"
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "ResourceAmount": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "ResourceId": {
+          "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
+          "type": "string"
+        },
+        "SettlementCategory": {
+          "enum": [
+            "realized_pnl",
+            "funding"
+          ],
+          "type": "string"
+        },
+        "Submission": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "description": "Original nonce/client identity and receipt correlation data. No signed bytes or secrets."
+            },
+            "kind": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reference",
+            "data"
+          ],
+          "type": "object"
+        },
+        "Valuation": {
+          "additionalProperties": false,
+          "properties": {
+            "additional_allocation_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "maximum_fee_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "movement_usd_micros": {
+              "$ref": "#/$defs/Quantity"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "prices": {
+              "items": {
+                "$ref": "#/$defs/AssetPrice"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "movement_usd_micros",
+            "maximum_fee_usd_micros",
+            "additional_allocation_usd_micros",
+            "observed_at",
+            "source",
+            "prices"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "input": true,
+        "intent": {
+          "$ref": "#/$defs/FinancialIntent"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "operation_version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "valuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Valuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "operation",
+        "input",
+        "binding",
+        "summary",
+        "checks",
+        "warnings",
+        "observed_at",
+        "expires_at",
+        "intent",
+        "operation_version"
+      ],
+      "title": "PreparedOperation",
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "amount": "1",
+        "chain_id": 1,
+        "expiration": 2000000000,
+        "max_fee_eth": "0.001",
+        "network": "evm",
+        "request_id": "unique-logical-request",
+        "spender": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+        "token": "0x0000000000000000000000000000000000000064",
+        "wallet": "main-wallet"
+      }
+    ],
+    "coverage": "Rust implementation; synthetic and fixed-fork evidence recorded separately. Human/mainnet acceptance remains pending.",
+    "completion": "Writes require canonical original transaction proof, confirmations, bounded actual gas, application-specific events and inclusion-block post-state.",
+    "semantics": {
+      "amount": "Exact decimal asset quantity; no floating-point conversion or rounding.",
+      "authorization": "fresh human per-write authorization",
+      "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
+      "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
+      "network": "explicit immutable chain/deployment identity",
+      "plan_authorization": {
+        "approval_requires_future_balances": false,
+        "binds": [
+          "operation",
+          "input_schema",
+          "canonical_input",
+          "protected_connection_identity"
+        ],
+        "deferred_write_checks": [
+          "current_balances",
+          "current_prices",
+          "fee_quotes",
+          "market_metadata",
+          "permissions",
+          "simulation",
+          "verified_typed_effects"
+        ],
+        "financial_limits": "per_step_maximum_debits_and_costs",
+        "mode": "exact_input"
+      },
+      "retry": "Reconcile the original persisted hash, never blind replay."
+    }
+  },
+  {
     "name": "wallet.receipt",
     "description": "Read original transaction inclusion state.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -14226,6 +16121,39 @@
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -14307,7 +16235,7 @@
       {
         "chain_id": 1,
         "network": "evm",
-        "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "token": "0x0000000000000000000000000000000000000064",
         "wallet": "main-wallet"
       }
     ],
@@ -14348,6 +16276,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -15289,6 +17250,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "allOf": [
@@ -16258,6 +18252,39 @@
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
+      "$defs": {
+        "V4PoolKey": {
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string"
+            },
+            "currency1": {
+              "type": "string"
+            },
+            "fee": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "hooks": {
+              "type": "string"
+            },
+            "tick_spacing": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "currency0",
+            "currency1",
+            "fee",
+            "tick_spacing",
+            "hooks"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {

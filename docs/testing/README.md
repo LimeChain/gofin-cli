@@ -75,12 +75,14 @@ and restoration. Synthetic approval never establishes native authorization.
 
 Ethereum mainnet, Arbitrum One and Robinhood Chain share a reusable EVM connection.
 The [wallet guide](evm-wallets.md) covers offline regressions, partial token
-discovery, explicit snapshot scope, L2 finalized-block checks and a proposed
+discovery, explicit snapshot scope, canonical rollup sequencer-inclusion checks and a proposed
 human test sequence. New network implementation is not a live acceptance pass.
 Public no-secret RPC/indexer probes, human enrollment/Touch ID and funded transfer
 round trips must each be reported separately when observed; this guide marks no
 unrun case passed. Existing $100 allocation, per-write approval and complete
 restoration requirements also apply to any separately authorized L2 live test.
+For the implemented Uniswap swap/permit path and its separate human Touch ID
+handoff, see [Uniswap verification](uniswap-amm.md).
 
 ## Relay bridge regressions
 

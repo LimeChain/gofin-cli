@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 fin-domain = { path = "../fin-domain" }
 fin-evm = { path = "../fin-evm" }
+fin-amm = { path = "../fin-amm" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
