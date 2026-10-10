@@ -2,10 +2,33 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.3.0"
+  version: "1.3.1"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
+
+## Conversational review before financial authorization
+
+Prepare the concrete plan using discovery, reads, quotes and previews, then present
+it to the human in conversation. Explain the ordered actions, accounts and wallets,
+networks and destinations, amounts, expected costs versus maximum fee/debit caps,
+minimum receipts, permitted variations, consent duration and intended final holdings.
+Keep the summary readable and give the human an opportunity to question or revise it.
+
+Wait for explicit approval of the presented plan in conversation before requesting
+Fin authorization or submitting any financial write. Presenting the plan and
+announcing an imminent Touch ID request in the same turn is insufficient. An initial
+task request does not approve concrete choices the human has not yet reviewed.
+Conversational approval confirms the intended scope; Fin's protected authorization
+and Touch ID remain separately required. This applies to named plans, standalone
+writes and operation-boundary consent.
+
+After conversational approval, refresh quotes and execute within the approved scope
+without asking again for each step or an in-bounds quote change. If the plan changes
+materially, present the revision and obtain conversational approval before requesting
+new Fin authorization. If a native approval expires, explain what did not happen and
+wait for the human to request a retry; preserve the reviewed scope and reconcile any
+uncertain financial submission before proceeding.
 
 Start with `fin --help` and `fin capabilities --json`, even before setup exists. Inspect `fin explain setup --json`, `fin schema connections.add --json`, and `fin connections add --help` for human onboarding. Use the installed definitions for exact syntax, supported providers, and completion criteria.
 
@@ -230,8 +253,10 @@ fin plans preview --input PLAN_JSON --json
 ```
 
 Review the returned ordered permissions, variations, cumulative bounds, prior
-usage, duration and `review_hash`. For machine-driven review, carry that exact
-hash into authorization; a changed review is rejected before Touch ID:
+usage, duration and `review_hash`. Present the reviewed plan in conversation and
+wait for explicit human approval as described above. Only then request Fin
+authorization. For machine-driven review, carry that exact hash into authorization;
+a changed review is rejected before Touch ID:
 
 ```text
 fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-hash REVIEW_HASH --json
