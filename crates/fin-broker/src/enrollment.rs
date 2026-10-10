@@ -1219,7 +1219,7 @@ mod tests {
         };
         config.validate().unwrap();
         let resources = connection_resources(&shared, &config);
-        for chain in [1, 42161, 4663] {
+        for chain in [1, 42161, 4663, 8453] {
             assert!(resources.contains(&ResourceId(format!("ethereum:{chain}:{address}"))));
         }
         let output = outcome("update", Some(&shared), vec![], vec![], None);

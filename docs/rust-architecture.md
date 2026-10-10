@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, Ethereum mainnet Uniswap/Aave adapters and a Relay-backed bridge adapter. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, Ethereum Uniswap and Ethereum/Base Aave adapters, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## One CLI and a protected execution role
 
@@ -46,7 +46,7 @@ The compiled workspace separates shared accounting from application-owned interp
 | `fin-exchange`          | Shared exchange Adapter lifecycle, default public-read profile, and internal official CCXT Rust wrapper with exact response capture.                  |
 | `fin-binance`           | Binance account mapping, funding routes, permissions, stable client identifiers, exact venue quantities and settlement evidence.                       |
 | `fin-pricing`           | Provider-independent async USD quotes, exact CoinGecko parsing, identity mappings, source freshness and shared bounded cache.                           |
-| `fin-ethereum`          | EVM wallets across reviewed networks, optional mainnet Uniswap/Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
+| `fin-ethereum`          | EVM wallets across reviewed networks, optional Ethereum Uniswap and Ethereum/Base Aave, conditional return planning, protocol-specific receipt interpretation and position anchors.                         |
 | `fin-bridge`            | Relay quote normalization, fixed order/calldata validation, exact source-deposit decoding, and destination/refund event decoding. It supplies candidates; broker RPC verification and engine settlement establish proof. |
 | `fin-authorization`     | Shared challenge/decision contract, trusted operation presentation, native authentication providers, response verification, single-use approval.       |
 | `fin-credentials`       | Protected enrollment, credential references and storage backends, signer access, replacement/removal. No secret-export API.                            |
@@ -85,9 +85,11 @@ Wallet, Uniswap, and Aave operations share the EVM runtime; their financial sema
 of a chain. Reviewed profiles provide chain identity, public RPCs, confirmations,
 finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
-compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
+compatible. New setup includes Ethereum mainnet (1), Base (8453), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Uniswap/Aave are mainnet-only. Relay transfers are a separate application
+Aave supports the reviewed Base deployment; Base Uniswap awaits its separately
+owned foundation merge. Base fee envelopes include execution, L1 data and
+operator costs, while receipt completion uses one canonical full L2 block. Relay transfers are a separate application
 capability, not a general wallet write or arbitrary calldata interface.
 
 ### Relay bridge composition and settlement

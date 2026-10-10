@@ -210,7 +210,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(quote.usd_per_unit, "1.02");
-        for chain in [1, 42161, 4663] {
+        for chain in [1, 42161, 4663, 8453] {
             let asset = AssetId {
                 network: format!("ethereum:{chain}"),
                 reference: "native".into(),

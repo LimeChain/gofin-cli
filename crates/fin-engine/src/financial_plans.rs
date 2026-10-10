@@ -1719,10 +1719,12 @@ fn plan_bridge_deposit_link<'a>(
         return None;
     }
     transfer.steps.iter().find(|link| {
-        link.kind == fin_domain::BridgeStepKind::Deposit
-            && link.plan_authority.as_ref().is_some_and(|authority| {
-                authority.plan_id == plan_id && authority.plan_step_id == step_id
-            })
+        matches!(
+            link.kind,
+            fin_domain::BridgeStepKind::Deposit | fin_domain::BridgeStepKind::Finalize
+        ) && link.plan_authority.as_ref().is_some_and(|authority| {
+            authority.plan_id == plan_id && authority.plan_step_id == step_id
+        })
     })
 }
 
@@ -2690,7 +2692,7 @@ fn prepare_plan_bridge_attempt_claim(
             )
         })?;
     if store_transfer.grant_id.is_some()
-        || store_transfer.transit.is_some()
+        || (store_transfer.transit.is_some() && !kind.is_destination_stage())
         || store_transfer
             .plan_scope
             .as_ref()
@@ -2700,6 +2702,8 @@ fn prepare_plan_bridge_attempt_claim(
             fin_domain::BridgeTransferState::Prepared
                 | fin_domain::BridgeTransferState::ApprovalPending
                 | fin_domain::BridgeTransferState::SourcePending
+                | fin_domain::BridgeTransferState::InTransit
+                | fin_domain::BridgeTransferState::DestinationPending
         )
     {
         return Err(plan_error(
@@ -2789,11 +2793,14 @@ fn prepare_plan_bridge_attempt_claim(
     link.plan_authority = Some(authority);
     link.state = fin_domain::BridgeStepState::Submitted;
     store_transfer.plan_scope = Some(scope);
-    store_transfer.state = if kind == fin_domain::BridgeStepKind::Deposit {
-        fin_domain::BridgeTransferState::SourcePending
-    } else {
-        fin_domain::BridgeTransferState::ApprovalPending
-    };
+    if kind.is_destination_stage() && store_transfer.transit.is_none() {
+        return Err(plan_error(
+            "PLAN_BRIDGE_SOURCE_PROOF_REQUIRED",
+            "A deferred bridge stage requires settled original source proof.",
+            "Reconcile the initiation before executing its proof or finalization.",
+        ));
+    }
+    store_transfer.state = kind.pending_state();
     store_transfer.version = store_transfer
         .version
         .checked_add(1)
@@ -2993,7 +3000,17 @@ fn step_authority_cannot_complete(
                         && !aggregate.amount.atoms.is_zero()
                 })
         });
-        if !any_principal_capacity {
+        let deferred_capacity = permission
+            .permission
+            .as_ref()
+            .and_then(|value| value.deferred_receipt.as_ref())
+            .zip(step.completion.minimum_net_receipt.as_ref())
+            .is_some_and(|(capacity, target)| {
+                capacity.resource == target.resource
+                    && capacity.amount.asset == target.amount.asset
+                    && capacity.amount.atoms >= target.amount.atoms
+            });
+        if !any_principal_capacity && !deferred_capacity {
             return Ok(true);
         }
     }
@@ -3940,6 +3957,26 @@ fn validate_active_bridge_revision_scopes(
             let replacement = next_permissions
                 .iter()
                 .find(|permission| permission.step_id == old.step_id);
+            let superseded_unsubmitted = old
+                .permission
+                .as_ref()
+                .and_then(|permission| {
+                    permission.spec.fixed["plan_step_identity"]["step_id"].as_str()
+                })
+                .is_some_and(|id| {
+                    transfer.steps.iter().any(|link| {
+                        link.step_id == id
+                            && link.state == fin_domain::BridgeStepState::Superseded
+                            && link.operation_id.is_none()
+                            && link.kind.is_destination_stage()
+                    })
+                });
+            if replacement.is_none() && superseded_unsubmitted {
+                // Only the store-validated deferred recovery recipe can retire
+                // this never-attempted stage. Started writes retain every
+                // original permission; recovery adds explicit new identities.
+                continue;
+            }
             if replacement != Some(old) {
                 return Err(plan_error(
                     "PLAN_BRIDGE_PARENT_SCOPE_CHANGED",
@@ -4748,6 +4785,39 @@ mod tests {
     }
 
     #[test]
+    fn deferred_receipt_capacity_grants_no_principal_and_preserves_exact_target() {
+        let mut approved = permission(json!({"claim":"fixed"}), json!({}), "1");
+        let scope = approved.permission.as_mut().unwrap();
+        scope.spec.maximum_debits.clear();
+        scope.deferred_receipt = Some(resource_amount("destination", "ETH", "100"));
+        let mut step = financial_plans::FinancialPlanStepSpec {
+            step_id: "claim".into(),
+            operation: "synthetic.claim".into(),
+            input: json!({}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("destination", "ETH", "100")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+        };
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        assert!(permission_debits(&approved).is_empty());
+        for target in [
+            resource_amount("other", "ETH", "100"),
+            resource_amount("destination", "USDT", "100"),
+            resource_amount("destination", "ETH", "101"),
+        ] {
+            step.completion.minimum_net_receipt = Some(target);
+            assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        }
+        step.completion.minimum_net_receipt = Some(resource_amount("destination", "ETH", "100"));
+        approved.permission.as_mut().unwrap().deferred_receipt = None;
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+    }
+
+    #[test]
     fn operation_success_is_conjunctive_and_supports_zero_debit_effects() {
         let success = financial_plans::FinancialStepCompletion {
             principal_spend: None,
@@ -5150,6 +5220,7 @@ mod tests {
                 },
                 possible_credits: vec![],
                 fee_assets: vec![],
+                deferred_receipt: None,
                 authorization_seconds: None,
                 cumulative_scope: None,
             }),

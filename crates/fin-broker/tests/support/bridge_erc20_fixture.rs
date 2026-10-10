@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -37,6 +37,7 @@ fin_evm::alloy::sol! {
     interface FixtureErc20 {
         function approve(address spender, uint256 amount) external returns (bool);
         function allowance(address owner, address spender) external view returns (uint256);
+        function decimals() external view returns (uint8);
         event Approval(address indexed owner, address indexed spender, uint256 value);
         event Transfer(address indexed from, address indexed to, uint256 value);
     }
@@ -67,6 +68,7 @@ fn pad_topic(address: Address) -> String {
 
 pub struct Erc20Provider {
     revisions: AtomicUsize,
+    pub omit_approval: AtomicBool,
     destination_rpc: Option<Arc<Rpc>>,
     direct_payout: DestinationPayout,
 }
@@ -74,6 +76,7 @@ pub struct Erc20Provider {
 pub enum DestinationPayout {
     Router,
     Direct,
+    DirectTransferFrom,
     DirectWrongOrderTag,
     DirectWrongToken,
     DirectNoTransferLog,
@@ -82,6 +85,7 @@ impl Erc20Provider {
     pub fn with_destination(destination_rpc: Arc<Rpc>, direct_payout: DestinationPayout) -> Self {
         Self {
             revisions: AtomicUsize::new(0),
+            omit_approval: AtomicBool::new(false),
             destination_rpc: Some(destination_rpc),
             direct_payout,
         }
@@ -185,6 +189,12 @@ impl BridgeProvider for Erc20Provider {
             maximum_debit: vec![source.amount(request.intent.amount.clone())],
             dependencies: vec![0],
         };
+        let omit_approval = self.omit_approval.load(Ordering::SeqCst);
+        let mut deposit = deposit;
+        if omit_approval {
+            deposit.ordinal = 0;
+            deposit.dependencies.clear();
+        }
         Ok(BridgeQuoteBatch {
             quotes: vec![BridgeQuote {
                 quote_id: format!("synthetic-erc20-{revision}"),
@@ -195,8 +205,12 @@ impl BridgeProvider for Erc20Provider {
                 expected_receipt: destination.amount(expected_receipt),
                 minimum_receipt: destination.amount(minimum_receipt),
                 fees: vec![],
-                approval: Some(approval),
-                protocol_steps: vec![approve, deposit],
+                approval: (!omit_approval).then_some(approval),
+                protocol_steps: if omit_approval {
+                    vec![deposit]
+                } else {
+                    vec![approve, deposit]
+                },
                 estimated_arrival_seconds: Some(120),
                 observed_at: now(),
                 valid_until: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
@@ -304,17 +318,32 @@ impl Rpc {
         let (to, value, input, logs) = if let Some(token) = &asset.token {
             *self.historical_code_unavailable.lock().unwrap() = true;
             let amount = U256::from_str_radix(amount.as_str(), 10).unwrap();
-            let input = format!(
-                "0xa9059cbb{}{}{}",
-                word_address(recipient_address),
-                word(amount),
-                tag.trim_start_matches("0x")
-            );
+            let token_sender = if payout == DestinationPayout::DirectTransferFrom {
+                Address::repeat_byte(0x61)
+            } else {
+                sender
+            };
+            let input = if payout == DestinationPayout::DirectTransferFrom {
+                format!(
+                    "0x23b872dd{}{}{}{}",
+                    word_address(token_sender),
+                    word_address(recipient_address),
+                    word(amount),
+                    tag.trim_start_matches("0x")
+                )
+            } else {
+                format!(
+                    "0xa9059cbb{}{}{}",
+                    word_address(recipient_address),
+                    word(amount),
+                    tag.trim_start_matches("0x")
+                )
+            };
             let transfer = self.event_log(
                 token,
                 vec![
                     hash("Transfer(address,address,uint256)"),
-                    pad_topic(sender),
+                    pad_topic(token_sender),
                     pad_topic(recipient_address),
                 ],
                 word(amount),
@@ -559,8 +588,18 @@ impl EvmRpc for Rpc {
         Ok(match method {
             "eth_chainId" => json!(format!("0x{:x}", self.chain_id)),
             "eth_getCode" => {
+                let address = params[0].as_str().unwrap_or_default().to_ascii_lowercase();
                 let block_tag = params.get(1).and_then(Value::as_str).unwrap_or_default();
-                if block_tag.starts_with("0x") && *self.historical_code_unavailable.lock().unwrap()
+                // Dynamic asset checks read code at the current pinned head.
+                // This fixture denies older payout-state reads, not that exact
+                // current-head contract metadata needed before source dispatch.
+                let current_token_metadata = self.chain_id == 42161
+                    && address.eq_ignore_ascii_case(ARB_USDC)
+                    && u64::from_str_radix(block_tag.trim_start_matches("0x"), 16).ok()
+                        == Some(self.block_number.load(Ordering::SeqCst));
+                if block_tag.starts_with("0x")
+                    && *self.historical_code_unavailable.lock().unwrap()
+                    && !current_token_metadata
                 {
                     return Err(fin_domain::FinError::new(
                         "RPC_HISTORICAL_STATE_UNAVAILABLE",
@@ -570,8 +609,10 @@ impl EvmRpc for Rpc {
                     )
                     .with_details(json!({"http_status":400,"json_rpc_code":-32001})));
                 }
-                let address = params[0].as_str().unwrap_or_default().to_ascii_lowercase();
-                if self.empty_code.lock().unwrap().contains(&address) {
+                let wrong_token_network = (address.eq_ignore_ascii_case(ETH_USDC)
+                    && self.chain_id != 1)
+                    || (address.eq_ignore_ascii_case(ARB_USDC) && self.chain_id != 42161);
+                if wrong_token_network || self.empty_code.lock().unwrap().contains(&address) {
                     json!("0x")
                 } else {
                     json!("0x60006000")
@@ -581,7 +622,23 @@ impl EvmRpc for Rpc {
             "eth_call" => {
                 let call = &params[0];
                 let data = call["data"].as_str().unwrap_or("").trim_start_matches("0x");
-                if data.starts_with("dd62ed3e") {
+                if data == hex::encode(FixtureErc20::decimalsCall {}.abi_encode()) {
+                    // Precision belongs to the exact fixture contract on its
+                    // network, independently of Relay candidate metadata.
+                    let expected_token = match self.chain_id {
+                        1 => ETH_USDC,
+                        42161 => ARB_USDC,
+                        _ => panic!("unexpected synthetic ERC-20 metadata network"),
+                    };
+                    if call["to"]
+                        .as_str()
+                        .is_some_and(|to| to.eq_ignore_ascii_case(expected_token))
+                    {
+                        json!(format!("0x{:064x}", U256::from(6)))
+                    } else {
+                        json!("0x")
+                    }
+                } else if data.starts_with("dd62ed3e") {
                     let fallback_tag = Value::String("latest".into());
                     let tag = params.get(1).unwrap_or(&fallback_tag);
                     let block = match tag.as_str().unwrap_or("latest") {
@@ -703,5 +760,54 @@ impl UsdPriceSource for Prices {
             observed_at: now(),
             source: "synthetic ERC-20 bridge fixture".into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn synthetic_token_metadata_binds_contract_and_network() {
+        for (chain, token, wrong_network_token) in
+            [(1, ETH_USDC, ARB_USDC), (42161, ARB_USDC, ETH_USDC)]
+        {
+            let rpc = Rpc::new(
+                chain,
+                "0x1111111111111111111111111111111111111111".into(),
+                U256::ZERO,
+            );
+            let selector = format!(
+                "0x{}",
+                hex::encode(FixtureErc20::decimalsCall {}.abi_encode())
+            );
+            assert_eq!(
+                rpc.request("eth_call", json!([{"to":token,"data":selector},"latest"]))
+                    .await
+                    .unwrap(),
+                json!(format!("0x{:064x}", U256::from(6)))
+            );
+            assert_eq!(
+                rpc.request(
+                    "eth_call",
+                    json!([{"to":wrong_network_token,"data":selector},"latest"])
+                )
+                .await
+                .unwrap(),
+                json!("0x")
+            );
+            assert_eq!(
+                rpc.request("eth_getCode", json!([token, "latest"]))
+                    .await
+                    .unwrap(),
+                json!("0x60006000")
+            );
+            assert_eq!(
+                rpc.request("eth_getCode", json!([wrong_network_token, "latest"]))
+                    .await
+                    .unwrap(),
+                json!("0x")
+            );
+        }
     }
 }

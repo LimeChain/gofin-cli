@@ -21,6 +21,7 @@ fn indexer_base(chain_id: u64) -> Result<&'static str> {
     match chain_id {
         1 => Ok("https://eth.blockscout.com"),
         42161 => Ok("https://arbitrum.blockscout.com"),
+        8453 => Ok("https://base.blockscout.com"),
         4663 => Ok("https://robinhoodchain.blockscout.com"),
         _ => Err(FinError::new(
             "TOKEN_DISCOVERY_UNAVAILABLE",
@@ -456,6 +457,7 @@ mod tests {
             assert!(provider.tokens(1, address).await.is_err());
         }
         assert_eq!(indexer_base(1).unwrap(), "https://eth.blockscout.com");
+        assert_eq!(indexer_base(8453).unwrap(), "https://base.blockscout.com");
         assert_eq!(
             indexer_base(42161).unwrap(),
             "https://arbitrum.blockscout.com"

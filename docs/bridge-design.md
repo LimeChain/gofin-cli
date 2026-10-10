@@ -400,3 +400,17 @@ make dev-env-stop DEV_ENV=bridging
 Add executable bridge examples, actual targeted Cargo/fork commands and README
 usage with implementation. Do not publish these proposed operation names as
 available capabilities before their adapter and executable contracts exist.
+
+
+## Base provider extension
+
+`base_canonical` is separate from Relay and Arbitrum canonical providers. It
+supports ETH and independently verified StandardBridge ERC-20 pairs in both
+directions. Source proof creates nonspendable transit; destination proof must
+establish exact messenger/bridge correlation and usable credit. Withdrawals
+expose separate persisted initiation, proof and finalization stages under exact
+or named-plan authority, using current portal/game readiness and cumulative fee
+budgets. Recovery preserves original message identity and all consumed costs.
+`bridge.routes` discovers indicative provider candidates without a quote or
+financial authority. See [Base verification](testing/base.md) for the deployed
+contract references, test matrix and evidence boundaries.

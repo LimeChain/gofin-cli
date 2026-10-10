@@ -14,6 +14,8 @@ use thiserror::Error;
 pub type BridgeAllocationOwnerRow = (String, String, String, String, Option<String>);
 
 #[cfg(test)]
+mod base_recovery_tests;
+#[cfg(test)]
 mod boundary_migration_tests;
 #[cfg(test)]
 mod bridge_state_tests;
@@ -148,6 +150,41 @@ impl BridgeStateRepository {
                 bounds,
                 expectation,
             )
+    }
+    /// Read exactly the immutable adapter permission that owns an original
+    /// bridge step; recovery topology never rewrites prior plan authority.
+    pub fn plan_permission(
+        &self,
+        authority: &fin_domain::BridgePlanAuthority,
+    ) -> Result<Option<fin_domain::financial_plans::PlanPermission>> {
+        let Some(value) = self
+            .store
+            .lock()
+            .map_err(|_| StoreError::Poisoned)?
+            .financial_plan_revision(&authority.plan_id, &authority.revision_id)?
+        else {
+            return Ok(None);
+        };
+        let revision: fin_domain::financial_plans::FinancialPlanRevision =
+            serde_json::from_value(value)?;
+        if revision.plan_id != authority.plan_id || revision.revision_id != authority.revision_id {
+            return Err(StoreError::BridgeConflict);
+        }
+        Ok(revision
+            .permissions
+            .into_iter()
+            .find(|permission| permission.step_id == authority.plan_step_id)
+            .and_then(|permission| permission.permission))
+    }
+    pub fn append_base_recovery(
+        &self,
+        expected: &fin_domain::BridgeTransferRecord,
+        updated: &fin_domain::BridgeTransferRecord,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
+        self.store
+            .lock()
+            .map_err(|_| StoreError::Poisoned)?
+            .append_base_recovery(expected, updated)
     }
     pub fn transfer(&self, id: &str) -> Result<Option<fin_domain::BridgeTransferRecord>> {
         self.store
@@ -973,7 +1010,9 @@ impl Store {
             return Err(StoreError::BridgeConflict);
         };
         let mut transfer: fin_domain::BridgeTransferRecord = serde_json::from_str(&transfer_json)?;
-        if bridge_step.grant_id != transfer.grant_id {
+        if bridge_step.grant_id != transfer.grant_id || transfer.plan_scope.is_some() {
+            // Named-plan parents can be claimed only through their dedicated
+            // plan attempt transaction, never adopted by an ordinary exact write.
             return Err(StoreError::BridgeConflict);
         }
         let Some(index) = transfer
@@ -1007,6 +1046,18 @@ impl Store {
                 return Err(StoreError::BridgeConflict);
             }
             transfer.state = fin_domain::BridgeTransferState::SourcePending;
+        } else if bridge_step.kind.is_destination_stage() {
+            if transfer.transit.is_none()
+                || !matches!(
+                    transfer.state,
+                    fin_domain::BridgeTransferState::InTransit
+                        | fin_domain::BridgeTransferState::DestinationPending
+                        | fin_domain::BridgeTransferState::NeedsAttention
+                )
+            {
+                return Err(StoreError::BridgeConflict);
+            }
+            transfer.state = fin_domain::BridgeTransferState::DestinationPending;
         }
         transfer.steps[index] = bridge_step.clone();
         transfer.version = transfer
@@ -2731,7 +2782,7 @@ impl Store {
             return Err(StoreError::BridgeConflict);
         }
         step.state = fin_domain::BridgeStepState::Settled;
-        transfer.state = fin_domain::BridgeTransferState::ApprovalPending;
+        transfer.state = kind.settled_stage_state();
         transfer.version = transfer
             .version
             .checked_add(1)
@@ -3895,7 +3946,9 @@ impl Store {
             && updated_link.operation_id.is_none()
             && updated_link.state == fin_domain::BridgeStepState::Unsubmitted
             && updated_transfer.state
-                == if previous.steps.iter().any(|step| {
+                == if link.kind.is_destination_stage() {
+                    fin_domain::BridgeTransferState::DestinationPending
+                } else if previous.steps.iter().any(|step| {
                     step.step_id != bridge_step_id
                         && step.state == fin_domain::BridgeStepState::Settled
                 }) {
@@ -3915,7 +3968,12 @@ impl Store {
                 .is_some_and(|value| !value.is_null())
             && updated_link.operation_id.as_deref() == Some(operation_id)
             && updated_link.state == fin_domain::BridgeStepState::NeedsAttention
-            && updated_transfer.state == fin_domain::BridgeTransferState::Failed;
+            && updated_transfer.state
+                == if link.kind.is_destination_stage() {
+                    fin_domain::BridgeTransferState::NeedsAttention
+                } else {
+                    fin_domain::BridgeTransferState::Failed
+                };
         if !matches!(
             (no_submission_release, submitted_failure),
             (true, false) | (false, true)
@@ -5454,6 +5512,8 @@ fn bridge_cap_operation_matches_request(
         fin_domain::BridgeStepKind::ResetAllowance => "reset_allowance",
         fin_domain::BridgeStepKind::Approval => "approval",
         fin_domain::BridgeStepKind::Deposit => "deposit",
+        fin_domain::BridgeStepKind::Prove => "prove",
+        fin_domain::BridgeStepKind::Finalize => "finalize",
     };
     if record["status"] != "awaiting_approval"
         || !record["submission"].is_null()
@@ -5678,7 +5738,9 @@ fn release_unsubmitted_bridge_claim_tx(
         step.state = fin_domain::BridgeStepState::Unsubmitted;
         step.kind == fin_domain::BridgeStepKind::Deposit
     };
-    if is_deposit {
+    if transfer.steps[index].kind.is_destination_stage() {
+        transfer.state = fin_domain::BridgeTransferState::DestinationPending;
+    } else if is_deposit {
         transfer.state = if transfer.steps.iter().any(|settled| {
             settled.state == fin_domain::BridgeStepState::Settled
                 && matches!(
@@ -5799,7 +5861,17 @@ fn valid_transit_locator(transit: &fin_domain::TransitResource) -> bool {
         locator.source_evidence_id == transit.evidence_id
             && !locator.scheme.trim().is_empty()
             && locator.destination_chain_id > 0
-            && valid_evm_transaction_hash(&locator.transaction_hash)
+            && if locator.scheme == "base_withdrawal_message" {
+                locator.transaction_hash.is_empty()
+                    && locator.destination_chain_id == 1
+                    && locator
+                        .message_hash
+                        .as_deref()
+                        .is_some_and(valid_evm_transaction_hash)
+            } else {
+                locator.message_hash.is_none()
+                    && valid_evm_transaction_hash(&locator.transaction_hash)
+            }
     })
 }
 
@@ -5826,11 +5898,21 @@ fn settlement_locator_matches(
         .evidence
         .get("transaction_hash")
         .and_then(Value::as_str);
-    proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
-        && chain_id == Some(locator.destination_chain_id)
-        && transaction_hash
+    let locator_matches = if locator.scheme == "base_withdrawal_message" {
+        transaction_hash.is_some_and(valid_evm_transaction_hash)
+            && locator.message_hash.as_deref().is_some_and(|message| {
+                proof.evidence["withdrawal_hash"]
+                    .as_str()
+                    .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
+            })
+    } else {
+        transaction_hash
             .filter(|hash| valid_evm_transaction_hash(hash))
             .is_some_and(|hash| hash.eq_ignore_ascii_case(&locator.transaction_hash))
+    };
+    proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
+        && chain_id == Some(locator.destination_chain_id)
+        && locator_matches
 }
 
 fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
@@ -5914,12 +5996,14 @@ fn validate_plan_bridge_claim_transition(
     operation_record: &Value,
 ) -> Result<()> {
     if previous.grant_id.is_some()
-        || previous.transit.is_some()
+        || (previous.transit.is_some() && !bridge_kind.is_destination_stage())
         || !matches!(
             previous.state,
             fin_domain::BridgeTransferState::Prepared
                 | fin_domain::BridgeTransferState::ApprovalPending
                 | fin_domain::BridgeTransferState::SourcePending
+                | fin_domain::BridgeTransferState::InTransit
+                | fin_domain::BridgeTransferState::DestinationPending
         )
     {
         return Err(StoreError::BridgeConflict);
@@ -5964,6 +6048,8 @@ fn validate_plan_bridge_claim_transition(
         fin_domain::BridgeStepKind::Approval => "approval",
         fin_domain::BridgeStepKind::ResetAllowance => "reset_allowance",
         fin_domain::BridgeStepKind::Deposit => "deposit",
+        fin_domain::BridgeStepKind::Prove => "prove",
+        fin_domain::BridgeStepKind::Finalize => "finalize",
     };
     let kind_matches = input.get("stepKind").or_else(|| input.get("step_kind"))
         == Some(&Value::String(kind_string.to_owned()));
@@ -6028,11 +6114,7 @@ fn validate_plan_bridge_claim_transition(
     previous_step.operation_id = Some(operation_id.to_owned());
     previous_step.plan_authority = Some(authority);
     previous_step.state = fin_domain::BridgeStepState::Submitted;
-    expected.state = if *bridge_kind == fin_domain::BridgeStepKind::Deposit {
-        fin_domain::BridgeTransferState::SourcePending
-    } else {
-        fin_domain::BridgeTransferState::ApprovalPending
-    };
+    expected.state = bridge_kind.pending_state();
     if expected != *next {
         return Err(StoreError::BridgeConflict);
     }
@@ -6134,7 +6216,7 @@ fn validate_plan_bridge_terminal_transition(
             return Err(StoreError::BridgeConflict);
         }
     } else if before.kind == fin_domain::BridgeStepKind::Deposit
-        || next.state != fin_domain::BridgeTransferState::ApprovalPending
+        || next.state != before.kind.settled_stage_state()
         || next.transit != previous.transit
         || next.applied_proofs != previous.applied_proofs
         || next.allocation_owner != previous.allocation_owner
@@ -6192,6 +6274,402 @@ fn get_request_conn(conn: &Connection, request_id: &str) -> Result<Option<Reques
         )
         .optional()?;
     Ok(row)
+}
+
+impl Store {
+    /// Record a canonical reverted deferred stage without dropping the source
+    /// transit or releasing its principal allocation. A new attempt needs a
+    /// separately declared recovery identity and fresh authorization.
+    pub fn commit_bridge_failed_stage(
+        &mut self,
+        settlement: &Settlement,
+        transfer_id: &str,
+        step_id: &str,
+        kind: &fin_domain::BridgeStepKind,
+        timestamp: &str,
+    ) -> Result<()> {
+        if !kind.is_destination_stage()
+            || settlement.terminal_record["status"] != "failed"
+            || settlement.terminal_record["submission"].is_null()
+            || settlement.terminal_record["effects"].is_null()
+            || settlement.proof.is_null()
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let submitted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+            [&settlement.operation_id],
+            |row| row.get(0),
+        )?;
+        if !submitted {
+            return Err(StoreError::SubmissionConflict);
+        }
+        let raw: String = tx.query_row(
+            "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+            [transfer_id],
+            |row| row.get(0),
+        )?;
+        let mut transfer: fin_domain::BridgeTransferRecord = serde_json::from_str(&raw)?;
+        if transfer.grant_id.is_some()
+            || transfer.plan_scope.is_some()
+            || transfer.transit.is_none()
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        let link = transfer
+            .steps
+            .iter_mut()
+            .find(|link| link.step_id == step_id)
+            .ok_or(StoreError::BridgeConflict)?;
+        if link.kind != *kind
+            || link.operation_id.as_deref() != Some(settlement.operation_id.as_str())
+            || link.state != fin_domain::BridgeStepState::Submitted
+            || link.grant_id.is_some()
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        link.state = fin_domain::BridgeStepState::NeedsAttention;
+        let link_json = serde_json::to_string(link)?;
+        transfer.state = fin_domain::BridgeTransferState::NeedsAttention;
+        transfer.version = transfer
+            .version
+            .checked_add(1)
+            .ok_or(StoreError::BridgeConflict)?;
+        commit_settlement_tx(&tx, settlement, timestamp)?;
+        let changed=tx.execute("UPDATE bridge_step_links SET step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id=?3",params![transfer.id,step_id,settlement.operation_id,link_json])?;
+        if changed != 1 {
+            return Err(StoreError::BridgeConflict);
+        }
+        tx.execute(
+            "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1",
+            params![
+                transfer.id,
+                transfer.version,
+                serde_json::to_string(&transfer)?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// CAS append of broker-derived deferred Base recovery declarations. This
+    /// changes no submission, approval, reservation, cost or source ownership.
+    pub fn append_base_recovery(
+        &mut self,
+        expected: &fin_domain::BridgeTransferRecord,
+        updated: &fin_domain::BridgeTransferRecord,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
+        validate_base_recovery_append(expected, updated)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: String = tx.query_row(
+            "SELECT record_json FROM bridge_transfers WHERE transfer_id=?1",
+            [&expected.id],
+            |row| row.get(0),
+        )?;
+        if serde_json::from_str::<fin_domain::BridgeTransferRecord>(&current)? != *expected {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        for link in &expected.steps {
+            if link.state == fin_domain::BridgeStepState::Submitted {
+                return Err(StoreError::BridgeConflict);
+            }
+            if let Some(operation_id) = &link.operation_id {
+                let status: Option<String> = tx
+                    .query_row(
+                        "SELECT status FROM operations WHERE id=?1",
+                        [operation_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if status.as_deref().is_none_or(|status| !is_terminal(status)) {
+                    return Err(StoreError::BridgeConflict);
+                }
+            }
+        }
+        let parent_id = updated
+            .quote_revisions
+            .last()
+            .ok_or(StoreError::BridgeConflict)?
+            .payload["base_recovery"]["parent_operation_id"]
+            .as_str()
+            .ok_or(StoreError::BridgeConflict)?;
+        let parent_status: String = tx.query_row(
+            "SELECT status FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )?;
+        let reason = updated
+            .quote_revisions
+            .last()
+            .ok_or(StoreError::BridgeConflict)?
+            .payload["base_recovery"]["reason"]
+            .as_str()
+            .ok_or(StoreError::BridgeConflict)?;
+        if parent_status
+            != if reason == "proof_invalidated" {
+                "completed"
+            } else {
+                "failed"
+            }
+        {
+            return Err(StoreError::BridgeConflict);
+        }
+        // Preserve old rows exactly except the never-submitted superseded final.
+        // Generic topology refresh deliberately forbids appending to plan-owned
+        // parents; this narrowly checked transition does not adopt new authority.
+        for (before, after) in expected.steps.iter().zip(&updated.steps) {
+            if before != after {
+                let changed=tx.execute("UPDATE bridge_step_links SET step_json=?3 WHERE transfer_id=?1 AND step_id=?2 AND operation_id IS NULL",params![updated.id,after.step_id,serde_json::to_string(after)?])?;
+                if changed != 1 {
+                    return Err(StoreError::BridgeConflict);
+                }
+            }
+        }
+        for step in &updated.steps[expected.steps.len()..] {
+            tx.execute("INSERT INTO bridge_step_links(transfer_id,step_id,operation_id,step_json) VALUES (?1,?2,NULL,?3)",params![updated.id,step.step_id,serde_json::to_string(step)?])?;
+        }
+        let revision = updated
+            .quote_revisions
+            .last()
+            .ok_or(StoreError::BridgeConflict)?;
+        tx.execute("INSERT INTO bridge_quote_revisions(transfer_id,revision,revision_json) VALUES (?1,?2,?3)",params![updated.id,revision.revision,serde_json::to_string(revision)?])?;
+        let changed=tx.execute("UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1 AND version=?4",params![updated.id,updated.version,serde_json::to_string(updated)?,expected.version])?;
+        if changed != 1 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        tx.commit()?;
+        Ok(updated.clone())
+    }
+}
+
+fn validate_base_recovery_append(
+    old: &fin_domain::BridgeTransferRecord,
+    next: &fin_domain::BridgeTransferRecord,
+) -> Result<()> {
+    use fin_domain::{BridgeStepKind as K, BridgeStepState as S, BridgeTransferState as T};
+    let invalid = || StoreError::BridgeConflict;
+    if old.grant_id.is_some()
+        || old.transit.is_none()
+        || old.approved_bounds.is_none()
+        || !matches!(
+            old.state,
+            T::InTransit | T::DestinationPending | T::NeedsAttention
+        )
+        || next.state != T::DestinationPending
+        || next.version != old.version.checked_add(1).ok_or_else(invalid)?
+        || !(1..=2).contains(&(next.steps.len().saturating_sub(old.steps.len())))
+        || next.quote_revisions.len() != old.quote_revisions.len() + 1
+        || old.steps.iter().any(|step| step.state == S::Submitted)
+        || old.quote_revisions.is_empty()
+    {
+        return Err(invalid());
+    }
+    let locator = old
+        .transit
+        .as_ref()
+        .and_then(|transit| transit.destination_locator.as_ref())
+        .ok_or_else(invalid)?;
+    if locator.scheme != "base_withdrawal_message"
+        || locator.destination_chain_id != 1
+        || !locator.transaction_hash.is_empty()
+        || !valid_transit_locator(old.transit.as_ref().ok_or_else(invalid)?)
+    {
+        return Err(invalid());
+    }
+    let previous = old.quote_revisions.last().ok_or_else(invalid)?;
+    if previous.payload["base_recovery"]["step_ids"]
+        .as_array()
+        .is_some_and(|ids| {
+            !ids.is_empty()
+                && ids.iter().all(|id| {
+                    old.steps.iter().any(|link| {
+                        Some(link.step_id.as_str()) == id.as_str()
+                            && link.state == S::Unsubmitted
+                            && link.operation_id.is_none()
+                    })
+                })
+        })
+    {
+        return Err(invalid());
+    }
+    let revision = next.quote_revisions.last().ok_or_else(invalid)?;
+    if previous.provider != "base_canonical"
+        || previous.payload["quote"]["intent"]["source"]["chain_id"] != 8453
+        || previous.payload["quote"]["intent"]["destination_chain_id"] != 1
+        || next.quote_revisions[..old.quote_revisions.len()] != old.quote_revisions
+        || revision.provider != previous.provider
+        || revision.route_id != previous.route_id
+        || revision.order_id != previous.order_id
+        || revision.valid_until != previous.valid_until
+        || revision.revision != previous.revision.checked_add(1).ok_or_else(invalid)?
+        || fin_domain::binding_hash(&revision.payload).map_err(|_| invalid())?
+            != revision.quote_hash
+    {
+        return Err(invalid());
+    }
+    let mut normalized = next.clone();
+    normalized.version = old.version;
+    normalized.state = old.state.clone();
+    normalized.steps = old.steps.clone();
+    normalized.quote_revisions = old.quote_revisions.clone();
+    if normalized != *old {
+        return Err(invalid());
+    }
+    let marker = &revision.payload["base_recovery"];
+    if marker["withdrawal_hash"].as_str() != locator.message_hash.as_deref() {
+        return Err(invalid());
+    }
+    let parent = old
+        .steps
+        .iter()
+        .find(|link| Some(link.step_id.as_str()) == marker["parent_step_id"].as_str())
+        .ok_or_else(invalid)?;
+    let invalidated = marker["reason"] == "proof_invalidated";
+    let reverted = marker["reason"] == "stage_reverted";
+    if ((!invalidated || parent.kind != K::Prove || parent.state != S::Settled)
+        && (!reverted || !parent.kind.is_destination_stage() || parent.state != S::NeedsAttention))
+        || parent.operation_id.as_deref() != marker["parent_operation_id"].as_str()
+    {
+        return Err(invalid());
+    }
+    let deposit = old
+        .steps
+        .iter()
+        .find(|link| link.kind == K::Deposit && link.state == S::Settled)
+        .ok_or_else(invalid)?;
+    let additions = &next.steps[old.steps.len()..];
+    if invalidated && additions.len() != 2 {
+        return Err(invalid());
+    }
+    if marker["step_ids"]
+        .as_array()
+        .is_none_or(|ids| ids.len() != additions.len())
+    {
+        return Err(invalid());
+    }
+    for (index, step) in additions.iter().enumerate() {
+        if step.transfer_id != old.id
+            || step.kind
+                != if index == 0 && additions.len() == 2 {
+                    K::Prove
+                } else {
+                    K::Finalize
+                }
+            || step.grant_id.is_some()
+            || step.plan_authority.is_some()
+            || step.operation_id.is_some()
+            || step.state != S::Unsubmitted
+            || step.step_id.is_empty()
+            || old.steps.iter().any(|old| old.step_id == step.step_id)
+            || additions
+                .iter()
+                .filter(|other| other.step_id == step.step_id)
+                .count()
+                != 1
+            || step.depends_on
+                != if index == 0 {
+                    vec![deposit.step_id.clone()]
+                } else {
+                    vec![additions[0].step_id.clone()]
+                }
+            || marker["step_ids"][index].as_str() != Some(step.step_id.as_str())
+        {
+            return Err(invalid());
+        }
+    }
+    for (before, after) in old.steps.iter().zip(&next.steps) {
+        let mut allowed = before.clone();
+        if before.kind == K::Finalize
+            && before.state == S::Unsubmitted
+            && before.operation_id.is_none()
+        {
+            allowed.state = S::Superseded;
+        }
+        if after != &allowed {
+            return Err(invalid());
+        }
+    }
+    let prior_steps = previous.payload["plan"]["steps"]
+        .as_array()
+        .ok_or_else(invalid)?;
+    let new_steps = revision.payload["plan"]["steps"]
+        .as_array()
+        .ok_or_else(invalid)?;
+    if prior_steps.len() != old.steps.len()
+        || new_steps.len() != prior_steps.len() + additions.len()
+        || new_steps[..prior_steps.len()] != *prior_steps
+    {
+        return Err(invalid());
+    }
+    let mut payload = revision.payload.clone();
+    payload["plan"]["steps"] = json!(prior_steps);
+    payload["step_ids"] = previous.payload["step_ids"].clone();
+    match previous.payload.get("base_recovery") {
+        Some(value) => {
+            payload["base_recovery"] = value.clone();
+        }
+        None => {
+            payload
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .remove("base_recovery");
+        }
+    }
+    if payload != previous.payload {
+        return Err(invalid());
+    }
+    let previous_ids = previous.payload["step_ids"]
+        .as_object()
+        .ok_or_else(invalid)?;
+    let new_ids = revision.payload["step_ids"]
+        .as_object()
+        .ok_or_else(invalid)?;
+    if new_ids.len() != previous_ids.len() + additions.len()
+        || previous_ids
+            .iter()
+            .any(|(key, value)| new_ids.get(key) != Some(value))
+    {
+        return Err(invalid());
+    }
+    let deposit_ordinal = previous_ids
+        .iter()
+        .find_map(|(key, value)| {
+            (value.as_str() == Some(deposit.step_id.as_str()))
+                .then(|| key.parse::<u8>().ok())
+                .flatten()
+        })
+        .ok_or_else(invalid)?;
+    for (index, call) in new_steps[prior_steps.len()..].iter().enumerate() {
+        let ordinal = u8::try_from(prior_steps.len() + index).map_err(|_| invalid())?;
+        if call["ordinal"] != ordinal
+            || call["kind"]
+                != if index == 0 && additions.len() == 2 {
+                    "prove"
+                } else {
+                    "finalize"
+                }
+            || call["call"]
+                != json!({"chain_id":1,"to":"0x49048044d57e1c92a77f79988d21fa8faf74e97e","value":"0","data":"0x"})
+            || call["maximum_debit"] != json!([])
+            || call["expected_sender"] != previous.payload["quote"]["intent"]["source_address"]
+            || call["dependencies"]
+                != if index == 0 {
+                    json!([deposit_ordinal])
+                } else {
+                    json!([ordinal - 1])
+                }
+            || new_ids.get(&ordinal.to_string()).and_then(Value::as_str)
+                != Some(additions[index].step_id.as_str())
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

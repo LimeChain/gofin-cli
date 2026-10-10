@@ -129,7 +129,7 @@ impl BinanceEthereumDepositAdapter {
                 "EVM_NETWORK_UNAVAILABLE",
                 "validation",
                 "Selected EVM chain is not configured in Fin.",
-                "Choose a configured Ethereum, Arbitrum One, or Robinhood Chain network.",
+                "Choose a configured Ethereum, Arbitrum One, Robinhood Chain, or Base network.",
             )
         })?;
         let wallet = ethereum
@@ -169,12 +169,12 @@ impl BinanceEthereumDepositAdapter {
             ));
         }
         let expected = fin_binance::binance_evm_chain_id(&network);
-        if expected != Some(chain_id) || ![1, 42161, 4663].contains(&chain_id) {
+        if expected != Some(chain_id) || ![1, 42161, 4663, 8453].contains(&chain_id) {
             return Err(error(
                 "DEPOSIT_ROUTE_UNSUPPORTED",
                 "validation",
                 "The Binance network does not match a supported Fin EVM chain.",
-                "Choose ETH, Arbitrum One, or Robinhood Chain using its current Binance network code.",
+                "Choose Ethereum, Arbitrum One, Robinhood Chain, or Base using its current Binance network code.",
             ));
         }
         Ok((coin, network, chain_id))
@@ -1218,5 +1218,40 @@ impl Adapter for BinanceEthereumDepositAdapter {
             evidence: verified.evidence.clone(),
             verified: Some(verified),
         })
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn base_deposit_network_matches_exact_reviewed_chain_and_keeps_legacy_defaults() {
+        let input: DepositInput = serde_json::from_value(json!({
+            "requestId":"synthetic-base-deposit", "account":"account", "wallet":"wallet",
+            "coin":"ANYCOIN", "network":"BASE", "token":"0x1111111111111111111111111111111111111111",
+            "amount":"1", "maxFeeEth":"0.001"
+        })).unwrap();
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&input).unwrap(),
+            ("ANYCOIN".into(), "BASE".into(), 8453)
+        );
+        let mut mismatched = input;
+        mismatched.chain_id = Some(1);
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&mismatched)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+        let legacy: DepositInput = serde_json::from_value(json!({
+            "requestId":"synthetic-legacy-deposit", "account":"account", "wallet":"wallet",
+            "amount":"1", "maxFeeEth":"0.001"
+        }))
+        .unwrap();
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&legacy).unwrap(),
+            ("ETH".into(), "ETH".into(), 1)
+        );
     }
 }

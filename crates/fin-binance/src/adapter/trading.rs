@@ -436,6 +436,7 @@ impl BinanceProfile {
             spec,
             possible_credits,
             fee_assets: fees,
+            deferred_receipt: None,
             cumulative_scope: None,
             authorization_seconds: None,
         })

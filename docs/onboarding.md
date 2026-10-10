@@ -98,7 +98,7 @@ fin connections add --provider evm --name watch --credential-type read_only --ad
 
 The second address is an unmistakable example; substitute the wallet you intend
 to observe. Signing enrollment may supply `--address` for an independent
-match check. The optional `--network ethereum:1`, `ethereum:42161` or
+match check. The optional `--network ethereum:1`, `ethereum:8453`, `ethereum:42161` or
 `ethereum:4663` selects the read-only enrollment check, defaulting to mainnet;
 it does not restrict the key to that chain. `--provider ethereum` remains a
 legacy alias. Financial inputs use `"network":"evm"` plus `chain_id`.
@@ -107,11 +107,13 @@ human uses protected `connections update --provider evm` to broaden them; no
 upgrade silently widens a legacy signer's scope. See [EVM wallets](testing/evm-wallets.md).
 
 The same enrolled wallet can quote and execute the supported Relay bridge
-transfers between Ethereum, Arbitrum One and Robinhood Chain; no bridge-specific
+transfers between Ethereum, Base, Arbitrum One and Robinhood Chain; no bridge-specific
 credential is collected. Quote discovery is a read. A selected finite bridge
 grant still requires fresh Touch ID and authorizes only that transfer's declared
-approval/reset/deposit steps. Base and Relay Chain are observers, not wallet
-networks. See the [bridge command guide](../README.md#relay-bridge-transfers)
+approval/reset/deposit steps. Base canonical uses exact approval or named
+plan stages, including withdrawal proof/finalization. Base is a wallet/Aave
+network; Relay protocol observers grant no wallet authority. Relay Chain remains
+observer-only. See [Base support and evidence](testing/base.md). See the [bridge command guide](../README.md#relay-bridge-transfers)
 for public request shapes and the separate [verification guide](testing/bridge.md).
 
 CoinGecko pricing accepts an optional protected market-data connection:

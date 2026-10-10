@@ -856,6 +856,7 @@ fn set_external_native_receipt(rpc: &Fixture, chain: u64) {
     let block = 21u64;
     rpc.chain.store(chain, Ordering::SeqCst);
     *rpc.tx.lock().unwrap() = Some(FrozenTransaction {
+        rollup_fee: None,
         chain_id: chain,
         sender: lower_address(addr(1)),
         to: lower_address(addr(2)),
@@ -881,6 +882,7 @@ fn set_external_erc20_receipt(rpc: &Fixture, chain: u64, logs: Vec<Value>) {
     let block = 21u64;
     rpc.chain.store(chain, Ordering::SeqCst);
     *rpc.tx.lock().unwrap() = Some(FrozenTransaction {
+        rollup_fee: None,
         chain_id: chain,
         sender: lower_address(addr(1)),
         to: lower_address(addr(101)),
@@ -947,7 +949,7 @@ async fn payout_rpc_failures_report_only_the_reviewed_method_name() {
 
 #[tokio::test]
 async fn external_payouts_use_l2_sequencer_inclusion_without_weakening_mainnet_finality() {
-    for chain in [42161, 4663] {
+    for chain in [42161, 4663, 8453] {
         for case in [
             "success",
             "wrong-recipient",
@@ -2928,7 +2930,12 @@ async fn borrow_ceil_rounding_is_deferred_and_repay_proves_interest_once() {
         ],
     );
     let proof = a.reconcile(&record(p)).await.unwrap().verified.unwrap();
-    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Accrual{position_kind:PositionKind::VariableDebt,delta,..} if delta.as_str()=="1")));
+    assert!(proof.effects.iter().any(|e|matches!(e,FinancialEffect::Accrual{position_kind:PositionKind::VariableDebt,delta,..} if delta.is_zero())));
+    assert!(
+        proof.effects.iter().any(
+            |e| matches!(e,FinancialEffect::DebtChange{delta,..} if delta.as_str()=="1000001")
+        )
+    );
     assert!(!proof.effects.iter().any(|e| matches!(
         e,
         FinancialEffect::Cost {
@@ -4646,6 +4653,13 @@ mod wallet_only_tests {
     }
     fn wallet_adapter(chain: u64, rpc: Arc<Fixture>) -> EthereumAdapter {
         rpc.chain.store(chain, Ordering::SeqCst);
+        let rpc: Arc<dyn EvmRpc> = if chain == 8453 {
+            // Explicit synthetic Base oracle/header/receipt evidence; this
+            // fixture never establishes deployed fee or biometric acceptance.
+            Arc::new(super::base_aave_tests::BaseAaveRpc { inner: rpc })
+        } else {
+            rpc
+        };
         EthereumAdapter::new(
             EthereumConfig::wallet_only(chain, 2, vec![]),
             vec![WalletConnection {
@@ -4957,7 +4971,7 @@ mod wallet_only_tests {
     }
     #[tokio::test]
     async fn injected_shared_prices_win_on_all_networks_and_keep_actual_observation_times() {
-        for chain in [1, 42161, 4663] {
+        for chain in [1, 42161, 4663, 8453] {
             let rpc = Arc::new(Fixture::new());
             let mut a = if chain == 1 {
                 adapter(rpc.clone())
@@ -5037,7 +5051,7 @@ mod wallet_only_tests {
     }
     #[tokio::test]
     async fn principal_and_fee_prices_keep_distinct_observations_and_valuation_uses_oldest() {
-        for chain in [1, 42161, 4663] {
+        for chain in [1, 42161, 4663, 8453] {
             let rpc = Arc::new(Fixture::new());
             let a = if chain == 1 {
                 adapter(rpc)
@@ -5081,7 +5095,7 @@ mod wallet_only_tests {
     }
     #[tokio::test]
     async fn injected_unavailable_stale_future_or_malformed_prices_never_fall_back_to_aave() {
-        for chain in [1, 42161, 4663] {
+        for chain in [1, 42161, 4663, 8453] {
             for (fail, observed_at, expected) in [
                 (true, now(), "SYNTHETIC_SHARED_PRICE_UNAVAILABLE"),
                 (
@@ -5830,3 +5844,9 @@ mod wallet_only_tests {
         }
     }
 }
+
+#[path = "base_aave_tests.rs"]
+mod base_aave_tests;
+
+#[path = "base_fee_tests.rs"]
+mod base_fee_tests;

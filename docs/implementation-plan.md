@@ -82,8 +82,8 @@ Source transaction confirmation releases the wallet transaction lock and moves
 principal into non-spendable transfer transit. It is not end-to-end completion.
 `bridge.status` independently verifies exact order-correlated destination receipt
 or refund evidence at configured finality before settling the transfer. Relay
-status and transaction hashes are candidate locators only. Base (`8453`) and
-Relay Chain (`537713`) are observer-only. The provider requires no key and
+status and transaction hashes are candidate locators only. Base (`8453`) is a
+reviewed wallet/Aave network; Relay Chain (`537713`) remains observer-only. The provider requires no key and
 currently depends on Relay's deprecated anonymous `/quote`; the newer
 `/requests/v3` path requires an API key and is not used. If the anonymous endpoint
 is removed or a route is unsupported, Fin leaves it unavailable. Canonical native-ETH Ethereum-to-same-EOA routes on Arbitrum and Robinhood
@@ -355,3 +355,64 @@ portfolio changes do not require a test run or baseline restoration.
 Keep release packaging and updates aligned with [release maintenance](releases.md).
 Never include secrets, private account mappings, signed requests or unredacted
 live logs in source control.
+
+
+## Base extension (implementation in this worktree)
+
+Reuse protected EVM signers and exact chain-qualified financial identities.
+Reviewed Base network configuration supplies RPCs, WETH and Aave V3 pool/oracle;
+legacy scopes and submissions remain unchanged. Dynamic Relay candidates are
+verified by exact RPC contract precision; provider lists never grant authority.
+`bridge.routes` is indicative discovery, separate from priced quotes and writes.
+No existing CCTP implementation was present to extend.
+
+Base execution reserves pinned bounded L1 data and operator fees in addition to
+L2 gas. Actual costs remain unclipped; rejected over-reservation proofs persist
+with reservations and conservative allocation accounting. Base receipts require
+one canonical full L2 block, with no Flashblock or L1-finality assertion.
+
+Base canonical withdrawals retain a source-proved message identity in transit,
+then materialize broker-owned `prove`/`finalize` calls from current portal/game
+state. Exact approval or a named plan lists every stage. Source quote expiry is
+separate from authority expiry; recovery appends finite stage IDs for the same
+withdrawal without renewing consent, replaying initiation or erasing consumed
+fees. Every stage checks remaining cumulative costs and reservations.
+
+Opening Aave variable debt from independently proved zero prior principal and
+zero pre-scaled debt classifies complete new backing (cash principal plus finite
+rounding/post-mint index increment) as `DebtChange`, with zero `Accrual`. That
+finite exposure was already priced/reserved; the opening maximum debt change
+includes it. Existing debt keeps principal/accrual separation and deferred-cost
+proofs. Shared accounting still rejects unanchored accrual. Historical previews
+with narrower debt caps are not widened or replayed.
+
+Uniswap swaps remain dependent on the separately owned foundation's merge to
+`main`; no uncommitted implementation is copied. Liquidity is not implemented
+by current Fin. See [the Base matrix, reproducible checks and pending human/live
+checklist](testing/base.md) for evidence limits, current blockers and test-only
+OP fork fee modeling.
+
+The explicitly requested October 2026 development bridge test exposed two RPC/API
+normalization cases. Relay zero fee rows are omitted only after exact asset and
+integer validation; positive unknown fees retain explicit additional-debit caps.
+Base deposit RPCs may omit `isSystemTx=false`; acceptance still requires the
+independently source-derived type-0x7e transaction hash, which commits to false,
+plus exact deposit fields, canonical successful receipt and correlated relay/credit
+logs. Explicit true or malformed flags remain rejected. Reconciliation preserves
+the already submitted deposit identity across the development rebuild.
+
+Allowance-aware Relay refresh may omit a satisfied approval. The broker retains
+the original validated finite approval identity/call and step topology while
+replacing only the unsubmitted deposit quote; fresh allowance checks still gate
+dispatch. Completed plan-owned bridge prefixes retain historical permissions
+for same-plan renewal, including terminal parents. Their executable paths remain
+closed, and usage/ownership checks preserve consumed principal and fees.
+
+Direct Relay ERC-20 payout proofs accept the two canonical calls `transfer`
+and `transferFrom`, with exactly one appended 32-byte protocol order ID.
+`transferFrom` independently binds a nonzero token owner distinct from the
+recipient, exact recipient/amount, and one canonical matching token Transfer
+log; the relayer remains the transaction sender. Extra calldata, malformed ABI,
+wrong order/request tag, self-credit, wrong token/owner/amount and duplicate
+matching logs remain rejected. No provider-success or balance-only shortcut
+establishes completion.

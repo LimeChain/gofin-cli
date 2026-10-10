@@ -169,14 +169,16 @@ One EVM connection shares an address and protected signer across reviewed chains
 
 ```sh
 fin connections add --provider evm --name wallet --credential-type private_key
+fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":8453}' --json
 fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
 fin read wallet.balances --input '{"wallet":"wallet","network":"evm","chain_id":4663}' --json
 ```
 
 Enrollment requires no network. Each operation selects its explicit `chain_id`:
-Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
+Ethereum mainnet `1`, Base `8453`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
 ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
-native/ERC-20 transfers. The supported Relay and canonical bridge scope is
+native/ERC-20 transfers. Base supports the reviewed Aave deployment and WETH operations; Base Uniswap
+awaits the separate implementation merge. The supported Relay and canonical bridge scope is
 described below; other dapps and bridge providers remain later work.
 Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. EVM pricing keeps the existing
@@ -184,9 +186,17 @@ CoinGecko native-ETH and exact network/contract token path.
 
 ## Bridge transfers
 
-Fin supports direct native ETH and explicitly reviewed ERC-20 Relay deposits
-between Ethereum Mainnet (`1`), Arbitrum One (`42161`) and Robinhood Chain
-(`4663`). It also supports a narrow canonical Inbox route for native ETH from
+Fin supports direct native ETH and dynamically verified exact ERC-20 Relay deposits
+between Ethereum Mainnet (`1`), Base (`8453`), Arbitrum One (`42161`) and Robinhood Chain
+(`4663`). Base canonical bridging supports ETH and verified StandardBridge ERC-20
+pairs in both directions, with separate initiation/proof/finalization stages for
+withdrawals. Discover indicative exact-asset routes before quoting:
+
+```sh
+fin read bridge.routes --input '{"source":{"chainId":1},"destinationChainId":8453}' --json
+```
+
+See the [Base capability/evidence matrix and verification checklist](docs/testing/base.md). It also supports a narrow canonical Inbox route for native ETH from
 Ethereum to the same wallet on Arbitrum One or Robinhood Chain. Canonical routes
 do not support tokens, another recipient, swaps, or reverse transfers. The first
 request is a read: quote-time bounds are optional planning hints, quotes reserve
@@ -315,9 +325,9 @@ anonymous `/quote` endpoint, which is deprecated; the newer `/requests/v3`
 request path requires an API key and is not used. Endpoint withdrawal or an
 unsupported response leaves the Relay quote unavailable; it does not change a
 saved transfer's provider or route. A separate canonical quote is returned only
-when the exact request is eligible for its native-ETH same-wallet route. Base
-(`8453`) and Relay Chain (`537713`) are read-only
-observers; neither grants wallet authority. Other canonical bridges, Across,
+when the exact request is eligible. Base (`8453`) is also a reviewed wallet and
+Aave network. Relay protocol observer access grants no spending authority;
+Relay Chain (`537713`) remains observer-only. CCTP, Across,
 LayerZero/Stargate and Chainlink CCIP have no enabled route. Both canonical
 destinations completed in the recorded isolated development run; protected
 installation and human Touch ID remain unverified. See [bridge design](docs/bridge-design.md)

@@ -165,7 +165,7 @@ struct ConnectionCommandArgs {
     /// Binance subaccount email; required with --parent and accepted only for role=sub.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     email: Option<String>,
-    /// Optional enrollment read-check network: ethereum:1, ethereum:42161 or ethereum:4663.
+    /// Optional enrollment read-check network: ethereum:1, ethereum:8453, ethereum:42161 or ethereum:4663.
     /// The EVM wallet remains reusable across all reviewed networks.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     network: Option<String>,
@@ -2858,7 +2858,7 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 53);
+        assert_eq!(financial_catalog().len(), 55);
         assert!(financial_catalog().iter().all(|v| v.get("name").is_some()));
     }
 

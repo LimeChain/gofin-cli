@@ -360,3 +360,5 @@ The second command tests the shared profile without connectivity features.
 separate explicit public-only network smoke check, never part of default tests.
 Authenticated production, installation, onboarding and real Touch ID are not
 covered by it.
+
+Base implementation, per-operation evidence and delayed canonical withdrawal acceptance are tracked in [Base verification](base.md).

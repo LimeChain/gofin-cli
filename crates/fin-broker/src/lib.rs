@@ -191,6 +191,16 @@ impl NetworkConfig {
                     "0x5fc5360d0400a0fd4f2af552add042d716f1d168".into(),
                 ],
             },
+            Self {
+                id: "ethereum:8453".into(),
+                chain_id: 8453,
+                // Standard RPC: settlement reads use canonical full blocks,
+                // never pending/Flashblocks preconfirmations.
+                // https://docs.base.org/get-started/connect-to-base
+                rpc_urls: vec!["https://mainnet.base.org".into()],
+                confirmations: 1,
+                snapshot_tokens: vec![],
+            },
         ]
     }
 }
@@ -258,7 +268,7 @@ impl BrokerConfigV2 {
                 || !networks.insert(network.id.clone())
                 || network.id != format!("ethereum:{}", network.chain_id)
                 || !chain_ids.insert(network.chain_id)
-                || ![1, 42161, 4663].contains(&network.chain_id)
+                || ![1, 42161, 4663, 8453].contains(&network.chain_id)
                 || network.snapshot_tokens.len() > 64
                 || network
                     .snapshot_tokens
@@ -894,9 +904,17 @@ pub fn build_applications_with_price_source(
                 require_finalized: false,
                 weth: Some(deployment.weth.clone()),
                 snapshot_tokens: deployment.snapshot_tokens.clone(),
-                uniswap: Some(deployment.uniswap.clone()),
+                // The shared Uniswap foundation must reach main before Base
+                // can expose swaps. Retain legacy deployment wire fields while
+                // refusing to reuse Ethereum's adapter as Base verification.
+                uniswap: (network.chain_id != 8453).then(|| deployment.uniswap.clone()),
                 aave: Some(deployment.aave.clone()),
             }
+        } else if network.chain_id == 8453 {
+            // Base's reviewed Aave deployment is independent of Uniswap.
+            // The optional-protocol adapter still checks live provider/token
+            // revisions before a write; discovery is not compatibility proof.
+            fin_ethereum::EthereumConfig::base_aave(network.snapshot_tokens.clone())
         } else {
             fin_ethereum::EthereumConfig::wallet_only(
                 network.chain_id,
@@ -1099,7 +1117,7 @@ fn configured_binance_destinations(
                     .into_iter()
                     .map(|asset| {
                         let key = if asset.reference == "native"
-                            && matches!(network.chain_id, 1 | 42161 | 4663)
+                            && matches!(network.chain_id, 1 | 42161 | 4663 | 8453)
                         {
                             "ETH".to_owned()
                         } else {
@@ -1156,7 +1174,7 @@ impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
         let Some(adapter) = self.adapters.get(&chain_id) else {
             return Ok(None);
         };
-        if !matches!(chain_id, 1 | 42161 | 4663)
+        if !matches!(chain_id, 1 | 42161 | 4663 | 8453)
             || adapter.config.chain_id != chain_id
             || adapter.runtime.chain_id != chain_id
         {
@@ -3610,7 +3628,7 @@ mod tests {
             .iter()
             .map(|network| network["chain_id"].as_u64().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(chain_ids, [1, 42161, 4663].into_iter().collect());
+        assert_eq!(chain_ids, [1, 42161, 4663, 8453].into_iter().collect());
         assert!(wallet["network"].is_null());
         assert!(networks.iter().all(|network| {
             network
@@ -3648,7 +3666,7 @@ mod tests {
                 .iter()
                 .map(|identity| identity.details["chain_id"].as_u64().unwrap())
                 .collect::<BTreeSet<_>>(),
-            [1, 42161, 4663].into_iter().collect()
+            [1, 42161, 4663, 8453].into_iter().collect()
         );
         assert!(wallet_identities.iter().all(|identity| {
             !identity.signing_enabled
@@ -3997,14 +4015,14 @@ mod tests {
         });
         config.validate().unwrap();
         let destinations = configured_binance_destinations(&config).unwrap();
-        assert_eq!(destinations.len(), 4);
+        assert_eq!(destinations.len(), 5);
         let reusable = destinations
             .iter()
             .filter(|d| d.name == "synthetic-reusable")
             .collect::<Vec<_>>();
         assert_eq!(
             reusable.iter().map(|d| d.chain_id).collect::<Vec<_>>(),
-            vec![1, 42161, 4663]
+            vec![1, 42161, 4663, 8453]
         );
         for destination in reusable {
             assert_eq!(
@@ -4035,6 +4053,106 @@ mod tests {
             legacy_assets.into_iter().collect()
         );
         assert!(build_protected_applications(&config, Arc::new(UnusedCredentials)).is_ok());
+    }
+
+    #[test]
+    fn base_profile_has_full_block_policy_wrapper_and_no_dapp_or_asset_whitelist() {
+        let mut configured = config();
+        configured.networks = NetworkConfig::reviewed_evm_networks();
+        configured.validate().unwrap();
+        let profile = configured
+            .networks
+            .iter()
+            .find(|n| n.chain_id == 8453)
+            .unwrap();
+        assert_eq!(profile.id, "ethereum:8453");
+        assert_eq!(profile.rpc_urls, vec!["https://mainnet.base.org"]);
+        assert_eq!(profile.confirmations, 1);
+        assert!(profile.snapshot_tokens.is_empty());
+        let wallet = fin_ethereum::EthereumConfig::wallet_only(8453, 9, vec![]);
+        assert_eq!(wallet.confirmations, 1);
+        assert!(!wallet.require_finalized);
+        assert_eq!(
+            wallet.weth.as_deref(),
+            Some("0x4200000000000000000000000000000000000006")
+        );
+        assert!(wallet.uniswap.is_none() && wallet.aave.is_none());
+        // Existing protected configuration keeps only its approved networks;
+        // startup never silently broadens a legacy wallet's scope.
+        let legacy = config();
+        assert_eq!(legacy.networks.len(), 1);
+        assert_eq!(legacy.networks[0].id, "ethereum:1");
+        legacy.validate().unwrap();
+        configured
+            .networks
+            .iter_mut()
+            .find(|n| n.chain_id == 8453)
+            .unwrap()
+            .id = "base:8453".into();
+        assert_eq!(
+            configured.validate().unwrap_err().code,
+            "CONFIG_NETWORK_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    async fn base_legacy_deployment_fields_never_enable_unmerged_uniswap_adapter() {
+        let mut config = config();
+        config.networks = NetworkConfig::reviewed_evm_networks()
+            .into_iter()
+            .filter(|network| network.chain_id == 8453)
+            .collect();
+        let base = fin_ethereum::EthereumConfig::base_aave(vec![]);
+        let mut deployment = DeploymentConfig::ethereum_mainnet();
+        deployment.network = "ethereum:8453".into();
+        deployment.weth = base.weth.unwrap();
+        deployment.aave = base.aave.unwrap();
+        deployment.snapshot_tokens.clear();
+        config.deployments = vec![deployment];
+        let address = "0x1111111111111111111111111111111111111111";
+        config.connections = vec![ConnectionConfig::Evm {
+            name: "synthetic-base".into(),
+            resource: ResourceId(format!("evm:{address}")),
+            address: address.into(),
+            signing_enabled: false,
+            credential_ref: None,
+        }];
+        config.validate().unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(
+            serialized["deployments"][0]["uniswap"].is_object(),
+            "Legacy wire shape remains readable."
+        );
+        let applications =
+            build_protected_applications(&config, Arc::new(UnusedCredentials)).unwrap();
+        let wallet = applications
+            .adapters
+            .iter()
+            .find(|adapter| {
+                adapter
+                    .definitions()
+                    .iter()
+                    .any(|definition| definition.name == "wallet.balances")
+            })
+            .unwrap();
+        assert!(
+            wallet
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == "aave.supply")
+        );
+        assert!(
+            !wallet
+                .definitions()
+                .iter()
+                .any(|definition| definition.name.starts_with("uniswap."))
+        );
+        let rejected = wallet
+            .prepare("uniswap.swap", &json!({"chain_id":8453}))
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code, "OPERATION_UNAVAILABLE");
+        assert!(rejected.message.contains("not supported on Base"));
     }
 
     struct PayoutMetadataRpc {
@@ -4098,6 +4216,47 @@ mod tests {
             asset,
             AssetId {
                 network: "ethereum:42161".into(),
+                reference: contract.to_ascii_lowercase(),
+                decimals: 7,
+            }
+        );
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eth_chainId", "eth_blockNumber", "eth_getCode", "eth_call"]
+        );
+        assert_eq!(calls[2].1, json!([contract.to_ascii_lowercase(), "0x2a"]));
+        assert_eq!(
+            calls[3].1,
+            json!([{"to": contract.to_ascii_lowercase(), "data": "0x313ce567"}, "0x2a"])
+        );
+    }
+
+    #[tokio::test]
+    async fn base_payout_asset_resolution_pins_contract_metadata_and_preserves_network_identity() {
+        use fin_binance::BinanceRecipientVerifier;
+        let rpc = Arc::new(PayoutMetadataRpc {
+            chain_id: 8453,
+            decimals: 7,
+            deployed: true,
+            calls: Mutex::new(vec![]),
+        });
+        let verifier = payout_metadata_verifier(8453, rpc.clone());
+        assert!(verifier.supports_chain(8453));
+        assert!(!verifier.supports_chain(1));
+        let contract = "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa";
+        let asset = verifier
+            .resolve_asset(8453, "UNLISTED", Some(contract))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            asset,
+            AssetId {
+                network: "ethereum:8453".into(),
                 reference: contract.to_ascii_lowercase(),
                 decimals: 7,
             }

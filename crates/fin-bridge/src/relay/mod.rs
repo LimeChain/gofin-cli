@@ -69,6 +69,42 @@ pub struct ReviewedTokenKey {
     pub decimals: u8,
 }
 impl ReviewedConfig {
+    /// Asset precision is resolved by the protected broker, independently of
+    /// provider metadata. Keep this exact request-local scope out of the
+    /// deployment registry; accepting an asset never reviews a new spender.
+    fn with_intent_assets(&self, intent: &BridgeIntent) -> Result<Self> {
+        let mut config = self.clone();
+        for asset in std::iter::once(&intent.source)
+            .chain(&intent.destination_assets)
+            .chain(&intent.allowed_refund_assets)
+        {
+            config.chain(asset.chain_id)?;
+            if let Some(token) = &asset.token {
+                let address = parse_address(token)?;
+                ensure(
+                    address != Address::ZERO,
+                    "BRIDGE_ASSET_INVALID",
+                    "validation",
+                    "ERC-20 asset identities must be nonzero.",
+                )?;
+                let address = address_string(address);
+                if let Some(existing) = config.token_decimals(asset.chain_id, &address) {
+                    ensure(
+                        existing == asset.decimals,
+                        "BRIDGE_ASSET_INVALID",
+                        "validation",
+                        "Exact token identity has conflicting precision.",
+                    )?;
+                }
+                config.tokens.insert(ReviewedTokenKey {
+                    chain_id: asset.chain_id,
+                    address,
+                    decimals: asset.decimals,
+                });
+            }
+        }
+        Ok(config)
+    }
     pub fn validate(&self) -> Result<()> {
         ensure(
             self.relay_solver_protocol_chain_id == "base",
@@ -246,23 +282,87 @@ impl RelayProvider {
 
 #[async_trait]
 impl BridgeProvider for RelayProvider {
+    async fn discover_routes(
+        &self,
+        request: &crate::BridgeRouteRequest,
+    ) -> Result<crate::BridgeRouteDiscovery> {
+        self.config.chain(request.source.chain_id)?;
+        self.config.chain(request.destination_chain_id)?;
+        ensure(
+            request.source.chain_id != request.destination_chain_id,
+            "BRIDGE_ROUTE_UNAVAILABLE",
+            "discovery",
+            "Bridge chains must differ.",
+        )?;
+        let mut result = crate::BridgeRouteDiscovery {
+            provider: "relay".into(),
+            availability: crate::RouteAvailability::Candidate,
+            candidates: vec![],
+            observed_at: fin_domain::now(),
+            evidence_source: "Relay /currencies/v2 related currency candidates".into(),
+            complete: false,
+            limitations: vec!["Indicative only: exact amount, liquidity, pricing, quote calldata and financial proof compatibility are checked by bridge.quotes and execution.".into(), "Currency discovery is partial; an explicit exact destination asset can be quoted even if absent from this list.".into()],
+            error: None,
+        };
+        if let Some(asset) = &request.destination_asset {
+            ensure(
+                asset.chain_id == request.destination_chain_id,
+                "BRIDGE_ASSET_INVALID",
+                "discovery",
+                "Destination asset is on a different chain.",
+            )?;
+            result.evidence_source =
+                "Explicit destination identity; provider feasibility requires an executable quote"
+                    .into();
+            result.candidates.push(crate::BridgeRouteCandidate {
+                destination: crate::BridgeAssetInput {
+                    chain_id: asset.chain_id,
+                    token: asset.token.clone(),
+                },
+                reported_decimals: Some(asset.decimals),
+            });
+            return Ok(result);
+        }
+        let Some(source_token) = &request.source.token else {
+            result.evidence_source =
+                "Reviewed Relay native ETH chain profiles; executable quote required".into();
+            result.candidates.push(crate::BridgeRouteCandidate {
+                destination: crate::BridgeAssetInput {
+                    chain_id: request.destination_chain_id,
+                    token: None,
+                },
+                reported_decimals: Some(18),
+            });
+            return Ok(result);
+        };
+        let response = self.client.post(format!("{}/currencies/v2", self.api_base))
+            .json(&json!({"chainIds":[request.source.chain_id],"address":source_token,"includeAllChains":true,"limit":100,"defaultList":false}))
+            .send().await.map_err(|_| bridge_error("BRIDGE_PROVIDER_UNAVAILABLE", "discovery", "Relay currency discovery could not be reached.", "Retry discovery or supply an exact destination asset for a quote."))?;
+        ensure(
+            response.status().is_success(),
+            "BRIDGE_PROVIDER_UNAVAILABLE",
+            "discovery",
+            "Relay currency discovery did not return a successful response.",
+        )?;
+        let raw = bounded_provider_json(response).await?;
+        result.candidates = parse_currency_candidates(&raw, request)?;
+        if result.candidates.is_empty() {
+            result.availability = crate::RouteAvailability::Unknown;
+        }
+        Ok(result)
+    }
     fn capabilities(&self) -> BridgeCapabilities {
         BridgeCapabilities {
             provider: "relay".into(),
-            chains: self
-                .config
-                .chains
-                .keys()
-                .copied()
-                .filter(|chain_id| *chain_id != 8453)
-                .collect(),
+            chains: self.config.chains.keys().copied().collect(),
             native_eth: true,
             erc20: true,
             protocol_versions: ["protocol.v2".to_owned()].into_iter().collect(),
         }
     }
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch> {
-        validate_intent(&self.config, &request.intent, &request.bounds)?;
+        let config = self.config.with_intent_assets(&request.intent)?;
+        validate_intent(&config, &request.intent, &request.bounds)?;
         let mut batch = BridgeQuoteBatch {
             quotes: Vec::new(),
             failures: Vec::new(),
@@ -273,7 +373,7 @@ impl BridgeProvider for RelayProvider {
             match self
                 .quote_http(&one)
                 .await
-                .and_then(|raw| parse_order_response(&raw, &one, &self.config))
+                .and_then(|raw| parse_order_response(&raw, &one, &config))
             {
                 Ok(quote) => batch.quotes.push(quote),
                 Err(error) => batch.failures.push(BridgeQuoteFailure {
@@ -291,7 +391,8 @@ impl BridgeProvider for RelayProvider {
         bounds: &BridgeBounds,
         wallet: &str,
     ) -> Result<PreparedBridge> {
-        validate_intent(&self.config, &quote.intent, bounds)?;
+        let config = self.config.with_intent_assets(&quote.intent)?;
+        validate_intent(&config, &quote.intent, bounds)?;
         ensure(
             quote.provider == "relay",
             "BRIDGE_QUOTE_INVALID",
@@ -330,8 +431,8 @@ impl BridgeProvider for RelayProvider {
             )?;
         }
         validate_quote_bounds(quote, bounds)?;
-        validate_prepared_calls(&self.config, quote, &steps, parse_b256(order_id)?)?;
-        let fixed_scope_digest = fixed_scope_digest(&quote.intent, &self.config)?;
+        validate_prepared_calls(&config, quote, &steps, parse_b256(order_id)?)?;
+        let fixed_scope_digest = fixed_scope_digest(&quote.intent, &config)?;
         steps.sort_by_key(|step| step.ordinal);
         Ok(PreparedBridge {
             quote: quote.clone(),
@@ -395,6 +496,99 @@ impl BridgeProvider for RelayProvider {
         })?;
         parse_evidence_candidates(&value, transfer)
     }
+}
+
+/// Provider currency metadata is a bounded, partial identity candidate list.
+/// Exact source matching gates related-chain results; symbols never match assets.
+fn parse_currency_candidates(
+    raw: &Value,
+    request: &crate::BridgeRouteRequest,
+) -> Result<Vec<crate::BridgeRouteCandidate>> {
+    let entries = raw
+        .as_array()
+        .ok_or_else(|| invalid_order("currency discovery is not an array"))?;
+    ensure(
+        entries.len() <= 100,
+        "BRIDGE_RESPONSE_INVALID",
+        "discovery",
+        "Relay currency discovery exceeds its declared bound.",
+    )?;
+    let source_token = request
+        .source
+        .token
+        .as_deref()
+        .ok_or_else(|| invalid_order("currency discovery requires an exact source token"))?;
+    let source_matches = entries.iter().any(|entry| {
+        entry["chainId"].as_u64() == Some(request.source.chain_id)
+            && entry["vmType"].as_str() == Some("evm")
+            && entry["address"]
+                .as_str()
+                .is_some_and(|address| address.eq_ignore_ascii_case(source_token))
+            && entry["decimals"].as_u64() == Some(u64::from(request.source.decimals))
+    });
+    if !source_matches {
+        return Ok(vec![]);
+    }
+    let mut seen = BTreeMap::new();
+    let mut candidates = Vec::new();
+    for entry in entries {
+        if entry["chainId"].as_u64() != Some(request.destination_chain_id)
+            || entry["vmType"].as_str() != Some("evm")
+        {
+            continue;
+        }
+        let token = entry["address"]
+            .as_str()
+            .ok_or_else(|| invalid_order("candidate currency has no exact address"))?;
+        let address = parse_address(token)?;
+        let decimals: u8 = entry["decimals"]
+            .as_u64()
+            .and_then(|n| n.try_into().ok())
+            .ok_or_else(|| invalid_order("candidate currency precision is invalid"))?;
+        ensure(
+            address != Address::ZERO || decimals == 18,
+            "BRIDGE_RESPONSE_INVALID",
+            "discovery",
+            "Native ETH candidate precision must be exactly 18 decimals.",
+        )?;
+        if let Some(previous) = seen.insert(address, decimals) {
+            ensure(
+                previous == decimals,
+                "BRIDGE_RESPONSE_INVALID",
+                "discovery",
+                "Exact candidate token identity has conflicting precision.",
+            )?;
+            continue;
+        }
+        candidates.push(crate::BridgeRouteCandidate {
+            destination: crate::BridgeAssetInput {
+                chain_id: request.destination_chain_id,
+                token: (address != Address::ZERO).then(|| address_string(address)),
+            },
+            reported_decimals: Some(decimals),
+        });
+    }
+    Ok(candidates)
+}
+
+async fn bounded_provider_json(mut response: reqwest::Response) -> Result<Value> {
+    const MAX_BYTES: usize = 256 * 1024;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| invalid_order("provider response body failed"))?
+    {
+        ensure(
+            bytes.len().saturating_add(chunk.len()) <= MAX_BYTES,
+            "BRIDGE_RESPONSE_INVALID",
+            "discovery",
+            "Provider discovery response exceeds its byte bound.",
+        )?;
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| invalid_order("provider discovery is malformed JSON"))
 }
 
 fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<()> {
@@ -614,12 +808,6 @@ fn validate_intent(
     )?;
     config.chain(intent.source.chain_id)?;
     config.chain(intent.destination_chain_id)?;
-    ensure(
-        intent.source.chain_id != 8453 && intent.destination_chain_id != 8453,
-        "BRIDGE_ROUTE_UNAVAILABLE",
-        "validation",
-        "Base is a read-only Relay solver observer in this configuration.",
-    )?;
     let source_addr = parse_address(&intent.source_address)?;
     let recipient_addr = parse_address(&intent.recipient)?;
     let refund_addr = parse_address(&intent.refund_to)?;
@@ -1326,6 +1514,13 @@ fn parse_order_fees(value: &Value, config: &ReviewedConfig) -> Result<Vec<Bridge
         {
             continue;
         }
+        let atoms = Quantity::new(amount)?;
+        // A validated zero fee grants no spending authority. Anonymous
+        // responses include zero app/subsidy rows; requiring a positive cap
+        // for those rows would invent an additional debit.
+        if atoms.is_zero() {
+            continue;
+        }
         let (kind, payer) = match name.as_str() {
             "gas" => (FeeKind::Gas, "sender"),
             "relayerGas" => (FeeKind::Gas, "relay"),
@@ -1334,10 +1529,7 @@ fn parse_order_fees(value: &Value, config: &ReviewedConfig) -> Result<Vec<Bridge
             _ => (FeeKind::AdditionalDebit, "unknown"),
         };
         fees.push(BridgeFee {
-            amount: Amount {
-                asset,
-                atoms: Quantity::new(amount)?,
-            },
+            amount: Amount { asset, atoms },
             kind,
             payer: payer.into(),
         });
@@ -2252,3 +2444,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod dynamic_tests;

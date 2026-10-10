@@ -244,21 +244,36 @@ impl BinanceTransport for SyntheticVenue {
                 }).take(limit).collect::<Vec<_>>();
                 Ok(json!(rows))
             }
-            E::CapitalConfig => Ok(json!([
+            E::CapitalConfig => {
+                let mut assets = json!([
                 {"coin":ASSET,"depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ETH","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":s.withdraw_fee,"withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"minConfirm":12,"unLockConfirm":64},{"network":"ARBITRUM","coin":ASSET,"withdrawIntegerMultiple":"0.001","withdrawFee":"0","withdrawMin":"0.001","withdrawMax":"100","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"minConfirm":12,"unLockConfirm":64}]},
                 {"coin":"USDC","depositAllEnable":true,"withdrawAllEnable":true,"networkList":[{"network":"ARBITRUM","coin":"USDC","withdrawIntegerMultiple":"0.000001","withdrawFee":"0","withdrawMin":"0.001","withdrawMax":"1000000","depositDust":"0.001","withdrawEnable":true,"depositEnable":s.deposit_enabled,"memoRegex":s.deposit_memo_regex,"contractAddress":"0xaf88d065e77c8cC2239327C5EDb3A432268e5831","denomination":s.deposit_denomination,"minConfirm":12,"unLockConfirm":64}]}
-            ])),
+                ]);
+                for asset in assets.as_array_mut().unwrap() {
+                    let routes = asset["networkList"].as_array_mut().unwrap();
+                    if let Some(arbitrum) = routes.iter().find(|r| r["network"] == "ARBITRUM") {
+                        let mut base = arbitrum.clone();
+                        base["network"] = json!("BASE");
+                        if base["coin"] == "USDC" {
+                            base["contractAddress"] =
+                                json!("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913");
+                        }
+                        routes.push(base);
+                    }
+                }
+                Ok(assets)
+            }
             E::DepositAddress => {
                 if params.get("coin").is_some_and(|coin| coin == "USDC") {
                     Ok(
-                        json!({"coin":"USDC","network":"ARBITRUM","address":"0x1111111111111111111111111111111111111111","tag":s.deposit_memo.clone().unwrap_or_default()}),
+                        json!({"coin":"USDC","network":params.get("network").map(String::as_str).unwrap_or("ARBITRUM"),"address":"0x1111111111111111111111111111111111111111","tag":s.deposit_memo.clone().unwrap_or_default()}),
                     )
                 } else if params
                     .get("network")
-                    .is_some_and(|network| network == "ARBITRUM")
+                    .is_some_and(|network| network == "ARBITRUM" || network == "BASE")
                 {
                     Ok(
-                        json!({"coin":ASSET,"network":"ARBITRUM","address":"0x1111111111111111111111111111111111111111","tag":""}),
+                        json!({"coin":ASSET,"network":params.get("network").unwrap(),"address":"0x1111111111111111111111111111111111111111","tag":""}),
                     )
                 } else {
                     Ok(
@@ -1239,6 +1254,44 @@ impl EvmRpc for ArbitrumTokenRpc {
     }
 }
 
+struct BaseTokenPreviewRpc {
+    inner: ArbitrumTokenRpc,
+}
+#[async_trait]
+impl EvmRpc for BaseTokenPreviewRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        if method == "eth_chainId" {
+            return Ok(json!("0x2105"));
+        }
+        if method == "eth_call"
+            && params[0]["to"].as_str().is_some_and(|to| {
+                to.eq_ignore_ascii_case("0x420000000000000000000000000000000000000f")
+            })
+        {
+            let data = params[0]["data"].as_str().unwrap();
+            let flag = ["isFjord()", "isIsthmus()", "isJovian()"]
+                .iter()
+                .any(|sig| {
+                    data.starts_with(&format!(
+                        "0x{}",
+                        hex::encode(DepositPreviewRpc::selector(sig))
+                    ))
+                });
+            return Ok(json!(format!(
+                "0x{:064x}",
+                if flag { 1u64 } else { 1000u64 }
+            )));
+        }
+        let mut result = self.inner.request(method, params).await?;
+        if method == "eth_getBlockByNumber" {
+            // The synthetic oracle advertises Jovian: canonical fee evidence
+            // must include its complete version-1 header, never omit it.
+            result["extraData"] = json!(format!("0x01{}", "00".repeat(16)));
+        }
+        Ok(result)
+    }
+}
+
 struct DepositExecutionRpc {
     oracle_updated_at: u128,
     priority_fee: AtomicU64,
@@ -1932,6 +1985,178 @@ async fn arbitrum_payout_verifier_recovers_legacy_confirmation_count_at_sequence
     assert_eq!(
         verifier.verify(request).await.status,
         fin_domain::Status::Completed
+    );
+}
+
+#[tokio::test]
+async fn base_payout_requires_full_canonical_l2_inclusion_and_exact_identity() {
+    use fin_binance::{BinanceRecipientVerifier, PayoutRequest};
+    let rpc = Arc::new(CanonicalNativeCreditRpc::new(8453));
+    let recipient = "0x1111111111111111111111111111111111111111";
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(8453, 2, vec![]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-base-payout".into(),
+                address: recipient.into(),
+                signing_enabled: false,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(rpc.clone(), 8453, None)),
+        )
+        .unwrap(),
+    );
+    let verifier =
+        fin_broker::EthereumPayoutVerifier::new(BTreeMap::from([(8453, ethereum)])).unwrap();
+    let request = PayoutRequest {
+        network: "BASE".into(),
+        memo: None,
+        tx_hash: format!("0x{}", "ab".repeat(32)),
+        chain_id: 8453,
+        recipient: recipient.into(),
+        asset: AssetId {
+            network: "ethereum:8453".into(),
+            reference: "native".into(),
+            decimals: 18,
+        },
+        minimum_amount: "0.01".into(),
+        maximum_amount: "0.01".into(),
+        confirmations: 2,
+    };
+    // A historical request retains its stored two-confirmation identity, but
+    // the reviewed incoming-credit policy requires only sequencer inclusion.
+    *rpc.latest.lock().unwrap() = "0x64".into();
+    for finalized in [None, Some("0x63".to_owned()), Some("invalid".to_owned())] {
+        *rpc.finalized.lock().unwrap() = finalized;
+        let completed = verifier.verify(request.clone()).await;
+        assert_eq!(completed.status, fin_domain::Status::Completed);
+        assert_eq!(
+            completed.amount_atoms,
+            Some(Quantity::from_decimal("0.01", 18).unwrap())
+        );
+        assert_eq!(
+            completed.evidence["proof_method"],
+            "canonical-direct-native-value"
+        );
+        assert_eq!(completed.evidence["chain_id"], 8453);
+        assert_eq!(completed.evidence["finality"], "sequencer-inclusion");
+        assert_eq!(rpc.finalized_seen.load(Ordering::SeqCst), 0);
+    }
+    *rpc.latest.lock().unwrap() = "0x63".into();
+    assert_eq!(
+        verifier.verify(request.clone()).await.status,
+        fin_domain::Status::Pending
+    );
+    *rpc.latest.lock().unwrap() = "0x64".into();
+    *rpc.recipient.lock().unwrap() = "0x3333333333333333333333333333333333333333".into();
+    let wrong_recipient = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_recipient.status, fin_domain::Status::Unknown);
+    assert_eq!(
+        wrong_recipient.evidence["code"],
+        "FUNDING_RECIPIENT_MISMATCH"
+    );
+    *rpc.recipient.lock().unwrap() = recipient.into();
+    *rpc.value.lock().unwrap() = "0x1".into();
+    let partial = verifier.verify(request.clone()).await;
+    assert_eq!(partial.status, fin_domain::Status::Unknown);
+    assert_eq!(partial.evidence["code"], "FUNDING_AMOUNT_MISMATCH");
+    *rpc.value.lock().unwrap() = "0x2386f26fc10000".into();
+    rpc.transaction_chain.store(1, Ordering::SeqCst);
+    let wrong_transaction_chain = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_transaction_chain.status, fin_domain::Status::Unknown);
+    assert_eq!(
+        wrong_transaction_chain.evidence["code"],
+        "FUNDING_IDENTITY_MISMATCH"
+    );
+    rpc.transaction_chain.store(8453, Ordering::SeqCst);
+    rpc.rpc_chain.store(1, Ordering::SeqCst);
+    let wrong_rpc_chain = verifier.verify(request.clone()).await;
+    assert_eq!(wrong_rpc_chain.status, fin_domain::Status::Unknown);
+    assert!(wrong_rpc_chain.amount_atoms.is_none());
+    rpc.rpc_chain.store(8453, Ordering::SeqCst);
+    let mut wrong_asset = request.clone();
+    wrong_asset.asset.network = "ethereum:1".into();
+    let wrong_asset = verifier.verify(wrong_asset).await;
+    assert_eq!(wrong_asset.status, fin_domain::Status::Unknown);
+    assert_eq!(wrong_asset.evidence["code"], "WRONG_CHAIN");
+    assert_eq!(
+        verifier.verify(request).await.status,
+        fin_domain::Status::Completed
+    );
+}
+
+#[tokio::test]
+async fn base_deposit_preview_uses_authenticated_exact_asset_and_total_fee_bound() {
+    let venue = Arc::new(SyntheticVenue::new());
+    let token = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+    let wallet = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(8453, 8, vec![]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: "0x2222222222222222222222222222222222222222".into(),
+                signing_enabled: true,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(
+                Arc::new(BaseTokenPreviewRpc {
+                    inner: ArbitrumTokenRpc {
+                        token: token.into(),
+                    },
+                }),
+                8453,
+                None,
+            )),
+        )
+        .unwrap()
+        .with_wallet_valuation(Arc::new(SyntheticWalletPrice)),
+    );
+    let deposit = fin_broker::BinanceEthereumDepositAdapter::new(
+        subaccount_only_adapter(venue.clone()),
+        wallet,
+    );
+    let input = json!({"requestId":"synthetic-base-token","account":"child-a","wallet":"synthetic-wallet",
+        "coin":"USDC","network":"BASE","token":token,"amount":"1.25","maxFeeEth":"0.001"});
+    let prepared = deposit.prepare("binance.deposit", &input).await.unwrap();
+    assert_eq!(prepared.binding["source_asset"]["network"], "ethereum:8453");
+    assert_eq!(prepared.binding["source_asset"]["reference"], token);
+    assert_eq!(prepared.binding["source_asset"]["decimals"], 6);
+    assert_eq!(prepared.binding["target"]["chain_id"], 8453);
+    assert_eq!(prepared.binding["target"]["network"], "BASE");
+    assert_eq!(prepared.intent.debits[0].amount.atoms.to_decimal(6), "1.25");
+    let transaction = &prepared.binding["inner_preview"]["binding"]["transaction"];
+    assert_eq!(transaction["rollup_fee"]["version"], 1);
+    assert_eq!(transaction["rollup_fee"]["maximum_l1_data_fee"], "1500");
+    assert_eq!(transaction["rollup_fee"]["maximum_operator_fee"], "1500");
+    let native = json!({"requestId":"synthetic-base-native","account":"child-a","wallet":"synthetic-wallet",
+        "coin":"ETH","network":"BASE","token":"native","amount":"0.01","maxFeeEth":"0.001"});
+    let prepared_native = deposit.prepare("binance.deposit", &native).await.unwrap();
+    assert_eq!(
+        prepared_native.binding["source_asset"]["reference"],
+        "native"
+    );
+    assert_eq!(
+        prepared_native.binding["source_asset"]["network"],
+        "ethereum:8453"
+    );
+    assert_eq!(prepared_native.binding["source_asset"]["decimals"], 18);
+    assert_eq!(prepared_native.binding["target"]["network"], "BASE");
+    let mut wrong = input.clone();
+    wrong["token"] = json!("0x1111111111111111111111111111111111111111");
+    assert_eq!(
+        deposit
+            .prepare("binance.deposit", &wrong)
+            .await
+            .unwrap_err()
+            .code,
+        "ASSET_IDENTITY_MISMATCH"
+    );
+    venue.state.lock().unwrap().deposit_enabled = false;
+    assert_eq!(
+        deposit
+            .prepare("binance.deposit", &input)
+            .await
+            .unwrap_err()
+            .code,
+        "DEPOSIT_DISABLED"
     );
 }
 

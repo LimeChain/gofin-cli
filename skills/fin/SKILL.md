@@ -2,7 +2,7 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
@@ -13,7 +13,7 @@ Setup and credential changes belong to the human's fresh Terminal. Explain the s
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
 
-EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes Relay routes and canonical native ETH only from Ethereum Mainnet to the same EOA on Arbitrum One or Robinhood Chain. Canonical does not support ERC-20, another recipient, or reverse transfers. Other dapps and bridge providers remain unavailable. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
+EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Base Uniswap awaits its separate foundation merge; liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
 ## Bridge transfers
 
@@ -30,6 +30,8 @@ from Ethereum to the same wallet on Arbitrum One or Robinhood Chain; it offers n
 token, different-recipient, refund, or reverse route.
 
 ```sh
+fin schema bridge.routes --json
+fin schema bridge.recovery --json
 fin schema bridge.quotes --json
 fin schema bridge.transfer --json
 fin schema bridge.status --json
@@ -62,7 +64,7 @@ approval, optional allowance reset and source deposit steps, with cumulative
 debit and gas limits. For a workflow that also includes Binance funding or
 other linked actions, put the bridge writes in the same named plan instead:
 list one `bridge.transfer` plan step per exact saved approval/reset/deposit ID,
-all using the same transfer ID and selected bounds. A bridge transfer cannot be
+all using the same transfer ID and selected bounds. For Base canonical withdrawals, include the saved prove and finalize IDs too. Use operation success for initiation/prove completion and the final stage for destination receipt, so the sequence does not wait for destination credit before proving. Base canonical requires exact approvals or a named plan, not an operation-boundary grant. A bridge transfer cannot be
 covered by both a named plan and a separate bridge grant. In either flow, each
 concrete write keeps its own stable operation `--id`; quote refresh does not
 extend consent.
@@ -93,8 +95,8 @@ Source confirmation proves the debit and moves principal to non-spendable
 in-transit state; it is not recipient settlement. Keep checking `bridge.status`
 until Fin proves the exact correlated destination credit or refund at configured
 finality. Relay status and transaction hashes are candidates only. An API
-`success` is not proof of completion. Base (`8453`) and Relay Chain (`537713`)
-are observers with no wallet authority.
+`success` is not proof of completion. Base (`8453`) is a reviewed wallet/Aave network; protocol observation does not grant spending authority. Relay Chain (`537713`)
+remains an observer with no wallet authority.
 
 No Relay key is required today. The integration currently depends on its
 deprecated anonymous `/quote` endpoint; the newer `/requests/v3` path requires
@@ -184,7 +186,7 @@ a revised approval. Keep step IDs stable and ordered, declare completion targets
 exact predecessor funding dependencies and aggregate debit/fee caps, and use
 only operation scopes that `fin plans preview` confirms. Named plans accept
 adapter-reviewed bridge steps as well as supported transfers, withdrawals,
-orders and other eligible writes. For each bridge approval, allowance reset and
+orders and other eligible writes. For each bridge approval, allowance reset, Base prove/finalize and
 deposit, add a separate plan step with its exact `transferId`, `stepId`,
 `stepKind` and selected `bounds`; do not use one generic plan step for the whole
 bridge. The adapter binds all of those steps to the same persisted provider,
@@ -273,3 +275,15 @@ administrator access or financial approval; setup offers it as an opt-in after
 success. Compatible Fin runtime updates refresh only recorded, existing,
 unmodified copies. Modified or unmanaged content stays for review, and conflicts
 never grant financial authority. Use `fin skill --help` for update and conflict options.
+
+
+Base canonical withdrawal recovery preserves the original source message hash,
+all earlier submissions and consumed costs. Check `bridge.status` for current
+portal proof maturity, game validity and destination evidence. Quote expiry is
+separate from authority expiry; never reinitiate a settled source withdrawal.
+Use `bridge.recovery` to declare finite replacement stages after an invalidated
+proof or verified reverted stage, then obtain fresh exact approval (originally
+exact parent) or an approved revision of the same named plan (plan-owned parent).
+This read renews no authority and broadcasts nothing. Recovery must fit the
+original cumulative fee budgets. Empty bounded external-finalization discovery
+has partial coverage; it is not proof that no finalization exists.

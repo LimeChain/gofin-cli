@@ -540,7 +540,7 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
     }
     let mut networks = NetworkConfig::reviewed_evm_networks();
     for chain_id in config.rpc_urls.keys() {
-        if ![1, 42161, 4663].contains(chain_id) {
+        if ![1, 42161, 4663, 8453].contains(chain_id) {
             return Err("development RPC override names an unsupported chain".into());
         }
     }
@@ -635,6 +635,23 @@ mod tests {
         assert_eq!(runtime.networks[0].rpc_urls, config.rpc_urls[&1]);
         assert_eq!(runtime.networks[1], defaults[1]);
         assert_eq!(runtime.networks[2], defaults[2]);
+        assert_eq!(runtime.networks[3], defaults[3]);
+        config
+            .rpc_urls
+            .insert(8453, vec!["https://base-rpc.publicnode.com".into()]);
+        let runtime = broker_config(&config).unwrap();
+        let base = runtime
+            .networks
+            .iter()
+            .find(|network| network.chain_id == 8453)
+            .unwrap();
+        assert_eq!(base.rpc_urls, config.rpc_urls[&8453]);
+        assert_eq!(base.id, "ethereum:8453");
+        assert_eq!(base.confirmations, 1);
+        assert_eq!(runtime.networks[0].rpc_urls, config.rpc_urls[&1]);
+        config.rpc_urls.insert(8453, Vec::new());
+        assert!(broker_config(&config).is_err());
+        config.rpc_urls.remove(&8453);
 
         config.rpc_urls.insert(42161, Vec::new());
         assert!(broker_config(&config).is_err());

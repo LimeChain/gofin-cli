@@ -73,6 +73,7 @@ struct Harness {
     engine: Arc<Engine>,
     state: BridgeStateRepository,
     source: Arc<Rpc>,
+    provider: Arc<Erc20Provider>,
     approval: Arc<CountingApproval>,
     wallet: String,
 }
@@ -129,9 +130,10 @@ impl Harness {
             )
             .unwrap(),
         );
+        let provider = Arc::new(Erc20Provider::with_destination(destination.clone(), payout));
         let bridge = Arc::new(
             BridgeAdapter::with_provider_and_observers(
-                Arc::new(Erc20Provider::with_destination(destination.clone(), payout)),
+                provider.clone(),
                 BTreeMap::from([(1, source_wallet.clone()), (42161, destination_wallet)]),
                 BTreeMap::from([(1, source_runtime), (42161, destination_runtime)]),
                 prices,
@@ -160,6 +162,7 @@ impl Harness {
             engine,
             state,
             source,
+            provider,
             approval,
             wallet,
         }
@@ -341,6 +344,9 @@ async fn execute_source_and_get_transfer(
         DomainStepKind::ResetAllowance => 0,
         DomainStepKind::Approval => 1,
         DomainStepKind::Deposit => 2,
+        DomainStepKind::Prove | DomainStepKind::Finalize => {
+            panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+        }
     });
     let bounds = harness.bounds_for_destination(destination_token);
     for (index, step) in steps.iter().enumerate() {
@@ -431,6 +437,35 @@ async fn direct_erc20_order_tagged_payout_needs_no_historical_code_read() {
 }
 
 #[tokio::test]
+async fn direct_transfer_from_payout_verifies_distinct_token_owner_without_replay() {
+    let h = Harness::with_destination_payout(
+        fin_evm::alloy::primitives::U256::ZERO,
+        DestinationPayout::DirectTransferFrom,
+    );
+    let (transfer, _) =
+        execute_source_and_get_transfer(&h, Some(ARB_USDC), "direct-transfer-from").await;
+    let count = h.source.broadcasts();
+    for _ in 0..2 {
+        let status = h
+            .bridge
+            .read("bridge.status", &json!({"transferId":transfer}))
+            .await
+            .unwrap();
+        assert_eq!(status["state"], "completed", "{status}");
+    }
+    let record = h.state.transfer(&transfer).unwrap().unwrap();
+    let proof = record.settlement_proofs.last().unwrap();
+    assert_eq!(proof.evidence["transaction_sender"], ALT_PAYOUT_SENDER);
+    assert_eq!(proof.evidence["amount_atoms"], "9700000");
+    assert_eq!(proof.evidence["log_index"], 0);
+    assert_eq!(
+        proof.evidence["correlation"],
+        proof.evidence["protocol_order_id"]
+    );
+    assert_eq!(h.source.broadcasts(), count);
+}
+
+#[tokio::test]
 async fn direct_payout_with_provider_request_tag_stays_in_transit_without_effects() {
     let harness = Harness::with_destination_payout(
         fin_evm::alloy::primitives::U256::from(5_000_000u64),
@@ -513,6 +548,9 @@ async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_o
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
+            DomainStepKind::Prove | DomainStepKind::Finalize => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            }
         });
         assert_eq!(links.len(), 3);
 
@@ -653,7 +691,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
-        });
+         DomainStepKind::Prove | DomainStepKind::Finalize => panic!("SYNTHETIC Relay fixture does not declare deferred Base stages"), });
         let quoted_floor = h.state.transfer(&transfer).unwrap().unwrap()
             .settlement_expectation.unwrap().destination[0].minimum_atoms.clone();
         let mut bounds = h.bounds();
@@ -702,7 +740,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             .engine
             .authorize_financial_plan(FinancialPlanAuthorizationRequest {
                 request_id: format!("plan-authorize-{transfer}"),
-                plan,
+                plan: plan.clone(),
                 valid_for_seconds: 600,
                 replaces_revision_id: None,
                 expected_review_hash: Some(review.review_hash),
@@ -801,6 +839,9 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             "plan steps reuse the revision approval without child grants"
         );
 
+        // Provider omits the allowance already satisfied by settled steps.
+        h.provider.omit_approval.store(true, Ordering::SeqCst);
+        let broadcasts_before_refresh = h.source.broadcasts();
         // A quote refresh before principal dispatch is still on the same
         // protected parent and preserves each exact step and plan authority.
         let refreshed = h
@@ -810,6 +851,8 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             .unwrap();
         let refreshed_links: Vec<BridgeStepLink> =
             serde_json::from_value(refreshed["transfers"][0]["steps"].clone()).unwrap();
+        assert_eq!(h.source.broadcasts(), broadcasts_before_refresh,
+            "refresh never replays a satisfied allowance");
         assert_eq!(
             refreshed_links
                 .iter()
@@ -901,6 +944,25 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             1,
             "proof-only status reconciliation needs no extra approval"
         );
+        // A completed bridge can be a prefix of a plan whose remaining suffix
+        // still needs renewal. Historical permission is reviewable, but source
+        // submission remains terminal and must never be repeated.
+        let renewal = FinancialPlanAuthorizationRequest {
+            request_id: format!("plan-renew-{transfer}"),
+            plan,
+            valid_for_seconds: 600,
+            replaces_revision_id: Some(settled.revision.revision_id.clone()),
+            expected_review_hash: None,
+        };
+        let review = h.engine.preview_financial_plan(renewal.clone()).await.unwrap();
+        let renewed = h.engine.authorize_financial_plan(FinancialPlanAuthorizationRequest {
+            expected_review_hash: Some(review.review_hash),
+            ..renewal
+        }).await.unwrap();
+        assert_eq!(renewed.plan_id, plan_id);
+        assert_eq!(renewed.usage, settled.usage);
+        assert_eq!(h.source.broadcasts(), 3);
+        assert_eq!(h.approval.0.load(Ordering::SeqCst), 2);
     })
     .await
     .expect("named bridge plan should retain its parent until final destination proof");
@@ -978,6 +1040,9 @@ async fn exact_step_flow_refreshes_finite_allowance_cap_after_reset() {
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
+            DomainStepKind::Prove | DomainStepKind::Finalize => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            }
         });
         assert_eq!(
             steps.iter().map(|s| s.kind.clone()).collect::<Vec<_>>(),
@@ -1075,6 +1140,9 @@ async fn exact_step_flow_with_zero_initial_allowance_approves_then_deposits() {
             DomainStepKind::Approval => 0,
             DomainStepKind::Deposit => 1,
             DomainStepKind::ResetAllowance => 2,
+            DomainStepKind::Prove | DomainStepKind::Finalize => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            }
         });
         assert_eq!(
             steps.iter().map(|s| s.kind.clone()).collect::<Vec<_>>(),
@@ -1210,7 +1278,7 @@ async fn erc20_reset_finite_approval_deposit_and_settlement_share_one_grant() {
         let first = h.bridge.read("bridge.quotes", &h.quote_input(None)).await.unwrap();
         let transfer = first["transfers"][0]["transfer_id"].as_str().unwrap().to_owned();
         let mut steps: Vec<BridgeStepLink> = serde_json::from_value(first["transfers"][0]["steps"].clone()).unwrap();
-        steps.sort_by_key(|step| match step.kind { DomainStepKind::ResetAllowance => 0, DomainStepKind::Approval => 1, DomainStepKind::Deposit => 2 });
+        steps.sort_by_key(|step| match step.kind { DomainStepKind::ResetAllowance => 0, DomainStepKind::Approval => 1, DomainStepKind::Deposit => 2, DomainStepKind::Prove | DomainStepKind::Finalize => panic!("SYNTHETIC Relay fixture does not declare deferred Base stages"), });
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].kind, DomainStepKind::ResetAllowance);
         assert_eq!(steps[1].kind, DomainStepKind::Approval);

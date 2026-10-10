@@ -267,6 +267,7 @@ fn source_derived_destination_locator_persists_and_cannot_be_rebound() {
     let source_evidence_id =
         "ethereum:1:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7";
     let locator = fin_domain::BridgeDestinationLocator {
+        message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: source_evidence_id.into(),
         destination_chain_id: 42161,
@@ -740,6 +741,7 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
 
     let mut bad_locator_transit = transit.clone();
     bad_locator_transit.destination_locator = Some(fin_domain::BridgeDestinationLocator {
+        message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: "SYNTHETIC-unrelated-source-proof".into(),
         destination_chain_id: 42161,
@@ -763,6 +765,7 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
     ));
     let mut invalid_hash_transit = transit.clone();
     invalid_hash_transit.destination_locator = Some(fin_domain::BridgeDestinationLocator {
+        message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: invalid_hash_transit.evidence_id.clone(),
         destination_chain_id: 42161,
@@ -786,6 +789,7 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
     ));
 
     transit.destination_locator = Some(fin_domain::BridgeDestinationLocator {
+        message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: transit.evidence_id.clone(),
         destination_chain_id: 42161,

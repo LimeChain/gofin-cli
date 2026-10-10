@@ -192,6 +192,28 @@ impl CanonicalProvider {
 
 #[async_trait]
 impl BridgeProvider for CanonicalProvider {
+    async fn discover_routes(
+        &self,
+        request: &crate::BridgeRouteRequest,
+    ) -> Result<crate::BridgeRouteDiscovery> {
+        let supported = request.source.chain_id == SOURCE_CHAIN_ID
+            && request.source.token.is_none()
+            && self
+                .config
+                .deployments
+                .contains_key(&request.destination_chain_id)
+            && request.destination_asset.as_ref().is_none_or(|asset| {
+                asset.chain_id == request.destination_chain_id
+                    && asset.token.is_none()
+                    && asset.decimals == 18
+            });
+        Ok(crate::BridgeRouteDiscovery {
+            provider:PROVIDER_ID.into(), availability:if supported {crate::RouteAvailability::Candidate} else {crate::RouteAvailability::Unavailable},
+            candidates:if supported {vec![crate::BridgeRouteCandidate {destination:crate::BridgeAssetInput {chain_id:request.destination_chain_id,token:None},reported_decimals:Some(18)}]} else {vec![]},
+            observed_at:fin_domain::now(), evidence_source:"Reviewed Ethereum canonical Inbox deployments".into(),complete:true,
+            limitations:vec!["Native ETH Ethereum-to-Arbitrum/Robinhood only; quote requires the same source EOA as recipient, exact deployment verification and finite gas. No reverse route or ERC-20 integration.".into()],error:None,
+        })
+    }
     fn capabilities(&self) -> BridgeCapabilities {
         BridgeCapabilities {
             provider: PROVIDER_ID.into(),
@@ -1029,6 +1051,50 @@ mod tests {
             CanonicalProvider::new(runtime, CanonicalConfig::reviewed()).unwrap(),
             rpc,
         )
+    }
+
+    #[tokio::test]
+    async fn routes_disclose_existing_native_inbox_scope_without_quote_or_rpc() {
+        let (provider, rpc) = canonical_provider();
+        for destination in [42161, 4663] {
+            let request = crate::BridgeRouteRequest {
+                source: EvmAsset {
+                    chain_id: 1,
+                    token: None,
+                    decimals: 18,
+                },
+                destination_chain_id: destination,
+                destination_asset: None,
+            };
+            let routes = provider.discover_routes(&request).await.unwrap();
+            assert_eq!(routes.availability, crate::RouteAvailability::Candidate);
+            assert_eq!(routes.candidates.len(), 1);
+            assert_eq!(routes.candidates[0].destination.chain_id, destination);
+            let mut token = request.clone();
+            token.source.token = Some("0x1111111111111111111111111111111111111111".into());
+            assert_eq!(
+                provider.discover_routes(&token).await.unwrap().availability,
+                crate::RouteAvailability::Unavailable
+            );
+        }
+        let reverse = crate::BridgeRouteRequest {
+            source: EvmAsset {
+                chain_id: 42161,
+                token: None,
+                decimals: 18,
+            },
+            destination_chain_id: 1,
+            destination_asset: None,
+        };
+        assert_eq!(
+            provider
+                .discover_routes(&reverse)
+                .await
+                .unwrap()
+                .availability,
+            crate::RouteAvailability::Unavailable
+        );
+        assert!(rpc.requests.lock().unwrap().is_empty());
     }
 
     fn native_request(destination: u64) -> BridgeQuoteRequest {

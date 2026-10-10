@@ -1093,18 +1093,39 @@ impl EthereumAdapter {
                             "DEBT_POST_STATE_MISMATCH",
                             "Debt receipt backing disagrees with inclusion-block user position.",
                         )?;
+                        // A proved zero pre-position has no historical claim
+                        // accruing interest. Its rounding and post-mint index
+                        // increment create new debt within the approved finite
+                        // exposure, rather than inventing an unanchored accrual.
+                        // Existing debt retains its prior principal/accrual split.
+                        let opening = prior.principal.atoms.is_zero() && before.is_zero();
+                        let (principal_change, accrued_change) = if opening {
+                            require(
+                                total_accrual
+                                    <= u256(
+                                        b.debt_rounding_maximum
+                                            .as_ref()
+                                            .expect("borrow rounding bound"),
+                                    )?,
+                                "DEBT_ROUNDING_LIMIT",
+                                "Opening debt's complete proved increment exceeds approved finite rounding exposure.",
+                            )?;
+                            (add(qty, total_accrual)?, U256::ZERO)
+                        } else {
+                            (qty, total_accrual)
+                        };
                         effects.push(FinancialEffect::Accrual {
                             resource: b.resource.clone(),
                             position: debt_position.clone(),
                             asset: b.token.clone(),
                             position_kind: PositionKind::VariableDebt,
-                            delta: SignedQuantity::positive(&quantity(total_accrual)),
+                            delta: SignedQuantity::positive(&quantity(accrued_change)),
                         });
                         effects.push(FinancialEffect::DebtChange {
                             resource: b.resource.clone(),
                             debt: debt_position,
                             asset: b.token.clone(),
-                            delta: SignedQuantity::positive(&b.units),
+                            delta: SignedQuantity::positive(&quantity(principal_change)),
                             anchor: Some(anchor),
                         });
                         effects.push(FinancialEffect::UsableCredit {

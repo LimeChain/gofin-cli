@@ -67,6 +67,7 @@ test-dev-env:
 	@python3 scripts/test-fin-dev.py
 	@python3 scripts/test-dev-runtime.py
 	@python3 scripts/test-fork-runner.py
+	@python3 scripts/test-base-aave-fork-runner.py
 	@python3 scripts/test-dev-workflow.py
 
 test-fork:

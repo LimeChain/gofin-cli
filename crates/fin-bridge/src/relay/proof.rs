@@ -232,23 +232,44 @@ pub fn verify_direct_payment_transaction(
             "reconcile",
             "ERC-20 payout transaction target or native value differs from the approved token transfer.",
         )?;
-        // transfer(address,uint256) followed by the exact protocol order id.
+        // Only the two canonical ERC-20 transfer shapes, each followed by
+        // exactly one protocol order id, can establish a tagged direct credit.
+        // transferFrom may be sent by a relayer; the token owner is separately
+        // bound by calldata and the exact receipt Transfer event.
+        let (token_sender, call_recipient, call_amount, footer) = match input.as_slice() {
+            [0xa9, 0x05, 0x9c, 0xbb, ..] if input.len() == 100 => (
+                sender,
+                word_address(&input[4..36])?,
+                word_u256(&input[36..68])?,
+                &input[68..100],
+            ),
+            [0x23, 0xb8, 0x72, 0xdd, ..] if input.len() == 132 => (
+                word_address(&input[4..36])?,
+                word_address(&input[36..68])?,
+                word_u256(&input[68..100])?,
+                &input[100..132],
+            ),
+            _ => {
+                return Err(bridge_error(
+                    "BRIDGE_PROOF_MISMATCH",
+                    "reconcile",
+                    "ERC-20 payout calldata is not an exact transfer or transferFrom call with a 32-byte order-id footer.",
+                    "Keep the original transfer unresolved and inspect its destination receipt.",
+                ));
+            }
+        };
         ensure(
-            input.len() == 100 && input[..4] == [0xa9, 0x05, 0x9c, 0xbb],
-            "BRIDGE_PROOF_MISMATCH",
-            "reconcile",
-            "ERC-20 payout calldata is not the exact transfer call with a 32-byte order-id footer.",
-        )?;
-        let call_recipient = word_address(&input[4..36])?;
-        let call_amount = word_u256(&input[36..68])?;
-        ensure(
-            word_b256(&input[68..100])? == order_id,
+            word_b256(footer)? == order_id,
             "BRIDGE_PROOF_MISMATCH",
             "reconcile",
             "ERC-20 payout calldata footer does not equal the saved protocol order id.",
         )?;
         ensure(
-            call_recipient == recipient && call_amount >= minimum && !call_amount.is_zero(),
+            !token_sender.is_zero()
+                && token_sender != recipient
+                && call_recipient == recipient
+                && call_amount >= minimum
+                && !call_amount.is_zero(),
             "BRIDGE_PROOF_MISMATCH",
             "reconcile",
             "ERC-20 payout calldata recipient or amount differs from the approved minimum receipt.",
@@ -265,7 +286,9 @@ pub fn verify_direct_payment_transaction(
             let transfer_from = topic_address(&transfer.topics[1])?;
             let transfer_to = topic_address(&transfer.topics[2])?;
             let transfer_amount = word_u256(&decode_hex(&transfer.data)?)?;
-            if transfer_from == sender && transfer_to == recipient && transfer_amount == call_amount
+            if transfer_from == token_sender
+                && transfer_to == recipient
+                && transfer_amount == call_amount
             {
                 ensure(
                     matching_index.is_none(),
@@ -798,6 +821,66 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn erc20_transfer_from_payout_binds_owner_recipient_order_and_exact_log() {
+        let sender = Address::repeat_byte(0x11);
+        let owner = Address::repeat_byte(0x12);
+        let recipient = Address::repeat_byte(0x22);
+        let token = Address::repeat_byte(0x33);
+        let order = B256::repeat_byte(0x44);
+        let mut input = vec![0x23, 0xb8, 0x72, 0xdd];
+        input.extend_from_slice(owner.into_word().as_slice());
+        input.extend_from_slice(recipient.into_word().as_slice());
+        input.extend_from_slice(U256::from(105).to_be_bytes::<32>().as_slice());
+        input.extend_from_slice(order.as_slice());
+        let tx = direct_tx(sender, token, 0, input.clone());
+        let expected = ExpectedDirectPayment {
+            recipient: format!("{recipient:#x}"),
+            token: Some(format!("{token:#x}")),
+            minimum_amount: Quantity::from_u64(100),
+            protocol_order_id: format!("{order:#x}"),
+        };
+        let transfer = token_transfer(7, token, owner, recipient, 105);
+        let proof =
+            verify_direct_payment_transaction(&tx, std::slice::from_ref(&transfer), &expected)
+                .unwrap();
+        assert_eq!(proof.amount, Quantity::from_u64(105));
+        assert_eq!(proof.sender, format!("{sender:#x}"));
+        assert_eq!(proof.transfer_log_index, Some(7));
+        for (offset, replacement) in [
+            (4, recipient.into_word().to_vec()), // self-credit is not net receipt
+            (4, Address::ZERO.into_word().to_vec()),
+            (4, vec![1; 32]), // noncanonical address padding
+            (36, owner.into_word().to_vec()),
+            (68, U256::from(99).to_be_bytes::<32>().to_vec()),
+            (100, B256::repeat_byte(0x45).to_vec()),
+        ] {
+            let mut changed = input.clone();
+            changed[offset..offset + 32].copy_from_slice(&replacement);
+            let bad = direct_tx(sender, token, 0, changed);
+            assert!(
+                verify_direct_payment_transaction(&bad, std::slice::from_ref(&transfer), &expected)
+                    .is_err()
+            );
+        }
+        for changed in [input[..100].to_vec(), [input.clone(), vec![0]].concat()] {
+            let bad = direct_tx(sender, token, 0, changed);
+            assert!(
+                verify_direct_payment_transaction(&bad, std::slice::from_ref(&transfer), &expected)
+                    .is_err()
+            );
+        }
+        for logs in [
+            vec![],
+            vec![token_transfer(7, token, sender, recipient, 105)],
+            vec![token_transfer(7, token, owner, recipient, 104)],
+            vec![token_transfer(7, owner, owner, recipient, 105)],
+            vec![transfer.clone(), transfer],
+        ] {
+            assert!(verify_direct_payment_transaction(&tx, &logs, &expected).is_err());
+        }
     }
 
     #[test]

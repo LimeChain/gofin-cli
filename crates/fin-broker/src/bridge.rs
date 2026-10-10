@@ -3,13 +3,15 @@
 //! aliases, freezes wallet transactions, and verifies receipt evidence.
 
 use super::*;
+mod base_recovery;
 use fin_bridge::{
     BridgeAssetInput, BridgeBounds, BridgeEvidenceCandidate, BridgeIntent, BridgeProvider,
     BridgeQuote, BridgeQuoteInput, BridgeQuoteRequest, BridgeStatusInput, BridgeStep,
     BridgeStepKind as ProviderStepKind, BridgeTransferInput, BridgeTransferRef, EvidenceKind,
     EvmAsset, EvmCall, PreparedBridge,
+    base_canonical::{BaseCanonicalConfig, BaseCanonicalProvider},
     canonical::{CanonicalConfig, CanonicalProvider},
-    relay::{RelayProvider, ReviewedChain, ReviewedConfig, ReviewedTokenKey},
+    relay::{RelayProvider, ReviewedChain, ReviewedConfig},
 };
 use fin_domain::{
     AccountingLocation, Amount as FinAmount, BridgeAllocationOwner, BridgeProspectiveDebit,
@@ -41,6 +43,7 @@ const ROBINHOOD_USDG: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
 fin_evm::alloy::sol! {
     interface BridgeErc20 {
+        function decimals() external view returns (uint8);
         function allowance(address owner, address spender) external view returns (uint256);
         function approve(address spender, uint256 amount) external returns (bool);
     }
@@ -113,6 +116,22 @@ impl BridgeAdapter {
                 source_observer,
                 CanonicalConfig::reviewed(),
             )?));
+            let base_rpc = observers
+                .get(&8453)
+                .map(|observer| observer.rpc.clone())
+                .unwrap_or(Arc::new(fin_evm::HttpRpc::new(
+                    vec![BASE_RPC.into()],
+                    8453,
+                )?));
+            providers.push(Arc::new(BaseCanonicalProvider::new(
+                Arc::new(fin_evm::EvmRuntime::new(
+                    source.runtime.rpc.clone(),
+                    1,
+                    None,
+                )),
+                Arc::new(fin_evm::EvmRuntime::new(base_rpc, 8453, None)),
+                BaseCanonicalConfig::reviewed(),
+            )?));
         }
         Self::with_providers(providers, wallet_adapters, observers, valuator)
     }
@@ -146,16 +165,16 @@ impl BridgeAdapter {
                 "At least one bridge provider must be configured.",
             ));
         }
-        // Base is a read-only solver observer. RelayChain is a separate
-        // read-only settlement observer; neither is a wallet or signer scope.
-        observers.insert(
-            8453,
-            Arc::new(fin_evm::EvmRuntime::new(
+        // Preserve an injected/configured Base observer, including isolated
+        // fixtures. Relay's solver identity uses the same chain but conveys
+        // no authority over its wallet runtime.
+        if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(8453) {
+            entry.insert(Arc::new(fin_evm::EvmRuntime::new(
                 Arc::new(fin_evm::HttpRpc::new(vec![BASE_RPC.into()], 8453)?),
                 8453,
                 None,
-            )),
-        );
+            )));
+        }
         observers.insert(
             537713,
             Arc::new(fin_evm::EvmRuntime::new(
@@ -238,6 +257,26 @@ impl BridgeAdapter {
                 "Keep the transfer on its original provider and inspect the protected journal.",
             )
         })
+    }
+
+    fn base_provider(&self) -> fin_domain::Result<BaseCanonicalProvider> {
+        if !self.providers.contains_key("base_canonical") {
+            return Err(FinError::validation(
+                "The saved Base canonical provider is unavailable.",
+            ));
+        }
+        let runtime = |chain| -> fin_domain::Result<Arc<fin_evm::EvmRuntime>> {
+            let observer = self
+                .observers
+                .get(&chain)
+                .ok_or_else(|| FinError::validation("Base canonical observer is unavailable."))?;
+            Ok(Arc::new(fin_evm::EvmRuntime::new(
+                observer.rpc.clone(),
+                chain,
+                None,
+            )))
+        };
+        BaseCanonicalProvider::new(runtime(1)?, runtime(8453)?, BaseCanonicalConfig::reviewed())
     }
 
     async fn validate_usd_bounds(
@@ -489,6 +528,9 @@ impl BridgeAdapter {
         bounds: &BridgeBounds,
         previous: Option<&SavedQuote>,
     ) -> fin_domain::Result<PreparedBridge> {
+        if quote.provider == "base_canonical" {
+            return Ok(plan);
+        }
         let approval = quote
             .approval
             .as_ref()
@@ -567,7 +609,26 @@ impl BridgeAdapter {
             .steps
             .iter()
             .find(|step| step.kind == ProviderStepKind::Approval)
-            .cloned();
+            .cloned()
+            .or_else(|| {
+                previous.and_then(|saved| {
+                    // A satisfied allowance can make the provider omit this
+                    // transaction on refresh. Retain the validated finite call
+                    // and immutable topology; refresh never submits it.
+                    let prior = saved.quote.approval.as_ref()?;
+                    if !prior.token.eq_ignore_ascii_case(&approval.token)
+                        || !prior.spender.eq_ignore_ascii_case(&approval.spender)
+                    {
+                        return None;
+                    }
+                    saved
+                        .plan
+                        .steps
+                        .iter()
+                        .find(|step| step.kind == ProviderStepKind::Approval)
+                        .cloned()
+                })
+            });
         let deposit = plan
             .steps
             .iter()
@@ -605,6 +666,11 @@ impl BridgeAdapter {
                     )
                 })?,
                 ProviderStepKind::Deposit => deposit.clone(),
+                ProviderStepKind::Prove | ProviderStepKind::Finalize => {
+                    return Err(FinError::validation(
+                        "Deferred stages require the Base canonical provider.",
+                    ));
+                }
             };
             step.ordinal = ordinal as u8;
             step.dependencies = match kind {
@@ -613,6 +679,7 @@ impl BridgeAdapter {
                 ProviderStepKind::Approval => vec![],
                 ProviderStepKind::Deposit if ordinal > 0 => vec![(ordinal - 1) as u8],
                 ProviderStepKind::Deposit => vec![],
+                ProviderStepKind::Prove | ProviderStepKind::Finalize => vec![],
             };
             steps.push(step);
         }
@@ -738,9 +805,23 @@ impl BridgeAdapter {
 
     pub fn operation_definitions() -> Vec<Definition> {
         vec![
+            base_recovery::base_recovery_definition(),
+            Definition {
+                name: "bridge.routes".into(),
+                description: "Discover indicative bridge routes by exact source asset and destination chain, with provider-specific availability and independently verified candidate token identities.".into(),
+                kind: OperationKind::Read,
+                execution_actor: fin_domain::ExecutionActor::AgentReadable,
+                input_schema: serde_json::to_value(schema_for!(fin_bridge::BridgeRoutesInput)).expect("schema serializes"),
+                output_schema: json!({"type":"object","required":["indicative","source","destination_chain_id","coverage","routes","next_action"],"properties":{"indicative":{"const":true},"routes":{"type":"array"}}}),
+                error_schema: schema_for_fin_error(),
+                examples: vec![json!({"source":{"chainId":1},"destinationChainId":8453}), json!({"source":{"chainId":8453,"token":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"},"destinationChainId":1,"destinationAsset":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"}})],
+                coverage: "Configured providers only. Currency/indexer lists are partial; empty discovery is unknown rather than proof that no route exists. Exact destination assets remain available for quotes.".into(),
+                completion: "Returns indicative candidates and availability reasons. Creates no transfer, reservation, approval, submission or executable calldata.".into(),
+                semantics: json!({"financial_authorization":false,"may_submit":false,"indicative":true,"asset_identity":"Exact chain and native/ERC-20 contract; symbols never establish equivalence.","token_decimals":"Independently verified at pinned RPC blocks; provider metadata is a candidate only.","next":"Choose exact destination/refund representations, wallet, recipient and amount using bridge.quotes before approval."}),
+            },
             Definition {
                 name: "bridge.quotes".into(),
-                description: "Compare the configured Relay and Canonical Inbox bridge routes for exact EVM wallet, asset and recipient identities.".into(),
+                description: "Compare the configured Relay, Arbitrum canonical and Base canonical bridge routes for exact EVM wallet, asset and recipient identities.".into(),
                 kind: OperationKind::Read,
                 execution_actor: fin_domain::ExecutionActor::AgentReadable,
                 input_schema: serde_json::to_value(schema_for!(BridgeQuoteInput)).expect("schema serializes"),
@@ -750,22 +831,22 @@ impl BridgeAdapter {
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"},"bounds":{}}),
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[],"amount":"10000000000000000"},"bounds":{}})
                 ],
-                coverage: "Compares configured Relay routes and Canonical Inbox native-ETH deposits where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
+                coverage: "Compares configured Relay, Arbitrum canonical and Base canonical routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
                 completion: "Returns exact assets, Fin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"none","providers":[{"id":"relay","coverage":"reviewed native ETH and finite ERC-20 protocol routes"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"}],"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by Fin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"fin read bridge.quotes --input JSON --json"}),
+                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"none","providers":[{"id":"relay","coverage":"quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"}],"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by Fin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"fin read bridge.quotes --input JSON --json"}),
             },
             Definition {
                 name: "bridge.transfer".into(),
-                description: "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step, either under a finite bridge grant or as one step of a named plan.".into(),
+                description: "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof or finalization stage under its exact or named-plan authority.".into(),
                 kind: OperationKind::Write,
                 execution_actor: fin_domain::ExecutionActor::AgentInvocable,
                 input_schema: serde_json::to_value(schema_for!(BridgeTransferInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
                 error_schema: schema_for_fin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
-                coverage: "Relay handles its reviewed native ETH and finite ERC-20 source steps. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
+                coverage: "Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false},{"chain_id":8453,"name":"Base","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
+                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
             },
             Definition {
                 name: "bridge.status".into(),
@@ -821,7 +902,11 @@ impl BridgeAdapter {
             })
     }
 
-    fn asset(&self, input: &BridgeAssetInput, expected_chain: u64) -> fin_domain::Result<EvmAsset> {
+    async fn asset(
+        &self,
+        input: &BridgeAssetInput,
+        expected_chain: u64,
+    ) -> fin_domain::Result<EvmAsset> {
         if input.chain_id != expected_chain {
             return Err(error(
                 "BRIDGE_ASSET_CHAIN_MISMATCH",
@@ -834,28 +919,133 @@ impl BridgeAdapter {
             .token
             .as_deref()
             .filter(|token| !token.eq_ignore_ascii_case("native"));
-        let decimals = match (
-            input.chain_id,
-            token.map(str::to_ascii_lowercase).as_deref(),
-        ) {
-            (_, None) => 18,
-            (1, Some(ETHEREUM_USDC))
-            | (42161, Some(ARBITRUM_USDC))
-            | (4663, Some(ROBINHOOD_USDG)) => 6,
-            _ => {
-                return Err(error(
-                    "BRIDGE_TOKEN_UNREVIEWED",
-                    "validation",
-                    "Selected token identity has no reviewed precision or deployment.",
-                    "Choose native ETH or an explicitly reviewed token contract.",
+        if !matches!(input.chain_id, 1 | 42161 | 4663 | 8453) {
+            return Err(FinError::validation("Select a reviewed bridge network."));
+        }
+        let decimals = if let Some(token) = token {
+            let token_address = fin_evm::address(token)?;
+            if token_address == fin_evm::alloy::primitives::Address::ZERO {
+                return Err(FinError::validation(
+                    "Use native for ETH; ERC-20 contracts must be nonzero.",
                 ));
             }
+            let runtime = self.observers.get(&input.chain_id).ok_or_else(|| {
+                FinError::validation("The exact token network has no configured observer.")
+            })?;
+            runtime.assert_chain().await?;
+            let block =
+                fin_evm::rpc_u64(&runtime.rpc.request("eth_blockNumber", json!([])).await?)?;
+            let code = fin_evm::rpc_bytes(
+                &runtime
+                    .rpc
+                    .request(
+                        "eth_getCode",
+                        json!([fin_evm::lower_address(token_address), format!("{block:#x}")]),
+                    )
+                    .await?,
+            )?;
+            if code.is_empty() {
+                return Err(error(
+                    "BRIDGE_TOKEN_UNAVAILABLE",
+                    "validation",
+                    "Selected ERC-20 contract has no code at the observed block.",
+                    "Choose an exact deployed token on the selected chain.",
+                ));
+            }
+            runtime
+                .call(token_address, &BridgeErc20::decimalsCall {}, Some(block))
+                .await?
+        } else {
+            18
         };
         Ok(EvmAsset {
             chain_id: input.chain_id,
             token: token.map(|value| value.to_ascii_lowercase()),
             decimals,
         })
+    }
+
+    async fn routes(&self, input: &Value) -> fin_domain::Result<Value> {
+        let input: fin_bridge::BridgeRoutesInput =
+            serde_json::from_value(input.clone()).map_err(|_| {
+                FinError::validation(
+                    "Use bridge.routes with exact source and destination chain identities.",
+                )
+            })?;
+        if input.source.chain_id == input.destination_chain_id
+            || !matches!(input.destination_chain_id, 1 | 42161 | 4663 | 8453)
+        {
+            return Err(FinError::validation(
+                "Bridge source and destination must be distinct reviewed networks.",
+            ));
+        }
+        let source = self.asset(&input.source, input.source.chain_id).await?;
+        let destination_asset = if let Some(asset) = &input.destination_asset {
+            Some(self.asset(asset, input.destination_chain_id).await?)
+        } else {
+            None
+        };
+        let request = fin_bridge::BridgeRouteRequest {
+            source: source.clone(),
+            destination_chain_id: input.destination_chain_id,
+            destination_asset: destination_asset.clone(),
+        };
+        let mut routes = Vec::new();
+        let mut providers = Vec::new();
+        for provider in self.providers.values() {
+            let provider_id = provider.capabilities().provider;
+            providers.push(provider_id.clone());
+            let discovered = provider.discover_routes(&request).await;
+            let batch = match discovered {
+                Ok(batch)
+                    if batch.provider == provider_id
+                        && batch.candidates.len() <= 100
+                        && batch.limitations.len() <= 32 =>
+                {
+                    batch
+                }
+                Ok(_) => {
+                    routes.push(json!({"provider":provider_id,"availability":"unknown","indicative":true,"destination_asset":null,"error":FinError::validation("Provider discovery identity or bounds did not match the configured provider.")}));
+                    continue;
+                }
+                Err(error) => {
+                    routes.push(json!({"provider":provider_id,"availability":"unknown","indicative":true,"destination_asset":null,"error":error}));
+                    continue;
+                }
+            };
+            if batch.candidates.is_empty() {
+                routes.push(json!({"provider":provider_id,"availability":batch.availability,"indicative":true,"destination_asset":null,"observed_at":batch.observed_at,"evidence_source":batch.evidence_source,"complete":batch.complete,"limitations":batch.limitations,"error":batch.error}));
+                continue;
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for candidate in &batch.candidates {
+                match self
+                    .asset(&candidate.destination, input.destination_chain_id)
+                    .await
+                {
+                    Ok(asset)
+                        if candidate
+                            .reported_decimals
+                            .is_none_or(|decimals| decimals == asset.decimals)
+                            && destination_asset
+                                .as_ref()
+                                .is_none_or(|expected| *expected == asset) =>
+                    {
+                        if !seen.insert((asset.chain_id, asset.token.clone())) {
+                            continue;
+                        }
+                        routes.push(json!({"provider":provider_id,"availability":batch.availability,"indicative":true,"destination_asset":asset,"identity_verified":true,"observed_at":batch.observed_at,"evidence_source":batch.evidence_source,"complete":batch.complete,"limitations":batch.limitations,"error":batch.error}));
+                    }
+                    result => {
+                        let cause = result.err().unwrap_or_else(|| FinError::validation("Provider candidate precision or exact destination differs from independent on-chain identity."));
+                        routes.push(json!({"provider":provider_id,"availability":"unavailable","indicative":true,"destination_asset":candidate.destination,"identity_verified":false,"error":cause}));
+                    }
+                }
+            }
+        }
+        Ok(
+            json!({"indicative":true,"source":source,"destination_chain_id":input.destination_chain_id,"coverage":{"providers":providers,"market_wide_comparison":false,"complete":false},"routes":routes,"next_action":"Select an exact provider/destination representation, then request bridge.quotes with wallet, amount, recipient and refund scope. Discovery cannot execute or authorize a transfer."}),
+        )
     }
 
     async fn quote(&self, input: &Value) -> fin_domain::Result<Value> {
@@ -875,10 +1065,12 @@ impl BridgeAdapter {
                 "Name each permitted destination asset by chain and exact token contract.",
             ));
         }
-        let source = self.asset(&input.intent.source, input.intent.source.chain_id)?;
-        if !matches!(source.chain_id, 1 | 42161 | 4663)
+        let source = self
+            .asset(&input.intent.source, input.intent.source.chain_id)
+            .await?;
+        if !matches!(source.chain_id, 1 | 42161 | 4663 | 8453)
             || input.intent.destination_chain_id == source.chain_id
-            || !matches!(input.intent.destination_chain_id, 1 | 42161 | 4663)
+            || !matches!(input.intent.destination_chain_id, 1 | 42161 | 4663 | 8453)
         {
             return Err(error(
                 "BRIDGE_NETWORK_UNSUPPORTED",
@@ -902,30 +1094,30 @@ impl BridgeAdapter {
             FinError::validation("Configured EVM wallet has no physical address.")
         })?;
         let resource = wallet.resource.clone();
-        let destination_assets = input
-            .intent
-            .destination_assets
-            .iter()
-            .map(|asset| self.asset(asset, input.intent.destination_chain_id))
-            .collect::<fin_domain::Result<Vec<_>>>()?;
-        let allowed_refund_assets = input
-            .intent
-            .allowed_refund_assets
-            .iter()
-            .map(|asset| {
-                if asset.chain_id != source.chain_id
-                    && asset.chain_id != input.intent.destination_chain_id
-                {
-                    return Err(error(
-                        "BRIDGE_REFUND_ASSET_UNSUPPORTED",
-                        "validation",
-                        "Refund assets may be on the source or destination chain only.",
-                        "Select an exact asset on one of the two wallet networks.",
-                    ));
-                }
-                self.asset(asset, asset.chain_id)
-            })
-            .collect::<fin_domain::Result<Vec<_>>>()?;
+        if input.intent.destination_assets.len() > 8 || input.intent.allowed_refund_assets.len() > 8
+        {
+            return Err(FinError::validation(
+                "Bridge destination and refund asset scopes are limited to eight exact identities each.",
+            ));
+        }
+        let mut destination_assets = Vec::new();
+        for asset in &input.intent.destination_assets {
+            destination_assets.push(self.asset(asset, input.intent.destination_chain_id).await?);
+        }
+        let mut allowed_refund_assets = Vec::new();
+        for asset in &input.intent.allowed_refund_assets {
+            if asset.chain_id != source.chain_id
+                && asset.chain_id != input.intent.destination_chain_id
+            {
+                return Err(error(
+                    "BRIDGE_REFUND_ASSET_UNSUPPORTED",
+                    "validation",
+                    "Refund assets may be on the source or destination chain only.",
+                    "Select an exact asset on one of the two wallet networks.",
+                ));
+            }
+            allowed_refund_assets.push(self.asset(asset, asset.chain_id).await?);
+        }
         let intent = BridgeIntent {
             wallet: resource.clone(),
             source_address: address.into(),
@@ -1154,7 +1346,7 @@ impl BridgeAdapter {
             ));
         }
         let mut transfers = Vec::new();
-        for quote in batch.quotes {
+        for mut quote in batch.quotes {
             let mut expected_intent = request_intent.clone();
             if quote.intent.destination_assets.len() != 1
                 || !request_intent
@@ -1188,6 +1380,14 @@ impl BridgeAdapter {
                     "A refreshed quote cannot change its original bridge provider.",
                     "Continue with the saved provider or create a new transfer and review it independently.",
                 ));
+            }
+            if quote.approval.is_none()
+                && let Some((_, previous, _)) = &existing
+            {
+                // Intent/provider identity is checked above. An allowance-aware
+                // refresh may contain only a deposit; retain its prior finite
+                // allowance identity. Deposit preparation rechecks allowance.
+                quote.approval = previous.quote.approval.clone();
             }
             let provider = self.provider(&quote.provider)?;
             let priced_fees = self.validate_quote_prices(&quote_bounds, &quote).await?;
@@ -1424,7 +1624,9 @@ impl BridgeAdapter {
             BridgeTransferState::InTransit
                 | BridgeTransferState::DestinationPending
                 | BridgeTransferState::RefundPending
-        ) {
+        ) || (transfer.state == BridgeTransferState::NeedsAttention
+            && transfer.transit.is_some())
+        {
             let diagnostic = self.reconcile_external(&engine, &transfer).await?;
             transfer = self
                 .state()?
@@ -1475,6 +1677,9 @@ impl BridgeAdapter {
         transfer: &BridgeTransferRecord,
     ) -> fin_domain::Result<Value> {
         let saved = self.saved_quote(transfer)?;
+        if saved.quote.provider == "base_canonical" {
+            return self.reconcile_base_external(engine, transfer, &saved).await;
+        }
         if saved.quote.provider == "arbitrum_canonical" {
             return self
                 .reconcile_canonical_external(engine, transfer, &saved)
@@ -2194,6 +2399,415 @@ impl BridgeAdapter {
         }))
     }
 
+    async fn reconcile_base_external(
+        &self,
+        engine: &Engine,
+        transfer: &BridgeTransferRecord,
+        saved: &SavedQuote,
+    ) -> fin_domain::Result<Value> {
+        let Some(locator) = transfer
+            .transit
+            .as_ref()
+            .and_then(|transit| transit.destination_locator.as_ref())
+        else {
+            return Ok(
+                json!({"provider":"base_canonical","settled":false,"status":"source_proof_pending"}),
+            );
+        };
+        let chain = saved.quote.intent.destination_chain_id;
+        let runtime = self.observers.get(&chain).ok_or_else(internal_error)?;
+        let mut candidates = Vec::new();
+        let (message, withdrawal_hash) = if chain == 8453 {
+            let deposit: fin_bridge::base_canonical::BaseDeposit =
+                serde_json::from_value(locator.proof["deposit"].clone())
+                    .map_err(|_| FinError::validation("Saved Base deposit proof is malformed."))?;
+            if locator.scheme != "base_deposit_v1"
+                || locator.transaction_hash != deposit.transaction_hash
+                || locator.message_hash.is_some()
+            {
+                return Err(FinError::validation(
+                    "Base deposit locator differs from its source-derived transaction identity.",
+                ));
+            }
+            candidates.push(locator.transaction_hash.clone());
+            (deposit.message_hash, None)
+        } else {
+            let verified = saved_base_withdrawal(locator)?;
+            let operations = engine.operations()?;
+            for link in transfer
+                .steps
+                .iter()
+                .filter(|link| link.kind == BridgeStepKind::Finalize)
+            {
+                if let Some(operation) = operations
+                    .iter()
+                    .find(|op| Some(&op.id) == link.operation_id.as_ref())
+                    && let Some(submission) = &operation.submission
+                {
+                    candidates.push(submission.reference.clone());
+                }
+            }
+            // Permissionless third-party finalization may satisfy the same
+            // immutable withdrawal. Logs locate candidates; receipts prove it.
+            {
+                let block =
+                    fin_evm::rpc_u64(&runtime.rpc.request("eth_blockNumber", json!([])).await?)?;
+                let topic =
+                    fin_evm::alloy::primitives::keccak256("WithdrawalFinalized(bytes32,bool)");
+                let logs = runtime.rpc.request("eth_getLogs",json!([{"address":fin_bridge::base_canonical::PORTAL,"fromBlock":format!("{:#x}",block.saturating_sub(10_000)),"toBlock":format!("{block:#x}"),"topics":[format!("{topic:#x}"),verified.withdrawal_hash]}])).await?;
+                if let Some(logs) = logs.as_array().filter(|logs| logs.len() <= 16) {
+                    for log in logs {
+                        if let Some(hash) = log["transactionHash"].as_str() {
+                            fin_evm::hash(hash)?;
+                            candidates.push(hash.into());
+                        }
+                    }
+                }
+            }
+            if candidates.is_empty() {
+                let provider = self.base_provider()?;
+                let readiness = provider
+                    .withdrawal_readiness(&verified.withdrawal, &saved.quote.intent.source_address)
+                    .await?;
+                return Ok(
+                    json!({"provider":"base_canonical","settled":false,"status":"withdrawal_pending","withdrawal_hash":verified.withdrawal_hash,"readiness":readiness,"locator_coverage":"Fin submission identities and latest 10,000 Ethereum blocks; partial for externally finalized withdrawals","next_action":if readiness.finalized {"The portal reports finalization, but exact usable credit was not found in bounded discovery. Preserve this withdrawal and inspect destination receipt coverage; do not submit again."} else if readiness.proof_invalidated {"The proof was invalidated. An explicitly authorized re-proof of this same withdrawal is required."} else if readiness.ready {"Prepare the saved finalize stage."} else if readiness.proven_at==0 {"Prepare the saved prove stage once a checkpoint is available."} else {"Wait for the current portal proof/game checks; do not reinitiate the withdrawal."}}),
+                );
+            }
+            (verified.message_hash, Some(verified.withdrawal_hash))
+        };
+        candidates.sort();
+        candidates.dedup();
+        let (confirmations, finalized) = self
+            .confirmation_rules
+            .get(&chain)
+            .copied()
+            .unwrap_or((2, true));
+        for candidate in candidates {
+            let Some(receipt) = runtime
+                .observe_receipt(&candidate, confirmations, finalized)
+                .await?
+            else {
+                continue;
+            };
+            if !receipt.success || !receipt_logs_canonical(&receipt.receipt, &receipt, &candidate)?
+            {
+                continue;
+            }
+            let raw = receipt.receipt["logs"]
+                .as_array()
+                .ok_or_else(internal_error)?
+                .iter()
+                .map(canonical_raw_log)
+                .collect::<fin_domain::Result<Vec<_>>>()?;
+            if let Some(hash) = &withdrawal_hash {
+                if fin_bridge::base_canonical::verify_withdrawal_finalized(&raw, hash).is_err() {
+                    continue;
+                }
+            } else {
+                let deposit: fin_bridge::base_canonical::BaseDeposit =
+                    serde_json::from_value(locator.proof["deposit"].clone())
+                        .map_err(|_| internal_error())?;
+                let tx = runtime
+                    .rpc
+                    .request("eth_getTransactionByHash", json!([candidate]))
+                    .await?;
+                fin_bridge::base_canonical::verify_deposit_transaction(&tx, &deposit)?;
+            }
+            let log_index = fin_bridge::base_canonical::verify_destination_logs(
+                &raw,
+                &saved.quote.intent,
+                &message,
+            )?;
+            if saved.quote.expected_receipt.asset.reference == "native" {
+                require_empty_code(
+                    runtime,
+                    &saved.quote.intent.recipient,
+                    Some(receipt.block_number),
+                )
+                .await?;
+            }
+            let resource = fin_domain::ResourceId(format!(
+                "ethereum:{chain}:{}",
+                saved.quote.intent.recipient.to_ascii_lowercase()
+            ));
+            let amount = saved.quote.expected_receipt.clone();
+            let evidence_id = format!(
+                "ethereum:{chain}:{}:{log_index}",
+                candidate.to_ascii_lowercase()
+            );
+            let evidence = json!({"transfer_id":transfer.id,"log_index":log_index,"correlation":withdrawal_hash.as_ref().unwrap_or(&message),"canonical":true,"success":true,"confirmations":confirmations,"recipient":saved.quote.intent.recipient,"provider":"base_canonical","chain_id":chain,"transaction_hash":candidate,"withdrawal_hash":withdrawal_hash,"message_hash":message,"source_evidence_id":locator.source_evidence_id,"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"recipient_resource":resource,"asset":amount.asset,"amount_atoms":amount.atoms,"evidence_id":evidence_id,"proof_method":"base_canonical_message_and_usable_credit"});
+            let mut proof = fin_domain::BridgeSettlementProof {
+                transfer_id: transfer.id.clone(),
+                outcome: fin_domain::BridgeSettlementOutcome::Destination,
+                evidence_id: evidence_id.clone(),
+                effects: vec![FinancialEffect::UsableCredit {
+                    to: resource,
+                    amount,
+                }],
+                evidence,
+                observed_at: now(),
+                proof_digest: String::new(),
+            };
+            proof.proof_digest = fin_domain::bridge_settlement_digest(&proof)?;
+            engine.commit_bridge_external_settlement(proof)?;
+            return Ok(
+                json!({"provider":"base_canonical","settled":true,"status":"destination_settled","evidence_id":evidence_id}),
+            );
+        }
+        Ok(
+            json!({"provider":"base_canonical","settled":false,"status":"destination_receipt_pending","message_hash":message}),
+        )
+    }
+
+    async fn prepare_base_stage(
+        &self,
+        input: &Value,
+        record: &BridgeTransferRecord,
+        saved: &SavedQuote,
+        mut step: BridgeStep,
+        link: &BridgeStepLink,
+        requested: Option<BridgeBounds>,
+    ) -> fin_domain::Result<PreparedOperation> {
+        if saved.quote.provider != "base_canonical"
+            || saved.quote.intent.source.chain_id != 8453
+            || saved.quote.intent.destination_chain_id != 1
+            || record.grant_id.is_some()
+        {
+            return Err(FinError::validation(
+                "Deferred stages require an original Base canonical withdrawal under exact or named-plan authority.",
+            ));
+        }
+        let locator = record.transit.as_ref().and_then(|transit| transit.destination_locator.as_ref())
+            .ok_or_else(|| error("BRIDGE_SOURCE_PROOF_REQUIRED", "preview", "The original Base withdrawal source proof is not settled.", "Reconcile the original initiation transaction before preparing a proof or finalization."))?;
+        let verified = saved_base_withdrawal(locator)?;
+        let alias = record.metadata["wallet_alias"]
+            .as_str()
+            .ok_or_else(internal_error)?;
+        let wallet = self.wallet(alias, 1)?;
+        let sender = wallet.address.as_deref().ok_or_else(internal_error)?;
+        if !sender.eq_ignore_ascii_case(&saved.quote.intent.source_address)
+            || !wallet.signing_enabled
+        {
+            return Err(FinError::validation(
+                "The saved withdrawal requires the same reusable signing wallet on Ethereum.",
+            ));
+        }
+        let bounds: BridgeBounds = serde_json::from_value(
+            record
+                .approved_bounds
+                .clone()
+                .ok_or_else(|| FinError::validation("Original withdrawal bounds are missing."))?,
+        )
+        .map_err(|_| FinError::validation("Original withdrawal bounds are invalid."))?;
+        if let Some(requested) = requested
+            && normalize_authorization_bounds(Some(requested), saved)? != bounds
+        {
+            return Err(FinError::validation(
+                "Recovery stages preserve the original withdrawal bounds and consumed fees.",
+            ));
+        }
+        let provider = self.base_provider()?;
+        let readiness = provider
+            .withdrawal_readiness(&verified.withdrawal, sender)
+            .await?;
+        let witness = if link.kind == BridgeStepKind::Prove {
+            if readiness.finalized || (readiness.proven_at > 0 && !readiness.proof_invalidated) {
+                return Err(error(
+                    "BRIDGE_PROOF_ALREADY_PRESENT",
+                    "preview",
+                    "The saved withdrawal already has a proof or finalization.",
+                    "Inspect bridge.status; do not reset a valid proof's maturity timer.",
+                ));
+            }
+            let source_block = locator.proof["source_block_number"]
+                .as_u64()
+                .ok_or_else(internal_error)?;
+            let witness = provider
+                .withdrawal_witness(&verified.withdrawal, source_block, sender)
+                .await?;
+            step.call =
+                fin_bridge::base_canonical::encode_prove_call(&verified.withdrawal, &witness)?;
+            Some(witness)
+        } else {
+            if !readiness.ready || readiness.finalized {
+                return Err(error(
+                    "BRIDGE_FINALIZATION_PENDING",
+                    "preview",
+                    "The saved withdrawal has not satisfied the portal's current finalization checks.",
+                    "Use bridge.status to inspect proof maturity and game validity; no write was submitted.",
+                ));
+            }
+            step.call =
+                fin_bridge::base_canonical::encode_finalize_call(&verified.withdrawal, sender)?;
+            None
+        };
+        if step.call.chain_id != 1
+            || step.call.to != fin_bridge::base_canonical::PORTAL
+            || !step.call.value.is_zero()
+            || step.call.data == "0x"
+            || !step.maximum_debit.is_empty()
+        {
+            return Err(FinError::validation(
+                "Deferred Base call was not materialized as an exact zero-value portal stage.",
+            ));
+        }
+        let runtime = &self
+            .wallet_adapters
+            .get(&1)
+            .ok_or_else(internal_error)?
+            .runtime;
+        let transaction = runtime
+            .prepare(
+                fin_evm::address(sender)?,
+                fin_evm::address(&step.call.to)?,
+                fin_evm::alloy::primitives::U256::ZERO,
+                fin_evm::rpc_bytes(&json!(step.call.data))?,
+                fin_evm::u256(&maximum_gas_cap(&bounds, 1)?)?,
+            )
+            .await?
+            .transaction;
+        let gas_asset = EvmAsset {
+            chain_id: 1,
+            token: None,
+            decimals: 18,
+        }
+        .asset_id();
+        self.validate_frozen_gas_cap(
+            &bounds,
+            &gas_asset,
+            &fin_evm::quantity(transaction.maximum_cost()?),
+        )
+        .await?;
+        self.validate_transfer_gas_budget(
+            record,
+            &link.step_id,
+            &bounds,
+            &gas_asset,
+            transaction.maximum_cost()?,
+        )?;
+        let resource = wallet.resource;
+        let intent = FinancialIntent {
+            debits: vec![],
+            maximum_costs: vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: resource.clone(),
+                },
+                amount: FinAmount {
+                    asset: gas_asset,
+                    atoms: fin_evm::quantity(transaction.maximum_cost()?),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }],
+            expected: vec![],
+            locks: vec![resource.clone()],
+        };
+        let valuation = self.value_intent(&intent).await?;
+        let expectation = record
+            .settlement_expectation
+            .clone()
+            .ok_or_else(internal_error)?;
+        let mut plan = saved.plan.clone();
+        plan.bounds = bounds.clone();
+        plan.fixed_scope_digest =
+            fin_bridge::base_canonical::scope_digest(&saved.quote, &bounds, sender)?;
+        let mut prepared = PreparedOperation {
+            operation:"bridge.transfer".into(), input:input.clone(),
+            binding:json!({"resource":resource,"transaction":transaction,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"base_withdrawal":verified,"base_witness":witness,
+                (fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":bounds,"settlement_expectation":expectation}}),
+            summary:self.summary(saved,&link.kind,alias),
+            checks:vec![Check{name:"saved Base withdrawal identity and current portal stage".into(),status:CheckStatus::Passed,detail:"The broker materialized this exact stage from settled source proof; no new principal is moved.".into()}],
+            warnings:vec!["Canonical withdrawal timing follows current on-chain proof maturity and game validity; source confirmation is not destination credit.".into()],
+            observed_at:now(), expires_at:(chrono::Utc::now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1,
+        };
+        fin_domain::value_bounds::bind(&mut prepared);
+        Ok(prepared)
+    }
+
+    fn validate_transfer_gas_budget(
+        &self,
+        transfer: &BridgeTransferRecord,
+        current_step: &str,
+        bounds: &BridgeBounds,
+        asset: &fin_domain::AssetId,
+        candidate: fin_evm::alloy::primitives::U256,
+    ) -> fin_domain::Result<()> {
+        let engine = self
+            .engine
+            .lock()
+            .map_err(|_| internal_error())?
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let operations = if let Some(engine) = engine {
+            engine.operations()?
+        } else {
+            if transfer
+                .steps
+                .iter()
+                .any(|link| link.operation_id.is_some())
+            {
+                return Err(FinError::validation(
+                    "Historical bridge costs require the attached protected operation journal.",
+                ));
+            }
+            Vec::new()
+        };
+        let mut total = candidate;
+        for operation in operations.iter().filter(|operation| {
+            operation.preview.as_ref().is_some_and(|preview| {
+                preview.binding["transfer_id"] == transfer.id
+                    && preview.binding["step_id"].as_str() != Some(current_step)
+            })
+        }) {
+            if let Some(effects) = &operation.effects {
+                for effect in &effects.effects {
+                    if let FinancialEffect::Cost {
+                        amount,
+                        treatment: CostTreatment::AdditionalDebit,
+                        ..
+                    } = effect
+                        && amount.asset == *asset
+                    {
+                        total = total
+                            .checked_add(fin_evm::u256(&amount.atoms)?)
+                            .ok_or_else(internal_error)?;
+                    }
+                }
+            } else if operation.submission.is_some() || !operation.status.terminal() {
+                // Uncertain submissions continue to reserve their complete frozen
+                // bound; terminal unsubmitted previews consume nothing.
+                for cost in &operation
+                    .preview
+                    .as_ref()
+                    .ok_or_else(internal_error)?
+                    .intent
+                    .maximum_costs
+                {
+                    if cost.amount.asset == *asset
+                        && cost.treatment == CostTreatment::AdditionalDebit
+                    {
+                        total = total
+                            .checked_add(fin_evm::u256(&cost.amount.atoms)?)
+                            .ok_or_else(internal_error)?;
+                    }
+                }
+            }
+        }
+        let chain = asset
+            .network
+            .strip_prefix("ethereum:")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(internal_error)?;
+        if total > fin_evm::u256(&maximum_gas_cap(bounds, chain)?)? {
+            return Err(error(
+                "BRIDGE_CUMULATIVE_FEE_LIMIT",
+                "preview",
+                "Prior bridge costs and unresolved reservations leave insufficient approved gas budget for this stage.",
+                "Preserve the withdrawal identity and inspect bridge.status; obtain an explicit revised fee budget where supported.",
+            ));
+        }
+        Ok(())
+    }
+
     fn saved_quote(&self, record: &BridgeTransferRecord) -> fin_domain::Result<SavedQuote> {
         let revision = record.quote_revisions.last().ok_or_else(|| {
             error(
@@ -2453,7 +3067,10 @@ impl BridgeAdapter {
                     .as_ref()
                     .map(|approval| abbreviate_address(&approval.spender))
                     .unwrap_or_else(|| "reviewed Relay spender".into());
-                format!("Approve up to {cap} for Relay spender {spender}")
+                format!(
+                    "Approve up to {cap} for {} spender {spender}",
+                    bridge_provider_label(&saved.quote.provider)
+                )
             }
             BridgeStepKind::ResetAllowance => {
                 let zero = format_amount(&FinAmount {
@@ -2466,12 +3083,19 @@ impl BridgeAdapter {
                     .as_ref()
                     .map(|approval| abbreviate_address(&approval.spender))
                     .unwrap_or_else(|| "reviewed Relay spender".into());
-                format!("Reset token allowance to {zero} for Relay spender {spender}")
+                format!(
+                    "Reset token allowance to {zero} for {} spender {spender}",
+                    bridge_provider_label(&saved.quote.provider)
+                )
             }
             BridgeStepKind::Deposit => String::new(),
+            BridgeStepKind::Prove => "Prove the saved Base withdrawal on Ethereum".into(),
+            BridgeStepKind::Finalize => "Finalize the saved Base withdrawal on Ethereum".into(),
         };
         let bridge_clause = if matches!(kind, BridgeStepKind::Deposit) {
             format!("Bridge {amount}{range}")
+        } else if kind.is_destination_stage() {
+            format!("{action}; saved withdrawal {amount}")
         } else {
             format!("{action}; bridge {amount}{range}")
         };
@@ -2522,6 +3146,7 @@ fn bridge_provider_label(provider: &str) -> &'static str {
     match provider {
         "relay" => "Relay",
         "arbitrum_canonical" => "Canonical Inbox",
+        "base_canonical" => "Base canonical bridge",
         _ => "reviewed bridge provider",
     }
 }
@@ -2587,7 +3212,7 @@ fn bridge_settlement_status_summary(transfer: &BridgeTransferRecord) -> Option<V
 
 fn bridge_confirmation_rules(mut rules: BTreeMap<u64, (u64, bool)>) -> BTreeMap<u64, (u64, bool)> {
     for (chain_id, rule) in [
-        (8453, (2, true)),
+        (8453, (1, false)),
         (537713, (2, true)),
         (42161, (1, false)),
         (4663, (1, false)),
@@ -2832,6 +3457,12 @@ impl Adapter for BridgeAdapter {
     }
 
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
+        if operation == "bridge.recovery" {
+            return self.base_recovery(input).await;
+        }
+        if operation == "bridge.routes" {
+            return self.routes(input).await;
+        }
         if operation == "bridge.quotes" {
             return self.quote(input).await;
         }
@@ -2860,6 +3491,11 @@ impl Adapter for BridgeAdapter {
             ));
         }
         let (mut record, mut saved, mut step, link, requested_bounds) = self.step_context(input)?;
+        if link.kind.is_destination_stage() {
+            return self
+                .prepare_base_stage(input, &record, &saved, step, &link, requested_bounds)
+                .await;
+        }
         if saved.quote.class != fin_bridge::QuoteClass::Executable {
             return Err(error(
                 "BRIDGE_QUOTE_NOT_EXECUTABLE",
@@ -2894,6 +3530,7 @@ impl Adapter for BridgeAdapter {
         };
         saved.bounds = selected_bounds.clone();
         if saved.quote.intent.source.token.is_some()
+            && saved.quote.provider != "base_canonical"
             && record.approved_bounds.is_none()
             && record.grant_id.is_none()
         {
@@ -3060,7 +3697,8 @@ impl Adapter for BridgeAdapter {
         // those exact bounds separately. Relay's digest already excludes the
         // mutable quantity and its raw provider steps need allowance-aware
         // normalization, so retain its persisted plan digest here.
-        if saved.quote.provider == "arbitrum_canonical" {
+        if saved.quote.provider == "arbitrum_canonical" || saved.quote.provider == "base_canonical"
+        {
             let provider = self.provider(&saved.quote.provider)?;
             let selected_plan = provider.prepare(&saved.quote, &selected_bounds, sender)?;
             if !same_bridge_step_topology(&saved.plan.steps, &selected_plan.steps) {
@@ -3246,6 +3884,18 @@ impl Adapter for BridgeAdapter {
             &fin_evm::quantity(fee),
         )
         .await?;
+        self.validate_transfer_gas_budget(
+            &record,
+            &link.step_id,
+            &selected_bounds,
+            &EvmAsset {
+                chain_id: step.call.chain_id,
+                token: None,
+                decimals: 18,
+            }
+            .asset_id(),
+            fee,
+        )?;
         let source_asset = saved.quote.intent.source.asset_id();
         let resource = wallet.resource.clone();
         let mut debits = step
@@ -3361,6 +4011,7 @@ impl Adapter for BridgeAdapter {
                 asset: source_asset.clone(),
                 maximum_debit: saved.quote.gross_debit.atoms.clone(),
             }],
+            ProviderStepKind::Prove | ProviderStepKind::Finalize => vec![],
         };
         let intent = FinancialIntent {
             debits,
@@ -3465,19 +4116,21 @@ impl Adapter for BridgeAdapter {
                 )
             })?;
         if record.grant_id.is_some()
-            || matches!(
+            || (matches!(
                 record.state,
                 BridgeTransferState::Completed
                     | BridgeTransferState::Refunded
                     | BridgeTransferState::Failed
-            )
+            ) && !record.steps.iter().any(|link| {
+                link.step_id == requested.step_id && link.plan_authority.is_some()
+            }))
             // A plan revision may refresh the same plan-owned transfer after
             // settled approval/reset steps. The store checks plan/revision
             // ownership when it claims a concrete attempt. Never adopt an
             // independently submitted exact step into a new named plan.
             || record.steps.iter().any(|link| {
                 link.plan_authority.is_none()
-                    && (link.state != BridgeStepState::Unsubmitted
+                    && (!matches!(link.state, BridgeStepState::Unsubmitted | BridgeStepState::Superseded)
                         || link.operation_id.is_some())
             })
         {
@@ -3518,6 +4171,28 @@ impl Adapter for BridgeAdapter {
                 "Use the kind returned for this exact step ID.",
             ));
         }
+        if let Some(authority) = &link.plan_authority {
+            let original: BridgeBounds =
+                serde_json::from_value(record.approved_bounds.clone().ok_or_else(internal_error)?)
+                    .map_err(|_| internal_error())?;
+            if bounds != original {
+                return Err(FinError::validation(
+                    "A plan renewal must preserve the original bridge bounds and consumed authority.",
+                ));
+            }
+            // A recovery recipe adds future identities, not new permissions
+            // to previously approved writes. Preserve their exact historical
+            // inventory so the started plan prefix remains immutable.
+            return self
+                .state()?
+                .plan_permission(authority)
+                .map_err(store_error)?
+                .ok_or_else(|| {
+                    FinError::validation(
+                        "The original immutable bridge plan permission is missing.",
+                    )
+                });
+        }
 
         // Rebuild only deterministic provider calls from the protected quote.
         // This path deliberately does not inspect balances, allowance state,
@@ -3526,8 +4201,21 @@ impl Adapter for BridgeAdapter {
         // uses `prepare`, which repeats live preflight immediately before the
         // immutable operation attempt is created.
         let provider = self.provider(&saved.quote.provider)?;
-        let mut normalized_plan =
-            provider.prepare(&saved.quote, &bounds, &saved.quote.intent.source_address)?;
+        let mut normalized_plan = if requested.step_kind.is_destination_stage()
+            && record.transit.is_some()
+            && saved.quote.provider == "base_canonical"
+        {
+            let mut plan = saved.plan.clone();
+            plan.bounds = bounds.clone();
+            plan.fixed_scope_digest = fin_bridge::base_canonical::scope_digest(
+                &saved.quote,
+                &bounds,
+                &saved.quote.intent.source_address,
+            )?;
+            plan
+        } else {
+            provider.prepare(&saved.quote, &bounds, &saved.quote.intent.source_address)?
+        };
         normalized_plan = self
             .allowance_aware_plan(
                 &saved.quote,
@@ -3620,7 +4308,7 @@ impl Adapter for BridgeAdapter {
         };
         let step_gas = CostBound {
             location: AccountingLocation::Cash {
-                resource: saved.quote.intent.wallet.clone(),
+                resource: bridge_stage_resource(&saved.quote.intent, step.call.chain_id),
             },
             amount: FinAmount {
                 asset: gas_asset.clone(),
@@ -3729,6 +4417,20 @@ impl Adapter for BridgeAdapter {
                 .atoms
                 .clone(),
         );
+        let deferred_receipt = if link.kind == BridgeStepKind::Finalize {
+            expectation
+                .destination
+                .first()
+                .map(|target| ResourceAmount {
+                    resource: target.resource.clone(),
+                    amount: FinAmount {
+                        asset: target.asset.clone(),
+                        atoms: target.minimum_atoms.clone(),
+                    },
+                })
+        } else {
+            None
+        };
         let mut possible_credits = std::collections::BTreeSet::new();
         for target in expectation
             .destination
@@ -3758,6 +4460,7 @@ impl Adapter for BridgeAdapter {
             },
             possible_credits: possible_credits.into_iter().collect(),
             fee_assets,
+            deferred_receipt,
             authorization_seconds: bounds.authorization_seconds.map(u64::from),
             cumulative_scope: Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
                 scope_id: record.id,
@@ -3772,6 +4475,14 @@ impl Adapter for BridgeAdapter {
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> fin_domain::Result<fin_domain::boundaries::BoundarySpec> {
+        if prepared.binding["quote"]["provider"] == "base_canonical" {
+            return Err(error(
+                "BRIDGE_BOUNDARY_UNSUPPORTED",
+                "authorization",
+                "Base canonical stages use exact approval or a named sequential plan.",
+                "Authorize the exact step, or include the finite stages and cumulative fees in a named plan.",
+            ));
+        }
         bridge_boundary_spec(prepared, bounds)
     }
 
@@ -3809,6 +4520,155 @@ impl Adapter for BridgeAdapter {
                     "Reconcile the original operation; do not prepare an alternate route.",
                 )
             })?;
+        let kind: BridgeStepKind = serde_json::from_value(prepared.binding["step_kind"].clone())
+            .map_err(|_| FinError::validation("Bridge stage binding is malformed."))?;
+        if quote.provider == "relay" {
+            for asset in std::iter::once(&quote.intent.source)
+                .chain(quote.intent.destination_assets.iter())
+                .chain(quote.intent.allowed_refund_assets.iter())
+            {
+                let fresh = self
+                    .asset(
+                        &BridgeAssetInput {
+                            chain_id: asset.chain_id,
+                            token: asset.token.clone(),
+                        },
+                        asset.chain_id,
+                    )
+                    .await?;
+                if fresh != *asset {
+                    return Err(FinError::validation(
+                        "Exact Relay asset precision or deployment changed before dispatch.",
+                    ));
+                }
+            }
+        }
+        if kind.is_destination_stage() {
+            let id = prepared.binding["transfer_id"]
+                .as_str()
+                .ok_or_else(internal_error)?;
+            let transfer = self
+                .state()?
+                .transfer(id)
+                .map_err(store_error)?
+                .ok_or_else(internal_error)?;
+            let locator = transfer
+                .transit
+                .as_ref()
+                .and_then(|transit| transit.destination_locator.as_ref())
+                .ok_or_else(|| {
+                    FinError::validation("Original withdrawal transit proof is missing.")
+                })?;
+            if quote.provider != "base_canonical"
+                || transfer.grant_id.is_some()
+                || json!(locator) != prepared.binding["source_locator"]
+            {
+                return Err(FinError::validation(
+                    "Deferred Base stage differs from its original settled source identity.",
+                ));
+            }
+            let verified = saved_base_withdrawal(locator)?;
+            let call = if kind == BridgeStepKind::Prove {
+                let readiness = self
+                    .base_provider()?
+                    .withdrawal_readiness(&verified.withdrawal, &transaction.sender)
+                    .await?;
+                if readiness.finalized || (readiness.proven_at > 0 && !readiness.proof_invalidated)
+                {
+                    return Err(error(
+                        "BRIDGE_PROOF_ALREADY_PRESENT",
+                        "submission",
+                        "A valid proof or finalization appeared before dispatch.",
+                        "Inspect bridge.status; preserve the existing proof's maturity timer.",
+                    ));
+                }
+                let witness: fin_bridge::base_canonical::BaseWithdrawalWitness =
+                    serde_json::from_value(prepared.binding["base_witness"].clone())
+                        .map_err(|_| FinError::validation("Base proof witness is malformed."))?;
+                fin_bridge::base_canonical::encode_prove_call(&verified.withdrawal, &witness)?
+            } else {
+                let readiness = self
+                    .base_provider()?
+                    .withdrawal_readiness(&verified.withdrawal, &transaction.sender)
+                    .await?;
+                if !readiness.ready || readiness.finalized {
+                    return Err(error(
+                        "BRIDGE_FINALIZATION_PENDING",
+                        "submission",
+                        "Portal finalization checks no longer permit this saved withdrawal.",
+                        "Inspect bridge.status and preserve the original withdrawal identity.",
+                    ));
+                }
+                fin_bridge::base_canonical::encode_finalize_call(
+                    &verified.withdrawal,
+                    &transaction.sender,
+                )?
+            };
+            if transaction.chain_id != call.chain_id
+                || !transaction.to.eq_ignore_ascii_case(&call.to)
+                || transaction.value != call.value
+                || !transaction.calldata.eq_ignore_ascii_case(&call.data)
+            {
+                return Err(FinError::validation(
+                    "Frozen Base stage is not the exact broker-derived portal call.",
+                ));
+            }
+            let bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
+                .map_err(|_| internal_error())?;
+            self.validate_frozen_gas_cap(
+                &bounds,
+                &EvmAsset {
+                    chain_id: 1,
+                    token: None,
+                    decimals: 18,
+                }
+                .asset_id(),
+                &fin_evm::quantity(transaction.maximum_cost()?),
+            )
+            .await?;
+            self.validate_transfer_gas_budget(
+                &transfer,
+                prepared.binding["step_id"]
+                    .as_str()
+                    .ok_or_else(internal_error)?,
+                &bounds,
+                &EvmAsset {
+                    chain_id: 1,
+                    token: None,
+                    decimals: 18,
+                }
+                .asset_id(),
+                transaction.maximum_cost()?,
+            )?;
+            let mut fresh = prepared.clone();
+            fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
+            fin_domain::value_bounds::carry(prepared, &mut fresh)?;
+            return Ok(fresh);
+        }
+        if quote.provider == "base_canonical"
+            && kind == BridgeStepKind::Deposit
+            && let Some(source_token) = &quote.intent.source.token
+        {
+            let destination_token = quote
+                .intent
+                .destination_assets
+                .first()
+                .and_then(|asset| asset.token.as_deref())
+                .ok_or_else(internal_error)?;
+            let (l1, l2) = if quote.intent.source.chain_id == 1 {
+                (source_token.as_str(), destination_token)
+            } else {
+                (destination_token, source_token.as_str())
+            };
+            let decimals = self.base_provider()?.verify_pair(l1, l2).await?;
+            if decimals != quote.intent.source.decimals
+                || quote.intent.destination_assets[0].decimals != decimals
+            {
+                return Err(FinError::validation(
+                    "Canonical token-pair precision or deployment changed before dispatch.",
+                ));
+            }
+        }
         if quote.provider == "arbitrum_canonical" {
             require_empty_code(&runtime, &quote.intent.source_address, None).await?;
         }
@@ -3837,6 +4697,29 @@ impl Adapter for BridgeAdapter {
             &fin_evm::quantity(transaction.maximum_cost()?),
         )
         .await?;
+        let transfer = self
+            .state()?
+            .transfer(
+                prepared.binding["transfer_id"]
+                    .as_str()
+                    .ok_or_else(internal_error)?,
+            )
+            .map_err(store_error)?
+            .ok_or_else(internal_error)?;
+        self.validate_transfer_gas_budget(
+            &transfer,
+            prepared.binding["step_id"]
+                .as_str()
+                .ok_or_else(internal_error)?,
+            &bounds,
+            &EvmAsset {
+                chain_id: transaction.chain_id,
+                token: None,
+                decimals: 18,
+            }
+            .asset_id(),
+            transaction.maximum_cost()?,
+        )?;
         let mut fresh = prepared.clone();
         fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
         fin_domain::value_bounds::carry(prepared, &mut fresh)?;
@@ -4521,21 +5404,9 @@ fn reviewed_relay_config() -> ReviewedConfig {
             },
         );
     }
-    let tokens = [
-        (1, ETHEREUM_USDC),
-        (42161, ARBITRUM_USDC),
-        (4663, ROBINHOOD_USDG),
-    ]
-    .into_iter()
-    .map(|(chain_id, address)| ReviewedTokenKey {
-        chain_id,
-        address: address.to_owned(),
-        decimals: 6,
-    })
-    .collect();
     ReviewedConfig {
         chains,
-        tokens,
+        tokens: Default::default(),
         relay_solver_protocol_chain_id: "base".into(),
         settlement_hub_chain_id: 537713,
         settlement_hub_address: RELAY_HUB.into(),
@@ -4715,6 +5586,7 @@ fn chain_name(chain_id: u64) -> &'static str {
         1 => "Ethereum Mainnet",
         42161 => "Arbitrum One",
         4663 => "Robinhood Chain",
+        8453 => "Base",
         _ => "EVM",
     }
 }
@@ -4800,6 +5672,8 @@ fn domain_step_kind(kind: &ProviderStepKind) -> BridgeStepKind {
         ProviderStepKind::Approval => BridgeStepKind::Approval,
         ProviderStepKind::ResetAllowance => BridgeStepKind::ResetAllowance,
         ProviderStepKind::Deposit => BridgeStepKind::Deposit,
+        ProviderStepKind::Prove => BridgeStepKind::Prove,
+        ProviderStepKind::Finalize => BridgeStepKind::Finalize,
     }
 }
 
@@ -4825,6 +5699,8 @@ fn step_kind_name(kind: &BridgeStepKind) -> &'static str {
         BridgeStepKind::Approval => "approval",
         BridgeStepKind::ResetAllowance => "reset_allowance",
         BridgeStepKind::Deposit => "deposit",
+        BridgeStepKind::Prove => "prove",
+        BridgeStepKind::Finalize => "finalize",
     }
 }
 
@@ -4872,7 +5748,11 @@ fn cumulative_gas_cost_caps(
         }
         caps.push(CostBound {
             location: AccountingLocation::Cash {
-                resource: resource.clone(),
+                resource: if step.call.chain_id == plan.quote.intent.source.chain_id {
+                    resource.clone()
+                } else {
+                    bridge_stage_resource(&plan.quote.intent, step.call.chain_id)
+                },
             },
             amount: FinAmount {
                 asset,
@@ -4882,6 +5762,17 @@ fn cumulative_gas_cost_caps(
         });
     }
     Ok(caps)
+}
+
+fn bridge_stage_resource(intent: &BridgeIntent, chain_id: u64) -> fin_domain::ResourceId {
+    if chain_id == intent.source.chain_id {
+        intent.wallet.clone()
+    } else {
+        fin_domain::ResourceId(format!(
+            "ethereum:{chain_id}:{}",
+            intent.source_address.to_ascii_lowercase()
+        ))
+    }
 }
 
 fn push_plan_cost_cap(
@@ -5063,12 +5954,12 @@ fn finite_bridge_boundary_summary(
         .iter()
         .map(|step| match step.kind {
             ProviderStepKind::ResetAllowance => Ok(format!(
-                "reset token allowance to {} for Relay spender {spender}",
-                format_amount(&source_amount(fin_domain::Quantity::zero()))
+                "reset token allowance to {} for {} spender {spender}",
+                format_amount(&source_amount(fin_domain::Quantity::zero())),bridge_provider_label(&plan.quote.provider)
             )),
             ProviderStepKind::Approval => Ok(format!(
-                "approve up to {} for Relay spender {spender}",
-                format_amount(&source_amount(max_source.clone()))
+                "approve up to {} for {} spender {spender}",
+                format_amount(&source_amount(max_source.clone())),bridge_provider_label(&plan.quote.provider)
             )),
             ProviderStepKind::Deposit => {
                 let input_scope = if input.minimum == input.maximum {
@@ -5082,6 +5973,8 @@ fn finite_bridge_boundary_summary(
                 };
                 Ok(format!("deposit source input {input_scope}"))
             }
+            ProviderStepKind::Prove => Ok("prove the original withdrawal on Ethereum; witness and simulation deferred until source proof".into()),
+            ProviderStepKind::Finalize => Ok("finalize the original withdrawal on Ethereum after current portal readiness checks".into()),
         })
         .collect::<fin_domain::Result<Vec<_>>>()?
         .join("; ");
@@ -5177,7 +6070,7 @@ fn prospective_debit_update_before_source_approval(
                     .first()
                     .is_none_or(|reset| current.depends_on.contains(&reset.step_id))
         }
-        BridgeStepKind::Deposit => false,
+        BridgeStepKind::Deposit | BridgeStepKind::Prove | BridgeStepKind::Finalize => false,
     };
     if !reset_history_is_safe {
         return false;
@@ -5402,6 +6295,31 @@ async fn reconcile_wallet_step(
         BridgeStepKind::Deposit => {
             verify_source_deposit(&step, &preview.binding, &receipt, transfer_id, &runtime).await?
         }
+        BridgeStepKind::Prove | BridgeStepKind::Finalize => {
+            let locator: fin_domain::BridgeDestinationLocator =
+                serde_json::from_value(preview.binding["source_locator"].clone())
+                    .map_err(|_| FinError::validation("Stage source locator is malformed."))?;
+            let verified = saved_base_withdrawal(&locator)?;
+            let logs = receipt.receipt["logs"]
+                .as_array()
+                .ok_or_else(internal_error)?
+                .iter()
+                .map(canonical_raw_log)
+                .collect::<fin_domain::Result<Vec<_>>>()?;
+            if kind == BridgeStepKind::Prove {
+                fin_bridge::base_canonical::verify_withdrawal_proven(
+                    &logs,
+                    &verified.withdrawal,
+                    &transaction.sender,
+                )?;
+            } else {
+                fin_bridge::base_canonical::verify_withdrawal_finalized(
+                    &logs,
+                    &verified.withdrawal_hash,
+                )?;
+            }
+            (vec![], None)
+        }
     };
     let mut effects = amount_effects;
     if !receipt.fee.is_zero() {
@@ -5505,6 +6423,70 @@ async fn verify_source_deposit(
             runtime,
         )
         .await;
+    }
+    if quote.provider == "base_canonical" {
+        let raw = receipt.receipt["logs"]
+            .as_array()
+            .ok_or_else(|| FinError::validation("Base source logs are missing."))?
+            .iter()
+            .map(canonical_raw_log)
+            .collect::<fin_domain::Result<Vec<_>>>()?;
+        let (log_index, correlation, transaction_hash, message_hash, scheme, proof) =
+            if quote.intent.source.chain_id == 1 {
+                let deposit = fin_bridge::base_canonical::verify_deposit_source(
+                    &raw,
+                    &quote.intent,
+                    &format!("{:#x}", receipt.block_hash),
+                )?;
+                (
+                    u64::from(deposit.bridge_log_index),
+                    deposit.source_hash.clone(),
+                    deposit.transaction_hash.clone(),
+                    None,
+                    "base_deposit_v1",
+                    json!({"deposit":deposit,"source_block_number":receipt.block_number}),
+                )
+            } else {
+                let withdrawal =
+                    fin_bridge::base_canonical::verify_withdrawal_source(&raw, &quote.intent)?;
+                (
+                    u64::from(withdrawal.bridge_log_index),
+                    withdrawal.withdrawal_hash.clone(),
+                    String::new(),
+                    Some(withdrawal.withdrawal_hash.clone()),
+                    "base_withdrawal_message",
+                    json!({"withdrawal":withdrawal,"source_block_number":receipt.block_number}),
+                )
+            };
+        let evidence_id = format!(
+            "ethereum:{}:{:#x}:{log_index}",
+            quote.intent.source.chain_id, receipt.hash
+        );
+        let locator = fin_domain::BridgeDestinationLocator {
+            scheme: scheme.into(),
+            source_evidence_id: evidence_id.clone(),
+            destination_chain_id: quote.intent.destination_chain_id,
+            transaction_hash,
+            message_hash,
+            proof,
+        };
+        let effect = FinancialEffect::CashDebit {
+            resource: quote.intent.wallet.clone(),
+            amount: quote.gross_debit.clone(),
+        };
+        let transit = FinancialEffect::TransitPrincipal {
+            transfer_id: transfer_id.into(),
+            amount: quote.gross_debit.clone(),
+        };
+        return Ok((
+            vec![effect, transit],
+            Some(VerifiedSourceProof {
+                evidence_id,
+                log_index,
+                correlation,
+                destination_locator: Some(locator),
+            }),
+        ));
     }
     let order_id = quote.protocol_order_id.as_deref().ok_or_else(|| {
         error(
@@ -5748,6 +6730,7 @@ async fn verify_canonical_source_deposit(
         step.call.chain_id
     );
     let locator = fin_domain::BridgeDestinationLocator {
+        message_hash: None,
         scheme: "arbitrum_eth_deposit_v1".into(),
         source_evidence_id: evidence_id.clone(),
         destination_chain_id: proof.destination_chain_id,
@@ -5791,6 +6774,27 @@ fn canonical_raw_log(log: &Value) -> fin_domain::Result<fin_bridge::canonical::C
             .ok_or_else(|| FinError::validation("Canonical log data is malformed."))?
             .to_owned(),
     })
+}
+
+fn saved_base_withdrawal(
+    locator: &fin_domain::BridgeDestinationLocator,
+) -> fin_domain::Result<fin_bridge::base_canonical::VerifiedBaseWithdrawal> {
+    let withdrawal: fin_bridge::base_canonical::VerifiedBaseWithdrawal =
+        serde_json::from_value(locator.proof["withdrawal"].clone())
+            .map_err(|_| FinError::validation("Persisted Base withdrawal proof is malformed."))?;
+    let actual = format!("{:#x}", withdrawal.withdrawal.hash()?);
+    if locator.scheme != "base_withdrawal_message"
+        || locator.destination_chain_id != 1
+        || !locator.transaction_hash.is_empty()
+        || locator.source_evidence_id.is_empty()
+        || locator.message_hash.as_deref() != Some(actual.as_str())
+        || withdrawal.withdrawal_hash != actual
+    {
+        return Err(FinError::validation(
+            "Persisted Base withdrawal message identity does not match its exact source proof.",
+        ));
+    }
+    Ok(withdrawal)
 }
 
 async fn require_empty_code(
@@ -5903,8 +6907,10 @@ async fn verify_allowance_step(
     let expected = match kind {
         BridgeStepKind::ResetAllowance => fin_evm::alloy::primitives::U256::ZERO,
         BridgeStepKind::Approval => after,
-        BridgeStepKind::Deposit => {
-            return Err(FinError::validation("Deposit is not an allowance step."));
+        BridgeStepKind::Deposit | BridgeStepKind::Prove | BridgeStepKind::Finalize => {
+            return Err(FinError::validation(
+                "This bridge stage is not an allowance step.",
+            ));
         }
     };
     let expected_call = BridgeErc20::approveCall {
@@ -6110,7 +7116,7 @@ mod tests {
         assert_eq!(configured[&1], (6, true));
         assert_eq!(configured[&42161], (1, false));
         assert_eq!(configured[&4663], (1, false));
-        assert_eq!(configured[&8453], (2, true));
+        assert_eq!(configured[&8453], (1, false));
         assert_eq!(configured[&537713], (2, true));
     }
 

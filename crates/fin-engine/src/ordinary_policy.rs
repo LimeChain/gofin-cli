@@ -37,6 +37,42 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
             "A historical submission has no recorded valuation.",
         ));
     };
+    if cost_attention_pending(record) {
+        // An externally incurred overrun is never capped or valued at invented
+        // zero for future policy checks. Retain every other approved slice and
+        // enlarge only the proved cost slice using the frozen exact price map.
+        let unknown = || {
+            budget_error(
+                "ALLOCATION_COST_UNKNOWN",
+                "An unresolved proved cost has no trustworthy exact valuation; writes remain blocked until its original evidence and pricing are restored.",
+            )
+        };
+        let evidence = record
+            .last_reconciliation_evidence
+            .as_ref()
+            .ok_or_else(unknown)?;
+        let verified: VerifiedEffects =
+            from_value(evidence["verified_effects"].clone()).map_err(|_| unknown())?;
+        let outcome: Status =
+            from_value(evidence["reported_status"].clone()).map_err(|_| unknown())?;
+        if !matches!(outcome, Status::Completed | Status::Failed) {
+            return Err(unknown());
+        }
+        if let Err(rejection) = validate_effects(record, &verified, &outcome)
+            && !matches!(
+                rejection.code.as_str(),
+                "COST_EXCEEDS_RESERVATION"
+                    | "EFFECT_EXCEEDS_RESERVATION"
+                    | "COST_EXCEEDS_USD_RESERVATION"
+            )
+        {
+            return Err(unknown());
+        }
+        let valuation = prepared.valuation.as_ref().ok_or_else(unknown)?;
+        let actual_cost = actual_cost_usd(&verified.effects, valuation).map_err(|_| unknown())?;
+        let approved_cost = valuation.maximum_fee_usd_micros.integer();
+        return Ok(charge(prepared)? - &approved_cost + approved_cost.max(actual_cost));
+    }
     let bounded = prepared
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)

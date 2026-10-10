@@ -116,6 +116,11 @@ pub struct PlanPermission {
     pub spec: BoundarySpec,
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
     pub fee_assets: Vec<AssetId>,
+    /// Receipt capacity for a deferred claim of already committed principal.
+    /// This grants no new debit authority; the adapter independently verifies
+    /// the original backing and the exact claim before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_receipt: Option<ResourceAmount>,
     /// Optional adapter-imposed upper bound on the parent plan consent life.
     /// It is reviewed with the permission and applies to every step.
     #[serde(default, skip_serializing_if = "Option::is_none")]

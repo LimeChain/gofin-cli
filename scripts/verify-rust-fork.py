@@ -103,6 +103,7 @@ def selected_test_filter() -> list[str]:
         "deployed_protocol_roundtrip_via_broker_restores_exact_state",
         "deployed_relay_native_source_proof_keeps_principal_in_transit",
         "deployed_canonical_native_source_proof_on_both_children",
+        "deployed_base_canonical_native_source_proof_keeps_principal_in_transit",
     }:
         raise RuntimeError("FIN_FORK_TEST_FILTER must select a documented deployed-contract test; arbitrary filters could falsely pass with no tests.")
     return [value]
@@ -111,7 +112,7 @@ def verify(source: Path, anvil: Path) -> int:
     test_filter = selected_test_filter()
     test_target = (
         "canonical_orchestration"
-        if test_filter == ["deployed_canonical_native_source_proof_on_both_children"]
+        if test_filter in (["deployed_canonical_native_source_proof_on_both_children"], ["deployed_base_canonical_native_source_proof_keeps_principal_in_transit"])
         else "fork_roundtrip"
     )
     work = source / "work"

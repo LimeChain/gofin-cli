@@ -10106,7 +10106,7 @@
   },
   {
     "name": "bridge.quotes",
-    "description": "Compare the configured Relay and Canonical Inbox bridge routes for exact EVM wallet, asset and recipient identities.",
+    "description": "Compare the configured Relay, Arbitrum canonical and Base canonical bridge routes for exact EVM wallet, asset and recipient identities.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -10572,7 +10572,7 @@
         }
       }
     ],
-    "coverage": "Compares configured Relay routes and Canonical Inbox native-ETH deposits where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.",
+    "coverage": "Compares configured Relay, Arbitrum canonical and Base canonical routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.",
     "completion": "Returns exact assets, Fin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.",
     "semantics": {
       "agent_supplied_calldata": false,
@@ -10583,16 +10583,226 @@
       "provider_usd_fields": "ignored; fee USD values are independently priced by Fin",
       "providers": [
         {
-          "coverage": "reviewed native ETH and finite ERC-20 protocol routes",
+          "coverage": "quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes",
           "id": "relay"
         },
         {
           "coverage": "native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path",
           "id": "arbitrum_canonical"
+        },
+        {
+          "coverage": "bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages",
+          "id": "base_canonical"
         }
       ],
       "quote_persistence": "broker-owned, restart-safe",
       "service_required": true
+    }
+  },
+  {
+    "name": "bridge.recovery",
+    "description": "Declare fresh deferred stages for the same Base withdrawal after an invalidated settled proof or a canonically reverted stage.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "transferId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transferId"
+      ],
+      "title": "BridgeStatusInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "required": [
+        "transfer_id",
+        "withdrawal_hash",
+        "steps",
+        "created",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "transferId": "TRANSFER_ID_FROM_QUOTE"
+      }
+    ],
+    "coverage": "Base canonical withdrawals with independently invalidated settled proof or canonically reverted proof/finalization.",
+    "completion": "Persists new deferred step identities; all prior operations, source proof, bounds and fees remain intact. Repeated reads return the same unsubmitted pair.",
+    "semantics": {
+      "agent_supplied_calldata": false,
+      "approval_renewal": false,
+      "financial_authorization": false,
+      "may_submit": false,
+      "next": "Obtain fresh exact approval or revise the same named plan before executing the returned stages."
+    }
+  },
+  {
+    "name": "bridge.routes",
+    "description": "Discover indicative bridge routes by exact source asset and destination chain, with provider-specific availability and independently verified candidate token identities.",
+    "kind": "read",
+    "execution_actor": "agent_readable",
+    "input_schema": {
+      "$defs": {
+        "BridgeAssetInput": {
+          "additionalProperties": false,
+          "properties": {
+            "chainId": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "token": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "chainId"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "destinationAsset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BridgeAssetInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "destinationChainId": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/BridgeAssetInput"
+        }
+      },
+      "required": [
+        "source",
+        "destinationChainId"
+      ],
+      "title": "BridgeRoutesInput",
+      "type": "object"
+    },
+    "output_schema": {
+      "properties": {
+        "indicative": {
+          "const": true
+        },
+        "routes": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "indicative",
+        "source",
+        "destination_chain_id",
+        "coverage",
+        "routes",
+        "next_action"
+      ],
+      "type": "object"
+    },
+    "error_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "details": true,
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "stage",
+        "message",
+        "next_action"
+      ],
+      "title": "FinError",
+      "type": "object"
+    },
+    "examples": [
+      {
+        "destinationChainId": 8453,
+        "source": {
+          "chainId": 1
+        }
+      },
+      {
+        "destinationAsset": {
+          "chainId": 1,
+          "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "destinationChainId": 1,
+        "source": {
+          "chainId": 8453,
+          "token": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        }
+      }
+    ],
+    "coverage": "Configured providers only. Currency/indexer lists are partial; empty discovery is unknown rather than proof that no route exists. Exact destination assets remain available for quotes.",
+    "completion": "Returns indicative candidates and availability reasons. Creates no transfer, reservation, approval, submission or executable calldata.",
+    "semantics": {
+      "asset_identity": "Exact chain and native/ERC-20 contract; symbols never establish equivalence.",
+      "financial_authorization": false,
+      "indicative": true,
+      "may_submit": false,
+      "next": "Choose exact destination/refund representations, wallet, recipient and amount using bridge.quotes before approval.",
+      "token_decimals": "Independently verified at pinned RPC blocks; provider metadata is a candidate only."
     }
   },
   {
@@ -10729,7 +10939,7 @@
   },
   {
     "name": "bridge.transfer",
-    "description": "Prepare or execute one persisted, broker-validated approval, allowance reset or supported bridge source-deposit step, either under a finite bridge grant or as one step of a named plan.",
+    "description": "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof or finalization stage under its exact or named-plan authority.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -10893,7 +11103,9 @@
           "enum": [
             "approval",
             "reset_allowance",
-            "deposit"
+            "deposit",
+            "prove",
+            "finalize"
           ],
           "type": "string"
         },
@@ -11055,7 +11267,7 @@
         "transferId": "SYNTHETIC-transfer-id"
       }
     ],
-    "coverage": "Relay handles its reviewed native ETH and finite ERC-20 source steps. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
+    "coverage": "Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
     "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
     "semantics": {
       "agent_supplied_calldata": false,
@@ -11067,16 +11279,12 @@
           "chain_id": 537713,
           "name": "RelayChain",
           "wallet_authority": false
-        },
-        {
-          "chain_id": 8453,
-          "name": "Base",
-          "wallet_authority": false
         }
       ],
       "providers": [
         "relay",
-        "arbitrum_canonical"
+        "arbitrum_canonical",
+        "base_canonical"
       ],
       "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
       "service_required": true,

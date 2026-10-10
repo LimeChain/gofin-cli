@@ -72,6 +72,7 @@ impl EthereumAdapter {
         let mut intent = FinancialIntent::default();
         intent.locks.push(resource.clone());
         let placeholder = FrozenTransaction {
+            rollup_fee: None,
             chain_id: self.config.chain_id,
             sender: w.address.clone(),
             to: w.address.clone(),
@@ -546,7 +547,23 @@ impl EthereumAdapter {
                             debt: debt_position.clone(),
                             asset: principal_asset.clone(),
                             direction: Direction::Increase,
-                            maximum_change: quantity(qty),
+                            // Opening debt includes its already-priced finite
+                            // rounding exposure. With an existing verified debt
+                            // baseline, principal and accrual stay separate.
+                            maximum_change: quantity(
+                                if b.debt_anchor
+                                    .as_ref()
+                                    .expect("anchor")
+                                    .principal
+                                    .atoms
+                                    .is_zero()
+                                    && user.scaled_variable_debt.is_zero()
+                                {
+                                    add(qty, rounding_limit)?
+                                } else {
+                                    qty
+                                },
+                            ),
                         });
                         intent.expected.push(EffectConstraint::Credit {
                             to: resource.clone(),

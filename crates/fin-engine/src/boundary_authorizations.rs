@@ -982,6 +982,7 @@ impl Engine {
                     && bridge_step_is_downstream(&transfer.steps, &deposit.step_id, step_id)
             }
             fin_domain::BridgeStepKind::Deposit => deposit.step_id == *step_id,
+            fin_domain::BridgeStepKind::Prove | fin_domain::BridgeStepKind::Finalize => false,
         };
         if current.kind != *step_kind
             || current.operation_id.is_some()
@@ -1170,7 +1171,7 @@ pub(super) fn bridge_step_claim(
         .bridge_transfer(transfer_id)
         .map_err(map_store)?
         .ok_or_else(|| boundary_error("The bridge transfer is not present in the durable plan."))?;
-    if transfer.grant_id.as_deref() != grant_id {
+    if transfer.grant_id.as_deref() != grant_id || transfer.plan_scope.is_some() {
         return Err(boundary_error(
             "The bridge transfer is not bound to this finite authorization.",
         ));

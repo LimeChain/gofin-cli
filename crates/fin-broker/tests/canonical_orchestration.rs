@@ -1028,3 +1028,247 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
     }
     Ok(())
 }
+
+/// A destination observer which explicitly has no Base deposit receipt. This
+/// source-only fork test never fabricates cross-chain liveness or settlement.
+struct AbsentBaseDestination;
+#[async_trait]
+impl EvmRpc for AbsentBaseDestination {
+    async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+        Ok(match method {
+            "eth_chainId" => json!("0x2105"),
+            "eth_getCode" => json!("0x"),
+            "eth_blockNumber" => json!("0x1"),
+            "eth_getTransactionByHash" | "eth_getTransactionReceipt" => Value::Null,
+            other => {
+                return Err(FinError::new(
+                    "SOURCE_ONLY_FORK",
+                    "fork",
+                    format!("Base source-only fixture rejects {other}."),
+                    "Use independently owned Base fixtures for destination verification.",
+                ));
+            }
+        })
+    }
+}
+#[tokio::test]
+#[ignore = "Requires a fresh guarded loopback Ethereum fork; source proof only, never live writes or Base liveness"]
+async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit() -> Result<()> {
+    use canonical_fork::CanonicalForkRpc;
+    use fin_bridge::base_canonical::{BaseCanonicalConfig, BaseCanonicalProvider};
+    let rpc = CanonicalForkRpc::new().await?;
+    let snapshot = rpc.snapshot_fixture().await?;
+    // Public, synthetic Anvil default key. It is only ever signed against the
+    // exact guarded loopback fork identity, never a configured mainnet endpoint.
+    let signer = Arc::new(LocalEnvelopeSigner::from_private_key(
+        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )?);
+    let wallet_address = lower_address(signer.address());
+    let runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, Some(signer)));
+    let base_runtime = Arc::new(EvmRuntime::new(Arc::new(AbsentBaseDestination), 8453, None));
+    let mut config = EthereumConfig::wallet_only(1, 1, vec![]);
+    config.require_finalized = false;
+    let valuator = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
+    let wallet = Arc::new(
+        EthereumAdapter::new(
+            config,
+            vec![WalletConnection {
+                name: "fork-wallet".into(),
+                address: wallet_address.clone(),
+                signing_enabled: true,
+            }],
+            runtime.clone(),
+        )?
+        .with_wallet_valuation(valuator.clone()),
+    );
+    let tmp = tempfile::tempdir()
+        .map_err(|_| FinError::validation("Cannot create source-only fork journal."))?;
+    let shared = Store::open(tmp.path().join("base-canonical-fork.sqlite"))
+        .map_err(|_| FinError::validation("Cannot open source-only fork journal."))?
+        .share();
+    let state = BridgeStateRepository::new(shared.clone());
+    let provider = Arc::new(BaseCanonicalProvider::new(
+        Arc::new(EvmRuntime::new(rpc.clone(), 1, None)),
+        base_runtime.clone(),
+        BaseCanonicalConfig::reviewed(),
+    )?);
+    let bridge = Arc::new(BridgeAdapter::with_providers(
+        vec![provider],
+        BTreeMap::from([(1, wallet.clone())]),
+        BTreeMap::from([(1, runtime.clone()), (8453, base_runtime)]),
+        valuator,
+    )?);
+    bridge.attach_state(state.clone())?;
+    let approvals = Arc::new(Approvals::default());
+    let engine = Arc::new(Engine::new_with_shared_store(
+        shared.clone(),
+        vec![wallet, bridge.clone()],
+        approvals.clone(),
+        EngineOptions {
+            max_movement_and_cost_usd_micros: "100000000".into(),
+            max_run_allocation_usd_micros: "100000000".into(),
+            allow_unpriced_exchange_assets: false,
+        },
+    )?);
+    bridge.attach_engine(Arc::downgrade(&engine))?;
+    let bounds = fin_bridge::BridgeBounds {
+        fee_caps: vec![fin_bridge::FeeCap {
+            asset: fin_bridge::EvmAsset {
+                chain_id: 1,
+                token: None,
+                decimals: 18,
+            }
+            .asset_id(),
+            kind: fin_bridge::FeeKind::Gas,
+            maximum: q("5000000000000000"),
+            maximum_usd_micros: Some(20_000_000),
+        }],
+        ..Default::default()
+    };
+    let quote_input = BridgeQuoteInput {
+        intent: BridgeQuoteIntentInput {
+            wallet: "fork-wallet".into(),
+            source: BridgeAssetInput {
+                chain_id: 1,
+                token: None,
+            },
+            destination_chain_id: 8453,
+            destination_assets: vec![BridgeAssetInput {
+                chain_id: 8453,
+                token: None,
+            }],
+            recipient: wallet_address.clone(),
+            refund_to: wallet_address.clone(),
+            allowed_refund_assets: vec![],
+            amount: q("1000000000000"),
+        },
+        bounds: bounds.clone(),
+        refresh_transfer_id: None,
+    };
+    let quote = bridge
+        .read("bridge.quotes", &serde_json::to_value(quote_input).unwrap())
+        .await
+        .map_err(|mut e| {
+            e.message = format!("Fork phase quote: {}", e.message);
+            e
+        })?;
+    let transfer = quote["transfers"][0]["transfer_id"]
+        .as_str()
+        .ok_or_else(|| {
+            FinError::new(
+                "BASE_CANONICAL_FORK_QUOTE_UNAVAILABLE",
+                "fork",
+                "Base canonical source fork produced no executable quote.",
+                "Inspect sanitized provider failure codes.",
+            )
+            .with_details(safe_fork_quote_diagnostic(&quote))
+        })?
+        .to_owned();
+    let step = quote["transfers"][0]["steps"][0]["step_id"]
+        .as_str()
+        .ok_or_else(|| FinError::validation("Fork quote returned no source step."))?
+        .to_owned();
+    let input = serde_json::to_value(BridgeTransferInput {
+        transfer_id: transfer.clone(),
+        step_id: step,
+        step_kind: fin_domain::BridgeStepKind::Deposit,
+        bounds: Some(bounds),
+    })
+    .unwrap();
+    engine
+        .preview("bridge.transfer", &input)
+        .await
+        .map_err(|mut e| {
+            e.message = format!("Fork phase preview: {}", e.message);
+            e
+        })?;
+    let mut operation = engine
+        .execute(OperationRequest {
+            request_id: "base-canonical-owned-fork-source".into(),
+            operation: "bridge.transfer".into(),
+            input: input.clone(),
+            run_id: None,
+        })
+        .await
+        .map_err(|mut e| {
+            e.message = format!("Fork phase execute: {}", e.message);
+            e
+        })?;
+    for _ in 0..12 {
+        if !matches!(
+            operation.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) {
+            break;
+        }
+        rpc.mine_finality_block().await?;
+        operation = engine.status(&operation.id, true).await.map_err(|mut e| {
+            e.message = format!("Fork phase source status: {}", e.message);
+            e
+        })?;
+    }
+    if operation.status != Status::Completed {
+        return Err(FinError::new(
+            "BASE_CANONICAL_FORK_SOURCE_UNVERIFIED",
+            "fork",
+            format!(
+                "Source step did not verify (status {:?}, error {}): {}",
+                operation.status,
+                operation
+                    .error
+                    .as_ref()
+                    .map(|error| format!("{}:{}", error.code, error.stage))
+                    .unwrap_or_else(|| "none".into()),
+                safe_fork_operation_evidence(&operation)
+            ),
+            "Reconcile the same source operation; never repeat its financial submission.",
+        ));
+    }
+    let duplicate = engine
+        .execute(OperationRequest {
+            request_id: "base-canonical-owned-fork-source".into(),
+            operation: "bridge.transfer".into(),
+            input,
+            run_id: None,
+        })
+        .await?;
+    assert_eq!(duplicate.id, operation.id);
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 1);
+    let record = state
+        .transfer(&transfer)
+        .map_err(|_| FinError::validation("Cannot reload source transfer."))?
+        .ok_or_else(|| FinError::validation("Source transfer missing from durable journal."))?;
+    let locator = record
+        .transit
+        .as_ref()
+        .and_then(|t| t.destination_locator.as_ref())
+        .ok_or_else(|| {
+            FinError::validation(
+                "Actual source receipt did not persist a derived Base transaction locator.",
+            )
+        })?;
+    assert_eq!(locator.scheme, "base_deposit_v1");
+    assert_eq!(locator.destination_chain_id, 8453);
+    assert!(record.settlement_proofs.is_empty());
+    assert!(matches!(
+        record.state,
+        fin_domain::BridgeTransferState::InTransit
+            | fin_domain::BridgeTransferState::DestinationPending
+    ));
+    let status = bridge
+        .read("bridge.status", &json!({"transferId":transfer}))
+        .await?;
+    assert_ne!(status["state"], "completed");
+    // This is local fixture rollback, not a completed cross-chain return path.
+    // Verify the source-only evidence first, then restore owned synthetic state.
+    rpc.restore_fixture(&snapshot).await?;
+    assert!(
+        rpc.request(
+            "eth_getTransactionReceipt",
+            json!([operation.submission.as_ref().unwrap().reference])
+        )
+        .await?
+        .is_null()
+    );
+    Ok(())
+}

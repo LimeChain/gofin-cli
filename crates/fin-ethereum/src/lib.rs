@@ -230,10 +230,23 @@ impl Default for EthereumConfig {
     }
 }
 impl EthereumConfig {
-    /// Reviewed Arbitrum and Robinhood Chain operations settle at canonical
+    /// Reviewed Arbitrum, Robinhood Chain and Base operations settle at canonical
     /// sequencer inclusion rather than waiting for Ethereum L1 finality.
     pub const fn external_credit_uses_sequencer(chain_id: u64) -> bool {
-        matches!(chain_id, 42161 | 4663)
+        matches!(chain_id, 42161 | 4663 | 8453)
+    }
+
+    /// Reviewed Base Aave pool/oracle. Each selected write still verifies the
+    /// provider relationship and requires token revision 5's exact backing math.
+    /// This profile does not attest current deployment compatibility or enable Uniswap.
+    /// https://github.com/bgd-labs/aave-address-book/blob/main/src/AaveV3Base.sol
+    pub fn base_aave(snapshot_tokens: Vec<String>) -> Self {
+        let mut config = Self::wallet_only(8453, 1, snapshot_tokens);
+        config.aave = Some(AaveConfig {
+            pool: "0xa238dd80c259a72e81d7e4664a9801593f98d1c5".into(),
+            oracle: "0x2cc0fc26ed4563a5ce5e8bdcfe1a2878676ae156".into(),
+        });
+        config
     }
 
     pub fn wallet_only(chain_id: u64, confirmations: u64, snapshot_tokens: Vec<String>) -> Self {
@@ -249,7 +262,9 @@ impl EthereumConfig {
             },
             require_finalized: !sequencer_inclusion,
             snapshot_tokens,
-            weth: None,
+            // Base WETH9 is reviewed deployment metadata, not a token whitelist.
+            // https://docs.base.org/specifications/reference/base-contracts
+            weth: (chain_id == 8453).then(|| "0x4200000000000000000000000000000000000006".into()),
             uniswap: None,
             aave: None,
         }
@@ -444,6 +459,16 @@ impl EthereumAdapter {
         }
     }
     fn require_operation(&self, operation: &str) -> Result<()> {
+        if self.config.chain_id == 8453
+            && operation.starts_with("uniswap.")
+            && self.config.uniswap.is_none()
+        {
+            return Err(error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Uniswap is not supported on Base in this Fin version.",
+            ));
+        }
         require(
             self.supports_operation(operation),
             "OPERATION_UNAVAILABLE",
@@ -558,9 +583,16 @@ impl Adapter for EthereumAdapter {
             .map(|mut definition| {
                 for example in &mut definition.examples { example["chain_id"] = json!(self.config.chain_id); }
                 if !self.config.require_finalized && self.config.confirmations == 1 && EthereumConfig::external_credit_uses_sequencer(self.config.chain_id) {
-                    definition.completion = "Writes require the original canonical envelope and receipt, one sequencer-produced L2 block, bounded actual fees and verified transfer effects; no RPC finalized-tag wait is required.".into();
+                    definition.completion = "Writes require the original canonical envelope and receipt, one canonical full sequencer-produced L2 block (no Flashblocks preconfirmation), bounded actual fees and verified transfer effects; no RPC finalized-tag wait is required.".into();
                 } else if self.config.require_finalized {
                     definition.completion = "Writes require the original canonical envelope and receipt, bounded actual fees, verified transfer effects, and RPC finalized inclusion; sequencer confirmation alone remains pending.".into();
+                }
+                if self.config.chain_id == 8453 && definition.name.starts_with("aave.") {
+                    definition.semantics["deployment_compatibility"] = json!({
+                        "pool":self.config.aave.as_ref().map(|aave| aave.pool.as_str()),
+                        "reviewed_token_revision":5,
+                        "write_eligibility":"Live provider relationship, selected reserve state and exact revision-5 supply/debt backing are checked before submission. Unsupported token revisions fail before dispatch; operation discovery alone is not deployed-contract verification."
+                    });
                 }
                 definition
             })

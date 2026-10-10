@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+pub mod base_canonical;
 pub mod canonical;
 pub mod relay;
+pub mod routes;
+pub use routes::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +169,8 @@ pub enum BridgeStepKind {
     #[serde(rename = "reset_allowance")]
     ResetAllowance,
     Deposit,
+    Prove,
+    Finalize,
 }
 impl BridgeStepKind {
     /// Stable engine input spelling. Every concrete attempt continues to use
@@ -175,6 +180,8 @@ impl BridgeStepKind {
             Self::Approval => "approval",
             Self::ResetAllowance => "reset_allowance",
             Self::Deposit => "deposit",
+            Self::Prove => "prove",
+            Self::Finalize => "finalize",
         }
     }
 }
@@ -448,6 +455,11 @@ pub fn validate_fee_usd_caps(bounds: &BridgeBounds, fees: &[PricedBridgeFee]) ->
 #[async_trait]
 pub trait BridgeProvider: Send + Sync {
     fn capabilities(&self) -> BridgeCapabilities;
+    async fn discover_routes(&self, _request: &BridgeRouteRequest) -> Result<BridgeRouteDiscovery> {
+        Ok(BridgeRouteDiscovery::unsupported(
+            self.capabilities().provider,
+        ))
+    }
     async fn quote(&self, request: &BridgeQuoteRequest) -> Result<BridgeQuoteBatch>;
     fn prepare(
         &self,

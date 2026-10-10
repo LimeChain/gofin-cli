@@ -153,10 +153,10 @@ fn offline_discovery_commands_work_without_service() {
     assert!(capabilities.status.success());
     let capabilities: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(capabilities["service_required"], false);
-    assert_eq!(capabilities["evm_networks"][1]["name"], "Arbitrum One");
-    assert_eq!(capabilities["evm_networks"][2]["chain_id"], 4663);
+    assert_eq!(capabilities["evm_networks"][1]["name"], "Base");
+    assert_eq!(capabilities["evm_networks"][2]["chain_id"], 42161);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 53);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 55);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
@@ -501,7 +501,12 @@ fn evm_enrollment_is_offline_discoverable_and_machine_mode_requires_human() {
     let value: Value = serde_json::from_slice(&capabilities.stdout).unwrap();
     assert_eq!(
         value["semantics"]["evm"]["networks"],
-        serde_json::json!(["ethereum:1", "ethereum:42161", "ethereum:4663"])
+        serde_json::json!([
+            "ethereum:1",
+            "ethereum:8453",
+            "ethereum:42161",
+            "ethereum:4663"
+        ])
     );
 }
 

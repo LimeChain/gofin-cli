@@ -218,12 +218,13 @@ impl Lookup {
             )
         };
         // Platform IDs and native_coin_id=ethereum were verified against the
-        // provider /asset_platforms for chain IDs 1, 42161 and 4663.
+        // provider /asset_platforms for chain IDs 1, 42161, 4663 and 8453.
         // https://docs.coingecko.com/reference/asset-platforms-list
         let platform = match asset.network.as_str() {
             "ethereum:1" => "ethereum",
             "ethereum:42161" => "arbitrum-one",
             "ethereum:4663" => "robinhood",
+            "ethereum:8453" => "base",
             _ => return Err(unsupported()),
         };
         if asset.reference == "native" {
@@ -1216,7 +1217,12 @@ mod tests {
 
     #[test]
     fn native_assets_select_exact_id_lookups() {
-        for network in ["ethereum:1", "ethereum:42161", "ethereum:4663"] {
+        for network in [
+            "ethereum:1",
+            "ethereum:42161",
+            "ethereum:4663",
+            "ethereum:8453",
+        ] {
             assert_eq!(
                 Lookup::asset(&asset(network, "native", 18)).unwrap(),
                 Lookup::Coin("ethereum".into())
@@ -1276,12 +1282,14 @@ mod tests {
             (http(200, &body(&contract, "1.25", NOW)), Duration::ZERO),
             (http(200, &body(&contract, "2.5", NOW)), Duration::ZERO),
             (http(200, &body(&contract, "3.75", NOW)), Duration::ZERO),
+            (http(200, &body(&contract, "4.5", NOW)), Duration::ZERO),
         ])
         .await;
         for (network, platform, value) in [
             ("ethereum:1", "ethereum", "1.25"),
             ("ethereum:42161", "arbitrum-one", "2.5"),
             ("ethereum:4663", "robinhood", "3.75"),
+            ("ethereum:8453", "base", "4.5"),
         ] {
             let quote = provider.quote(&asset(network, mixed, 6)).await.unwrap();
             assert_eq!(quote.usd_per_unit, value);
@@ -1298,7 +1306,7 @@ mod tests {
                     ))
             );
         }
-        assert_eq!(server.count(), 3);
+        assert_eq!(server.count(), 4);
         assert!(
             single(
                 http(200, &body(CONTRACT, "1", NOW)),
@@ -1385,7 +1393,7 @@ mod tests {
         .await;
         let first = provider.quote(&native()).await.unwrap();
         clock.store(NOW + 29, Ordering::SeqCst);
-        for network in ["ethereum:42161", "ethereum:4663"] {
+        for network in ["ethereum:42161", "ethereum:4663", "ethereum:8453"] {
             let cached = provider.quote(&asset(network, "native", 18)).await.unwrap();
             assert_eq!(cached.updated_at, first.updated_at);
             assert_eq!(cached.observed_at, first.observed_at);

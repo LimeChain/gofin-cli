@@ -41,6 +41,8 @@ mod boundary_authorizations;
 #[cfg(test)]
 mod boundary_dispatch_tests;
 mod cash_reservation_sources;
+#[cfg(test)]
+mod cost_attention_tests;
 mod financial_plans;
 mod ordinary_policy;
 use ordinary_policy::reject_unpriced_run;
@@ -1715,9 +1717,29 @@ impl Engine {
                 } else {
                     retained.status
                 };
-                retained.last_reconciliation_evidence = Some(reconciliation.evidence);
-                if retained.error.is_none() || retained.submission.is_none() {
+                if matches!(
+                    error.code.as_str(),
+                    "COST_EXCEEDS_RESERVATION"
+                        | "EFFECT_EXCEEDS_RESERVATION"
+                        | "COST_EXCEEDS_USD_RESERVATION"
+                ) {
+                    // The adapter proved what happened, but its effects exceed
+                    // authority. Preserve the exact rejected proof for inspection
+                    // without committing settlement, releasing reservations or
+                    // crediting unused authority. It is not an accepted ledger effect.
+                    retained.last_reconciliation_evidence = Some(json!({
+                        "state":"needs_attention",
+                        "reason":error.code,
+                        "reported_status":reconciliation.status,
+                        "adapter_evidence":reconciliation.evidence,
+                        "verified_effects":reconciliation.verified,
+                    }));
                     retained.error = Some(error);
+                } else if !cost_attention_pending(&retained) {
+                    retained.last_reconciliation_evidence = Some(reconciliation.evidence);
+                    if retained.error.is_none() || retained.submission.is_none() {
+                        retained.error = Some(error);
+                    }
                 }
                 retained.updated_at = now();
                 self.update_record(&retained)?;
@@ -1734,8 +1756,10 @@ impl Engine {
     ) -> Result<OperationRecord> {
         match reconciliation.status.clone() {
             Status::Pending | Status::Submitted | Status::Unknown => {
-                record.status = reconciliation.status;
-                record.last_reconciliation_evidence = Some(reconciliation.evidence);
+                if !cost_attention_pending(&record) {
+                    record.status = reconciliation.status;
+                    record.last_reconciliation_evidence = Some(reconciliation.evidence);
+                }
                 if record.submission.is_none() {
                     record.error = None;
                 }
@@ -2085,6 +2109,7 @@ impl Engine {
                 fin_domain::BridgeTransferState::InTransit
                     | fin_domain::BridgeTransferState::DestinationPending
                     | fin_domain::BridgeTransferState::RefundPending
+                    | fin_domain::BridgeTransferState::NeedsAttention
             )
         {
             return Err(FinError::new(
@@ -2129,7 +2154,8 @@ impl Engine {
                 let deposit_authority = transfer
                     .steps
                     .iter()
-                    .filter(|step| step.kind == fin_domain::BridgeStepKind::Deposit)
+                    .filter(|step| matches!(step.kind, fin_domain::BridgeStepKind::Deposit | fin_domain::BridgeStepKind::Finalize))
+                    .rev()
                     .filter_map(|step| step.plan_authority.as_ref())
                     .find(|authority| authority.plan_id == scope.plan_id)
                     .ok_or_else(|| plan_error(
@@ -3051,7 +3077,7 @@ impl Engine {
                         ));
                     }
                     planned_step.state = fin_domain::BridgeStepState::Settled;
-                    transfer.state = fin_domain::BridgeTransferState::ApprovalPending;
+                    transfer.state = kind.settled_stage_state();
                 } else if record.submission.is_none() {
                     if record.effects.is_some() {
                         return Err(plan_error(
@@ -3062,7 +3088,9 @@ impl Engine {
                     }
                     planned_step.operation_id = None;
                     planned_step.state = fin_domain::BridgeStepState::Unsubmitted;
-                    transfer.state = if transfer.steps.iter().any(|step| {
+                    transfer.state = if kind.is_destination_stage() {
+                        fin_domain::BridgeTransferState::DestinationPending
+                    } else if transfer.steps.iter().any(|step| {
                         step.step_id != bridge_step_id
                             && step.state == fin_domain::BridgeStepState::Settled
                     }) {
@@ -3079,7 +3107,11 @@ impl Engine {
                         ));
                     }
                     planned_step.state = fin_domain::BridgeStepState::NeedsAttention;
-                    transfer.state = fin_domain::BridgeTransferState::Failed;
+                    transfer.state = if kind.is_destination_stage() {
+                        fin_domain::BridgeTransferState::NeedsAttention
+                    } else {
+                        fin_domain::BridgeTransferState::Failed
+                    };
                 }
                 transfer.version = transfer
                     .version
@@ -3248,6 +3280,18 @@ impl Engine {
                                 grant_id.as_deref(),
                                 &record.updated_at,
                                 None,
+                            )
+                            .map_err(map_store)
+                    } else if kind.is_destination_stage() {
+                        self.store
+                            .lock()
+                            .map_err(|_| internal("store lock poisoned"))?
+                            .commit_bridge_failed_stage(
+                                &settlement,
+                                &transfer_id,
+                                &step_id,
+                                &kind,
+                                &record.updated_at,
                             )
                             .map_err(map_store)
                     } else {
@@ -4349,6 +4393,8 @@ fn bridge_step_binding(record: &OperationRecord) -> Result<Option<BridgeStepBind
                 fin_domain::BridgeStepKind::Approval => "approval",
                 fin_domain::BridgeStepKind::ResetAllowance => "reset_allowance",
                 fin_domain::BridgeStepKind::Deposit => "deposit",
+                fin_domain::BridgeStepKind::Prove => "prove",
+                fin_domain::BridgeStepKind::Finalize => "finalize",
             })
     {
         return Err(boundary_error(
@@ -5169,6 +5215,26 @@ fn matches_direction(negative: bool, zero: bool, direction: &Direction) -> bool 
         }
 }
 
+fn cost_attention_pending(record: &OperationRecord) -> bool {
+    record.error.as_ref().is_some_and(|error| {
+        matches!(
+            error.code.as_str(),
+            "COST_EXCEEDS_RESERVATION"
+                | "EFFECT_EXCEEDS_RESERVATION"
+                | "COST_EXCEEDS_USD_RESERVATION"
+        ) && record
+            .last_reconciliation_evidence
+            .as_ref()
+            .is_some_and(|evidence| {
+                evidence.get("state").and_then(Value::as_str) == Some("needs_attention")
+                    && evidence.get("reason").and_then(Value::as_str) == Some(error.code.as_str())
+                    && evidence
+                        .get("verified_effects")
+                        .is_some_and(|proof| !proof.is_null())
+            })
+    })
+}
+
 fn cost_within_intent(
     effect: &FinancialEffect,
     intent: &FinancialIntent,
@@ -5185,7 +5251,10 @@ fn cost_within_intent(
     };
     let key = cost_key(location, &amount.asset, treatment)?;
     let maximums = aggregate_cost_bounds(&intent.maximum_costs)?;
-    if amount.atoms.integer() > maximums.get(&key).cloned().unwrap_or_default() {
+    // Validate cost identity/treatment here. The aggregate check in
+    // validate_effects enforces the cap after every effect and expectation has
+    // been verified, producing an explicit cost-overrun attention result.
+    if !maximums.contains_key(&key) && !amount.atoms.is_zero() {
         return Ok(false);
     }
     match treatment {
@@ -16051,6 +16120,7 @@ mod tests {
         };
         let source_evidence_id = format!("ethereum:1:0x{}:transaction", "a".repeat(64));
         let locator = fin_domain::BridgeDestinationLocator {
+            message_hash: None,
             scheme: "SYNTHETIC-message-v1".into(),
             source_evidence_id: source_evidence_id.clone(),
             destination_chain_id: 42161,

@@ -20,6 +20,8 @@ use std::{
 };
 
 pub use alloy;
+mod fees;
+pub use fees::{OperatorFeeModel, RollupFeeBound};
 
 fn error(code: &str, stage: &str, message: &str) -> FinError {
     FinError::new(
@@ -209,9 +211,23 @@ fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttempt
 }
 
 fn has_historical_block_tag(value: Option<&Value>) -> bool {
-    value.and_then(Value::as_str).is_some_and(|tag| {
-        tag.strip_prefix("0x")
-            .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    let Some(value) = value else {
+        return false;
+    };
+    if let Some(tag) = value.as_str() {
+        return tag.strip_prefix("0x").is_some_and(|hex| {
+            !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+    }
+    // Canonical EIP-1898 state reads may use another configured archive endpoint
+    // without replacing the block identity or falling back to latest state.
+    value.as_object().is_some_and(|object| {
+        object.len() == 2
+            && object.get("requireCanonical") == Some(&Value::Bool(true))
+            && object
+                .get("blockHash")
+                .and_then(Value::as_str)
+                .is_some_and(|value| hash(value).is_ok())
     })
 }
 
@@ -222,7 +238,7 @@ fn is_historical_state_read(method: &str, params: &Value) -> bool {
     };
     match method {
         "eth_getCode" | "eth_getBalance" => has_historical_block_tag(params.get(1)),
-        "eth_getStorageAt" => has_historical_block_tag(params.get(2)),
+        "eth_getStorageAt" | "eth_getProof" => has_historical_block_tag(params.get(2)),
         "eth_call" => has_historical_block_tag(params.get(1)),
         _ => false,
     }
@@ -469,6 +485,8 @@ impl EvmRpc for HttpRpc {
             "eth_getCode",
             "eth_getBalance",
             "eth_getStorageAt",
+            "eth_getLogs",
+            "eth_getProof",
             "eth_call",
             "eth_estimateGas",
             "eth_maxPriorityFeePerGas",
@@ -542,6 +560,8 @@ pub struct FrozenTransaction {
     pub gas: u64,
     pub max_fee_per_gas: Quantity,
     pub max_priority_fee_per_gas: Quantity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup_fee: Option<RollupFeeBound>,
 }
 impl FrozenTransaction {
     pub fn consensus(&self) -> Result<TxEip1559> {
@@ -597,6 +617,14 @@ impl FrozenTransaction {
                     "U256_OVERFLOW",
                     "validation",
                     "Maximum gas cost overflows uint256.",
+                )
+            })?
+            .checked_add(fees::bound_cost(self)?)
+            .ok_or_else(|| {
+                error(
+                    "U256_OVERFLOW",
+                    "validation",
+                    "Total fee bound overflows uint256.",
                 )
             })
     }
@@ -919,7 +947,7 @@ impl EvmRuntime {
                 )
             })?
             .min(max);
-        let transaction = FrozenTransaction {
+        let mut transaction = FrozenTransaction {
             chain_id: self.chain_id,
             sender: lower_address(sender),
             to: lower_address(to),
@@ -929,7 +957,28 @@ impl EvmRuntime {
             gas,
             max_fee_per_gas: quantity(max),
             max_priority_fee_per_gas: quantity(max_priority),
+            rollup_fee: None,
         };
+        transaction.consensus()?;
+        transaction.rollup_fee = self.rollup_fee_bound(&transaction).await?;
+        let extras = fees::bound_cost(&transaction)?;
+        let execution_budget = maximum_total_fee.checked_sub(extras).ok_or_else(|| {
+            error(
+                "FEE_LIMIT",
+                "preview",
+                "The total bound cannot fund rollup data and operator fees.",
+            )
+        })?;
+        let max = max.min(execution_budget / U256::from(gas.max(1)));
+        if max < required {
+            return Err(error(
+                "FEE_LIMIT",
+                "preview",
+                "The total fee bound cannot fund execution and rollup fees.",
+            ));
+        }
+        transaction.max_fee_per_gas = quantity(max);
+        transaction.max_priority_fee_per_gas = quantity(max_priority.min(max));
         transaction.consensus()?;
         let cost = transaction.maximum_cost()?;
         if cost > maximum_total_fee {
@@ -982,6 +1031,7 @@ impl EvmRuntime {
                 "Current fee conditions exceed the approved frozen envelope.",
             ));
         }
+        self.revalidate_rollup_fee(transaction).await?;
         let request = transaction.rpc_call();
         let simulation = rpc_bytes(
             &self
@@ -1160,13 +1210,9 @@ impl EvmRuntime {
                 "Actual execution gas/price exceeds the approved envelope.",
             ));
         }
-        let fee = U256::from(gas).checked_mul(price).ok_or_else(|| {
-            error(
-                "U256_OVERFLOW",
-                "reconciliation",
-                "Receipt gas cost overflows uint256.",
-            )
-        })?;
+        let fee = self
+            .receipt_total_fee(&receipt, &reported, &block, gas, price)
+            .await?;
         Ok(Some(CanonicalReceipt {
             hash: expected,
             transaction_sender: transaction.sender.clone(),
@@ -1284,13 +1330,9 @@ impl EvmRuntime {
         }
         let gas = rpc_u64(&receipt["gasUsed"])?;
         let price = rpc_u256(&receipt["effectiveGasPrice"])?;
-        let fee = U256::from(gas).checked_mul(price).ok_or_else(|| {
-            error(
-                "U256_OVERFLOW",
-                "reconciliation",
-                "Receipt gas cost overflows uint256.",
-            )
-        })?;
+        let fee = self
+            .receipt_total_fee(&receipt, &reported, &block, gas, price)
+            .await?;
         Ok(Some(CanonicalReceipt {
             hash: expected,
             transaction_sender: lower_address(address(reported["from"].as_str().unwrap_or(""))?),
@@ -1854,14 +1896,28 @@ mod http_rpc_tests {
             ("eth_getCode", json!(["0x1", "0x10"])),
             ("eth_getBalance", json!(["0x1", "0x10"])),
             ("eth_getStorageAt", json!(["0x1", "0x0", "0x10"])),
+            ("eth_getProof", json!(["0x1", ["0x0"], "0x10"])),
             ("eth_call", json!([{"to":"0x1"}, "0x10"])),
+            (
+                "eth_call",
+                json!([{"to":"0x1"}, {"blockHash":format!("0x{}", "11".repeat(32)), "requireCanonical":true}]),
+            ),
         ] {
             assert!(is_historical_state_read(method, &params), "{method}");
         }
         for (method, params) in [
             ("eth_getCode", json!(["0x1", "latest"])),
             ("eth_getBalance", json!(["0x1"])),
+            ("eth_getProof", json!(["0x1", ["0x0"], "pending"])),
             ("eth_call", json!([{"to":"0x1"}, "pending"])),
+            (
+                "eth_call",
+                json!([{"to":"0x1"}, {"blockHash":"0x10", "requireCanonical":true}]),
+            ),
+            (
+                "eth_call",
+                json!([{"to":"0x1"}, {"blockHash":format!("0x{}", "11".repeat(32)), "requireCanonical":false}]),
+            ),
             ("eth_sendRawTransaction", json!(["0xdeadbeef"])),
         ] {
             assert!(!is_historical_state_read(method, &params), "{method}");

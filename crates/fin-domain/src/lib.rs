@@ -109,12 +109,35 @@ pub enum BridgeStepKind {
     Approval,
     ResetAllowance,
     Deposit,
+    Prove,
+    Finalize,
 }
 
 impl BridgeStepKind {
+    pub const fn is_destination_stage(&self) -> bool {
+        matches!(self, Self::Prove | Self::Finalize)
+    }
+    pub const fn pending_state(&self) -> BridgeTransferState {
+        match self {
+            Self::Deposit => BridgeTransferState::SourcePending,
+            Self::Prove | Self::Finalize => BridgeTransferState::DestinationPending,
+            Self::Approval | Self::ResetAllowance => BridgeTransferState::ApprovalPending,
+        }
+    }
+    pub const fn settled_stage_state(&self) -> BridgeTransferState {
+        if self.is_destination_stage() {
+            BridgeTransferState::DestinationPending
+        } else {
+            BridgeTransferState::ApprovalPending
+        }
+    }
     pub fn operation(&self) -> &'static str {
         match self {
-            Self::Approval | Self::ResetAllowance | Self::Deposit => "bridge.transfer",
+            Self::Approval
+            | Self::ResetAllowance
+            | Self::Deposit
+            | Self::Prove
+            | Self::Finalize => "bridge.transfer",
         }
     }
 }
@@ -250,6 +273,10 @@ pub struct BridgeDestinationLocator {
     pub source_evidence_id: String,
     pub destination_chain_id: u64,
     pub transaction_hash: String,
+    /// Withdrawal messages do not determine a finalization transaction hash.
+    /// The scheme binds this immutable message hash instead; old locators omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_hash: Option<String>,
     pub proof: Value,
 }
 

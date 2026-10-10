@@ -241,12 +241,11 @@ mod tests {
             .iter()
             .map(|value| value["chain_id"].as_u64().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(ids, [1, 42161, 4663].into_iter().collect());
+        assert_eq!(ids, [1, 8453, 42161, 4663].into_iter().collect());
         assert!(
             !evm.definitions()
                 .iter()
-                .any(|definition| definition.name.starts_with("aave.")
-                    || definition.name.starts_with("uniswap."))
+                .any(|definition| definition.name.starts_with("uniswap."))
         );
         let mut duplicate = config.connections[0].clone();
         if let ConnectionConfig::Evm { name, .. } = &mut duplicate {

@@ -100,6 +100,29 @@ impl CanonicalForkRpc {
         Ok(())
     }
 
+    /// Disposable-chain fixture controls, never financial restoration evidence.
+    pub async fn snapshot_fixture(&self) -> Result<String> {
+        self.guard().await?;
+        self.raw("evm_snapshot", json!([]))
+            .await?
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(blocked)
+    }
+    pub async fn restore_fixture(&self, snapshot: &str) -> Result<()> {
+        self.guard().await?;
+        if !snapshot.starts_with("0x")
+            || snapshot.len() > 66
+            || !snapshot[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(blocked());
+        }
+        if self.raw("evm_revert", json!([snapshot])).await? != json!(true) {
+            return Err(blocked());
+        }
+        self.guard().await
+    }
+
     /// Mine only on the exact guarded local fork, and only a small bounded
     /// number of blocks while reconciling an already-submitted operation.
     pub async fn mine_finality_block(&self) -> Result<()> {

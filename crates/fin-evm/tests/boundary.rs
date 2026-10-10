@@ -15,6 +15,7 @@ const SYNTHETIC_KEY: &str = "000000000000000000000000000000000000000000000000000
 fn frozen() -> FrozenTransaction {
     let signer = LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY).unwrap();
     FrozenTransaction {
+        rollup_fee: None,
         chain_id: 1,
         sender: lower_address(signer.address()),
         to: "0x0000000000000000000000000000000000000002".into(),
