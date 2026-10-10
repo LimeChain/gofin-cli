@@ -2,7 +2,7 @@
 
 Updated 2026-10-10. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–23 inclusive, plus item 30 (release preparedness)**, as specified by the user through 2026-10-10. Items 24–28 are later roadmap work; items 29 and 31 have no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–23 inclusive, plus item 30 (release preparedness)**, as specified by the user through 2026-10-10. Items 24–28 are later roadmap work; items 29, 31 and 32 have no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ First-release scope: **items 1–23 inclusive, plus item 30 (release preparednes
 | 2 | [Boundary-based operation approval](boundary-based-operation-approval.md) | Implemented — user reported |
 | 3 | [Expiring sequential plan approval](expiring-sequential-plan-approval.md) | Implemented — user reported |
 | 4 | [Parallel development sandboxes](parallel-development-sandbox.md) | Implemented — user reported |
-| 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | In progress — user reported; Ethereum, Arbitrum and Robinhood Chain; ETH and USDC where supported |
+| 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | Implemented — user reported; SushiSwap/PancakeSwap follow-up tracked as item 32 |
 | 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | Implemented — user reported |
 | 7 | [Aave support](aave-support.md) | Requested; review existing implementation and define network/version coverage |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
@@ -37,5 +37,6 @@ First-release scope: **items 1–23 inclusive, plus item 30 (release preparednes
 | 29 | [Ethereum Smart Wallet support](integration-roadmap.md#29-ethereum-smart-wallet-support) | Requested — wallet model, capabilities and release scope to define |
 | 30 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
 | 31 | [RPC redundancy](rpc-redundancy.md) | Requested — multiple endpoints, health checks and safe failover; release scope to define |
+| 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | In progress — user assigned an agent; extends completed item 5 |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.

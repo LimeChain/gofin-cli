@@ -1,6 +1,6 @@
 # Verify Uniswap swaps and permit bounded parameter adjustments
 
-Status: In progress, reported by the user on 2026-10-09. Verify and fix Uniswap swaps using the development ETH wallet on Ethereum, Arbitrum and Robinhood Chain, with ETH and, where supported, ERC-20 USDC. Plan approval is implemented according to the user; review its current contract before extending swap support. Completion and verification have not been reported.
+Status: Implemented, reported complete by the user on 2026-10-10. Implementation and verification evidence were not independently reviewed in this roadmap update. The original draft below records requested scope; current repository documentation governs delivered behavior. The user has assigned an agent to the separate [SushiSwap/PancakeSwap extension, item 32](sushiswap-pancakeswap-support.md).
 
 ## Description
 
