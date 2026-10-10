@@ -24,7 +24,7 @@ First-release scope: **items 1–23 inclusive, plus item 30 (release preparednes
 | 16 | [Solana Jupiter support](integration-roadmap.md#16-solana-jupiter-support) | Roadmap — interpreted from “Jupyter” |
 | 17 | [Solana Pump support](integration-roadmap.md#17-solana-pump-support) | Roadmap — product/action scope to define |
 | 18 | [Solana Backpack support](integration-roadmap.md#18-solana-backpack-support) | Roadmap — wallet/exchange scope to clarify |
-| 19 | [Robinhood Chain Ramses support](integration-roadmap.md#19-robinhood-chain-ramses-support) | Roadmap — deployment and action scope to verify |
+| 19 | [Robinhood Chain Ramses support](integration-roadmap.md#19-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 20 | [Base support](base-support.md) | Scoped — wallets, available onboarded dapps, bridging, deposits and withdrawals; extensive ask-ogi consultation |
 | 21 | [Solana Kamino support](integration-roadmap.md#21-solana-kamino-support) | Roadmap — first release; product/action scope to define |
 | 22 | [Solana Phoenix support](integration-roadmap.md#22-solana-phoenix-support) | Roadmap — first release; product/action scope to define |

@@ -1,6 +1,6 @@
 # Fin integration roadmap
 
-Captured from the user's requests on 2026-10-09. All entries below are roadmap requests, not implementation or verification claims. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
+Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
 The first release requires **backlog items 1–23 inclusive, plus item 30 ([release preparedness](release-preparedness.md))**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release scope reflects user decisions through 2026-10-10.
 
@@ -47,7 +47,9 @@ Support the requested Backpack integration. Clarify whether this means Backpack 
 
 ## 19. Robinhood Chain Ramses support
 
-Integrate Ramses on Robinhood Chain. Verify the actual deployment and agree action coverage, such as swaps or liquidity positions. Reuse existing Robinhood wallet/network infrastructure where applicable; network support alone is not evidence of Ramses support.
+Status: Implemented, reported complete by the user on 2026-10-10 alongside [item 5, Uniswap swap support](swap-support.md). Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered operation coverage.
+
+The original request was to integrate Ramses on Robinhood Chain using existing wallet/network infrastructure where applicable. This completion update does not independently claim liquidity-position support or other operations beyond the delivered integration.
 
 ## 20. Base support
 
