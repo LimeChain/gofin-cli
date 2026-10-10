@@ -1942,6 +1942,7 @@ dependencies = [
  "fin-evm",
  "fin-exchange",
  "fin-human-terminal",
+ "fin-networks",
  "fin-presentation",
  "fin-pricing",
  "fin-protocol",
@@ -2007,6 +2008,7 @@ dependencies = [
  "clap",
  "fin-bridge",
  "fin-domain",
+ "fin-networks",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -2060,6 +2062,7 @@ dependencies = [
  "fin-domain",
  "fin-engine",
  "fin-evm",
+ "fin-networks",
  "fin-store",
  "hex",
  "schemars 1.2.2",
@@ -2123,6 +2126,10 @@ dependencies = [
  "signal-hook",
  "zeroize",
 ]
+
+[[package]]
+name = "fin-networks"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "fin-presentation"

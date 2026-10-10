@@ -8,7 +8,8 @@ obtains human approval, executes it and keeps durable records for reconciliation
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
-EVM networks; Uniswap v3/v4 on reviewed deployments; and Ethereum mainnet Aave.
+EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood;
+and Ethereum mainnet Aave.
 The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
 bridge providers follow later. Fin is open source; license selection is pending.
@@ -851,12 +852,21 @@ permit behavior and pending protected Touch ID checks. Rollup transactions
 settle on verified canonical sequencer inclusion. Caller-supplied token contracts
 are verified through pinned reads; token contracts are not product defaults.
 
+Robinhood also supports the reviewed Ramses v3 profile through `ramses.quote`
+and `ramses.swap`. Select its fixed `tick_spacing` rather than a Uniswap fee
+tier. Fin reads the mutable pool fee at the pinned quote block and binds its
+maximum quoted fee separately from the on-chain minimum receipt. Network
+identity, RPC defaults and sequencer classification come from `fin-networks`;
+ABI-specific AMM deployment profiles reuse the financial engine and signing
+paths. See the [Ramses verification and human checklist](docs/testing/ramses-amm.md).
+
 ```sh
 fin schema uniswap.swap --json
 fin read uniswap.quote --input "$QUOTE_JSON" --json
 fin preview uniswap.swap --input "$SWAP_JSON" --json
 cargo test --locked -p fin-amm -p fin-ethereum
 make test-amm-fork
+make test-amm-fork AMM_FORK_ARGS='--dex ramses'
 python3 scripts/prepare-amm-touch-id-checklist.py --help
 ```
 

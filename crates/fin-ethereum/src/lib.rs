@@ -42,6 +42,7 @@ pub fn route_gas_ceiling(operation: &str) -> Result<u64> {
         "wallet.wrap" | "wallet.unwrap" | "wallet.approve" => Ok(100_000),
         "wallet.transfer" => Ok(150_000),
         "uniswap.swap" => Ok(350_000),
+        "ramses.swap" => Ok(500_000),
         "aave.supply" => Ok(500_000),
         "aave.borrow" => Ok(800_000),
         "aave.repay" | "aave.withdraw" => Ok(600_000),
@@ -250,6 +251,17 @@ pub struct UniswapConfig {
     #[serde(default)]
     pub v4: Option<V4Config>,
 }
+/// Deployment addresses for the reviewed Ramses concentrated-liquidity v3
+/// profile. Pool identity uses one of the adapter's reviewed tick spacings;
+/// the pool fee is dynamic and is never inferred from that spacing.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RamsesConfig {
+    pub factory: String,
+    pub quoter: String,
+    pub router: String,
+    pub pool_deployer: String,
+}
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RouterKind {
@@ -296,6 +308,8 @@ pub struct EthereumConfig {
     pub snapshot_tokens: Vec<String>,
     #[serde(default)]
     pub uniswap: Option<UniswapConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ramses: Option<RamsesConfig>,
     #[serde(default)]
     pub aave: Option<AaveConfig>,
 }
@@ -314,6 +328,7 @@ impl Default for EthereumConfig {
                 router_kind: RouterKind::LegacyV3,
                 v4: None,
             }),
+            ramses: None,
             aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
                 oracle: "0x54586be62e3c3580375ae3723c145253060ca0c2".into(),
@@ -326,7 +341,10 @@ impl EthereumConfig {
     /// Adding a network here requires reviewing its canonical receipt and
     /// inclusion semantics before it can use this completion policy.
     pub const fn is_reviewed_sequencer_rollup(chain_id: u64) -> bool {
-        matches!(chain_id, 42161 | 4663)
+        match fin_networks::by_chain_id(chain_id) {
+            Some(network) => network.uses_sequencer_inclusion(),
+            None => false,
+        }
     }
 
     /// Whether this operation must wait for the RPC's finalized tag. Reviewed
@@ -359,6 +377,7 @@ impl EthereumConfig {
             snapshot_tokens,
             weth: None,
             uniswap: None,
+            ramses: None,
             aave: None,
         }
     }
@@ -484,6 +503,14 @@ impl EthereumAdapter {
                 ]);
             }
         }
+        if let Some(ramses) = &mut config.ramses {
+            deployments.extend([
+                &mut ramses.factory,
+                &mut ramses.quoter,
+                &mut ramses.router,
+                &mut ramses.pool_deployer,
+            ]);
+        }
         if let Some(aave) = &mut config.aave {
             deployments.extend([&mut aave.pool, &mut aave.oracle]);
         }
@@ -558,11 +585,18 @@ impl EthereumAdapter {
                 .as_ref()
                 .is_some_and(|uniswap| uniswap.v4.is_some()),
             "wallet.wrap" | "wallet.unwrap" => {
-                self.config.weth.is_some() || self.config.uniswap.is_some()
+                self.config.weth.is_some()
+                    || self.config.uniswap.is_some()
+                    || self.config.ramses.is_some()
             }
-            "wallet.approve" => self.config.aave.is_some() || self.config.uniswap.is_some(),
+            "wallet.approve" => {
+                self.config.aave.is_some()
+                    || self.config.uniswap.is_some()
+                    || self.config.ramses.is_some()
+            }
             name if name.starts_with("aave.") => self.config.aave.is_some(),
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
+            name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             _ => false,
         }
     }
@@ -582,6 +616,15 @@ impl EthereumAdapter {
             )
         })
     }
+    fn ramses(&self) -> Result<&RamsesConfig> {
+        self.config.ramses.as_ref().ok_or_else(|| {
+            error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Ramses is not configured on this network.",
+            )
+        })
+    }
     fn uniswap(&self) -> Result<&UniswapConfig> {
         self.config.uniswap.as_ref().ok_or_else(|| {
             error(
@@ -595,7 +638,11 @@ impl EthereumAdapter {
         if let Some(weth) = &self.config.weth {
             return Ok(weth.clone());
         }
-        let router = address(&self.uniswap()?.router)?;
+        let router = if let Some(uniswap) = &self.config.uniswap {
+            address(&uniswap.router)?
+        } else {
+            address(&self.ramses()?.router)?
+        };
         self.runtime.code_at(router, block).await?;
         let weth = self
             .runtime
@@ -660,6 +707,18 @@ struct Binding {
     pub deadline: Option<u64>,
     pub pool: Option<String>,
     pub fee_tier: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_spacing: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_deployer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_fee_ppm: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pool_fee_ppm: Option<u32>,
     #[serde(default)]
     pub protocol: Option<String>,
     #[serde(default)]
@@ -773,13 +832,13 @@ impl Adapter for EthereumAdapter {
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> Result<boundaries::BoundarySpec> {
-        if prepared.operation == "uniswap.swap" {
+        if matches!(prepared.operation.as_str(), "uniswap.swap" | "ramses.swap") {
             return self.swap_boundaries(prepared, bounds);
         }
         Err(FinError::new(
             "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
             "authorization",
-            "Ethereum boundary authorization supports uniswap.swap only.",
+            "Ethereum boundary authorization supports configured single-pool swaps only.",
             "Use the ordinary exact-operation approval flow.",
         ))
     }
@@ -796,13 +855,16 @@ impl Adapter for EthereumAdapter {
         spec: &boundaries::BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
-        if spec.fixed.get("operation").and_then(Value::as_str) == Some("uniswap.swap") {
+        if matches!(
+            spec.fixed.get("operation").and_then(Value::as_str),
+            Some("uniswap.swap" | "ramses.swap")
+        ) {
             return self.validate_swap_candidate(spec, prepared);
         }
         Err(FinError::new(
             "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
             "authorization",
-            "Boundary candidate does not identify a supported Uniswap swap.",
+            "Boundary candidate does not identify a supported single-pool swap.",
             "Use the ordinary exact-operation approval flow.",
         ))
     }

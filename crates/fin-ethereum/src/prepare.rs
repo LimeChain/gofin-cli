@@ -36,6 +36,7 @@ struct UniswapAmm<'a> {
     token_in: reads::Token,
     input_units: U256,
     maximum_fee: Quantity,
+    ramses: bool,
 }
 
 #[async_trait::async_trait]
@@ -57,10 +58,12 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
         let mut quote = self
             .adapter
             .quote_protocol(reads::ProtocolQuoteRequest {
+                dex: if self.ramses { "ramses" } else { "uniswap" },
                 input: &self.token_in.reference,
                 output: self.request.token_out.as_deref().expect("schema"),
                 amount: &quantity(self.input_units).to_decimal(self.token_in.decimals),
                 fee_tier: self.request.fee_tier,
+                tick_spacing: self.request.tick_spacing,
                 protocol: self.request.protocol.as_deref(),
                 v4_key: self.request.v4_pool_key.as_ref(),
                 block: None,
@@ -105,7 +108,11 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
         let prepared = self
             .adapter
             .prepare_operation_inner(
-                "uniswap.swap",
+                if self.ramses {
+                    "ramses.swap"
+                } else {
+                    "uniswap.swap"
+                },
                 &self.input,
                 self.original.as_ref(),
                 &self.context,
@@ -132,7 +139,7 @@ impl EthereumAdapter {
         if operation == "wallet.permit2.approve" {
             return self.prepare_permit2_approval(input, None, context).await;
         }
-        if operation != "uniswap.swap" {
+        if !matches!(operation, "uniswap.swap" | "ramses.swap") {
             return self
                 .prepare_operation_inner(operation, input, original, context)
                 .await;
@@ -177,6 +184,7 @@ impl EthereumAdapter {
             token_in: token_in.clone(),
             input_units: amount,
             maximum_fee: quantity(maximum_fee),
+            ramses: operation == "ramses.swap",
         };
         let quote = fin_amm::AmmDex::quote(
             &quote_backend,
@@ -235,7 +243,7 @@ impl EthereumAdapter {
         self.runtime.assert_chain().await?;
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
-        } else if operation == "uniswap.swap" {
+        } else if matches!(operation, "uniswap.swap" | "ramses.swap") {
             r.token_in.as_deref().expect("schema").to_owned()
         } else {
             r.token.as_deref().expect("schema").to_owned()
@@ -256,7 +264,7 @@ impl EthereumAdapter {
                 token.decimals,
             )?
         };
-        if all_amount && matches!(operation, "wallet.unwrap" | "uniswap.swap") {
+        if all_amount && matches!(operation, "wallet.unwrap" | "uniswap.swap" | "ramses.swap") {
             let observed = self.balance_of(&token, owner, None).await?;
             require(
                 observed > U256::ZERO && observed <= qty,
@@ -301,6 +309,12 @@ impl EthereumAdapter {
             deadline: None,
             pool: None,
             fee_tier: None,
+            dex: None,
+            tick_spacing: None,
+            pool_deployer: None,
+            factory: None,
+            swap_fee_ppm: None,
+            max_pool_fee_ppm: None,
             protocol: None,
             v4_pool_key: None,
             route_token_in: None,
@@ -458,13 +472,20 @@ impl EthereumAdapter {
                 .abi_encode()
                 .into()
             }
-            "uniswap.swap" => {
+            "uniswap.swap" | "ramses.swap" => {
+                let is_ramses = operation == "ramses.swap";
                 let quote = self
                     .quote_protocol(reads::ProtocolQuoteRequest {
+                        dex: if operation == "ramses.swap" {
+                            "ramses"
+                        } else {
+                            "uniswap"
+                        },
                         input: &token.reference,
                         output: r.token_out.as_deref().expect("schema"),
                         amount: &quantity(qty).to_decimal(token.decimals),
                         fee_tier: original.and_then(|b| b.fee_tier).or(r.fee_tier),
+                        tick_spacing: r.tick_spacing,
                         protocol: original
                             .and_then(|b| b.protocol.as_deref())
                             .or(r.protocol.as_deref()),
@@ -490,16 +511,13 @@ impl EthereumAdapter {
                     "This bounded swap profile returns output to the signing wallet.",
                 )?;
                 let maximum_fee = exact(r.max_fee_eth.as_deref().expect("schema"), 18)?;
+                let permission = self.swap_permission_requirement(owner, &quote).await?;
                 let amm_quote = super::uniswap::as_amm_quote(
                     self,
                     resource.clone(),
                     &quote,
                     quantity(maximum_fee),
-                    if token.reference == "native" {
-                        fin_amm::PermissionRequirement::None
-                    } else {
-                        fin_amm::PermissionRequirement::TokenApproval
-                    },
+                    permission,
                 )?;
                 let selected_slippage = r.slippage_bps.expect("schema");
                 let absolute_minimum = exact(
@@ -527,6 +545,28 @@ impl EthereumAdapter {
                 let fresh_minimum = u256(&validated)?;
                 shared_swap = Some(amm_request);
                 let quote_output = u256(&quote.output)?;
+                let max_pool_fee = if is_ramses {
+                    let observed = quote.swap_fee_ppm.ok_or_else(|| {
+                        error(
+                            "POOL_FEE_UNAVAILABLE",
+                            "preview",
+                            "Ramses dynamic pool fee was not observed.",
+                        )
+                    })?;
+                    let bound = original
+                        .and_then(|binding| binding.max_pool_fee_ppm)
+                        .or(r.max_pool_fee_ppm)
+                        .or_else(|| original.and_then(|binding| binding.swap_fee_ppm))
+                        .unwrap_or(observed);
+                    require(
+                        observed <= bound,
+                        "POOL_FEE_LIMIT",
+                        "Pinned Ramses pool fee exceeds the approved quote ceiling; create a fresh bounded preview.",
+                    )?;
+                    Some(bound)
+                } else {
+                    None
+                };
                 let minimum = if let Some(original) = original {
                     let approved_minimum =
                         u256(original.minimum_output.as_ref().ok_or_else(|| {
@@ -567,7 +607,11 @@ impl EthereumAdapter {
                     "Swap deadline must be in the next ten minutes.",
                 )?;
                 let protocol = super::uniswap::Protocol::parse(Some(&quote.protocol))?;
-                let router = if protocol == super::uniswap::Protocol::V4 {
+                let router = if is_ramses {
+                    address(
+                        super::uniswap::profile::V3DeploymentProfile::ramses(self.ramses()?).router,
+                    )?
+                } else if protocol == super::uniswap::Protocol::V4 {
                     address(
                         &self
                             .uniswap()?
@@ -583,7 +627,9 @@ impl EthereumAdapter {
                             .router,
                     )?
                 } else {
-                    address(&self.uniswap()?.router)?
+                    let profile =
+                        super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?);
+                    address(profile.router)?
                 };
                 self.runtime.code_at(router, Some(quote_block)).await?;
                 if token.reference != "native" {
@@ -778,7 +824,18 @@ impl EthereumAdapter {
                 b.minimum_output = Some(quantity(minimum));
                 b.deadline = Some(deadline);
                 b.pool = Some(quote.pool);
-                b.fee_tier = Some(quote.fee_tier);
+                // Ramses identifies pools by tick spacing; `fee()` is a
+                // mutable quote observation and must not enter the fixed
+                // fee-tier binding field.
+                b.fee_tier = (!is_ramses).then_some(quote.fee_tier);
+                if is_ramses {
+                    b.dex = Some("ramses".into());
+                    b.tick_spacing = quote.tick_spacing;
+                    b.pool_deployer = Some(self.ramses()?.pool_deployer.clone());
+                    b.factory = Some(self.ramses()?.factory.clone());
+                    b.swap_fee_ppm = quote.swap_fee_ppm;
+                    b.max_pool_fee_ppm = max_pool_fee;
+                }
                 b.protocol = Some(quote.protocol.clone());
                 b.v4_pool_key = quote.pool_key.clone();
                 b.route_token_in = Some(quote.pool_token_in.clone());
@@ -796,13 +853,69 @@ impl EthereumAdapter {
                     output: b.output.clone().expect("output"),
                     minimum_output: quantity(minimum),
                 });
-                if protocol == super::uniswap::Protocol::V3 {
-                    let router_cfg = self.uniswap()?;
+                if is_ramses {
+                    let mut call = super::uniswap::ramses::exact_input_single(
+                        super::uniswap::ramses::ExactInputSingle {
+                            router,
+                            token_in: address(&quote.pool_token_in)?,
+                            token_out: address(&quote.pool_token_out)?,
+                            tick_spacing: quote.tick_spacing.expect("Ramses quote spacing"),
+                            wallet: recipient,
+                            deadline,
+                            input: qty,
+                            minimum,
+                            native_in: token.reference == "native",
+                            native_out: quote.token_out.reference == "native",
+                        },
+                    )?;
+                    if let Some(AuthorizedPermit::Eip2612(permit)) = &eip2612_authorization {
+                        let (with_permit, layout) = super::uniswap::ramses::with_eip2612(
+                            call.calldata,
+                            address(&permit.token)?,
+                            qty,
+                            deadline,
+                        )?;
+                        call.calldata = with_permit;
+                        let request = UnsignedPermitTransaction {
+                            sender: owner,
+                            to,
+                            value: call.value,
+                            calldata: call.calldata.clone(),
+                            gas_limit: 500_000,
+                            maximum_total_fee: exact(
+                                r.max_fee_eth.as_deref().expect("schema"),
+                                18,
+                            )?,
+                        };
+                        let authorization = AuthorizedPermit::Eip2612(permit.clone());
+                        let template = if let Some(existing) =
+                            original.and_then(|binding| binding.permit_template.as_ref())
+                        {
+                            self.runtime
+                                .revalidate_permit_template(
+                                    existing,
+                                    request,
+                                    layout,
+                                    authorization,
+                                )
+                                .await?
+                        } else {
+                            self.runtime
+                                .prepare_permit_template_with_layout(request, layout, authorization)
+                                .await?
+                        };
+                        b.permit_template = Some(template);
+                    }
+                    value = call.value;
+                    call.calldata
+                } else if protocol == super::uniswap::Protocol::V3 {
+                    let profile =
+                        super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?);
                     let token_in = address(&quote.pool_token_in)?;
                     let token_out = address(&quote.pool_token_out)?;
                     let mut call = super::uniswap::v3::exact_input_single(
                         super::uniswap::v3::ExactInputSingle {
-                            kind: router_cfg.router_kind,
+                            kind: profile.router_kind,
                             router,
                             token_in,
                             token_out,
@@ -817,7 +930,7 @@ impl EthereumAdapter {
                     )?;
                     if let Some(AuthorizedPermit::Eip2612(permit)) = &eip2612_authorization {
                         let (with_permit, layout) = super::uniswap::v3::with_eip2612(
-                            router_cfg.router_kind,
+                            profile.router_kind,
                             call.calldata,
                             address(&permit.token)?,
                             qty,
@@ -1296,7 +1409,12 @@ impl EthereumAdapter {
         };
         if matches!(
             operation,
-            "wallet.unwrap" | "wallet.transfer" | "uniswap.swap" | "aave.supply" | "aave.repay"
+            "wallet.unwrap"
+                | "wallet.transfer"
+                | "uniswap.swap"
+                | "ramses.swap"
+                | "aave.supply"
+                | "aave.repay"
         ) {
             require(
                 self.balance_of(&token, owner, None).await? >= qty,
@@ -1399,7 +1517,7 @@ impl EthereumAdapter {
                 "Simulated withdrawal differs from requested exact cash amount.",
             )?;
         }
-        if operation == "uniswap.swap" {
+        if matches!(operation, "uniswap.swap" | "ramses.swap") {
             let protocol = b.protocol.as_deref().unwrap_or("v3");
             if b.permit_template.is_some() || protocol == "v4" {
                 // Universal Router v4 `execute` intentionally returns no amount;
@@ -1407,10 +1525,18 @@ impl EthereumAdapter {
                 // Their exact signature-dependent call is simulated only after
                 // approval and the frozen minimum remains enforced by calldata.
             } else {
-                let received = if self.uniswap()?.router_kind == RouterKind::SwapRouter02
-                    || quote_native_output(&b)
+                let ramses = b.dex.as_deref() == Some("ramses");
+                let router_kind = if ramses {
+                    RouterKind::LegacyV3
+                } else {
+                    super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?)
+                        .router_kind
+                };
+                let received = if router_kind == RouterKind::SwapRouter02 || quote_native_output(&b)
                 {
-                    let outputs = if self.uniswap()?.router_kind == RouterKind::SwapRouter02 {
+                    let outputs = if ramses {
+                        RamsesRouter::multicallCall::abi_decode_returns(&simulation)
+                    } else if router_kind == RouterKind::SwapRouter02 {
                         SwapRouter02::multicallCall::abi_decode_returns(&simulation)
                     } else {
                         LegacyRouterPayments::multicallCall::abi_decode_returns(&simulation)
@@ -1429,7 +1555,12 @@ impl EthereumAdapter {
                             "Router multicall returned no swap result.",
                         )
                     })?;
-                    Router::exactInputSingleCall::abi_decode_returns(&bytes).map_err(|_| {
+                    if ramses {
+                        RamsesRouter::exactInputSingleCall::abi_decode_returns(&bytes)
+                    } else {
+                        Router::exactInputSingleCall::abi_decode_returns(&bytes)
+                    }
+                    .map_err(|_| {
                         error(
                             "SIMULATION_RETURN_INVALID",
                             "preview",
@@ -1437,7 +1568,12 @@ impl EthereumAdapter {
                         )
                     })?
                 } else {
-                    Router::exactInputSingleCall::abi_decode_returns(&simulation).map_err(|_| {
+                    if ramses {
+                        RamsesRouter::exactInputSingleCall::abi_decode_returns(&simulation)
+                    } else {
+                        Router::exactInputSingleCall::abi_decode_returns(&simulation)
+                    }
+                    .map_err(|_| {
                         error(
                             "SIMULATION_RETURN_INVALID",
                             "preview",
@@ -1463,11 +1599,17 @@ impl EthereumAdapter {
             // Observed claims may accrue but immutable execution fields and approved origin remain frozen.
             b.supplied_before = old.supplied_before.clone();
             b.debt_before = old.debt_before.clone();
-            if operation == "uniswap.swap" {
+            if matches!(operation, "uniswap.swap" | "ramses.swap") {
                 // Keep the original quote evidence immutable after proving the
                 // fresh quote still meets its minimum and impact ceiling.
                 b.quote_output = old.quote_output.clone();
                 b.price_impact_bps = old.price_impact_bps;
+                if old.dex.as_deref() == Some("ramses") {
+                    // Fee is dynamic and quote-observed, not a pool identity.
+                    // Validate the refreshed observation against the immutable
+                    // cap above, then retain the initially reviewed evidence.
+                    b.swap_fee_ppm = old.swap_fee_ppm;
+                }
             }
             require(
                 &b == old,
@@ -1687,7 +1829,7 @@ impl EthereumAdapter {
             .expect("principal and fee observations");
         let expires = (chrono::Utc::now() + chrono::Duration::seconds(120))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        if operation == "uniswap.swap" {
+        if matches!(operation, "uniswap.swap" | "ramses.swap") {
             let router = b.spender.as_deref().expect("swap router spender");
             let strategy = if b.token.reference == "native" {
                 "native input requires no token allowance; the reviewed router performs the native settlement"
@@ -1791,11 +1933,18 @@ impl EthereumAdapter {
                 detail: "The exact frozen transaction was simulated during preparation.".into(),
             });
         }
-        let summary = if operation == "uniswap.swap" {
+        let summary = if matches!(operation, "uniswap.swap" | "ramses.swap") {
             let output = b.output.as_ref().expect("swap output");
             let output_symbol = swap_output_symbol.as_deref().unwrap_or(&output.reference);
             let protocol = b.protocol.as_deref().unwrap_or("v3");
-            let route = if protocol == "v4" {
+            let route = if b.dex.as_deref() == Some("ramses") {
+                format!(
+                    "Ramses tick spacing {}, quoted pool fee {} ppm (quote-time ceiling {} ppm only)",
+                    b.tick_spacing.expect("Ramses tick spacing"),
+                    b.swap_fee_ppm.expect("quoted dynamic fee"),
+                    b.max_pool_fee_ppm.expect("quote fee ceiling")
+                )
+            } else if protocol == "v4" {
                 let key = b.v4_pool_key.as_ref().expect("v4 pool key");
                 format!(
                     "Uniswap v4 fee {} ppm, tick spacing {}",

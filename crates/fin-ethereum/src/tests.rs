@@ -1383,6 +1383,19 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     assert!(p.summary.contains("permission:"));
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     assert_eq!(b.fee_tier, Some(500));
+    for key in [
+        "dex",
+        "tick_spacing",
+        "pool_deployer",
+        "factory",
+        "swap_fee_ppm",
+        "max_pool_fee_ppm",
+    ] {
+        assert!(
+            p.binding.get(key).is_none(),
+            "legacy Uniswap binding gained {key}"
+        );
+    }
     let q = fin_evm::u256(&b.units).unwrap();
     let logs = |out| {
         vec![
@@ -1429,6 +1442,74 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     rpc.set_receipt(&b, 21, logs(U256::from(3_000_000)));
     assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
 }
+
+#[tokio::test]
+async fn ramses_only_profile_quotes_and_prepares_native_swap_with_dynamic_fee_scope() {
+    let rpc = Arc::new(Fixture::new());
+    let a = ramses_adapter(rpc.clone());
+    let quote = json!({
+        "wallet":"synthetic", "network":"evm", "chain_id":4663,
+        "token_in":"native", "token_out":lower_address(addr(101)),
+        "amount":"0.001", "tick_spacing":1
+    });
+    let read = a.read("ramses.quote", &quote).await.unwrap();
+    assert_eq!(read["data"]["dex"], "ramses");
+    assert_eq!(read["data"]["tick_spacing"], 1);
+    assert_eq!(read["data"]["swap_fee_ppm"], 100);
+
+    // The router/quoter factory identity is checked at the pinned quote block.
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .insert(RamsesRouter::deployerCall::SELECTOR, abi_value(addr(481)));
+    assert!(a.read("ramses.quote", &quote).await.is_err());
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .remove(&RamsesRouter::deployerCall::SELECTOR);
+
+    let mut swap = quote;
+    swap["request_id"] = json!("ramses-native-synthetic");
+    swap["max_fee_eth"] = json!("0.001");
+    swap["recipient"] = json!(lower_address(addr(1)));
+    swap["min_output"] = json!("2.97");
+    swap["slippage_bps"] = json!(100);
+    swap["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
+    swap["max_pool_fee_ppm"] = json!(200);
+    let prepared = a.prepare("ramses.swap", &swap).await.unwrap();
+    let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+    assert_eq!(binding.dex.as_deref(), Some("ramses"));
+    assert_eq!(binding.tick_spacing, Some(1));
+    assert_eq!(binding.swap_fee_ppm, Some(100));
+    assert_eq!(binding.max_pool_fee_ppm, Some(200));
+    assert_eq!(binding.fee_tier, None);
+    assert_eq!(
+        binding.transaction.value,
+        quantity(U256::from(1_000_000_000_000_000u64))
+    );
+
+    for refreshed_fee in [150u32, 50u32] {
+        rpc.call_overrides.lock().unwrap().insert(
+            RamsesPool::feeCall::SELECTOR,
+            abi_value(U256::from(refreshed_fee)),
+        );
+        let refreshed = a.revalidate(&prepared).await.unwrap();
+        let refreshed_binding: Binding = serde_json::from_value(refreshed.binding).unwrap();
+        assert_eq!(refreshed_binding.swap_fee_ppm, binding.swap_fee_ppm);
+        assert_eq!(refreshed_binding.fee_tier, None);
+        assert_eq!(refreshed_binding.max_pool_fee_ppm, binding.max_pool_fee_ppm);
+    }
+    // A refreshed pinned pool fee may not exceed the immutable quote ceiling.
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .insert(RamsesPool::feeCall::SELECTOR, abi_value(U256::from(201u32)));
+    assert_eq!(
+        a.revalidate(&prepared).await.unwrap_err().code,
+        "POOL_FEE_LIMIT"
+    );
+}
+
 #[tokio::test]
 async fn eip2612_permit_domain_is_bound_to_token_and_configured_chain() {
     let rpc = Arc::new(Fixture::new());
@@ -1480,6 +1561,30 @@ async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
     assert!(summary.contains("via uniswap v3"));
     assert!(summary.contains("permission"));
     assert!(result["data"]["summary"].is_null());
+    let quote: reads::SwapQuote = serde_json::from_value(result["data"].clone()).unwrap();
+    let generic = uniswap::as_amm_quote(
+        &adapter,
+        resource(1, addr(1)),
+        &quote,
+        quantity(U256::from(10_000_000_000_000u64)),
+        fin_amm::PermissionRequirement::TokenApproval,
+    )
+    .unwrap();
+    let legacy_route_identity = json!({
+        "chain_id":1,
+        "router":lower_address(addr(470)),
+        "protocol":"v3",
+        "pool":quote.pool,
+        "fee":quote.fee_tier,
+        "pool_key":quote.pool_key,
+        "token_in":quote.pool_token_in,
+        "token_out":quote.pool_token_out,
+    });
+    assert_eq!(
+        generic.route.fingerprint,
+        fin_domain::binding_hash(&legacy_route_identity).unwrap(),
+        "Uniswap v3 route fingerprints retain their original fields and values",
+    );
 }
 
 #[tokio::test]
@@ -1789,6 +1894,19 @@ impl EvmRpc for Fixture {
                             Address::ZERO
                         })
                     }
+                    RamsesFactory::getPoolCall::SELECTOR => {
+                        let call = RamsesFactory::getPoolCall::abi_decode_validate(&data).unwrap();
+                        abi_value(if call.tickSpacing == I24::try_from(1).unwrap() {
+                            addr(500)
+                        } else {
+                            Address::ZERO
+                        })
+                    }
+                    RamsesFactory::ramsesV3PoolDeployerCall::SELECTOR
+                    | RamsesRouter::deployerCall::SELECTOR => abi_value(addr(480)),
+                    RamsesPool::feeCall::SELECTOR => abi_value(U256::from(100u32)),
+                    RamsesPool::tickSpacingCall::SELECTOR => abi_value(I24::try_from(1).unwrap()),
+                    V3RouterInfo::WETH9Call::SELECTOR => abi_value(addr(100)),
                     UniswapPool::token0Call::SELECTOR => abi_value(addr(100)),
                     UniswapPool::token1Call::SELECTOR => abi_value(addr(101)),
                     UniswapPool::slot0Call::SELECTOR => abi_value((
@@ -1806,12 +1924,21 @@ impl EvmRpc for Fixture {
                         0u32,
                         U256::from(100000),
                     )),
+                    RamsesQuoter::quoteExactInputSingleCall::SELECTOR => abi_value((
+                        U256::from(3_000_000),
+                        fin_evm::alloy::primitives::aliases::U160::ZERO,
+                        0u32,
+                        U256::from(100000),
+                    )),
                     Weth::depositCall::SELECTOR
                     | Weth::withdrawCall::SELECTOR
                     | Pool::supplyCall::SELECTOR
                     | Pool::borrowCall::SELECTOR
                     | Pool::setUserUseReserveAsCollateralCall::SELECTOR => json!("0x"),
                     Router::exactInputSingleCall::SELECTOR => abi_value(U256::from(3_000_000)),
+                    RamsesRouter::exactInputSingleCall::SELECTOR => {
+                        abi_value(U256::from(3_000_000))
+                    }
                     Pool::repayCall::SELECTOR => abi_value(U256::from(1_000_000)),
                     Pool::withdrawCall::SELECTOR => {
                         let q = Pool::withdrawCall::abi_decode_validate(&data)
@@ -1864,6 +1991,32 @@ pub(super) fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
             signing_enabled: true,
         }],
         Arc::new(EvmRuntime::new(rpc, 1, None)),
+    )
+    .unwrap()
+}
+fn ramses_adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
+    rpc.chain.store(4663, Ordering::SeqCst);
+    let config = EthereumConfig {
+        chain_id: 4663,
+        // Intentionally absent: native-token resolution must use this DEX's
+        // reviewed router WETH9 getter when Uniswap is not configured.
+        ramses: Some(RamsesConfig {
+            factory: lower_address(addr(450)),
+            quoter: lower_address(addr(460)),
+            router: lower_address(addr(470)),
+            pool_deployer: lower_address(addr(480)),
+        }),
+        snapshot_tokens: vec![lower_address(addr(101))],
+        ..Default::default()
+    };
+    EthereumAdapter::new(
+        config,
+        vec![WalletConnection {
+            name: "synthetic".into(),
+            address: lower_address(addr(1)),
+            signing_enabled: true,
+        }],
+        Arc::new(EvmRuntime::new(rpc, 4663, None)),
     )
     .unwrap()
 }

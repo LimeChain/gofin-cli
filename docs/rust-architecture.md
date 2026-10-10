@@ -77,7 +77,24 @@ same root ownership, hardened signature and ACL validation as other runtime code
 | Connection                       | Another main account, child, or wallet    | Human enrollment, credential reference, physical identity, authority/permissions, resource locking.                         |
 | Policy/platform                  | Different limits or native authentication | Explicit versioned policy and a tested authorization/storage provider through the existing engine.                          |
 
-Wallet, Uniswap, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+
+`fin-networks` is the single reviewed wallet-network registry: identity, public
+RPC defaults, confirmation floor and settlement classification. Broker
+validation, enrollment, discovery, development RPC overrides and canonical
+receipt policy consume it. Protocol deployments remain application-owned.
+Adding a network requires reviewing its fee model as well as sequencing and
+registering its deployments; an Optimism-style additional L1 data fee needs
+bounded estimation and verified receipt accounting before enabling writes.
+
+Closed v3 deployment profiles separate factory pool lookup, quoter ABI,
+router encoding and fee semantics. Uniswap identifies pools by a fixed fee
+tier. Ramses identifies pools by signed tick spacing and reads their mutable
+fee at the quote block. It uses its own reviewed router, factory, quoter and
+pool deployer. The same `fin-amm` contract, finite permit path, financial
+limits, journal and receipt settlement handle both implementations. A
+compatible fork can reuse the v3 kernel after ABI/deployment review; changed
+encodings or fee models require an explicit profile implementation and tests.
 
 Uniswap v3/v4 swaps use exact-input, single-pool requests with a wallet-bound
 recipient, fresh quote, minimum-output floor, bounded slippage/impact, native
@@ -98,7 +115,8 @@ finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
 compatible. New setup includes Ethereum mainnet (1), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Uniswap/Aave are mainnet-only. Relay transfers are a separate application
+Uniswap v3/v4 has reviewed deployments on all three networks; Ramses v3 is
+reviewed on Robinhood and Aave on Ethereum mainnet. Relay transfers are a separate application
 capability, not a general wallet write or arbitrary calldata interface.
 
 ### Relay bridge composition and settlement

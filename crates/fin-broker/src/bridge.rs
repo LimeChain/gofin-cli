@@ -876,9 +876,9 @@ impl BridgeAdapter {
             ));
         }
         let source = self.asset(&input.intent.source, input.intent.source.chain_id)?;
-        if !matches!(source.chain_id, 1 | 42161 | 4663)
+        if !fin_networks::supports_chain(source.chain_id)
             || input.intent.destination_chain_id == source.chain_id
-            || !matches!(input.intent.destination_chain_id, 1 | 42161 | 4663)
+            || !fin_networks::supports_chain(input.intent.destination_chain_id)
         {
             return Err(error(
                 "BRIDGE_NETWORK_UNSUPPORTED",
@@ -4711,12 +4711,9 @@ fn safe_label(value: &str) -> String {
 }
 
 fn chain_name(chain_id: u64) -> &'static str {
-    match chain_id {
-        1 => "Ethereum Mainnet",
-        42161 => "Arbitrum One",
-        4663 => "Robinhood Chain",
-        _ => "EVM",
-    }
+    fin_networks::by_chain_id(chain_id)
+        .map(|network| network.display_name)
+        .unwrap_or("EVM")
 }
 
 fn format_amount(amount: &FinAmount) -> String {

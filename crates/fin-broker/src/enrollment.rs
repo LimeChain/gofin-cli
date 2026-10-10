@@ -284,7 +284,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
         version: 2,
         approver_uid: args.approver_uid,
         networks: NetworkConfig::reviewed_evm_networks(),
-        deployments: DeploymentConfig::reviewed_uniswap_networks(),
+        deployments: DeploymentConfig::reviewed_amm_networks(),
         connections: vec![],
         policy,
         extensions: BTreeMap::new(),
@@ -362,7 +362,7 @@ fn collect_material(
     Ok(Some(material))
 }
 
-/// Add only missing reviewed chain and Uniswap coverage during the human's
+/// Add only missing reviewed chain and AMM coverage during the human's
 /// protected EVM enrollment. Existing deployment choices remain authoritative.
 fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
     let reviewed_networks = NetworkConfig::reviewed_evm_networks();
@@ -375,16 +375,20 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
         {
             config.networks.push(network.clone());
             warnings.push(format!(
-                "Added reviewed EVM network {} (chain {}).",
-                network.id, network.chain_id
+                "Added reviewed EVM network {} ({}, chain {}).",
+                fin_networks::by_chain_id(network.chain_id)
+                    .map(|descriptor| descriptor.display_name)
+                    .unwrap_or("reviewed network"),
+                network.id,
+                network.chain_id
             ));
         }
     }
 
-    for reviewed in DeploymentConfig::reviewed_uniswap_networks() {
-        let Some(reviewed_uniswap) = reviewed.uniswap.as_ref() else {
+    for reviewed in DeploymentConfig::reviewed_amm_networks() {
+        if reviewed.uniswap.is_none() && reviewed.ramses.is_none() {
             continue;
-        };
+        }
         let Some(index) = config
             .deployments
             .iter()
@@ -394,33 +398,51 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
                 network: reviewed.network.clone(),
                 weth: None,
                 snapshot_tokens: Vec::new(),
-                uniswap: Some(reviewed_uniswap.clone()),
+                uniswap: reviewed.uniswap.clone(),
+                ramses: reviewed.ramses.clone(),
                 aave: None,
             });
-            warnings.push(format!(
-                "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
-                reviewed.network
-            ));
-            continue;
-        };
-
-        let existing = &mut config.deployments[index];
-        match existing.uniswap.as_mut() {
-            None => {
-                existing.uniswap = Some(reviewed_uniswap.clone());
+            if reviewed.uniswap.is_some() {
                 warnings.push(format!(
                     "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
                     reviewed.network
                 ));
             }
-            Some(uniswap) if uniswap.v4.is_none() && reviewed_uniswap.v4.is_some() => {
-                uniswap.v4 = reviewed_uniswap.v4.clone();
+            if reviewed.ramses.is_some() {
                 warnings.push(format!(
-                    "Added reviewed Uniswap v4 deployment coverage for {} while preserving the existing v3 deployment.",
+                    "Added reviewed Ramses v3 deployment coverage for {}.",
                     reviewed.network
                 ));
             }
-            Some(_) => {}
+            continue;
+        };
+
+        let existing = &mut config.deployments[index];
+        if let Some(reviewed_uniswap) = reviewed.uniswap.as_ref() {
+            match existing.uniswap.as_mut() {
+                None => {
+                    existing.uniswap = Some(reviewed_uniswap.clone());
+                    warnings.push(format!(
+                        "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
+                        reviewed.network
+                    ));
+                }
+                Some(uniswap) if uniswap.v4.is_none() && reviewed_uniswap.v4.is_some() => {
+                    uniswap.v4 = reviewed_uniswap.v4.clone();
+                    warnings.push(format!(
+                        "Added reviewed Uniswap v4 deployment coverage for {} while preserving the existing v3 deployment.",
+                        reviewed.network
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if existing.ramses.is_none() && reviewed.ramses.is_some() {
+            existing.ramses = reviewed.ramses.clone();
+            warnings.push(format!(
+                "Added reviewed Ramses v3 deployment coverage for {}.",
+                reviewed.network
+            ));
         }
     }
     warnings
@@ -469,7 +491,10 @@ async fn validate_connection(
                 fin_pricing::UsdPriceSource::quote(
                     &source,
                     &fin_domain::AssetId {
-                        network: "ethereum:1".into(),
+                        network: fin_networks::by_chain_id(1)
+                            .expect("Ethereum is reviewed")
+                            .network_id
+                            .into(),
                         reference: "native".into(),
                         decimals: 18,
                     },
@@ -494,7 +519,14 @@ async fn validate_connection(
             let network = config
                 .networks
                 .iter()
-                .find(|network| network.id == args.network.as_deref().unwrap_or("ethereum:1"))
+                .find(|network| {
+                    network.id
+                        == args.network.as_deref().unwrap_or_else(|| {
+                            fin_networks::by_chain_id(1)
+                                .expect("Ethereum is reviewed")
+                                .network_id
+                        })
+                })
                 .ok_or_else(|| {
                     error(
                         "NETWORK_NOT_CONFIGURED",
@@ -1050,6 +1082,22 @@ mod tests {
             assert!(deployment.uniswap.as_ref().unwrap().v4.is_some());
             assert!(warnings.iter().any(|warning| warning.contains(network)));
         }
+        let robinhood = config
+            .deployments
+            .iter()
+            .find(|deployment| deployment.network == "ethereum:4663")
+            .unwrap();
+        let ramses = robinhood.ramses.as_ref().unwrap();
+        assert_eq!(ramses.factory, "0xE0c4ceb92d08CA985bB70fe0a22fEb121A9854A8");
+        assert_eq!(ramses.quoter, "0x4730e03EB4a58A5e20244062D5f9A99bCf5770a6");
+        assert_eq!(ramses.router, "0xFCBBe2Af83F94e7E2a9C35a535B3A04719aFD2Ae");
+        assert_eq!(
+            ramses.pool_deployer,
+            "0x4b37359BF291AbE8453692DB58d515a8b013Dca9"
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("Added reviewed Ramses v3 deployment coverage for ethereum:4663")
+        }));
         assert!(
             warnings
                 .iter()
@@ -1078,6 +1126,7 @@ mod tests {
             weth: Some("0x6666666666666666666666666666666666666666".into()),
             snapshot_tokens: vec!["0x7777777777777777777777777777777777777777".into()],
             uniswap: Some(custom_uniswap.clone()),
+            ramses: None,
             aave: Some(custom_aave.clone()),
         };
         let mut config = empty_config(
@@ -1121,6 +1170,81 @@ mod tests {
         assert_eq!(serde_json::to_value(&config.deployments).unwrap(), before);
         let again = expand_reviewed_evm_coverage(&mut config);
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn reviewed_amm_profiles_add_ramses_only_on_robinhood_and_preserve_custom_profile() {
+        let profiles = DeploymentConfig::reviewed_amm_networks();
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:1")
+                .unwrap()
+                .ramses
+                .is_none()
+        );
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:42161")
+                .unwrap()
+                .ramses
+                .is_none()
+        );
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:4663")
+                .unwrap()
+                .ramses
+                .is_some()
+        );
+
+        let custom = fin_ethereum::RamsesConfig {
+            factory: "0x1111111111111111111111111111111111111111".into(),
+            quoter: "0x2222222222222222222222222222222222222222".into(),
+            router: "0x3333333333333333333333333333333333333333".into(),
+            pool_deployer: "0x4444444444444444444444444444444444444444".into(),
+        };
+        let mut profiles = profiles;
+        profiles
+            .iter_mut()
+            .find(|deployment| deployment.network == "ethereum:4663")
+            .unwrap()
+            .ramses = Some(custom.clone());
+        let mut config = empty_config(NetworkConfig::reviewed_evm_networks(), profiles);
+        assert!(expand_reviewed_evm_coverage(&mut config).is_empty());
+        assert_eq!(
+            config
+                .deployments
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:4663")
+                .unwrap()
+                .ramses
+                .as_ref()
+                .unwrap()
+                .router,
+            custom.router
+        );
+    }
+
+    #[test]
+    fn legacy_deployment_without_ramses_deserializes_and_omits_none_when_saved() {
+        let legacy = json!({
+            "network":"ethereum:4663",
+            "weth":null,
+            "snapshot_tokens":[],
+            "uniswap":null,
+            "aave":null
+        });
+        let decoded: DeploymentConfig = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.ramses.is_none());
+        assert!(
+            serde_json::to_value(decoded)
+                .unwrap()
+                .get("ramses")
+                .is_none()
+        );
     }
 
     fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {

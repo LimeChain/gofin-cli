@@ -152,6 +152,7 @@ async fn settled(
         .unwrap()
         .remove("_fork_authority")
         .and_then(|v| v.as_str().map(str::to_owned));
+    let plan = input.as_object_mut().unwrap().remove("_fork_plan");
     let request = OperationRequest {
         request_id: input["request_id"].as_str().unwrap().into(),
         operation: operation.into(),
@@ -163,6 +164,15 @@ async fn settled(
         json!({"stage":"execute", "operation":operation,"request_id":request.request_id})
     );
     let execute = async {
+        if let Some(plan) = &plan {
+            return engine
+                .execute_financial_plan_step(
+                    plan["id"].as_str().unwrap(),
+                    "reverse",
+                    request.clone(),
+                )
+                .await;
+        }
         match &authority {
             Some(id) => engine.execute_boundary(id, request.clone()).await,
             None => engine.execute(request.clone()).await,
@@ -198,9 +208,15 @@ async fn settled(
             "sequencer-inclusion"
         );
     }
-    let duplicate = match &authority {
-        Some(id) => engine.execute_boundary(id, request).await?,
-        None => engine.execute(request).await?,
+    let duplicate = if let Some(plan) = &plan {
+        engine
+            .execute_financial_plan_step(plan["id"].as_str().unwrap(), "reverse", request)
+            .await?
+    } else {
+        match &authority {
+            Some(id) => engine.execute_boundary(id, request).await?,
+            None => engine.execute(request).await?,
+        }
     };
     assert_eq!(duplicate.id, record.id);
     assert_eq!(duplicate.submission, record.submission);
@@ -239,6 +255,10 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     )
     .map_err(|_| FinError::validation("Invalid fork fixture"))?;
     let chain = fixture["chain_id"].as_u64().unwrap();
+    let dex = fixture["dex"].as_str().unwrap_or("uniswap");
+    assert!(matches!(dex, "uniswap" | "ramses"));
+    let quote_operation = format!("{dex}.quote");
+    let swap_operation = format!("{dex}.swap");
     let rpc = Arc::new(OwnedRpc {
         url,
         instance: std::env::var("FIN_AMM_FORK_INSTANCE").unwrap(),
@@ -260,7 +280,15 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     let mut config = EthereumConfig::wallet_only(chain, 1, vec![token.into()]);
     // Match mainnet confirmation policy; reviewed rollups use sequencer inclusion.
     config.require_finalized = chain == 1 && EthereumConfig::default().require_finalized;
-    config.uniswap = Some(serde_json::from_value(fixture["uniswap"].clone()).unwrap());
+    if dex == "ramses" {
+        config.ramses = Some(serde_json::from_value(fixture["ramses"].clone()).unwrap());
+        assert!(
+            config.uniswap.is_none(),
+            "Ramses must work without Uniswap configured"
+        );
+    } else {
+        config.uniswap = Some(serde_json::from_value(fixture["uniswap"].clone()).unwrap());
+    }
     let adapter = Arc::new(
         EthereumAdapter::new(
             config,
@@ -286,7 +314,12 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     let base = json!({"wallet":"fork-wallet","network":"evm","chain_id":chain});
     let baseline = adapter.read("wallet.balances", &base).await?;
     let mut results = vec![];
-    for protocol in ["v3", "v4"] {
+    let protocols = if dex == "ramses" {
+        vec!["v3"]
+    } else {
+        vec!["v3", "v4"]
+    };
+    for protocol in protocols {
         let mut quote = base.clone();
         quote.as_object_mut().unwrap().extend(
             json!({"token_in":"native","token_out":token,"amount":"0.001","protocol":protocol})
@@ -294,10 +327,14 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                 .unwrap()
                 .clone(),
         );
+        if dex == "ramses" {
+            quote.as_object_mut().unwrap().remove("protocol");
+            quote["tick_spacing"] = fixture["tick_spacing"].clone();
+        }
         if protocol == "v4" {
             quote["v4_pool_key"] = fixture["v4_pool_key"].clone();
         }
-        let q = adapter.read("uniswap.quote", &quote).await?;
+        let q = adapter.read(&quote_operation, &quote).await?;
         let out: Quantity = serde_json::from_value(q["data"]["output"].clone()).unwrap();
         assert!(!out.is_zero());
         let mut input = quote.clone();
@@ -312,18 +349,71 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                 .to_decimal(6)
         );
         let grant = engine.authorize_boundary(fin_domain::boundaries::BoundaryAuthorizationRequest {
-            request_id: format!("{protocol}-forward-grant"), operation: "uniswap.swap".into(), input: input.clone(),
-            bounds: json!({"max_input":"0.001","max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":"1000000000000000"},"allowed_fee_tiers":if protocol=="v3" {vec![100,500,3000,10000]} else {vec![]},"max_deadline_seconds":600}),
+            request_id: format!("{protocol}-forward-grant"), operation: swap_operation.clone(), input: input.clone(),
+            bounds: json!({"max_input":"0.001","max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":"1000000000000000"},"allowed_fee_tiers":if protocol=="v3" && dex=="uniswap" {vec![100,500,3000,10000]} else {vec![]},"max_deadline_seconds":600}),
             valid_for_seconds:600,replaces:None,
         }).await?;
+        if dex == "ramses" {
+            let nonce_before = rpc
+                .request("eth_getTransactionCount", json!([owner, "pending"]))
+                .await?;
+            for (field, value) in [
+                ("amount", json!("0.0011")),
+                ("slippage_bps", json!(101)),
+                ("max_price_impact_bps", json!(101)),
+                ("max_fee_eth", json!("0.011")),
+                ("max_pool_fee_ppm", json!(200)),
+                ("tick_spacing", json!(5)),
+                (
+                    "recipient",
+                    json!("0x0000000000000000000000000000000000000001"),
+                ),
+            ] {
+                let mut changed = input.clone();
+                changed[field] = value;
+                assert!(
+                    engine
+                        .preview_boundary(&grant.id, &swap_operation, &changed)
+                        .await
+                        .is_err(),
+                    "Ramses scope accepted changed {field}"
+                );
+            }
+            assert!(
+                engine
+                    .preview_boundary(&grant.id, "uniswap.swap", &input)
+                    .await
+                    .is_err()
+            );
+            let nonce_after = rpc
+                .request("eth_getTransactionCount", json!([owner, "pending"]))
+                .await?;
+            assert_eq!(
+                nonce_before, nonce_after,
+                "Rejected previews must never submit"
+            );
+            println!(
+                "{}",
+                json!({"stage":"ramses_bound_rejections", "checked":["amount","slippage","impact","gas_cap","quote_fee_ceiling","spacing","recipient","dex"],"submitted":false})
+            );
+        }
         input["_fork_authority"] = json!(grant.id);
-        let forward = settled(&engine, &rpc, "uniswap.swap", input).await?;
+        let forward = settled(&engine, &rpc, &swap_operation, input).await?;
+        if dex == "ramses" {
+            engine.revoke_boundary(&grant.id).await?;
+            assert!(
+                engine
+                    .preview_boundary(&grant.id, &swap_operation, &quote)
+                    .await
+                    .is_err()
+            );
+        }
         let proceeds = received(&forward)?;
         assert_eq!(proceeds.asset.reference, token);
         let spender = if protocol == "v4" {
             "0x000000000022d473030f116ddee9f6b43ac78ba3"
         } else {
-            fixture["uniswap"]["router"].as_str().unwrap()
+            fixture[dex]["router"].as_str().unwrap()
         };
         let mut allowance = base.clone();
         allowance["token"] = json!(token);
@@ -353,7 +443,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
         reverse["token_in"] = json!(token);
         reverse["token_out"] = json!("native");
         reverse["amount"] = json!(proceeds.atoms.to_decimal(proceeds.asset.decimals));
-        let q = adapter.read("uniswap.quote", &reverse).await?;
+        let q = adapter.read(&quote_operation, &reverse).await?;
         let out: Quantity = serde_json::from_value(q["data"]["output"].clone()).unwrap();
         reverse["request_id"] = json!(format!("{protocol}-reverse"));
         reverse["recipient"] = json!(owner);
@@ -365,7 +455,34 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             out.mul_div_ceil(&Quantity::from_u64(9950), &Quantity::from_u64(10000))?
                 .to_decimal(18)
         );
-        let returned = settled(&engine, &rpc, "uniswap.swap", reverse).await?;
+        if dex == "ramses" {
+            let prepared = adapter.prepare(&swap_operation, &reverse).await?;
+            let plan: fin_domain::financial_plans::FinancialPlanSpec = serde_json::from_value(json!({
+                "version":1, "name":"Owned Ramses reverse with verified proceeds",
+                "steps":[{"step_id":"reverse","operation":swap_operation,"input":reverse,
+                    "permitted_variations":{"max_input":proceeds.atoms.to_decimal(proceeds.asset.decimals),"max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":proceeds.atoms},"allowed_fee_tiers":[],"max_deadline_seconds":600},
+                    "completion":{"operation_succeeded":true},"funding_dependencies":[]}],
+                "aggregate_bounds":{"maximum_debits":prepared.intent.debits,"maximum_costs":[{
+                    "location":{"kind":"cash","resource":format!("ethereum:{chain}:{owner}")},"amount":{"asset":{"network":format!("ethereum:{chain}"),"reference":"native","decimals":18},"atoms":"10000000000000000"},"treatment":"additional_debit"}]}
+            })).unwrap();
+            let mut authorization_request =
+                fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
+                    request_id: "owned-ramses-reverse-plan".into(),
+                    plan,
+                    valid_for_seconds: 600,
+                    replaces_revision_id: None,
+                    expected_review_hash: None,
+                };
+            let review = engine
+                .preview_financial_plan(authorization_request.clone())
+                .await?;
+            authorization_request.expected_review_hash = Some(review.review_hash);
+            let authorized = engine
+                .authorize_financial_plan(authorization_request)
+                .await?;
+            reverse["_fork_plan"] = json!({"id":authorized.plan_id});
+        }
+        let returned = settled(&engine, &rpc, &swap_operation, reverse).await?;
         assert_eq!(received(&returned)?.asset.reference, "native");
         let mut restore = allowance.clone();
         restore["request_id"] = json!(format!("{protocol}-restore"));
@@ -414,9 +531,34 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             .clone()
     };
     assert_eq!(stable(&baseline), stable(&final_state));
+    // Reopen the same journal and reconcile settled identities. This must not
+    // repeat signing or broadcast when the process restarts.
+    let records_before = engine.operations()?;
+    let nonce_before = rpc
+        .request("eth_getTransactionCount", json!([owner, "pending"]))
+        .await?;
+    drop(engine);
+    let recovered = Engine::new(
+        Store::open(directory.path().join("operations.sqlite")).unwrap(),
+        vec![adapter],
+        Arc::new(Approval),
+        EngineOptions::default(),
+    )?;
+    for original in &records_before {
+        let current = recovered.status(&original.id, true).await?;
+        assert_eq!(current.id, original.id);
+        assert_eq!(current.status, original.status);
+        assert_eq!(current.submission, original.submission);
+        assert_eq!(current.effects, original.effects);
+    }
+    assert_eq!(
+        nonce_before,
+        rpc.request("eth_getTransactionCount", json!([owner, "pending"]))
+            .await?
+    );
     println!(
         "{}",
-        json!({"chain_id":chain,"results":results,"stable_restored":true,"production_writes":0,"usd_evidence":"synthetic fixture","baseline":baseline,"final":final_state})
+        json!({"dex":dex,"chain_id":chain,"results":results,"stable_restored":true,"production_writes":0,"usd_evidence":"synthetic fixture","baseline":baseline,"final":final_state})
     );
     Ok(())
 }

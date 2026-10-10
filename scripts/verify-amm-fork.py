@@ -30,21 +30,32 @@ def rpc(url, method, params):
         raise RuntimeError(f"{method}: {value['error']}")
     return value["result"]
 
-def protocol_config(chain):
+def protocol_config(chain, dex="uniswap"):
     text = (SOURCE / "crates/fin-broker/src/amm_deployments.rs").read_text()
+    if dex == "ramses":
+        if chain != 4663:
+            raise RuntimeError("Ramses is reviewed on Robinhood only")
+        start = text.index("pub fn reviewed_ramses")
+        fragment = text[start:text.index("pub fn reviewed_uniswap", start)]
+        contracts = dict(re.findall(r'(factory|quoter|router|pool_deployer): "(0x[0-9a-fA-F]+)"', fragment))
+        if set(contracts) != {"factory", "quoter", "router", "pool_deployer"}:
+            raise RuntimeError("Reviewed Ramses deployment fixture is incomplete")
+        return contracts
     start = text.index(f"{chain} => UniswapConfig")
     fragment = text[start:text.index("        },", start)+10]
     contracts = dict(re.findall(r'(factory|quoter|router|pool_manager|state_view): "(0x[0-9a-f]+)"', fragment.split("v4: Some")[0]))
     v4 = dict(re.findall(r'(quoter|router|pool_manager|state_view): "(0x[0-9a-f]+)"', fragment.split("v4: Some")[1]))
     return {**contracts,"router_kind":"swap_router02","v4":{**v4,"router_has_hop_price":True}}
 
-def run(chain, evidence, legacy_v3=False):
+def run(chain, evidence, legacy_v3=False, dex="uniswap"):
+    if dex == "ramses" and (chain != 4663 or legacy_v3):
+        raise RuntimeError("Ramses requires Robinhood and its reviewed router")
     head = rpc(URLS[chain], "eth_getBlockByNumber", ["latest", False])
     # Avoid public-provider replicas disagreeing at the tip. Record one exact
     # mature block/hash and require that immutable anchor at the owned node.
     depth = 32 if chain == 1 else 128
     anchor = rpc(URLS[chain], "eth_getBlockByNumber", [hex(int(head["number"],16)-depth), False])
-    fixture = {"chain_id":chain,"block":int(anchor["number"],16),"hash":anchor["hash"],"token":TOKENS[chain],"uniswap":protocol_config(chain),"v4_pool_key":{"currency0":"0x"+"0"*40,"currency1":TOKENS[chain],"fee":500,"tick_spacing":10,"hooks":"0x"+"0"*40}}
+    fixture = {"dex":dex,"chain_id":chain,"block":int(anchor["number"],16),"hash":anchor["hash"],"token":TOKENS[chain],dex:protocol_config(chain,dex),"tick_spacing":1,"v4_pool_key":{"currency0":"0x"+"0"*40,"currency1":TOKENS[chain],"fee":500,"tick_spacing":10,"hooks":"0x"+"0"*40}}
     if legacy_v3:
         if chain != 1:
             raise RuntimeError("Legacy router regression is reviewed on chain 1 only")
@@ -88,18 +99,21 @@ def run(chain, evidence, legacy_v3=False):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chain",type=int,choices=list(URLS))
+    parser.add_argument("--dex",choices=["uniswap","ramses"],default="uniswap")
     parser.add_argument("--legacy-v3",action="store_true",help="Verify preserved Ethereum legacy router encoding")
     args=parser.parse_args()
     if args.legacy_v3 and args.chain != 1:
         parser.error("--legacy-v3 requires --chain 1")
+    if args.dex == "ramses" and (args.chain not in (None,4663) or args.legacy_v3):
+        parser.error("--dex ramses requires chain 4663 and its reviewed router")
     results=[]
-    for chain in ([args.chain] if args.chain else URLS):
-        evidence=Path(tempfile.mkdtemp(prefix=f"amm-{'legacy-' if args.legacy_v3 else ''}fork-{chain}.",dir=SOURCE/"work"))
+    for chain in ([args.chain] if args.chain else ([4663] if args.dex == "ramses" else URLS)):
+        evidence=Path(tempfile.mkdtemp(prefix=f"amm-{args.dex}-{'legacy-' if args.legacy_v3 else ''}fork-{chain}.",dir=SOURCE/"work"))
         try:
-            status=run(chain,evidence,args.legacy_v3)
-            row={"chain_id":chain,"legacy_v3":args.legacy_v3,"exit":status,"result":"passed" if status==0 else "failed","evidence":str(evidence),"production_writes":0}
+            status=run(chain,evidence,args.legacy_v3,args.dex)
+            row={"dex":args.dex,"chain_id":chain,"legacy_v3":args.legacy_v3,"exit":status,"result":"passed" if status==0 else "failed","evidence":str(evidence),"production_writes":0}
         except (OSError,RuntimeError,KeyError,ValueError) as error:
-            row={"chain_id":chain,"result":"blocked","reason":str(error),"evidence":str(evidence),"production_writes":0}
+            row={"dex":args.dex,"chain_id":chain,"result":"blocked","reason":str(error),"evidence":str(evidence),"production_writes":0}
         results.append(row)
         print(json.dumps(row),flush=True)
     return 0 if all(r["result"]=="passed" for r in results) else 1

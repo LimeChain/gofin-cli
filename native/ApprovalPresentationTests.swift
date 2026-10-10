@@ -195,6 +195,17 @@ struct ApprovalPresentationTests {
             assert(swapReason.contains(detail), detail)
         }
         assert(swapReason.count <= ammAuthenticationReasonMaximumCharacters)
+        var ramsesBinding = swapBinding
+        ramsesBinding["operation"] = "ramses.swap"
+        let ramsesSummary = "Swap 0.1 TOKEN for at least 190 USDG; recipient 0x1111111111111111111111111111111111111111; Ramses tick spacing 10, quoted pool fee 500 ppm (quote-time ceiling 1000 ppm only); router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: finite token allowance or typed EIP-2612 permit to Ramses router only after approval."
+        let ramsesReason = financialAuthenticationReason(ramsesBinding, summary: ramsesSummary)!
+        for detail in ["0.1 TOKEN", "190 USDG", "recipient 0x1111…1111", "Ramses tick spacing 10",
+                       "quoted pool fee 500 ppm", "quote-time ceiling 1000 ppm only",
+                       "router 0x2222…2222", "slippage 50 bps", "impact max 40 bps",
+                       "deadline 1791500000", "max network fee 0.001 ETH", "only after approval"] {
+            assert(ramsesReason.contains(detail), detail)
+        }
+        assert(ramsesReason.count <= ammAuthenticationReasonMaximumCharacters)
         let permitSummary = "Swap 0.01 WETH for at least 19 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v4 fee 500 ppm, tick spacing 10; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: finite token allowance to canonical Permit2 was checked; a typed Permit2 signature will authorize the router only after approval."
         let permitReason = financialAuthenticationReason(swapBinding, summary: permitSummary)!
         for detail in ["0.01 WETH", "19 USDC", "recipient 0x1111…1111", "v4 fee 500 ppm", "router 0x2222…2222", "deadline 1791500000", "max network fee 0.001 ETH", "typed Permit2 signature", "after approval"] {
@@ -266,6 +277,46 @@ struct ApprovalPresentationTests {
             assert(swapBoundaryReason.contains(detail), detail)
         }
         assert(swapBoundaryReason.count <= ammAuthenticationReasonMaximumCharacters)
+        var ramsesBoundary = swapBoundary
+        ramsesBoundary["operation"] = "ramses.swap"
+        var ramsesFixed = swapBoundary["fixed"] as! [String: Any]
+        ramsesFixed["operation"] = "ramses.swap"; ramsesFixed["dex"] = "ramses"
+        ramsesFixed["tick_spacing"] = 10
+        ramsesFixed["factory"] = "0x4444444444444444444444444444444444444444"
+        ramsesFixed["pool"] = "0x3333333333333333333333333333333333333333"
+        ramsesFixed["pool_deployer"] = "0x5555555555555555555555555555555555555555"
+        ramsesBoundary["fixed"] = ramsesFixed
+        var ramsesBounds = swapBoundary["parameters"] as! [String: Any]
+        ramsesBounds.removeValue(forKey: "allowed_fee_tiers")
+        ramsesBounds["max_pool_fee_ppm"] = 1000
+        ramsesBoundary["parameters"] = ramsesBounds
+        let ramsesBoundaryReason = boundaryAuthenticationReason(ramsesBoundary, summary: "Ramses v3 bounded swap summary")!
+        for detail in ["Ramses v3 tick spacing 10", "pool 0x3333…3333", "factory 0x4444…4444",
+                       "pool deployer 0x5555…5555", "quote pool-fee ceiling ≤1000 ppm (quote-time bound only; no on-chain fee guarantee)",
+                       "router/spender 0x2222…2222", "Max input 0.1", "minimum rate 190000000/100000000000000000 atoms",
+                       "absolute floor 190", "deadline horizon 600s", "max fee 0.001 ETH"] {
+            assert(ramsesBoundaryReason.contains(detail), detail)
+        }
+        assert(ramsesBoundaryReason.count <= ammAuthenticationReasonMaximumCharacters)
+        var excessiveRamsesFee = ramsesBoundary
+        var excessiveRamsesBounds = excessiveRamsesFee["parameters"] as! [String: Any]
+        excessiveRamsesBounds["max_pool_fee_ppm"] = 1_000_000
+        excessiveRamsesFee["parameters"] = excessiveRamsesBounds
+        assert(boundaryAuthenticationReason(excessiveRamsesFee, summary: "Ramses bounded swap") == nil)
+        for requiredIdentity in ["factory", "pool", "pool_deployer"] {
+            var incompleteRamses = ramsesBoundary
+            var incompleteFixed = incompleteRamses["fixed"] as! [String: Any]
+            incompleteFixed.removeValue(forKey: requiredIdentity)
+            incompleteRamses["fixed"] = incompleteFixed
+            assert(boundaryAuthenticationReason(incompleteRamses, summary: "Ramses bounded swap") == nil)
+        }
+        for invalidSpacing in [0, 3, 25, 201] {
+            var invalid = ramsesBoundary
+            var invalidFixed = invalid["fixed"] as! [String: Any]
+            invalidFixed["tick_spacing"] = invalidSpacing
+            invalid["fixed"] = invalidFixed
+            assert(boundaryAuthenticationReason(invalid, summary: "Ramses bounded swap") == nil)
+        }
         var malformedSwapBoundary = swapBoundary
         var malformedSwapParameters = swapBoundary["parameters"] as! [String: Any]
         malformedSwapParameters.removeValue(forKey:"minimum_rate")
@@ -364,6 +415,52 @@ struct ApprovalPresentationTests {
             assert(ammPlanReason.contains(detail), detail)
         }
         assert(ammPlanReason.count <= ammAuthenticationReasonMaximumCharacters)
+        var ramsesInput = swapInput
+        ramsesInput.removeValue(forKey: "fee_tier")
+        ramsesInput["tick_spacing"] = 10
+        ramsesInput["max_pool_fee_ppm"] = 1000
+        var ramsesPlanStep = swapPlanStep
+        ramsesPlanStep["operation"] = "ramses.swap"
+        ramsesPlanStep["input"] = ramsesInput
+        var ramsesPlanFixed = ammSpec["fixed"] as! [String: Any]
+        ramsesPlanFixed["operation"] = "ramses.swap"
+        ramsesPlanFixed["dex"] = "ramses"
+        ramsesPlanFixed["tick_spacing"] = 10
+        ramsesPlanFixed["factory"] = "0x4444444444444444444444444444444444444444"
+        ramsesPlanFixed["pool"] = "0x3333333333333333333333333333333333333333"
+        ramsesPlanFixed["pool_deployer"] = "0x5555555555555555555555555555555555555555"
+        var ramsesPlanParameters = ammSpec["parameters"] as! [String: Any]
+        ramsesPlanParameters.removeValue(forKey: "allowed_fee_tiers")
+        ramsesPlanParameters["max_pool_fee_ppm"] = 1000
+        var ramsesSpec = ammSpec
+        ramsesSpec["fixed"] = ramsesPlanFixed
+        ramsesSpec["parameters"] = ramsesPlanParameters
+        ramsesSpec["summary"] = "Ramses v3 tick spacing 10; quote fee ceiling 1000 ppm; finite swap boundary."
+        var ramsesPlanPermission = ammPlanPermission
+        ramsesPlanPermission["permission"] = ["spec":ramsesSpec,
+                                               "possible_credits":[["resource":"ethereum:1:\(signerAddress)", "asset":outputAsset]],
+                                               "fee_assets":[nativeAsset]] as [String: Any]
+        var ramsesPlan = ammPlan
+        var ramsesPlanBody = ammPlan["plan"] as! [String: Any]
+        ramsesPlanBody["steps"] = [ramsesPlanStep]
+        ramsesPlan["plan"] = ramsesPlanBody
+        ramsesPlan["permissions"] = [ramsesPlanPermission]
+        let ramsesPlanReason = financialPlanAuthenticationReason(ramsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
+        for detail in ["Ramses v3 tick spacing 10", "pool 0x3333…3333", "factory 0x4444…4444",
+                       "pool deployer 0x5555…5555", "quote pool-fee ceiling ≤1000 ppm (quote-time bound only; no on-chain fee guarantee)",
+                       "min 190", "router/spender", "slip 50/100 bps", "gas ≤0.001 ETH", "deadline 1791500000"] {
+            assert(ramsesPlanReason.contains(detail), detail)
+        }
+        assert(ramsesPlanReason.count <= ammAuthenticationReasonMaximumCharacters)
+        var overWideRamsesPlan = ramsesPlan
+        var overWideRamsesSteps = ramsesPlanBody
+        var overWideRamsesStep = ramsesPlanStep
+        var overWideInput = ramsesInput
+        overWideInput["max_pool_fee_ppm"] = 1001
+        overWideRamsesStep["input"] = overWideInput
+        overWideRamsesSteps["steps"] = [overWideRamsesStep]
+        overWideRamsesPlan["plan"] = overWideRamsesSteps
+        assert(financialPlanAuthenticationReason(overWideRamsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == nil)
         assert(!ammPlanReason.contains("See terminal review for full details."))
         var twoSwapPlan = ammPlan
         var twoSwapStep = swapPlanStep; twoSwapStep["step_id"] = "swap-2"

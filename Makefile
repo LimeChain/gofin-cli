@@ -24,7 +24,7 @@ help:
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
-	  'make test-amm-fork     Owned v3/v4 forks on reviewed networks; AMM_FORK_ARGS="--chain ID" selects one' \
+	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
 	  'make test              Full offline Rust test suite' \
@@ -64,6 +64,7 @@ catalog:
 
 test-ui:
 	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli
+	@python3 scripts/test-prepare-amm-touch-id-checklist.py
 
 test-dev-env:
 	@python3 scripts/test-fin-dev.py

@@ -576,7 +576,7 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
     }
     let mut networks = NetworkConfig::reviewed_evm_networks();
     for chain_id in config.rpc_urls.keys() {
-        if ![1, 42161, 4663].contains(chain_id) {
+        if !fin_networks::supports_chain(*chain_id) {
             return Err("development RPC override names an unsupported chain".into());
         }
     }
@@ -625,7 +625,7 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
     let runtime_config = BrokerConfigV2 {
         version: 2,
         networks,
-        deployments: DeploymentConfig::reviewed_uniswap_networks(),
+        deployments: DeploymentConfig::reviewed_amm_networks(),
         connections,
         policy,
         approver_uid: unsafe { libc::geteuid() },

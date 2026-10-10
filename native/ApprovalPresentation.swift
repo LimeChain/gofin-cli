@@ -82,7 +82,7 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     if operation == "bridge.transfer" {
         return bridgeAuthenticationReason(summary: summary)
     }
-    if operation == "uniswap.swap" {
+    if operation == "uniswap.swap" || operation == "ramses.swap" {
         return compactAuthenticationReason(prefix: "approve this action: ", summary: summary,
                                            maximumCharacters: ammAuthenticationReasonMaximumCharacters)
     }
@@ -112,8 +112,8 @@ func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> 
             sourceAddress: fixed?["source_address"] as? String,
             refundAddress: fixed?["refund_to"] as? String)
     }
-    if operation == "uniswap.swap" {
-        guard let synopsis = uniswapBoundarySynopsis(binding) else { return nil }
+    if operation == "uniswap.swap" || operation == "ramses.swap" {
+        guard let synopsis = ammBoundarySynopsis(binding) else { return nil }
         return compactAuthenticationReason(prefix: "approve these boundaries: ",
                                            summary: "\(summary) \(synopsis)",
                                            maximumCharacters: ammAuthenticationReasonMaximumCharacters)
@@ -268,9 +268,12 @@ private func presentationAssetEndpoint(_ value: String) -> Bool {
     value == "native" || presentationAddress(value) != nil
 }
 
-private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
+private func ammBoundarySynopsis(_ binding: [String: Any]) -> String? {
     guard let fixed = binding["fixed"] as? [String: Any],
           let bounds = binding["parameters"] as? [String: Any],
+          let operation = fixed["operation"] as? String,
+          operation == "uniswap.swap" || operation == "ramses.swap",
+          binding["operation"] as? String == operation,
           let network = presentationString(fixed["network"], maximum: 64),
           let chainID = presentationInteger(fixed["chain_id"], minimum: 1),
           network == "ethereum:\(chainID)",
@@ -285,7 +288,7 @@ private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
           recipient == presentationAddress(fixed["signer"]),
           let router = presentationAddress(fixed["router"]),
           let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          protocolName == "v3" || protocolName == "v4",
+          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
           let maxInput = presentationDecimal(bounds["max_input"]),
           let maxFee = presentationDecimal(bounds["max_fee_eth"]),
           let maxSlippage = presentationInteger(bounds["max_slippage_bps"], maximum: 1000),
@@ -296,17 +299,31 @@ private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
           let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
           rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          let tiers = bounds["allowed_fee_tiers"] as? [Any],
           let duration = presentationInteger(binding["valid_for_seconds"], minimum: 1) else { return nil }
 
     let route: String
-    if protocolName == "v3" {
+    if operation == "ramses.swap" {
+        guard protocolName == "v3",
+              let spacing = presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200),
+              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
+              let factory = presentationAddress(fixed["factory"]),
+              let pool = presentationAddress(fixed["pool"]),
+              let deployer = presentationAddress(fixed["pool_deployer"]),
+              fixed["dex"] as? String == "ramses" else { return nil }
+        if let tiers = bounds["allowed_fee_tiers"] as? [Any], !tiers.isEmpty { return nil }
+        guard let feeCap = presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999) else { return nil }
+        route = "Ramses v3 tick spacing \(spacing)"
+            + "; pool \(pool); factory \(factory); pool deployer \(deployer)"
+            + "; quote pool-fee ceiling ≤\(feeCap) ppm (quote-time bound only; no on-chain fee guarantee)"
+    } else if protocolName == "v3" {
+        guard let tiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
         let parsed = tiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
         guard !parsed.isEmpty, parsed.count == tiers.count,
               parsed.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return nil }
         route = "Uniswap v3 fee tiers \(parsed.map { String($0) }.joined(separator: ",")) ppm"
     } else {
-        guard tiers.isEmpty, let poolKey = fixed["v4_pool_key"] as? [String: Any],
+        guard let tiers = bounds["allowed_fee_tiers"] as? [Any], tiers.isEmpty,
+              let poolKey = fixed["v4_pool_key"] as? [String: Any],
               let fee = presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000),
               let spacing = presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) else { return nil }
         route = "Uniswap v4 pool fee \(fee) ppm, tick spacing \(spacing)"
@@ -320,8 +337,9 @@ private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
 
 // Read the reviewed adapter permission from the hash-bound plan and pair it
 // with that step's exact request. Never infer token symbols or USD values here.
-private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String: Any]) -> String? {
-    guard step["operation"] as? String == "uniswap.swap",
+private func ammPlanStepSynopsis(_ step: [String: Any], permission: [String: Any]) -> String? {
+    guard let operation = step["operation"] as? String,
+          operation == "uniswap.swap" || operation == "ramses.swap",
           let stepID = presentationString(step["step_id"], maximum: 80),
           let input = step["input"] as? [String: Any],
           let permit = permission["permission"] as? [String: Any],
@@ -352,7 +370,7 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
           recipient == presentationAddress(fixed["signer"]),
           let router = presentationAddress(fixed["router"]),
           let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          protocolName == "v3" || protocolName == "v4",
+          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
           let rawAmount = presentationString(input["amount"], maximum: 100),
           let minimumOutput = presentationDecimal(input["min_output"]),
           let selectedSlippage = presentationInteger(input["slippage_bps"], maximum: 1000),
@@ -367,12 +385,12 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
           let rateInput = presentationString(rate["input_atoms"], maximum: 100),
           let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
+          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else { return nil }
 
-    let requestedProtocol = input["protocol"] == nil
-        ? "v3"
-        : presentationString(input["protocol"], maximum: 8)
+    guard fixed["operation"] as? String == operation else { return nil }
+    if operation == "ramses.swap", fixed["dex"] as? String != "ramses" { return nil }
+
+    let requestedProtocol = input["protocol"] == nil ? "v3" : presentationString(input["protocol"], maximum: 8)
     guard requestedProtocol == protocolName else { return nil }
 
     let amount: String
@@ -386,7 +404,29 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
     guard selectedSlippage <= maxSlippage, decimalAtMost(requestFee, maxFee) else { return nil }
 
     let feeDescription: String
-    if protocolName == "v3" {
+    if operation == "ramses.swap" {
+        let requestedFeeCap: UInt64?
+        if let raw = input["max_pool_fee_ppm"] {
+            guard let parsed = presentationInteger(raw, maximum: 999_999) else { return nil }
+            requestedFeeCap = parsed
+        } else {
+            requestedFeeCap = nil
+        }
+        guard protocolName == "v3",
+              let spacing = presentationInteger(input["tick_spacing"], minimum: 1, maximum: 200),
+              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
+              presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200) == spacing,
+              let factory = presentationAddress(fixed["factory"]),
+              let pool = presentationAddress(fixed["pool"]),
+              let deployer = presentationAddress(fixed["pool_deployer"]),
+              fixed["dex"] as? String == "ramses" else { return nil }
+        guard let effectiveCeiling = presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999),
+              requestedFeeCap.map({ $0 <= effectiveCeiling }) ?? true else { return nil }
+        feeDescription = "Ramses v3 tick spacing \(spacing)"
+            + "; pool \(pool); factory \(factory); pool deployer \(deployer)"
+            + "; quote pool-fee ceiling ≤\(requestedFeeCap ?? effectiveCeiling) ppm (quote-time bound only; no on-chain fee guarantee)"
+    } else if protocolName == "v3" {
+        guard let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
         let tiers = allowedTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10_000) }
         guard !tiers.isEmpty, tiers.count == allowedTiers.count,
               tiers.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return nil }
@@ -404,7 +444,8 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
             feeDescription = "v3 allowed fee tiers \(tiers.map { String($0) }.joined(separator: ",")) ppm"
         }
     } else {
-        guard input["fee_tier"] == nil, allowedTiers.isEmpty,
+        guard input["fee_tier"] == nil,
+              let allowedTiers = bounds["allowed_fee_tiers"] as? [Any], allowedTiers.isEmpty,
               let poolKey = fixed["v4_pool_key"] as? [String: Any],
               let poolFee = presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000),
               let spacing = presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) else { return nil }
@@ -512,13 +553,13 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
     let details = " (\(steps.count) steps, \(durationSeconds) seconds)"
     let detailed = lead + details
     let ammSteps = zip(steps, permissions).compactMap { step, permission in
-        (step["operation"] as? String == "uniswap.swap")
-            ? uniswapPlanStepSynopsis(step, permission: permission)
+        (["uniswap.swap", "ramses.swap"].contains(step["operation"] as? String ?? ""))
+            ? ammPlanStepSynopsis(step, permission: permission)
             : nil
     }
-    let containsAMMStep = steps.contains { $0["operation"] as? String == "uniswap.swap" }
+    let containsAMMStep = steps.contains { ["uniswap.swap", "ramses.swap"].contains($0["operation"] as? String ?? "") }
     if containsAMMStep {
-        guard ammSteps.count == steps.filter({ $0["operation"] as? String == "uniswap.swap" }).count,
+        guard ammSteps.count == steps.filter({ ["uniswap.swap", "ramses.swap"].contains($0["operation"] as? String ?? "") }).count,
               let aggregate = aggregatePlanCapsSynopsis(plan),
               summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
         let review = "\(summary) AMM scope: \(ammSteps.joined(separator: " ")) \(aggregate) Any required typed permit is finite to its attempt and signed only after journal authorization."

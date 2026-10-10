@@ -800,12 +800,13 @@ impl EthereumAdapter {
                     after: qty.to_string(),
                 });
             }
-            "uniswap.swap" => {
+            "uniswap.swap" | "ramses.swap" => {
                 let recipient = address(b.recipient.as_deref().expect("recipient"))?;
                 let router = address(&b.transaction.to)?;
                 let route_in = address(b.route_token_in.as_deref().expect("route input"))?;
                 let route_out = address(b.route_token_out.as_deref().expect("route output"))?;
                 let v4 = b.protocol.as_deref() == Some("v4");
+                let ramses = b.dex.as_deref() == Some("ramses") || operation == "ramses.swap";
                 let (pool, token0, token1, amount0_positive, amount0, amount1_positive, amount1) =
                     if v4 {
                         let key = b.v4_pool_key.as_ref().ok_or_else(|| {
@@ -847,37 +848,142 @@ impl EthereumAdapter {
                         )
                     } else {
                         let pool = address(b.pool.as_deref().expect("pool"))?;
-                        let token0 = self
-                            .runtime
-                            .call(pool, &UniswapPool::token0Call {}, Some(r.block_number))
-                            .await?;
-                        let token1 = self
-                            .runtime
-                            .call(pool, &UniswapPool::token1Call {}, Some(r.block_number))
-                            .await?;
-                        let event = exact_one(
-                            events::<UniswapPool::Swap>(receipt, pool)?
-                                .into_iter()
-                                .filter(|e| {
-                                    e.sender == router
-                                        && (e.recipient == recipient
-                                            || (b
-                                                .output
-                                                .as_ref()
-                                                .is_some_and(|a| a.reference == "native")
-                                                && e.recipient == router))
-                                })
-                                .collect(),
-                        )?;
-                        (
-                            pool,
-                            token0,
-                            token1,
-                            event.amount0.is_positive(),
-                            event.amount0.unsigned_abs(),
-                            event.amount1.is_positive(),
-                            event.amount1.unsigned_abs(),
-                        )
+                        if ramses {
+                            let config = self.ramses()?;
+                            let configured_router = address(&config.router)?;
+                            require(
+                                router == configured_router,
+                                "BINDING_INVALID",
+                                "Ramses swap router differs from the reviewed deployment.",
+                            )?;
+                            let expected_deployer = address(&config.pool_deployer)?;
+                            let deployer = self
+                                .runtime
+                                .call(
+                                    address(&config.factory)?,
+                                    &RamsesFactory::ramsesV3PoolDeployerCall {},
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            require(
+                                deployer == expected_deployer,
+                                "DEPLOYMENT_MISMATCH",
+                                "Ramses factory pool deployer changed before receipt verification.",
+                            )?;
+                            let router_deployer = self
+                                .runtime
+                                .call(router, &RamsesRouter::deployerCall {}, Some(r.block_number))
+                                .await?;
+                            let quoter_deployer = self
+                                .runtime
+                                .call(
+                                    address(&config.quoter)?,
+                                    &RamsesQuoter::deployerCall {},
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            require(
+                                router_deployer == expected_deployer
+                                    && quoter_deployer == expected_deployer,
+                                "DEPLOYMENT_MISMATCH",
+                                "Ramses router or quoter deployer differs at receipt inclusion.",
+                            )?;
+                            let token0 = self
+                                .runtime
+                                .call(pool, &RamsesPool::token0Call {}, Some(r.block_number))
+                                .await?;
+                            let token1 = self
+                                .runtime
+                                .call(pool, &RamsesPool::token1Call {}, Some(r.block_number))
+                                .await?;
+                            let observed_spacing = self
+                                .runtime
+                                .call(pool, &RamsesPool::tickSpacingCall {}, Some(r.block_number))
+                                .await?;
+                            require(
+                                b.tick_spacing.is_some_and(|spacing| {
+                                    observed_spacing
+                                        == fin_evm::alloy::primitives::aliases::I24::try_from(
+                                            i64::from(spacing),
+                                        )
+                                        .expect("reviewed positive spacing")
+                                }),
+                                "BINDING_INVALID",
+                                "Ramses pool tick spacing differs from the immutable binding.",
+                            )?;
+                            let factory_pool = self
+                                .runtime
+                                .call(
+                                    address(&config.factory)?,
+                                    &RamsesFactory::getPoolCall {
+                                        tokenA: route_in,
+                                        tokenB: route_out,
+                                        tickSpacing: observed_spacing,
+                                    },
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            require(
+                                factory_pool == pool,
+                                "POOL_IDENTITY_MISMATCH",
+                                "Ramses factory no longer resolves the exact bound tick-spacing pool.",
+                            )?;
+                            let event = exact_one(
+                                events::<RamsesPool::Swap>(receipt, pool)?
+                                    .into_iter()
+                                    .filter(|e| {
+                                        e.sender == router
+                                            && (e.recipient == recipient
+                                                || (b
+                                                    .output
+                                                    .as_ref()
+                                                    .is_some_and(|a| a.reference == "native")
+                                                    && e.recipient == router))
+                                    })
+                                    .collect(),
+                            )?;
+                            (
+                                pool,
+                                token0,
+                                token1,
+                                event.amount0.is_positive(),
+                                event.amount0.unsigned_abs(),
+                                event.amount1.is_positive(),
+                                event.amount1.unsigned_abs(),
+                            )
+                        } else {
+                            let token0 = self
+                                .runtime
+                                .call(pool, &UniswapPool::token0Call {}, Some(r.block_number))
+                                .await?;
+                            let token1 = self
+                                .runtime
+                                .call(pool, &UniswapPool::token1Call {}, Some(r.block_number))
+                                .await?;
+                            let event = exact_one(
+                                events::<UniswapPool::Swap>(receipt, pool)?
+                                    .into_iter()
+                                    .filter(|e| {
+                                        e.sender == router
+                                            && (e.recipient == recipient
+                                                || (b
+                                                    .output
+                                                    .as_ref()
+                                                    .is_some_and(|a| a.reference == "native")
+                                                    && e.recipient == router))
+                                    })
+                                    .collect(),
+                            )?;
+                            (
+                                pool,
+                                token0,
+                                token1,
+                                event.amount0.is_positive(),
+                                event.amount0.unsigned_abs(),
+                                event.amount1.is_positive(),
+                                event.amount1.unsigned_abs(),
+                            )
+                        }
                     };
                 require(
                     (route_in == token0 && route_out == token1)
@@ -1103,6 +1209,17 @@ impl EthereumAdapter {
                     received: amount(output, credited),
                 });
                 details["actual_output"] = json!(quantity(credited));
+                if ramses {
+                    details["ramses_pool_identity"] = json!({
+                        "factory": b.factory,
+                        "pool_deployer": b.pool_deployer,
+                        "pool": b.pool,
+                        "tick_spacing": b.tick_spacing,
+                        "quoted_pool_fee_ppm": b.swap_fee_ppm,
+                        "quote_fee_ceiling_ppm": b.max_pool_fee_ppm,
+                        "fee_evidence": "pinned quote observation only; actual conversion is proven by receipt pool/cash legs and the approved minimum output"
+                    });
+                }
             }
             _ => {
                 let pool = address(b.pool.as_deref().expect("pool"))?;

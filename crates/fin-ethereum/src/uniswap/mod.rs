@@ -1,6 +1,8 @@
 //! Reviewed single-pool Uniswap route primitives. Protocol-specific ABI and
 //! route validation live in separate modules so additional AMMs can reuse the
 //! generic bounds in `fin-amm` without inheriting Uniswap assumptions.
+pub(crate) mod profile;
+pub mod ramses;
 pub mod v3;
 pub mod v4;
 
@@ -35,7 +37,16 @@ pub fn as_amm_quote(
     maximum_fee: Quantity,
     permission: fin_amm::PermissionRequirement,
 ) -> Result<fin_amm::AmmQuote> {
-    let router = if quote.protocol == "v4" {
+    let dex_id = if quote.dex == "ramses" {
+        "ramses"
+    } else if quote.protocol == "v4" {
+        "uniswap"
+    } else {
+        profile::V3DeploymentProfile::uniswap(adapter.uniswap()?).dex_id
+    };
+    let router = if quote.dex == "ramses" {
+        adapter.ramses()?.router.clone()
+    } else if quote.protocol == "v4" {
         adapter
             .uniswap()?
             .v4
@@ -50,11 +61,21 @@ pub fn as_amm_quote(
             .router
             .clone()
     } else {
-        adapter.uniswap()?.router.clone()
+        profile::V3DeploymentProfile::uniswap(adapter.uniswap()?)
+            .router
+            .to_owned()
     };
-    let route_data = json!({"chain_id":adapter.config.chain_id,"router":router,"protocol":quote.protocol,"pool":quote.pool,"fee":quote.fee_tier,"pool_key":quote.pool_key,"token_in":quote.pool_token_in,"token_out":quote.pool_token_out});
+    let mut route_data = json!({"chain_id":adapter.config.chain_id,"router":router,"protocol":quote.protocol,"pool":quote.pool,"fee":quote.fee_tier,"pool_key":quote.pool_key,"token_in":quote.pool_token_in,"token_out":quote.pool_token_out});
+    if quote.dex == "ramses" {
+        route_data["dex"] = serde_json::json!(dex_id);
+        route_data["tick_spacing"] = serde_json::json!(quote.tick_spacing);
+        route_data
+            .as_object_mut()
+            .expect("route identity object")
+            .remove("fee");
+    }
     let route = fin_amm::RouteIdentity {
-        dex: "uniswap".into(),
+        dex: dex_id.into(),
         version: quote.protocol.clone(),
         assets: vec![
             quote.token_in.asset(adapter),
@@ -179,6 +200,52 @@ mod tests {
         let decoded = SwapRouter02::multicallCall::abi_decode(&call.calldata).unwrap();
         assert_eq!(decoded.deadline, U256::from(123));
         assert_eq!(decoded.data.len(), 2);
+    }
+
+    #[test]
+    fn ramses_v3_selector_and_int24_spacing_are_distinct_from_uniswap_fee_tier() {
+        use crate::abi::{RamsesRouter, Router};
+        use fin_evm::alloy::primitives::aliases::I24;
+        let router = address("0x0000000000000000000000000000000000000001").unwrap();
+        let wallet = address("0x0000000000000000000000000000000000000002").unwrap();
+        let request = ramses::ExactInputSingle {
+            router,
+            token_in: address("0x0000000000000000000000000000000000000003").unwrap(),
+            token_out: address("0x0000000000000000000000000000000000000004").unwrap(),
+            tick_spacing: 1,
+            wallet,
+            deadline: 123,
+            input: U256::from(10),
+            minimum: U256::from(9),
+            native_in: false,
+            native_out: false,
+        };
+        let call = ramses::exact_input_single(request).unwrap();
+        assert_ne!(
+            RamsesRouter::exactInputSingleCall::SELECTOR,
+            Router::exactInputSingleCall::SELECTOR,
+            "int24 tickSpacing produces a different function selector from uint24 fee"
+        );
+        let decoded = RamsesRouter::exactInputSingleCall::abi_decode(&call.calldata).unwrap();
+        assert_eq!(decoded.params.tickSpacing, I24::try_from(1i64).unwrap());
+        assert_eq!(decoded.params.amountOutMinimum, U256::from(9));
+        assert_eq!(call.value, U256::ZERO);
+        let native_out = ramses::exact_input_single(ramses::ExactInputSingle {
+            native_out: true,
+            ..request
+        })
+        .unwrap();
+        assert_eq!(
+            &native_out.calldata[..4],
+            &RamsesRouter::multicallCall::SELECTOR
+        );
+        assert_eq!(
+            RamsesRouter::multicallCall::abi_decode(&native_out.calldata)
+                .unwrap()
+                .data
+                .len(),
+            2
+        );
     }
 
     #[test]

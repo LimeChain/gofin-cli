@@ -100,6 +100,8 @@ pub struct DeploymentConfig {
     pub snapshot_tokens: Vec<String>,
     #[serde(default)]
     pub uniswap: Option<fin_ethereum::UniswapConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ramses: Option<fin_ethereum::RamsesConfig>,
     #[serde(default)]
     pub aave: Option<fin_ethereum::AaveConfig>,
 }
@@ -163,56 +165,53 @@ pub struct BrokerPolicy {
 
 impl NetworkConfig {
     pub fn ethereum_mainnet() -> Self {
-        Self {
-            id: "ethereum:1".into(),
-            chain_id: 1,
-            rpc_urls: vec![
-                "https://ethereum-rpc.publicnode.com".into(),
-                "https://eth.drpc.org".into(),
-            ],
-            confirmations: 2,
-            snapshot_tokens: vec![],
-        }
+        Self::from_reviewed(fin_networks::by_chain_id(1).expect("Ethereum is reviewed"))
     }
     pub fn reviewed_evm_networks() -> Vec<Self> {
-        vec![
-            Self::ethereum_mainnet(),
-            Self {
-                id: "ethereum:42161".into(),
-                chain_id: 42161,
-                rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
-                confirmations: 1,
-                snapshot_tokens: vec![],
-            },
-            Self {
-                id: "ethereum:4663".into(),
-                chain_id: 4663,
-                rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
-                confirmations: 1,
-                snapshot_tokens: vec![],
-            },
-        ]
+        fin_networks::all()
+            .iter()
+            .map(Self::from_reviewed)
+            .collect()
+    }
+
+    fn from_reviewed(network: &fin_networks::EvmNetwork) -> Self {
+        Self {
+            id: network.network_id.into(),
+            chain_id: network.chain_id,
+            rpc_urls: network.rpc_urls.iter().map(|url| (*url).into()).collect(),
+            confirmations: network.minimum_confirmations,
+            snapshot_tokens: vec![],
+        }
     }
 }
 
 impl DeploymentConfig {
-    pub fn reviewed_uniswap_networks() -> Vec<Self> {
+    pub fn reviewed_amm_networks() -> Vec<Self> {
         NetworkConfig::reviewed_evm_networks()
             .into_iter()
             .filter_map(|network| {
-                amm_deployments::reviewed_uniswap(network.chain_id).map(|uniswap| Self {
+                let uniswap = amm_deployments::reviewed_uniswap(network.chain_id);
+                let ramses = amm_deployments::reviewed_ramses(network.chain_id);
+                let aave = if network.chain_id == 1 {
+                    fin_ethereum::EthereumConfig::default().aave
+                } else {
+                    None
+                };
+                (uniswap.is_some() || ramses.is_some() || aave.is_some()).then(|| Self {
                     network: network.id,
                     weth: None,
                     snapshot_tokens: vec![],
-                    uniswap: Some(uniswap),
-                    aave: if network.chain_id == 1 {
-                        fin_ethereum::EthereumConfig::default().aave
-                    } else {
-                        None
-                    },
+                    uniswap,
+                    ramses,
+                    aave,
                 })
             })
             .collect()
+    }
+
+    /// Backwards-compatible name for callers that only require Uniswap profiles.
+    pub fn reviewed_uniswap_networks() -> Vec<Self> {
+        Self::reviewed_amm_networks()
     }
     pub fn ethereum_mainnet() -> Self {
         let defaults = fin_ethereum::EthereumConfig::default();
@@ -221,6 +220,7 @@ impl DeploymentConfig {
             weth: defaults.weth,
             snapshot_tokens: defaults.snapshot_tokens,
             uniswap: amm_deployments::reviewed_uniswap(1),
+            ramses: amm_deployments::reviewed_ramses(1),
             aave: defaults.aave,
         }
     }
@@ -276,7 +276,7 @@ impl BrokerConfigV2 {
                 || !networks.insert(network.id.clone())
                 || network.id != format!("ethereum:{}", network.chain_id)
                 || !chain_ids.insert(network.chain_id)
-                || ![1, 42161, 4663].contains(&network.chain_id)
+                || !fin_networks::supports_chain(network.chain_id)
                 || network.snapshot_tokens.len() > 64
                 || network
                     .snapshot_tokens
@@ -931,6 +931,7 @@ pub fn build_applications_with_price_source(
                 weth: deployment.weth.clone(),
                 snapshot_tokens: deployment.snapshot_tokens.clone(),
                 uniswap: deployment.uniswap.clone(),
+                ramses: deployment.ramses.clone(),
                 aave: deployment.aave.clone(),
             }
         } else {
@@ -1135,7 +1136,7 @@ fn configured_binance_destinations(
                     .into_iter()
                     .map(|asset| {
                         let key = if asset.reference == "native"
-                            && matches!(network.chain_id, 1 | 42161 | 4663)
+                            && fin_networks::supports_chain(network.chain_id)
                         {
                             "ETH".to_owned()
                         } else {
@@ -1192,7 +1193,7 @@ impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
         let Some(adapter) = self.adapters.get(&chain_id) else {
             return Ok(None);
         };
-        if !matches!(chain_id, 1 | 42161 | 4663)
+        if !fin_networks::supports_chain(chain_id)
             || adapter.config.chain_id != chain_id
             || adapter.runtime.chain_id != chain_id
         {

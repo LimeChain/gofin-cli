@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare read-only Uniswap acceptance artifacts; never authorize or execute."""
+"""Prepare read-only AMM acceptance artifacts; never authorize or execute."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ MAX_TOTAL_COST_USD = Decimal("20")
 GROSS_LIMIT_USD = Decimal("100")
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ALLOWED_READS = {"wallet.token", "wallet.balances", "uniswap.quote"}
+ALLOWED_READS.add("ramses.quote")
 
 
 class ChecklistError(Exception):
@@ -40,8 +41,9 @@ def invoke(fin: str, argv: list[str], allowed: set[str]) -> dict[str, Any]:
     """Run only a whitelisted Fin read/preview command; never use a shell."""
     if len(argv) >= 2 and argv[0] == "read" and argv[1] in allowed:
         command = f"read {argv[1]}"
-    elif len(argv) >= 2 and argv[:2] == ["preview", "uniswap.swap"] and "uniswap.swap" in allowed:
-        command = "preview uniswap.swap"
+    elif (len(argv) >= 2 and argv[0] == "preview"
+          and argv[1] in {"uniswap.swap", "ramses.swap"} and argv[1] in allowed):
+        command = f"preview {argv[1]}"
     elif len(argv) >= 2 and argv[:2] == ["plans", "preview"] and "plans" in allowed:
         command = "plans preview"
     else:
@@ -71,7 +73,9 @@ def read(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def preview(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return invoke(fin, ["preview", operation, "--input", compact(payload), "--json"], {"uniswap.swap"})
+    if operation not in {"uniswap.swap", "ramses.swap"}:
+        raise ChecklistError("internal refusal: unsupported Fin preview")
+    return invoke(fin, ["preview", operation, "--input", compact(payload), "--json"], {operation})
 
 
 def plan_preview(fin: str, plan: dict[str, Any]) -> dict[str, Any]:
@@ -153,6 +157,26 @@ def require_quote_evidence(quote: dict[str, Any]) -> tuple[int, int, int]:
     return input_atoms, output_atoms, impact
 
 
+def operation_names(dex: str) -> tuple[str, str]:
+    if dex == "ramses":
+        return "ramses.quote", "ramses.swap"
+    return "uniswap.quote", "uniswap.swap"
+
+
+def validate_ramses_quote(quote: dict[str, Any], tick_spacing: int,
+                          max_pool_fee_ppm: int | None) -> int:
+    if quote.get("dex") != "ramses" or quote.get("protocol") != "v3":
+        raise ChecklistError("quote did not identify the requested Ramses v3 route")
+    if quote.get("tick_spacing") != tick_spacing:
+        raise ChecklistError("quote tick spacing did not match the requested Ramses pool")
+    fee = quote.get("swap_fee_ppm")
+    if not isinstance(fee, int) or isinstance(fee, bool) or fee < 0 or fee >= 1_000_000:
+        raise ChecklistError("Ramses quote omitted a valid observed pool fee")
+    if max_pool_fee_ppm is not None and (max_pool_fee_ppm < fee or max_pool_fee_ppm >= 1_000_000):
+        raise ChecklistError("--max-pool-fee-ppm must be at least the quoted fee and below 1000000")
+    return max_pool_fee_ppm if max_pool_fee_ppm is not None else fee
+
+
 def usd_micros(result: dict[str, Any], path: str) -> int:
     obj: Any = result
     for field in path.split("."):
@@ -176,21 +200,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chain-id", required=True, type=int)
     parser.add_argument("--token-out", required=True, help="Exact caller-reviewed output token contract")
     parser.add_argument("--protocol", required=True, choices=("v3", "v4"))
+    parser.add_argument("--dex", default="uniswap", choices=("uniswap", "ramses"))
     parser.add_argument("--fee-cap", required=True, help="Maximum native transaction fee in ETH")
-    route = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--max-pool-fee-ppm", type=int,
+                        help="Optional Ramses quote-time pool-fee ceiling in ppm")
+    route = parser.add_mutually_exclusive_group(required=False)
     route.add_argument("--fee-tier", type=int, help="Reviewed Uniswap v3 fee tier in ppm")
     route.add_argument("--pool-key", help="Complete caller-reviewed Uniswap v4 pool-key JSON object")
+    parser.add_argument("--tick-spacing", type=int, help="Reviewed Ramses v3 tick spacing")
     parser.add_argument("--network", default="evm", choices=("evm", "ethereum"))
     parser.add_argument("--out-dir", required=True, type=Path, help="New directory for unsigned review artifacts")
     args = parser.parse_args()
     if args.chain_id <= 0 or not ADDRESS.fullmatch(args.token_out):
         parser.error("--chain-id must be positive and --token-out must be an exact EVM address")
-    if args.protocol == "v3" and (args.fee_tier is None or args.pool_key is not None):
-        parser.error("v3 requires --fee-tier and forbids --pool-key")
-    if args.protocol == "v4" and (args.pool_key is None or args.fee_tier is not None):
-        parser.error("v4 requires --pool-key and forbids --fee-tier")
-    if args.fee_tier is not None and args.fee_tier not in (100, 500, 3000, 10000):
+    if args.dex == "uniswap" and args.tick_spacing is not None:
+        parser.error("--tick-spacing is only valid with --dex ramses")
+    if args.dex == "ramses":
+        if args.chain_id != 4663 or args.protocol != "v3":
+            parser.error("Ramses acceptance is currently reviewed only for v3 on chain 4663")
+        if args.tick_spacing not in (1, 5, 10, 50, 100, 200) or args.fee_tier is not None or args.pool_key is not None:
+            parser.error("Ramses v3 requires a supported --tick-spacing and forbids Uniswap pool selectors")
+        if args.max_pool_fee_ppm is not None and not 0 <= args.max_pool_fee_ppm < 1_000_000:
+            parser.error("--max-pool-fee-ppm must be between 0 and 999999")
+    elif args.protocol == "v3" and (args.fee_tier is None or args.pool_key is not None):
+        parser.error("Uniswap v3 requires --fee-tier and forbids --pool-key")
+    elif args.protocol == "v4" and (args.pool_key is None or args.fee_tier is not None):
+        parser.error("Uniswap v4 requires --pool-key and forbids --fee-tier")
+    if args.dex == "uniswap" and args.fee_tier is not None and args.fee_tier not in (100, 500, 3000, 10000):
         parser.error("--fee-tier must be one of 100, 500, 3000, or 10000")
+    if args.dex == "uniswap" and args.max_pool_fee_ppm is not None:
+        parser.error("--max-pool-fee-ppm is only valid with --dex ramses")
     if args.out_dir.exists():
         parser.error("--out-dir must be a new, unused directory")
     try:
@@ -225,17 +264,23 @@ def main() -> int:
         "token_in": "native",
         "token_out": token_out,
         "amount": INPUT_AMOUNT,
-        "protocol": args.protocol,
     }
-    if args.protocol == "v3":
+    quote_operation, swap_operation = operation_names(args.dex)
+    if args.dex == "ramses":
+        quote_input["tick_spacing"] = args.tick_spacing
+    elif args.protocol == "v3":
+        quote_input["protocol"] = args.protocol
         quote_input["fee_tier"] = args.fee_tier
     else:
+        quote_input["protocol"] = args.protocol
         quote_input["v4_pool_key"] = args.pool_key_value
-    quote_result = read(args.fin, "uniswap.quote", quote_input)
+    quote_result = read(args.fin, quote_operation, quote_input)
     quote = data(quote_result)
     if str(quote.get("protocol")) != args.protocol:
         raise ChecklistError("quote protocol did not match the selected protocol")
-    if args.protocol == "v3" and int(quote.get("fee_tier", -1)) != args.fee_tier:
+    if args.dex == "ramses":
+        max_pool_fee_ppm = validate_ramses_quote(quote, args.tick_spacing, args.max_pool_fee_ppm)
+    elif args.protocol == "v3" and int(quote.get("fee_tier", -1)) != args.fee_tier:
         raise ChecklistError("quote fee tier did not match the requested v3 tier")
     input_atoms, output_atoms, impact = require_quote_evidence(quote)
     quoted_in = quote.get("token_in", {})
@@ -261,14 +306,18 @@ def main() -> int:
         "slippage_bps": SLIPPAGE_BPS,
         "max_price_impact_bps": MAX_IMPACT_BPS,
         "deadline": int(time.time()) + MAX_DEADLINE_SECONDS,
-        "protocol": args.protocol,
     }
-    if args.protocol == "v3":
+    if args.dex == "ramses":
+        swap_request["tick_spacing"] = args.tick_spacing
+        swap_request["max_pool_fee_ppm"] = max_pool_fee_ppm
+    elif args.protocol == "v3":
+        swap_request["protocol"] = args.protocol
         swap_request["fee_tier"] = args.fee_tier
     else:
+        swap_request["protocol"] = args.protocol
         swap_request["v4_pool_key"] = args.pool_key_value
-    swap_preview = preview(args.fin, "uniswap.swap", swap_request)
-    if swap_preview.get("operation") != "uniswap.swap" or not isinstance(swap_preview.get("intent"), dict):
+    swap_preview = preview(args.fin, swap_operation, swap_request)
+    if swap_preview.get("operation") != swap_operation or not isinstance(swap_preview.get("intent"), dict):
         raise ChecklistError("swap preview omitted its operation intent")
     movement = usd_micros(swap_preview, "valuation.movement_usd_micros")
     usd_micros(swap_preview, "valuation.maximum_fee_usd_micros")
@@ -298,7 +347,7 @@ def main() -> int:
         "max_price_impact_bps": MAX_IMPACT_BPS,
         "minimum_rate": {"output_atoms": str(output_atoms * 98), "input_atoms": str(input_atoms * 100)},
         "absolute_minimum_output": None,
-        "allowed_fee_tiers": [args.fee_tier] if args.protocol == "v3" else [],
+        "allowed_fee_tiers": [args.fee_tier] if args.dex == "uniswap" and args.protocol == "v3" else [],
         "max_deadline_seconds": MAX_DEADLINE_SECONDS,
     }
     intent = swap_preview["intent"]
@@ -314,10 +363,10 @@ def main() -> int:
     costs[0]["amount"]["atoms"] = str(int(Decimal(args.max_fee_eth) * 10**18))
     plan = {
         "version": 1,
-        "name": f"Reviewed {args.protocol} native-to-token acceptance swap",
+        "name": f"Reviewed {args.dex} {args.protocol} native-to-token acceptance swap",
         "steps": [{
             "step_id": "forward-swap",
-            "operation": "uniswap.swap",
+            "operation": swap_operation,
             "input": swap_request,
             "permitted_variations": bounds,
             "completion": {"operation_succeeded": True},
@@ -350,7 +399,7 @@ def main() -> int:
     try:
         for filename, value in artifacts.items():
             write_json(out / filename, value)
-        checklist = build_checklist(args, recipient, min_output, movement, fees, impact, review_hash)
+        checklist = build_checklist(args, recipient, min_output, movement, fees, impact, review_hash, swap_operation)
         (out / "checklist.md").write_text(checklist, encoding="utf-8")
     except OSError:
         # Preserve the out-dir no-overwrite rule; partial review material is still safe and unsigned.
@@ -361,20 +410,27 @@ def main() -> int:
 
 
 def build_checklist(args: argparse.Namespace, recipient: str, minimum: str,
-                    movement: int, fees: int, impact: int, review_hash: str) -> str:
+                    movement: int, fees: int, impact: int, review_hash: str,
+                    swap_operation: str = "uniswap.swap") -> str:
     path = shlex.quote(str(args.out_dir.resolve()))
     plan_id = str(uuid.uuid4())
     boundary_id = str(uuid.uuid4())
+    dex = getattr(args, "dex", "uniswap")
+    quote_operation, _ = operation_names(dex)
+    pool_fee = getattr(args, "max_pool_fee_ppm", None)
+    route = (f"Ramses v3, tick spacing {args.tick_spacing}, maximum quoted pool fee "
+             f"{pool_fee if pool_fee is not None else 'the initially quoted fee'} ppm"
+             if dex == "ramses" else f"Uniswap {args.protocol}")
     return f"""# Human Touch ID handoff — review required
 
-Generated from pinned read-only Fin results for `{args.protocol}` on chain `{args.chain_id}`.
+Generated from pinned read-only Fin results for {route} on chain `{args.chain_id}`.
 Recipient is the wallet resource `{recipient}`. Quoted impact was {impact} bps;
 selected slippage is 50 bps and the rounded minimum output is `{minimum}`.
 Estimated operation debit is ${movement / 1_000_000:.6f}; maximum-cost valuation
 under the supplied native fee cap is ${fees / 1_000_000:.6f}.
 
 This folder contains unsigned JSON only. The script ran `wallet.token`,
-`wallet.balances`, `uniswap.quote`, `preview uniswap.swap`, and `plans preview`.
+`wallet.balances`, `{quote_operation}`, `preview {swap_operation}`, and `plans preview`.
 It did not authorize, execute, install, enroll credentials, or broadcast.
 Read the exact token, pool/router, block evidence, recipient, fee cap, and every
 generated JSON file before any human action. A quote is useful for at most 120
@@ -401,8 +457,8 @@ artifact and obtaining fresh consent.
 ```sh
 fin read wallet.token --input "$(jq -c '.token_request' {path}/inputs.json)" --json
 fin read wallet.balances --input "$(jq -c '.balances_request' {path}/inputs.json)" --json
-fin read uniswap.quote --input "$(jq -c '.quote_request' {path}/inputs.json)" --json
-fin preview uniswap.swap --input "$(cat {path}/swap-input.json)" --json
+fin read {quote_operation} --input "$(jq -c '.quote_request' {path}/inputs.json)" --json
+fin preview {swap_operation} --input "$(cat {path}/swap-input.json)" --json
 fin plans preview --input "$(cat {path}/plan.json)" --valid-for 10m --json
 ```
 
@@ -419,15 +475,15 @@ the human's own terminal; this generator never runs them.
 **Standalone exact approval:**
 
 ```sh
-fin execute uniswap.swap --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()}
+fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()}
 ```
 
 **Boundary authorization** (approval once, then separately invoke each concrete attempt):
 
 ```sh
-fin authorizations authorize uniswap.swap --id {boundary_id} --input "$(cat {path}/swap-input.json)" --bounds "$(cat {path}/swap-bounds.json)" --valid-for 10m --json > {path}/boundary-approval.json
+fin authorizations authorize {swap_operation} --id {boundary_id} --input "$(cat {path}/swap-input.json)" --bounds "$(cat {path}/swap-bounds.json)" --valid-for 10m --json > {path}/boundary-approval.json
 AUTHORIZATION_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' {path}/boundary-approval.json)
-fin execute uniswap.swap --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --authorization "$AUTHORIZATION_ID"
+fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --authorization "$AUTHORIZATION_ID"
 fin authorizations status "$AUTHORIZATION_ID"
 fin authorizations cancel "$AUTHORIZATION_ID"
 ```
@@ -437,7 +493,7 @@ fin authorizations cancel "$AUTHORIZATION_ID"
 ```sh
 fin plans authorize --input "$(cat {path}/plan.json)" --id {plan_id} --review-hash {review_hash} --valid-for 10m --json > {path}/plan-approval.json
 PLAN_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_id"])' {path}/plan-approval.json)
-fin execute uniswap.swap --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --plan "$PLAN_ID" --step forward-swap
+fin execute {swap_operation} --input "$(cat {path}/swap-input.json)" --id {uuid.uuid4()} --plan "$PLAN_ID" --step forward-swap
 fin plans status "$PLAN_ID"
 fin plans cancel "$PLAN_ID"
 ```
