@@ -1,6 +1,6 @@
 # Support Base wallets, onboarded dapps and funding routes
 
-Status: Scoped on 2026-10-09. Part of the first release. Includes available onboarded dapps, bridging, deposits and withdrawals, with extensive ask-ogi implementation/verification assistance. Implementation and verification have not been reported.
+Status: Implemented, reported complete by the user on 2026-10-10. Part of the first release. Implementation and verification evidence were not independently reviewed in this roadmap update. The original draft below records requested scope; current repository documentation governs delivered behavior.
 
 ## Description
 

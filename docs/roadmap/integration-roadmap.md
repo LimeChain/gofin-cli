@@ -53,7 +53,7 @@ The original request was to integrate Ramses on Robinhood Chain using existing w
 
 ## 20. Base support
 
-Add Base coverage for wallets, available onboarded dapps, bridging, deposits and withdrawals. Inventory relevant protocol deployments and define supported assets, bridge routes, counterparties and the intended deposit/withdrawal venues. Coordinate with items 6 and 10 where their verified route mechanisms apply, without assuming either covers Base automatically. Use ask-ogi extensively for implementation and verification assistance. See the [detailed Base draft](base-support.md).
+Status: Implemented, reported complete by the user on 2026-10-10. The requested scope covers wallets, available onboarded dapps, bridging, deposits and withdrawals. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered coverage. See the [detailed Base record](base-support.md).
 
 ## 21. Solana Kamino support
 
