@@ -2378,8 +2378,7 @@ pub fn load_protected_config() -> fin_domain::Result<BrokerConfigV2> {
             "Repair it through human enrollment.",
         )
     })?;
-    config.validate()?;
-    Ok(config)
+    enrollment::effective_protected_config(config)
 }
 
 /// Enrollment helper. It is not exposed over the agent protocol and never
@@ -3892,6 +3891,116 @@ mod tests {
         assert_eq!(runtime.engine.operations().unwrap(), records);
         drop(runtime);
         drop(original);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reviewed_wallet_coverage_reload_preserves_pending_submission_without_credentials() {
+        let directory = test_directory();
+        let loader = FixtureRuntimeLoader {
+            database: directory.join("operations.sqlite"),
+            loads: AtomicUsize::new(0),
+            fail: false,
+        };
+        let mut stored = config();
+        stored.connections.push(ConnectionConfig::Evm {
+            name: "read-only-wallet".into(),
+            resource: ResourceId("evm:0x1111111111111111111111111111111111111111".into()),
+            credential_ref: None,
+            address: "0x1111111111111111111111111111111111111111".into(),
+            signing_enabled: false,
+        });
+        let old_reviewed_networks = vec![NetworkConfig::ethereum_mainnet()];
+        let old_reviewed_deployments = vec![DeploymentConfig::ethereum_mainnet()];
+        let initial = enrollment::effective_protected_config_with(
+            stored.clone(),
+            &old_reviewed_networks,
+            &old_reviewed_deployments,
+        )
+        .unwrap();
+        let mut runtime = loader.load(initial).await.unwrap();
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 1);
+        assert!(
+            runtime
+                .engine
+                .definitions()
+                .unwrap()
+                .iter()
+                .all(|definition| definition.name != "ramses.quote")
+        );
+
+        let mut store = Store::open(&loader.database).unwrap();
+        let record = OperationRecord {
+            id: "reviewed-wallet-pending".into(),
+            request_id: "reviewed-wallet-request".into(),
+            fingerprint: "reviewed-wallet-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "synthetic.write".into(),
+            input: json!({}),
+            status: fin_domain::Status::Submitted,
+            created_at: now(),
+            updated_at: now(),
+            preview: None,
+            approval: None,
+            submission: Some(Submission {
+                kind: "synthetic".into(),
+                reference: "reviewed-wallet-original-submission".into(),
+                data: json!({"nonce":7}),
+            }),
+            dispatch_evidence: None,
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        store
+            .create_request(
+                &record.id,
+                &record.request_id,
+                &record.fingerprint,
+                &record.operation,
+                None,
+                "submitted",
+                &serde_json::to_value(&record).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        drop(store);
+
+        let reviewed = enrollment::effective_protected_config(stored).unwrap();
+        assert_eq!(
+            reviewed.networks.len(),
+            NetworkConfig::reviewed_evm_networks().len()
+        );
+        let prior = runtime.clone();
+        refresh_runtime(&mut runtime, reviewed.clone(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&runtime, &prior));
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 2);
+        let definitions = runtime.engine.definitions().unwrap();
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "ramses.quote")
+        );
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "ramses.swap")
+        );
+        assert_eq!(runtime.engine.operations().unwrap(), vec![record.clone()]);
+
+        let refreshed = runtime.clone();
+        refresh_runtime(&mut runtime, reviewed, 501, &loader)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&runtime, &refreshed));
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.engine.operations().unwrap(), vec![record]);
+        drop(runtime);
+        drop(prior);
+        drop(refreshed);
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -14,6 +14,24 @@ that baseline so protected runtime, journal and configuration compatibility
 remain aligned with the updated installation while retaining the existing
 bridge implementation and its evidence.
 
+Reusable EVM wallets gain missing reviewed network and AMM deployment coverage
+through a pure effective-config overlay at protected configuration load. The
+overlay runs for read-only and signing wallets, preserves stored custom network
+and deployment fields, and never writes config or touches credential mappings.
+Legacy chain-scoped Ethereum connections are unchanged. Startup and protected
+reload share this derivation, allowing an installed broker update to expose its
+new reviewed profiles without asking the human to re-enroll the wallet or
+granting financial authority.
+
+AMM native approval presentation uses concise intent, verified display labels,
+readable quantities and human durations. Adapter display labels come from
+pinned token metadata and fall back safely when unavailable or unsafe. The
+labels change presentation prose only; financial asset identities, route
+fingerprints, pending bindings and all execution bounds remain unchanged. Exact
+technical details stay in structured review, which the LLM explains to the
+human. Bounded approval wording must not promise an initial minimum receipt
+that its permitted requotes could lower.
+
 ## Extending an integration
 
 1. Define the operation's exact asset, network, account and unit identities.

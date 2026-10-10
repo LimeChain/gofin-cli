@@ -47,18 +47,36 @@ liquidity blockers separately from a test failure.
 
 ## Human review through final CLI contracts
 
-Installation, private credential enrollment, actual Touch ID presentation and
-live financial acceptance remain pending until human observation. Use the
+On 10 October 2026, human-observed installed updates and Touch ID tests passed
+for an Ethereum Uniswap v3 round trip and a Robinhood Ramses round trip. Each
+used one approved two-step plan, swapped 0.001 ETH forward and returned only
+verified proceeds without another prompt. Fin proved actual conversion and gas
+costs; scoped token holdings and router allowances returned to their baselines,
+net unavoidable costs. Finite atomic EIP-2612 permits consumed one nonce on each
+return. The earlier cancellation test passed, and the updated native prompt's
+doubled terminal punctuation was confirmed fixed by the human. Duplicate
+requests returned the original operation and transaction without resubmission;
+remaining plan authority was revoked after completion.
+
+The remaining installed Uniswap network/version matrix, new installation,
+private enrollment and credential-isolation observations remain separate,
+pending cases. Robinhood's public token indexer failed during the test; explicit
+ETH/USDG scoped balances were verified through Fin and no PONS holding was
+inferred. The existing broad Aave fork regression previously failed with
+`PRIOR_POSITION_ANCHOR_REQUIRED`; the passing AMM forks and these live cases do
+not override that result. Use the
 [shared live-test contract](README.md#live-test-contract) and
 [AMM acceptance limits](uniswap-amm.md#acceptance-limits-for-this-round).
 Retain the shared $10 movement, $20 total cost and $100 gross allocation limits;
 include earlier tests, retries, approvals and restoration. Do not increase a
 limit to fit a new DEX test. Plan and fund the complete return path before a write.
 
-In your own Terminal, build/install or update the reviewed source, enroll or
-update the protected EVM connection to add the reviewed Ramses deployment, then
-inspect its capabilities. Updating binaries alone does not silently broaden
-the connection's protected deployment configuration.
+In your own Terminal, build/install or update the reviewed source, then inspect
+the wallet's capabilities. At broker startup and protected configuration reload,
+Fin derives additive reviewed network and AMM coverage for any reusable EVM
+wallet, including read-only wallets. This needs no credential replacement or
+enrollment prompt, writes no config file, and adds no financial authority.
+Legacy chain-scoped Ethereum connections keep their original network scope.
 
 ```sh
 make bundle

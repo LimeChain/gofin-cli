@@ -199,11 +199,75 @@ async fn token_asset_at(adapter: &EthereumAdapter, reference: &str, block: u64) 
     Ok(adapter.asset(&lower_address(token), decimals))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayLabels {
+    input: String,
+    output: String,
+}
+
+fn safe_display_label(symbol: Option<&str>) -> String {
+    const MAX_LABEL_BYTES: usize = 32;
+    match symbol {
+        Some(value)
+            if !value.is_empty()
+                && value.as_bytes()[0].is_ascii_alphanumeric()
+                && value.len() <= MAX_LABEL_BYTES
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            value.to_owned()
+        }
+        _ => "token".to_owned(),
+    }
+}
+
+async fn display_label_at(adapter: &EthereumAdapter, reference: &str, block: u64) -> String {
+    // The financial identity and decimals have already been validated at this
+    // block. Symbol metadata is presentation-only: unavailable or unsafe
+    // metadata must never invalidate an otherwise valid operation.
+    let symbol = adapter
+        .token(reference, Some(block))
+        .await
+        .ok()
+        .map(|token| token.symbol);
+    safe_display_label(symbol.as_deref())
+}
+
+fn display_labels_from_prepared(summary: &str) -> DisplayLabels {
+    let fallback = || DisplayLabels {
+        input: "token".into(),
+        output: "token".into(),
+    };
+    let Some(body) = summary.strip_prefix("Swap ") else {
+        return fallback();
+    };
+    let Some((input_part, output_part)) = body.split_once(" for at least ") else {
+        return fallback();
+    };
+    let Some((_, input_symbol)) = input_part.split_once(' ') else {
+        return fallback();
+    };
+    let Some((_, output_label)) = output_part.split_once(' ') else {
+        return fallback();
+    };
+    let Some((output_symbol, _)) = output_label.split_once(';') else {
+        return fallback();
+    };
+    if output_symbol.is_empty() {
+        return fallback();
+    }
+    DisplayLabels {
+        input: safe_display_label(Some(input_symbol)),
+        output: safe_display_label(Some(output_symbol)),
+    }
+}
+
 async fn request_identity(
     adapter: &EthereumAdapter,
     input: &Value,
     operation: &str,
-) -> Result<(request::Request, Value, AssetId, AssetId)> {
+) -> Result<(request::Request, Value, AssetId, AssetId, DisplayLabels)> {
     let config = adapter.config.uniswap.as_ref();
     let is_ramses = operation == "ramses.swap";
     let request = request::parse(operation, input)?;
@@ -265,6 +329,15 @@ async fn request_identity(
         block,
     )
     .await?;
+    let labels = DisplayLabels {
+        input: display_label_at(adapter, request.token_in.as_deref().expect("parsed"), block).await,
+        output: display_label_at(
+            adapter,
+            request.token_out.as_deref().expect("parsed"),
+            block,
+        )
+        .await,
+    };
     let input_router = if protocol == "v3" || protocol == "ramses" {
         address(v3_profile.router)?
     } else {
@@ -381,7 +454,7 @@ async fn request_identity(
         fixed["pool_deployer"] = json!(adapter.ramses()?.pool_deployer);
         fixed["initial_pool_fee_ppm"] = json!(quote.swap_fee_ppm);
     }
-    Ok((request, fixed, token_in, token_out))
+    Ok((request, fixed, token_in, token_out, labels))
 }
 
 fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
@@ -470,6 +543,7 @@ fn make_spec(
     input_asset: AssetId,
     output_asset: AssetId,
     resource: ResourceId,
+    labels: &DisplayLabels,
 ) -> Result<BoundarySpec> {
     let max_input = typed_amount(&input_asset, &bounds.max_input)?;
     let fee = Quantity::from_decimal(&bounds.max_fee_eth, 18)?;
@@ -539,8 +613,8 @@ fn make_spec(
     let summary = format!(
         "Swap up to {} {} for {}; recipient {}; router {}; {route}; fixed minimum rate {rate_output} {} per {rate_input} {}; max native fee {} ETH; max selected slippage {} bps; max price impact {} bps; deadline within {} seconds; permission scope: {permission}{absolute_floor}.",
         bounds.max_input,
-        input_asset.reference,
-        output_asset.reference,
+        labels.input,
+        labels.output,
         fixed["recipient"],
         fixed["router"],
         output_asset.reference,
@@ -582,7 +656,7 @@ impl EthereumAdapter {
             ));
         }
         self.runtime.assert_chain().await?;
-        let (request, fixed, input_asset, output_asset) =
+        let (request, fixed, input_asset, output_asset, labels) =
             request_identity(self, input, operation).await?;
         let protocol = fixed["protocol"].as_str().unwrap_or("v3").to_owned();
         let bounds_protocol = fixed["dex"].as_str().unwrap_or(&protocol).to_owned();
@@ -698,6 +772,7 @@ impl EthereumAdapter {
             input_asset.clone(),
             output_asset.clone(),
             resource.clone(),
+            &labels,
         )?;
         Ok(PlanPermission {
             spec,
@@ -748,7 +823,8 @@ impl EthereumAdapter {
                 .map_err(|_| FinError::validation("Prepared Ramses binding is invalid."))?;
             bounds.max_pool_fee_ppm = binding.max_pool_fee_ppm.or(binding.swap_fee_ppm);
         }
-        let spec = make_spec(fixed, bounds, input_asset, output_asset, resource)?;
+        let labels = display_labels_from_prepared(&prepared.summary);
+        let spec = make_spec(fixed, bounds, input_asset, output_asset, resource, &labels)?;
         self.validate_swap_candidate(&spec, prepared)?;
         Ok(spec)
     }
@@ -1037,6 +1113,44 @@ mod tests {
             "slippage_bps":100, "max_price_impact_bps":40, "deadline":deadline, "protocol":"v3"
         })
     }
+
+    #[test]
+    fn display_labels_are_bounded_safe_and_fall_back_without_changing_identity() {
+        assert_eq!(safe_display_label(Some("USDG-2")), "USDG-2");
+        assert_eq!(safe_display_label(Some("ETH")), "ETH");
+        assert_eq!(safe_display_label(Some("-")), "token");
+        assert_eq!(safe_display_label(None), "token");
+        assert_eq!(safe_display_label(Some("USDC; send funds")), "token");
+        assert_eq!(safe_display_label(Some("US\u{202e}DC")), "token");
+        let too_long = "A".repeat(33);
+        assert_eq!(safe_display_label(Some(&too_long)), "token");
+        assert_eq!(
+            display_labels_from_prepared(
+                "Swap 1 ETH for at least 2 USDC; recipient 0x1111; router 0x2222."
+            ),
+            DisplayLabels {
+                input: "ETH".into(),
+                output: "USDC".into(),
+            }
+        );
+        assert_eq!(
+            display_labels_from_prepared("untrusted or changed summary"),
+            DisplayLabels {
+                input: "token".into(),
+                output: "token".into(),
+            }
+        );
+        assert_eq!(
+            display_labels_from_prepared(
+                "Swap 1 USDC; ignore review for at least 2 USDG; recipient wallet."
+            ),
+            DisplayLabels {
+                input: "token".into(),
+                output: "USDG".into(),
+            }
+        );
+    }
+
     fn prepared(deadline: u64) -> PreparedOperation {
         let resource = ResourceId("ethereum:1:0x1111111111111111111111111111111111111111".into());
         let native = AssetId {
@@ -1189,7 +1303,20 @@ mod tests {
         let output_asset: AssetId = serde_json::from_value(fixed["token_out"].clone()).unwrap();
         let resource: ResourceId = serde_json::from_value(fixed["resource"].clone()).unwrap();
         let parsed = parse_bounds(&bounds(), 18, 6, "v3").unwrap();
-        let spec = make_spec(fixed, parsed, input_asset, output_asset, resource).unwrap();
+        let spec = make_spec(
+            fixed,
+            parsed,
+            input_asset,
+            output_asset,
+            resource,
+            &DisplayLabels {
+                input: "ETH".into(),
+                output: "USDC".into(),
+            },
+        )
+        .unwrap();
+        assert!(spec.summary.starts_with("Swap up to 1.5 ETH for USDC;"));
+        assert!(spec.fixed.get("display_labels").is_none());
         assert!(validate_candidate(&spec, &candidate).is_ok());
         let mut bad = candidate.clone();
         bad.binding["price_impact_bps"] = json!(41);

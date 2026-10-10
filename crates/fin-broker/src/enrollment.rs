@@ -366,8 +366,17 @@ fn collect_material(
 /// protected EVM enrollment. Existing deployment choices remain authoritative.
 fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
     let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+    let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+    expand_reviewed_evm_coverage_with(config, &reviewed_networks, &reviewed_amms)
+}
+
+fn expand_reviewed_evm_coverage_with(
+    config: &mut BrokerConfigV2,
+    reviewed_networks: &[NetworkConfig],
+    reviewed_amms: &[DeploymentConfig],
+) -> Vec<String> {
     let mut warnings = Vec::new();
-    for network in &reviewed_networks {
+    for network in reviewed_networks {
         if !config
             .networks
             .iter()
@@ -385,7 +394,7 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
         }
     }
 
-    for reviewed in DeploymentConfig::reviewed_amm_networks() {
+    for reviewed in reviewed_amms {
         if reviewed.uniswap.is_none() && reviewed.ramses.is_none() {
             continue;
         }
@@ -446,6 +455,35 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
         }
     }
     warnings
+}
+
+/// Derive the effective protected configuration from the stored config and the
+/// reviewed coverage shipped by this broker. This never persists configuration
+/// or touches credentials, and legacy chain-scoped Ethereum connections do not
+/// opt in to the reusable-wallet coverage.
+pub(crate) fn effective_protected_config(
+    config: BrokerConfigV2,
+) -> fin_domain::Result<BrokerConfigV2> {
+    let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+    let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+    effective_protected_config_with(config, &reviewed_networks, &reviewed_amms)
+}
+
+pub(crate) fn effective_protected_config_with(
+    mut config: BrokerConfigV2,
+    reviewed_networks: &[NetworkConfig],
+    reviewed_amms: &[DeploymentConfig],
+) -> fin_domain::Result<BrokerConfigV2> {
+    config.validate()?;
+    let reusable_wallet_enrolled = config
+        .connections
+        .iter()
+        .any(|connection| matches!(connection, ConnectionConfig::Evm { .. }));
+    if reusable_wallet_enrolled {
+        expand_reviewed_evm_coverage_with(&mut config, reviewed_networks, reviewed_amms);
+    }
+    config.validate()?;
+    Ok(config)
 }
 
 async fn validate_connection(
@@ -1041,6 +1079,7 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fin_domain::AssetId;
 
     fn empty_config(
         networks: Vec<NetworkConfig>,
@@ -1245,6 +1284,203 @@ mod tests {
                 .get("ramses")
                 .is_none()
         );
+    }
+
+    fn reusable_read_only_wallet() -> ConnectionConfig {
+        ConnectionConfig::Evm {
+            name: "wallet".into(),
+            resource: ResourceId("evm:0x1111111111111111111111111111111111111111".into()),
+            credential_ref: None,
+            address: "0x1111111111111111111111111111111111111111".into(),
+            signing_enabled: false,
+        }
+    }
+
+    #[test]
+    fn effective_protected_config_adds_reviewed_coverage_without_touching_custom_data() {
+        let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+        let mut custom_mainnet = NetworkConfig::ethereum_mainnet();
+        custom_mainnet.rpc_urls = vec!["https://custom.example/rpc".into()];
+        let mut custom_rh = reviewed_networks
+            .iter()
+            .find(|network| network.chain_id == 4663)
+            .unwrap()
+            .clone();
+        custom_rh.rpc_urls = vec!["https://rh-custom.example/rpc".into()];
+        let reviewed_mainnet = DeploymentConfig::reviewed_amm_networks()
+            .into_iter()
+            .find(|deployment| deployment.network == "ethereum:1")
+            .unwrap();
+        let mut custom_uniswap = reviewed_mainnet.uniswap.unwrap();
+        custom_uniswap.factory = "0x1111111111111111111111111111111111111111".into();
+        custom_uniswap.router = "0x2222222222222222222222222222222222222222".into();
+        custom_uniswap.quoter = "0x3333333333333333333333333333333333333333".into();
+        custom_uniswap.v4 = None;
+        let custom_ramses = fin_ethereum::RamsesConfig {
+            factory: "0x4444444444444444444444444444444444444444".into(),
+            quoter: "0x5555555555555555555555555555555555555555".into(),
+            router: "0x6666666666666666666666666666666666666666".into(),
+            pool_deployer: "0x7777777777777777777777777777777777777777".into(),
+        };
+        let mut config = empty_config(
+            vec![custom_mainnet.clone(), custom_rh.clone()],
+            vec![
+                DeploymentConfig {
+                    network: "ethereum:1".into(),
+                    weth: Some("0x8888888888888888888888888888888888888888".into()),
+                    snapshot_tokens: vec!["0x9999999999999999999999999999999999999999".into()],
+                    uniswap: Some(custom_uniswap.clone()),
+                    ramses: None,
+                    aave: Some(fin_ethereum::EthereumConfig::default().aave.unwrap()),
+                },
+                DeploymentConfig {
+                    network: "ethereum:4663".into(),
+                    weth: None,
+                    snapshot_tokens: vec![],
+                    uniswap: None,
+                    ramses: Some(custom_ramses.clone()),
+                    aave: None,
+                },
+            ],
+        );
+        config.connections.push(reusable_read_only_wallet());
+        config.connections.push(ConnectionConfig::Evm {
+            name: "synthetic-signer".into(),
+            resource: ResourceId("evm:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            signing_enabled: true,
+        });
+        config.extensions.insert(
+            "preserved".into(),
+            json!({"journal_identity":"pending-123"}),
+        );
+        let original_connections = config.connections.clone();
+        let original_policy = config.policy.clone();
+        let original_extensions = config.extensions.clone();
+
+        let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+        let first =
+            effective_protected_config_with(config, &reviewed_networks, &reviewed_amms).unwrap();
+        first.validate().unwrap();
+        assert_eq!(first.connections, original_connections);
+        assert_eq!(first.policy, original_policy);
+        assert_eq!(first.extensions, original_extensions);
+        assert_eq!(first.approver_uid, 501);
+        assert_eq!(
+            first.networks.iter().find(|n| n.chain_id == 1).unwrap(),
+            &custom_mainnet
+        );
+        assert_eq!(
+            first.networks.iter().find(|n| n.chain_id == 4663).unwrap(),
+            &custom_rh
+        );
+        assert!(first.networks.iter().any(|n| n.chain_id == 42161));
+        let mainnet = first
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:1")
+            .unwrap();
+        assert_eq!(
+            mainnet.uniswap.as_ref().unwrap().factory,
+            custom_uniswap.factory
+        );
+        assert!(mainnet.uniswap.as_ref().unwrap().v4.is_some());
+        assert_eq!(
+            mainnet.weth.as_deref(),
+            Some("0x8888888888888888888888888888888888888888")
+        );
+        assert_eq!(
+            mainnet.snapshot_tokens,
+            vec!["0x9999999999999999999999999999999999999999"]
+        );
+        assert_eq!(
+            serde_json::to_value(
+                first
+                    .deployments
+                    .iter()
+                    .find(|d| d.network == "ethereum:4663")
+                    .unwrap()
+                    .ramses
+                    .as_ref()
+            )
+            .unwrap(),
+            serde_json::to_value(Some(&custom_ramses)).unwrap()
+        );
+
+        let serialized = serde_json::to_value(&first).unwrap();
+        let second =
+            effective_protected_config_with(first, &reviewed_networks, &reviewed_amms).unwrap();
+        assert_eq!(serde_json::to_value(second).unwrap(), serialized);
+    }
+
+    #[test]
+    fn effective_coverage_is_gated_to_reusable_wallets_and_keeps_legacy_scope() {
+        let mut legacy_only = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        let legacy = ConnectionConfig::Ethereum {
+            name: "legacy-wallet".into(),
+            resource: ResourceId("ethereum:1:0x2222222222222222222222222222222222222222".into()),
+            credential_ref: None,
+            network: "ethereum:1".into(),
+            address: "0x2222222222222222222222222222222222222222".into(),
+            signing_enabled: false,
+            assets: vec![AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            }],
+        };
+        legacy_only.connections.push(legacy.clone());
+        let original = serde_json::to_value(&legacy_only).unwrap();
+        let unchanged = effective_protected_config(legacy_only).unwrap();
+        assert_eq!(serde_json::to_value(unchanged).unwrap(), original);
+
+        let mut mixed = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        mixed.connections.push(legacy.clone());
+        mixed.connections.push(reusable_read_only_wallet());
+        let expanded = effective_protected_config(mixed).unwrap();
+        assert_eq!(expanded.connections[0], legacy);
+        assert!(
+            expanded
+                .networks
+                .iter()
+                .any(|network| network.chain_id == 4663)
+        );
+    }
+
+    #[test]
+    fn effective_overlay_rejects_reviewed_deployments_with_dangling_networks() {
+        let mut config = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        config.connections.push(reusable_read_only_wallet());
+        let dangling = DeploymentConfig {
+            network: "ethereum:999999".into(),
+            weth: None,
+            snapshot_tokens: vec![],
+            uniswap: None,
+            ramses: Some(fin_ethereum::RamsesConfig {
+                factory: "0x1111111111111111111111111111111111111111".into(),
+                quoter: "0x2222222222222222222222222222222222222222".into(),
+                router: "0x3333333333333333333333333333333333333333".into(),
+                pool_deployer: "0x4444444444444444444444444444444444444444".into(),
+            }),
+            aave: None,
+        };
+        let error = effective_protected_config_with(
+            config,
+            &NetworkConfig::reviewed_evm_networks(),
+            &[dangling],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "CONFIG_DEPLOYMENT_INVALID");
     }
 
     fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {

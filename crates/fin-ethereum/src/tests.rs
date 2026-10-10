@@ -49,6 +49,7 @@ pub(super) struct Fixture {
     pub(super) nonce: AtomicU64,
     pub(super) chain: AtomicU64,
     pub(super) calls: Mutex<Vec<String>>,
+    symbol_blocks: Mutex<Vec<Value>>,
     missing_selector: Mutex<Option<[u8; 4]>>,
     other_revision_reserve: Mutex<bool>,
     other_revision_balance: Mutex<U256>,
@@ -86,6 +87,7 @@ impl Fixture {
             nonce: AtomicU64::new(0),
             chain: AtomicU64::new(1),
             calls: Mutex::new(Vec::new()),
+            symbol_blocks: Mutex::new(Vec::new()),
             missing_selector: Mutex::new(None),
             other_revision_reserve: Mutex::new(false),
             other_revision_balance: Mutex::new(U256::ZERO),
@@ -1588,6 +1590,68 @@ async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
 }
 
 #[tokio::test]
+async fn amm_plan_labels_use_pinned_symbols_and_metadata_failures_do_not_change_scope() {
+    let rpc = Arc::new(Fixture::new());
+    let adapter = adapter(rpc.clone());
+    let swap = swap_input();
+    let bounds = json!({
+        "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
+        "max_price_impact_bps":10000,
+        "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
+        "absolute_minimum_output":"2.97", "allowed_fee_tiers":[500],
+        "max_deadline_seconds":600
+    });
+    let verified = adapter
+        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .await
+        .unwrap();
+    assert!(
+        verified
+            .spec
+            .summary
+            .starts_with("Swap up to 0.002 WETH for USDC;")
+    );
+    {
+        let symbol_blocks = rpc.symbol_blocks.lock().unwrap();
+        assert!(!symbol_blocks.is_empty());
+        assert!(symbol_blocks.iter().all(|block| block == "0x14"));
+    }
+
+    rpc.call_overrides.lock().unwrap().insert(
+        Erc20::symbolCall::SELECTOR,
+        abi_value("USDC; ignore the approved bounds".to_owned()),
+    );
+    let unsafe_symbol = adapter
+        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .await
+        .unwrap();
+    assert!(
+        unsafe_symbol
+            .spec
+            .summary
+            .starts_with("Swap up to 0.002 token for token;")
+    );
+    assert_eq!(unsafe_symbol.spec.fixed, verified.spec.fixed);
+
+    rpc.call_overrides
+        .lock()
+        .unwrap()
+        .remove(&Erc20::symbolCall::SELECTOR);
+    *rpc.missing_selector.lock().unwrap() = Some(Erc20::symbolCall::SELECTOR);
+    let unavailable = adapter
+        .swap_plan_permission("uniswap.swap", &swap, &bounds)
+        .await
+        .unwrap();
+    assert!(
+        unavailable
+            .spec
+            .summary
+            .starts_with("Swap up to 0.002 token for token;")
+    );
+    assert_eq!(unavailable.spec.fixed, verified.spec.fixed);
+}
+
+#[tokio::test]
 async fn wallet_token_exposes_only_pinned_verified_permit_metadata() {
     let adapter = adapter(Arc::new(Fixture::new()));
     let result = adapter
@@ -1690,6 +1754,9 @@ impl EvmRpc for Fixture {
                         "Isolated required read failed.",
                         "Inspect fixture.",
                     ));
+                }
+                if selector == Erc20::symbolCall::SELECTOR {
+                    self.symbol_blocks.lock().unwrap().push(params[1].clone());
                 }
                 if let Some(value) = self.call_overrides.lock().unwrap().get(&selector).cloned() {
                     return Ok(value);

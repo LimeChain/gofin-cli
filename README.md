@@ -105,6 +105,8 @@ and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update, not a general
 schema-migration or published-version updater.
+At broker startup, an installed update makes newly reviewed network and AMM
+deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
 and [completion](docs/shell-completion.md).
 
@@ -163,6 +165,13 @@ unpriced exchange assets require the protected policy exception described below.
 Every replacement needs a fresh preview and approval; reconcile the original
 operation before creating a replacement.
 
+AMM Touch ID prompts lead with the swap intent, verified token labels and
+readable amount, fee and expiry limits. Exact contracts, routing and price
+formulas remain in structured review for the agent to explain. A bounded
+authorization says what may be executed; it does not promise the initial quote
+as the outcome of every later attempt. Use standalone execution for one exact
+swap and a named plan for a coherent sequence such as a swap and its return.
+
 Use `fin --help` for command descriptions, bare `fin explain` or `fin schema` for usage and examples,
 and `fin capabilities` to list all command and operation names. For a specific
 operation, run `fin explain wallet.balances`.
@@ -179,7 +188,12 @@ Enrollment requires no network. Each operation selects its explicit `chain_id`:
 Ethereum mainnet `1`, Arbitrum One `42161`, Robinhood Chain `4663`; all use native
 ETH. Arbitrum and Robinhood currently support wallet holdings and same-chain
 native/ERC-20 transfers. The supported Relay and canonical bridge scope is
-described below; other dapps and bridge providers remain later work.
+described below; additional dapps and bridge providers remain later work.
+At protected broker startup and configuration reload, an enrolled reusable EVM
+wallet receives additive coverage for reviewed networks and AMM deployments in
+the installed broker. This applies to read-only wallets, does not prompt for
+credentials or rewrite protected configuration, and grants no financial
+authority. Legacy chain-scoped Ethereum connections retain their original scope.
 Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. EVM pricing keeps the existing
 CoinGecko native-ETH and exact network/contract token path.

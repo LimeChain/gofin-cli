@@ -120,6 +120,7 @@ struct ApprovalPresentationTests {
         assert(configurationAuthenticationReason(setup) == "finish setup for your Mac account")
         let policy: [String: Any] = ["action":"policy_set", "financial_movement":false, "future_financial_authority":false]
         assert(configurationAuthenticationReason(policy) == "change your financial policy")
+        assert(nativeApprovalReasonForOS(configurationAuthenticationReason(policy)!) == "change your financial policy")
         assert(reviewed(policy))
         assert(!reviewed(policy, "changed"))
         for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
@@ -183,39 +184,84 @@ struct ApprovalPresentationTests {
         let oversizedReason = financialAuthenticationReason(deposit, summary: oversizedDeposit)!
         assert(oversizedReason.count <= 180 && oversizedReason.contains("See terminal review for full details."))
         assert(financialAuthenticationReason(write, summary: writeSummary) == "approve this action: \(writeSummary)")
-        // The native reason receives the broker's reviewed synopsis. Keep the
-        // swap's concrete route and all material ceilings visible when they fit;
-        // the complete transaction binding is independently reviewed in Terminal.
+        assert(approvalDuration(600) == "10 minutes")
+        assert(approvalDuration(60) == "1 minute")
+        assert(approvalDuration(90) == "1 minute 30 seconds")
+        assert(reviewedNetworkName("ethereum:4663") == "Robinhood Chain")
+        let futureDeadline = UInt64(Date().timeIntervalSince1970) + 600
+        // The OS prompt gets the concrete human action, while exact route data
+        // and formulas remain available in the structured terminal review.
         var swapBinding = write
         swapBinding["operation"] = "uniswap.swap"
-        let swapSummary = "Swap 0.1 WETH for at least 200 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v3 fee 3000 ppm; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: existing finite ERC-20 allowance to router 0x2222222222222222222222222222222222222222 was checked and reused."
+        let promptInputAsset: [String: Any] = ["network":"ethereum:1", "reference":"0x1111111111111111111111111111111111111111", "decimals":18]
+        let promptOutputAsset: [String: Any] = ["network":"ethereum:1", "reference":"0x2222222222222222222222222222222222222222", "decimals":6]
+        let promptNativeAsset: [String: Any] = ["network":"ethereum:1", "reference":"native", "decimals":18]
+        swapBinding["execution"] = ["token":promptInputAsset,
+                                     "units":"100000000000000000",
+                                     "output":promptOutputAsset,
+                                     "minimum_output":"200000000",
+                                     "deadline":futureDeadline, "permit_template":NSNull()] as [String: Any]
+        swapBinding["financial_intent"] = ["maximum_costs":[["amount":["asset":promptNativeAsset, "atoms":"1000000000000000"]]]] as [String: Any]
+        let swapSummary = "Swap 0.1 WETH for at least 200 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v3 fee 3000 ppm; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline \(futureDeadline); max network fee 0.001 ETH; permission: existing finite ERC-20 allowance was checked and reused."
         let swapReason = financialAuthenticationReason(swapBinding, summary: swapSummary)!
-        for detail in ["0.1 WETH", "200 USDC", "recipient 0x1111…1111", "router 0x2222…2222",
-                       "slippage 50 bps", "fee 3000 ppm", "max network fee 0.001 ETH", "deadline 1791500000"] {
+        for detail in ["allow swapping 0.1 WETH for at least 200 USDC", "max network fees 0.001 ETH", "expires in "] {
             assert(swapReason.contains(detail), detail)
         }
-        assert(swapReason.count <= ammAuthenticationReasonMaximumCharacters)
+        for hidden in ["0x", "router", "ppm", "bps", "atoms", String(futureDeadline)] { assert(!swapReason.contains(hidden), hidden) }
+        assert(swapReason.count <= 300)
+        assert(nativeApprovalReasonForOS(swapReason + ". \n") == String(swapReason.dropLast()))
+        assert(nativeApprovalReasonForOS("allow swap up to 0.001 ETH.") == "allow swap up to 0.001 ETH")
+        assert(!nativeApprovalReasonForOS(swapReason + ".").contains("…"))
+        var nativeExecution = swapBinding["execution"] as! [String: Any]
+        nativeExecution["token"] = promptNativeAsset
+        nativeExecution["units"] = "1000000000000000"
+        nativeExecution["minimum_output"] = "2489004"
+        var nativeSwapBinding = swapBinding
+        nativeSwapBinding["execution"] = nativeExecution
+        let nativeSwapSummary = "Swap 0.001 ETH for at least 2.489004 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v3 fee 500 ppm; router 0x2222222222222222222222222222222222222222; deadline \(futureDeadline); max network fee 0.001 ETH."
+        let nativeSwapReason = financialAuthenticationReason(nativeSwapBinding, summary: nativeSwapSummary)!
+        assert(nativeSwapReason.contains("allow swapping 0.001 ETH for at least 2.489004 USDC on Ethereum"))
+        assert(!nativeSwapReason.contains("permit") && nativeSwapReason.count <= 300)
+        let forgedSummary = swapSummary
+            .replacingOccurrences(of: "Swap 0.1 WETH for at least 200 USDC", with: "Swap 99 WETH for at least 1 USDC")
+            .replacingOccurrences(of: "max network fee 0.001 ETH", with: "max network fee 99 ETH")
+        let structuredReason = financialAuthenticationReason(swapBinding, summary: forgedSummary)!
+        assert(structuredReason.contains("allow swapping 0.1 WETH for at least 200 USDC"))
+        assert(structuredReason.contains("max network fees 0.001 ETH") && !structuredReason.contains("99 ETH"))
         var ramsesBinding = swapBinding
         ramsesBinding["operation"] = "ramses.swap"
-        let ramsesSummary = "Swap 0.1 TOKEN for at least 190 USDG; recipient 0x1111111111111111111111111111111111111111; Ramses tick spacing 10, quoted pool fee 500 ppm (quote-time ceiling 1000 ppm only); router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: finite token allowance or typed EIP-2612 permit to Ramses router only after approval."
+        var ramsesExecution = swapBinding["execution"] as! [String: Any]
+        ramsesExecution["permit_template"] = ["typed":"synthetic"]
+        ramsesBinding["execution"] = ramsesExecution
+        let ramsesSummary = "Swap 0.1 TOKEN for at least 190 USDG; recipient 0x1111111111111111111111111111111111111111; Ramses tick spacing 10, quoted pool fee 500 ppm (quote-time ceiling 1000 ppm only); router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline \(futureDeadline); max network fee 0.001 ETH; permission: finite token allowance or typed EIP-2612 permit to Ramses router only after approval."
         let ramsesReason = financialAuthenticationReason(ramsesBinding, summary: ramsesSummary)!
-        for detail in ["0.1 TOKEN", "190 USDG", "recipient 0x1111…1111", "Ramses tick spacing 10",
-                       "quoted pool fee 500 ppm", "quote-time ceiling 1000 ppm only",
-                       "router 0x2222…2222", "slippage 50 bps", "impact max 40 bps",
-                       "deadline 1791500000", "max network fee 0.001 ETH", "only after approval"] {
+        for detail in ["allow swapping 0.1 TOKEN for at least 200 USDG", "max network fees 0.001 ETH", "limited to this swap"] {
             assert(ramsesReason.contains(detail), detail)
         }
-        assert(ramsesReason.count <= ammAuthenticationReasonMaximumCharacters)
-        let permitSummary = "Swap 0.01 WETH for at least 19 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v4 fee 500 ppm, tick spacing 10; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: finite token allowance to canonical Permit2 was checked; a typed Permit2 signature will authorize the router only after approval."
-        let permitReason = financialAuthenticationReason(swapBinding, summary: permitSummary)!
-        for detail in ["0.01 WETH", "19 USDC", "recipient 0x1111…1111", "v4 fee 500 ppm", "router 0x2222…2222", "deadline 1791500000", "max network fee 0.001 ETH", "typed Permit2 signature", "after approval"] {
+        assert(ramsesReason.count <= 300 && !ramsesReason.contains("0x") && !ramsesReason.contains("pool"))
+        var permitExecution = swapBinding["execution"] as! [String: Any]
+        permitExecution["permit_template"] = ["typed":"synthetic"]
+        var permitBinding = swapBinding
+        permitBinding["execution"] = permitExecution
+        let permitSummary = "Swap 0.1 WETH for at least 200 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v4 fee 500 ppm, tick spacing 10; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline \(futureDeadline); max network fee 0.001 ETH; permission: finite token allowance to canonical Permit2 was checked; a typed Permit2 signature will authorize the router only after approval."
+        let permitReason = financialAuthenticationReason(permitBinding, summary: permitSummary)!
+        for detail in ["allow swapping 0.1 WETH for at least 200 USDC", "max network fees 0.001 ETH", "limited to this swap"] {
             assert(permitReason.contains(detail), detail)
         }
-        let eip2612Summary = "Swap 0.1 WETH for at least 200 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v3 fee 3000 ppm; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline 1791500000; max network fee 0.001 ETH; permission: typed EIP-2612 permit authorizes router 0x2222222222222222222222222222222222222222 only after approval."
-        let eip2612Reason = financialAuthenticationReason(swapBinding, summary: eip2612Summary)!
-        for detail in ["0.1 WETH", "200 USDC", "recipient 0x1111…1111", "EIP-2612", "router 0x2222…2222", "deadline 1791500000", "max network fee 0.001 ETH", "only after approval"] {
+        let eip2612Summary = "Swap 0.1 WETH for at least 200 USDC; recipient 0x1111111111111111111111111111111111111111; Uniswap v3 fee 3000 ppm; router 0x2222222222222222222222222222222222222222; slippage 50 bps, impact max 40 bps; deadline \(futureDeadline); max network fee 0.001 ETH; permission: typed EIP-2612 permit authorizes router only after approval."
+        let eip2612Reason = financialAuthenticationReason(permitBinding, summary: eip2612Summary)!
+        for detail in ["allow swapping 0.1 WETH for at least 200 USDC", "max network fees 0.001 ETH", "limited to this swap"] {
             assert(eip2612Reason.contains(detail), detail)
         }
+        let unsafeLabelSummary = "Swap 1 0x1111111111111111111111111111111111111111 for at least 2 0x2222222222222222222222222222222222222222; deadline \(futureDeadline); max network fee 0.001 ETH."
+        let safeFallbackReason = financialAuthenticationReason(swapBinding, summary: unsafeLabelSummary)!
+        assert(safeFallbackReason.contains("allow swapping 0.1 token for at least 200 token"))
+        assert(!safeFallbackReason.contains("0x"))
+        var expiredBinding = swapBinding
+        var expiredExecution = swapBinding["execution"] as! [String: Any]
+        expiredExecution["deadline"] = 1
+        expiredBinding["execution"] = expiredExecution
+        assert(financialAuthenticationReason(expiredBinding, summary: swapSummary) == nil)
         assert(financialAuthenticationReason(write, summary: "") == nil)
         assert(financialAuthenticationReason(write, summary: String(repeating: "x", count: 4097)) == nil)
         assert(financialAuthenticationReason(setup, summary: writeSummary) == nil)
@@ -230,6 +276,7 @@ struct ApprovalPresentationTests {
                                       "maximum_debits":[["amount":"2"]], "maximum_costs":[[String:Any]](), "valid_for_seconds":600]
         let boundarySummary = "Sell up to 2 SYNTHETIC; minimum price 10 USD; repricing allowed; valid for 10 minutes."
         assert(boundaryAuthenticationReason(boundary, summary:boundarySummary) == "approve these boundaries: \(boundarySummary)")
+        assert(nativeApprovalReasonForOS(boundaryAuthenticationReason(boundary, summary:boundarySummary)! + ".") == "approve these boundaries: \(boundarySummary.dropLast())")
         assert(financialAuthenticationReason(boundary, summary:boundarySummary) == nil)
         var bridgeBoundary = boundary
         bridgeBoundary["operation"] = "bridge.transfer"
@@ -268,15 +315,20 @@ struct ApprovalPresentationTests {
                                                         "max_fee_eth":"0.001", "max_deadline_seconds":600],
                                           "maximum_debits":[["amount":"0.1"]],
                                           "maximum_costs":[["amount":"0.001"]], "valid_for_seconds":600]
-        let swapBoundarySummary = "Swap up to 0.1 \(boundaryInputToken) into \(boundaryOutputToken) via Uniswap v3; maximum native fee 0.001 ETH, slippage 100 bps, price impact 40 bps, deadline 600 seconds."
+        let swapBoundarySummary = "Swap up to 0.1 WETH for USDC; maximum native fee 0.001 ETH, slippage 100 bps, price impact 40 bps, deadline 600 seconds."
         let swapBoundaryReason = boundaryAuthenticationReason(swapBoundary, summary:swapBoundarySummary)!
-        for detail in ["0x0000…0064", "0x0000…0065", "recipient 0x1111…1111", "router/spender 0x2222…2222",
-                       "Max input 0.1", "max fee 0.001 ETH", "max slippage 100 bps", "impact 40 bps",
-                       "190000000/100000000000000000 atoms", "absolute floor 190", "600s", "consent duration 600s",
-                       "typed permit is finite"] {
+        for detail in ["allow swapping up to 0.1 WETH for at least 190 USDC on Ethereum for 10 minutes",
+                       "max network fees 0.001 ETH", "limited to each swap"] {
             assert(swapBoundaryReason.contains(detail), detail)
         }
-        assert(swapBoundaryReason.count <= ammAuthenticationReasonMaximumCharacters)
+        for hidden in ["0x", "router", "atoms", "bps", "1791500000"] { assert(!swapBoundaryReason.contains(hidden), hidden) }
+        assert(swapBoundaryReason.count <= 300)
+        let unsafeBoundaryLabels = boundaryAuthenticationReason(
+            swapBoundary,
+            summary: "Swap up to 0.1 0x0000000000000000000000000000000000000064 for 0x0000000000000000000000000000000000000065;"
+        )!
+        assert(unsafeBoundaryLabels.contains("up to 0.1 token for at least 190 token"))
+        assert(!unsafeBoundaryLabels.contains("0x"))
         var ramsesBoundary = swapBoundary
         ramsesBoundary["operation"] = "ramses.swap"
         var ramsesFixed = swapBoundary["fixed"] as! [String: Any]
@@ -290,14 +342,13 @@ struct ApprovalPresentationTests {
         ramsesBounds.removeValue(forKey: "allowed_fee_tiers")
         ramsesBounds["max_pool_fee_ppm"] = 1000
         ramsesBoundary["parameters"] = ramsesBounds
-        let ramsesBoundaryReason = boundaryAuthenticationReason(ramsesBoundary, summary: "Ramses v3 bounded swap summary")!
-        for detail in ["Ramses v3 tick spacing 10", "pool 0x3333…3333", "factory 0x4444…4444",
-                       "pool deployer 0x5555…5555", "quote pool-fee ceiling ≤1000 ppm (quote-time bound only; no on-chain fee guarantee)",
-                       "router/spender 0x2222…2222", "Max input 0.1", "minimum rate 190000000/100000000000000000 atoms",
-                       "absolute floor 190", "deadline horizon 600s", "max fee 0.001 ETH"] {
+        let ramsesBoundaryReason = boundaryAuthenticationReason(ramsesBoundary, summary: "Swap up to 0.1 TOKEN for USDG; Ramses v3 bounded swap summary")!
+        for detail in ["allow swapping up to 0.1 TOKEN for at least 190 USDG on Ethereum for 10 minutes",
+                       "max network fees 0.001 ETH"] {
             assert(ramsesBoundaryReason.contains(detail), detail)
         }
-        assert(ramsesBoundaryReason.count <= ammAuthenticationReasonMaximumCharacters)
+        for hidden in ["0x", "pool", "factory", "ppm", "atoms", "bps"] { assert(!ramsesBoundaryReason.contains(hidden), hidden) }
+        assert(ramsesBoundaryReason.count <= 300)
         var excessiveRamsesFee = ramsesBoundary
         var excessiveRamsesBounds = excessiveRamsesFee["parameters"] as! [String: Any]
         excessiveRamsesBounds["max_pool_fee_ppm"] = 1_000_000
@@ -336,15 +387,15 @@ struct ApprovalPresentationTests {
         let planStep: [String: Any] = ["step_id":"transfer", "operation":"wallet.transfer", "input":[String:Any](), "permitted_variations":["mode":"exact", "maximum_debits":[[String:Any]](), "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()], "completion":["operation_succeeded":true]]
         let planPermission: [String: Any] = ["step_id":"transfer", "exact":["scope":["mode":"exact", "maximum_debits":[[String:Any]](), "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()], "definition_hash":"schema", "connections_hash":"connections"]]
         let planBinding: [String: Any] = ["version":1, "kind":"financial_plan", "plan_id":"synthetic-plan", "revision_id":"synthetic-revision", "name":"Synthetic rotation", "plan":["name":"Synthetic rotation", "steps":[planStep]], "permissions":[planPermission], "valid_for_seconds":600]
-        assert(financialPlanAuthenticationReason(planBinding, summary:"Full swap scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 steps, 600 seconds)")
+        assert(financialPlanAuthenticationReason(planBinding, summary:"Full swap scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 step, 10 minutes)")
         var generatedPermission = planPermission; generatedPermission["generated_input_fields"] = ["/requestId"]
         var generatedPlan = planBinding; generatedPlan["permissions"] = [generatedPermission]
-        assert(financialPlanAuthenticationReason(generatedPlan, summary:"Full scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 steps, 600 seconds)")
+        assert(financialPlanAuthenticationReason(generatedPlan, summary:"Full scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 step, 10 minutes)")
         generatedPermission["generated_input_fields"] = "requestId"
         generatedPlan["permissions"] = [generatedPermission]
         assert(financialPlanAuthenticationReason(generatedPlan, summary:"review") == nil)
         var revisedPlan = planBinding; revisedPlan["replaces_revision_id"] = "synthetic-prior-revision"
-        assert(financialPlanAuthenticationReason(revisedPlan, summary:"Full scope is in the terminal review.") == "approve the revised plan “Synthetic rotation” (1 steps, 600 seconds)")
+        assert(financialPlanAuthenticationReason(revisedPlan, summary:"Full scope is in the terminal review.") == "approve the revised plan “Synthetic rotation” (1 step, 10 minutes)")
         var incompletePlan = planBinding; incompletePlan["permissions"] = [[String:Any]]()
         assert(financialPlanAuthenticationReason(incompletePlan, summary:"review") == nil)
         incompletePlan = planBinding; incompletePlan["name"] = "spoofed"
@@ -393,7 +444,7 @@ struct ApprovalPresentationTests {
                                       "maximum_costs":[["location":["kind":"cash", "resource":"ethereum:1:\(signerAddress)"],
                                                          "amount":["asset":nativeAsset, "atoms":"1000000000000000"],
                                                          "treatment":"additional_debit"]],
-                                      "summary":"Swap up to 0.1 \(inputAddress) into \(outputAddress) via Uniswap v3; maximum native fee 0.001 ETH, slippage 100 bps, price impact 40 bps, deadline 600 seconds."]
+                                      "summary":"Swap up to 0.1 WETH for USDC; maximum native fee 0.001 ETH, slippage 100 bps, price impact 40 bps, deadline 600 seconds."]
         let ammPlanPermission: [String: Any] = ["step_id":"swap", "permission":["spec":ammSpec,
                                                                         "possible_credits":[["resource":"ethereum:1:\(signerAddress)", "asset":outputAsset]],
                                                                         "fee_assets":[nativeAsset]]]
@@ -407,14 +458,15 @@ struct ApprovalPresentationTests {
                                                                                      "treatment":"additional_debit"]]]],
                                       "permissions":[ammPlanPermission], "valid_for_seconds":600]
         let ammPlanReason = financialPlanAuthenticationReason(ammPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
-        for detail in ["Synthetic bounded swap", "0.1 \(inputAddress.prefix(6))…\(inputAddress.suffix(4))",
-                       "min 190 \(outputAddress.prefix(6))…\(outputAddress.suffix(4))", "recipient \(signerAddress.prefix(6))…\(signerAddress.suffix(4))",
-                       "router/spender \(routerAddress.prefix(6))…\(routerAddress.suffix(4))", "fee tier 3000", "slip 50/100 bps",
-                       "min rate 190000000/100000000000000000 atoms", "gas ≤0.001 ETH", "1791500000", "100000000000000000 atoms",
-                       "1000000000000000 atoms"] {
+        for detail in ["allow swapping up to 0.1 WETH for at least 190 USDC", "10 minutes",
+                       "max fees 0.001 ETH", "Total spending up to 0.1 WETH", "limited to its swap"] {
             assert(ammPlanReason.contains(detail), detail)
         }
-        assert(ammPlanReason.count <= ammAuthenticationReasonMaximumCharacters)
+        for hidden in ["Synthetic bounded swap", "0x", "router", "fee tier", "bps", "atoms", "1791500000"] {
+            assert(!ammPlanReason.contains(hidden), hidden)
+        }
+        assert(ammPlanReason.count <= 300)
+        assert(nativeApprovalReasonForOS(ammPlanReason + ".") == String(ammPlanReason.dropLast()))
         var ramsesInput = swapInput
         ramsesInput.removeValue(forKey: "fee_tier")
         ramsesInput["tick_spacing"] = 10
@@ -435,7 +487,7 @@ struct ApprovalPresentationTests {
         var ramsesSpec = ammSpec
         ramsesSpec["fixed"] = ramsesPlanFixed
         ramsesSpec["parameters"] = ramsesPlanParameters
-        ramsesSpec["summary"] = "Ramses v3 tick spacing 10; quote fee ceiling 1000 ppm; finite swap boundary."
+        ramsesSpec["summary"] = "Swap up to 0.1 WETH for USDC; Ramses v3 tick spacing 10; quote fee ceiling 1000 ppm."
         var ramsesPlanPermission = ammPlanPermission
         ramsesPlanPermission["permission"] = ["spec":ramsesSpec,
                                                "possible_credits":[["resource":"ethereum:1:\(signerAddress)", "asset":outputAsset]],
@@ -446,12 +498,25 @@ struct ApprovalPresentationTests {
         ramsesPlan["plan"] = ramsesPlanBody
         ramsesPlan["permissions"] = [ramsesPlanPermission]
         let ramsesPlanReason = financialPlanAuthenticationReason(ramsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
-        for detail in ["Ramses v3 tick spacing 10", "pool 0x3333…3333", "factory 0x4444…4444",
-                       "pool deployer 0x5555…5555", "quote pool-fee ceiling ≤1000 ppm (quote-time bound only; no on-chain fee guarantee)",
-                       "min 190", "router/spender", "slip 50/100 bps", "gas ≤0.001 ETH", "deadline 1791500000"] {
+        for detail in ["allow swapping up to 0.1 WETH for at least 190 USDC", "10 minutes",
+                       "max fees 0.001 ETH", "Total spending up to 0.1 WETH", "limited to its swap"] {
             assert(ramsesPlanReason.contains(detail), detail)
         }
-        assert(ramsesPlanReason.count <= ammAuthenticationReasonMaximumCharacters)
+        for hidden in ["0x", "pool", "factory", "ppm", "bps", "atoms", "1791500000"] { assert(!ramsesPlanReason.contains(hidden), hidden) }
+        assert(ramsesPlanReason.count <= 300)
+        var higherAggregatePlan = ammPlan
+        var higherAggregateBody = ammPlan["plan"] as! [String: Any]
+        var higherAggregateBounds = higherAggregateBody["aggregate_bounds"] as! [String: Any]
+        var higherCost = (higherAggregateBounds["maximum_costs"] as! [[String: Any]])[0]
+        var higherCostAmount = higherCost["amount"] as! [String: Any]
+        higherCostAmount["atoms"] = "2000000000000000"
+        higherCost["amount"] = higherCostAmount
+        higherAggregateBounds["maximum_costs"] = [higherCost]
+        higherAggregateBody["aggregate_bounds"] = higherAggregateBounds
+        higherAggregatePlan["plan"] = higherAggregateBody
+        let higherAggregateReason = financialPlanAuthenticationReason(higherAggregatePlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
+        assert(higherAggregateReason.contains("max fees 0.002 ETH"))
+        assert(!higherAggregateReason.contains("max fees 0.001 ETH"))
         var overWideRamsesPlan = ramsesPlan
         var overWideRamsesSteps = ramsesPlanBody
         var overWideRamsesStep = ramsesPlanStep
@@ -468,9 +533,26 @@ struct ApprovalPresentationTests {
         var twoStepBody = ammPlan["plan"] as! [String: Any]; twoStepBody["steps"] = [swapPlanStep, twoSwapStep]
         twoSwapPlan["plan"] = twoStepBody; twoSwapPlan["permissions"] = [ammPlanPermission, twoSwapPermission]
         let twoSwapReason = financialPlanAuthenticationReason(twoSwapPlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")!
-        assert(twoSwapReason.count <= ammAuthenticationReasonMaximumCharacters)
-        assert(twoSwapReason.contains("Swap step swap:" ) && twoSwapReason.contains("Swap step swap-2:"))
-        assert(!twoSwapReason.contains("See terminal review for full details."))
+        assert(twoSwapReason.count <= 400)
+        assert(twoSwapReason.contains("Allow swaps for 10 minutes: swap up to 0.1 WETH" ) && twoSwapReason.contains("; then swap up to 0.1 WETH"))
+        assert(twoSwapReason.contains("Total spending up to") && twoSwapReason.contains("max fees"))
+        for hidden in ["0x", "atoms", "1791500000", "router"] { assert(!twoSwapReason.contains(hidden), hidden) }
+        var mixedStep = swapPlanStep
+        mixedStep["step_id"] = "second-action"
+        mixedStep["operation"] = "wallet.sweep"
+        var mixedPlanBody = twoStepBody
+        mixedPlanBody["steps"] = [swapPlanStep, mixedStep]
+        var mixedPlan = twoSwapPlan
+        mixedPlan["plan"] = mixedPlanBody
+        let mixedExactPermission: [String: Any] = ["step_id":"second-action", "exact":[
+            "scope":["mode":"exact", "maximum_debits":[[String:Any]](),
+                     "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()],
+            "definition_hash":"synthetic", "connections_hash":"synthetic"]]
+        mixedPlan["permissions"] = [ammPlanPermission, mixedExactPermission]
+        let mixedReason = financialPlanAuthenticationReason(mixedPlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")!
+        assert(mixedReason.contains("swap up to 0.1 WETH"))
+        assert(mixedReason.contains("; then one other reviewed action"))
+        assert(mixedReason.contains("Total spending up to") && mixedReason.contains("max fees"))
         var malformedAMMPlan = ammPlan
         var malformedAMMSpec = ammSpec
         malformedAMMSpec.removeValue(forKey:"parameters")
@@ -481,15 +563,29 @@ struct ApprovalPresentationTests {
         var longAMMPlan = ammPlan
         var longSteps: [[String: Any]] = []
         var longPermissions: [[String: Any]] = []
-        for index in 1...3 {
+        for index in 1...12 {
             var step = swapPlanStep; step["step_id"] = "swap-\(index)"; longSteps.append(step)
             var permission = ammPlanPermission; permission["step_id"] = "swap-\(index)"; longPermissions.append(permission)
         }
         var longPlanBody = ammPlan["plan"] as! [String: Any]; longPlanBody["steps"] = longSteps
+        var longAggregateBounds = longPlanBody["aggregate_bounds"] as! [String: Any]
+        var longDebit = (longAggregateBounds["maximum_debits"] as! [[String: Any]])[0]
+        var longDebitAmount = longDebit["amount"] as! [String: Any]
+        longDebitAmount["atoms"] = "1200000000000000000"
+        longDebit["amount"] = longDebitAmount
+        longAggregateBounds["maximum_debits"] = [longDebit]
+        var longCost = (longAggregateBounds["maximum_costs"] as! [[String: Any]])[0]
+        var longCostAmount = longCost["amount"] as! [String: Any]
+        longCostAmount["atoms"] = "12000000000000000"
+        longCost["amount"] = longCostAmount
+        longAggregateBounds["maximum_costs"] = [longCost]
+        longPlanBody["aggregate_bounds"] = longAggregateBounds
         longAMMPlan["plan"] = longPlanBody; longAMMPlan["permissions"] = longPermissions
-        let longAMMReason = financialPlanAuthenticationReason(longAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 3 ordered steps for 600 seconds.")!
-        assert(longAMMReason.count <= ammAuthenticationReasonMaximumCharacters)
-        assert(longAMMReason.contains("See terminal review for full details."))
+        let longAMMReason = financialPlanAuthenticationReason(longAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 12 ordered steps for 600 seconds.")!
+        assert(longAMMReason.count <= 400)
+        assert(longAMMReason.contains("Synthetic bounded swap") && longAMMReason.contains("12 reviewed actions, including 12 swaps"))
+        assert(longAMMReason.contains("Total spending up to 1.2 WETH") && longAMMReason.contains("max fees 0.012 ETH"))
+        assert(!longAMMReason.contains("See terminal review for full details."))
         let address = "0x1111111111111111111111111111111111111111"
         let withdrawal = "Withdraw API quantity 0.00765 ETH from SYNTHETIC-main SPOT to SYNTHETIC-wallet (\(address)) on ARBITRUM; published fee 0.00005, approved maximum fee 0.00005, maximum gross debit 0.0077, minimum net receipt 0.0076. USD ceilings: $19.67 movement, $0.13 fees."
         let withdrawalReason = financialAuthenticationReason(write, summary: withdrawal)!

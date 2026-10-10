@@ -87,6 +87,18 @@ Adding a network requires reviewing its fee model as well as sequencing and
 registering its deployments; an Optimism-style additional L1 data fee needs
 bounded estimation and verified receipt accounting before enabling writes.
 
+At protected configuration load, the broker derives missing reviewed networks
+and AMM deployments for any reusable `ConnectionConfig::Evm`, including
+read-only wallets. The validated effective config is in memory only: this
+overlay does not rewrite protected config, inspect credentials, or create
+financial authority. Existing RPCs, deployment overrides and asset scope win;
+legacy chain-scoped Ethereum connections remain limited to their configured
+network. The same pure derivation runs on startup and protected reload so a
+broker update can expose newly shipped reviewed coverage without reenrollment.
+When the effective config changes, the existing reload path recomposes adapters
+against the same journal; pending submission identities remain in place and
+are never replayed as a consequence of coverage derivation.
+
 Closed v3 deployment profiles separate factory pool lookup, quoter ABI,
 router encoding and fee semantics. Uniswap identifies pools by a fixed fee
 tier. Ramses identifies pools by signed tick spacing and reads their mutable
