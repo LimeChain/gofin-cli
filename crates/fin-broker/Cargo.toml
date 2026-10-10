@@ -40,6 +40,7 @@ name = "fin-dev-broker"
 path = "examples/fin-dev-broker.rs"
 
 [dev-dependencies]
+fin-ethereum = { workspace = true, features = ["test-support"] }
 fin-exchange = { workspace = true, features = ["test-support"] }
 jsonschema.workspace = true
 ed25519-dalek.workspace = true

@@ -14,6 +14,10 @@ The concept's cross-system journey starts with Kraken → Ethereum wallet → Aa
 
 General chain-to-chain bridging is deferred. Funding a local fork is test setup, not evidence that a real exchange withdrawal reached it.
 
+Use the dedicated [Uniswap swap and permit guide](uniswap-amm.md) for current
+v3/v4 command examples, typed-permit behavior, boundary/plan authority and the
+human Touch ID acceptance checklist.
+
 ## Resolve and record the environment
 
 | Input                 | Required detail                                                                                                                                                                  |

@@ -1,7 +1,33 @@
 use super::*;
 use abi::*;
-use fin_evm::alloy::primitives::aliases::U24;
-use fin_evm::{quantity, rpc_u64, u256};
+use fin_evm::alloy::{
+    primitives::{
+        B256,
+        aliases::{U24, U160},
+    },
+    sol_types::{SolCall, SolValue},
+};
+use fin_evm::{quantity, rpc_bytes, rpc_u64, u256};
+
+fn configured_quote_router(adapter: &EthereumAdapter, protocol: &str) -> Result<String> {
+    let deployment = adapter.uniswap()?;
+    let router = if protocol == "v4" {
+        &deployment
+            .v4
+            .as_ref()
+            .ok_or_else(|| {
+                error(
+                    "OPERATION_UNAVAILABLE",
+                    "validation",
+                    "Uniswap v4 has no configured router on this network.",
+                )
+            })?
+            .router
+    } else {
+        &deployment.router
+    };
+    Ok(lower_address(address(router)?))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Token {
@@ -50,9 +76,340 @@ pub struct SwapQuote {
     pub output: Quantity,
     pub pool: String,
     pub fee_tier: u32,
+    #[serde(default)]
+    pub swap_fee_ppm: Option<u32>,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub pool_key: Option<super::V4PoolKey>,
+    #[serde(default)]
+    pub pool_token_in: String,
+    #[serde(default)]
+    pub pool_token_out: String,
+    pub price_impact_bps: u32,
+    pub observed_at: String,
+    pub block_number: Option<u64>,
+    pub block_hash: Option<String>,
+    #[serde(default)]
+    pub router: Option<String>,
+    #[serde(default)]
+    pub permit2: Option<String>,
+    #[serde(default)]
+    pub permission_strategy: Option<String>,
+    #[serde(default)]
+    pub permission_verification: Option<String>,
+    #[serde(default)]
+    pub permission_requirement: Option<fin_amm::PermissionRequirement>,
+}
+
+pub(crate) struct ProtocolQuoteRequest<'a> {
+    pub input: &'a str,
+    pub output: &'a str,
+    pub amount: &'a str,
+    pub fee_tier: Option<u32>,
+    pub protocol: Option<&'a str>,
+    pub v4_key: Option<&'a super::V4PoolKey>,
+    pub block: Option<u64>,
 }
 
 impl EthereumAdapter {
+    async fn wallet_usd_valuation_metadata(&self, token: &Token) -> Value {
+        let asset = token.asset(self);
+        let asset_value = json!(asset);
+        let Some(provider) = &self.wallet_valuation else {
+            return json!({
+                "available":false,
+                "asset":asset_value,
+                "error_code":"VALUATION_UNAVAILABLE"
+            });
+        };
+        let units = match pow10(token.decimals) {
+            Ok(units) => quantity(units),
+            Err(error) => {
+                return json!({
+                    "available":false,
+                    "asset":asset_value,
+                    "error_code":error.code
+                });
+            }
+        };
+        let (value, source, observed_at) = match provider.quote_observation(&asset, units).await {
+            Ok(observation) => observation,
+            Err(error) => {
+                return json!({
+                    "available":false,
+                    "asset":asset_value,
+                    "error_code":error.code
+                });
+            }
+        };
+        if source.trim().is_empty() || value.is_zero() {
+            return json!({
+                "available":false,
+                "asset":asset_value,
+                "error_code":"VALUATION_UNAVAILABLE"
+            });
+        }
+        let Ok(observed) = chrono::DateTime::parse_from_rfc3339(&observed_at) else {
+            return json!({
+                "available":false,
+                "asset":asset_value,
+                "error_code":"VALUATION_UNAVAILABLE"
+            });
+        };
+        let current = chrono::Utc::now();
+        if observed > current + chrono::Duration::seconds(5)
+            || current.signed_duration_since(observed) > chrono::Duration::seconds(120)
+        {
+            return json!({
+                "available":false,
+                "asset":asset_value,
+                "error_code":"VALUATION_UNAVAILABLE"
+            });
+        }
+        json!({
+            "available":true,
+            "asset":asset_value,
+            "usd_micros_per_unit":value,
+            "observed_at":observed_at,
+            "source":source
+        })
+    }
+
+    /// Return an EIP-2612 nonce only when the token's own domain separator
+    /// matches the standard chain- and verifying-contract-bound EIP-712 domain.
+    pub(crate) async fn eip2612_nonce_at(
+        &self,
+        token: Address,
+        owner: Address,
+        block: u64,
+    ) -> Option<(U256, B256)> {
+        let block_tag = format!("{block:#x}");
+        let call = |data: Vec<u8>| json!([{"to":lower_address(token),"data":fin_evm::hex_bytes(&data)},block_tag]);
+        let nonce_bytes = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request("eth_call", call(Erc20::noncesCall { owner }.abi_encode()))
+                .await
+                .ok()?,
+        )
+        .ok()?;
+        let nonce = Erc20::noncesCall::abi_decode_returns(&nonce_bytes).ok()?;
+        let domain_bytes = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request(
+                    "eth_call",
+                    call(Erc20::DOMAIN_SEPARATORCall {}.abi_encode()),
+                )
+                .await
+                .ok()?,
+        )
+        .ok()?;
+        let domain = Erc20::DOMAIN_SEPARATORCall::abi_decode_returns(&domain_bytes).ok()?;
+        let name_bytes = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request("eth_call", call(Erc20::nameCall {}.abi_encode()))
+                .await
+                .ok()?,
+        )
+        .ok()?;
+        let name = Erc20::nameCall::abi_decode_returns(&name_bytes).ok()?;
+        // Some deployed EIP-2612 tokens omit `version()`. Probe only the
+        // standard default candidate `1` in that case, and accept it only if
+        // the independently computed domain exactly matches DOMAIN_SEPARATOR.
+        let version = self
+            .runtime
+            .rpc
+            .request("eth_call", call(Erc20::versionCall {}.abi_encode()))
+            .await
+            .ok()
+            .and_then(|value| rpc_bytes(&value).ok())
+            .and_then(|bytes| Erc20::versionCall::abi_decode_returns(&bytes).ok())
+            .unwrap_or_else(|| "1".to_owned());
+        if name.is_empty() || version.is_empty() {
+            return None;
+        }
+        let type_hash = fin_evm::alloy::primitives::keccak256(
+            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+        );
+        let expected = fin_evm::alloy::primitives::keccak256(
+            (
+                type_hash,
+                fin_evm::alloy::primitives::keccak256(name.as_bytes()),
+                fin_evm::alloy::primitives::keccak256(version.as_bytes()),
+                U256::from(self.config.chain_id),
+                token,
+            )
+                .abi_encode(),
+        );
+        (expected == domain).then_some((nonce, domain))
+    }
+
+    pub(crate) async fn swap_permission_requirement(
+        &self,
+        owner: Address,
+        quote: &SwapQuote,
+    ) -> Result<fin_amm::PermissionRequirement> {
+        use fin_amm::PermissionRequirement::{None as NoPermission, Permit, TokenApproval};
+        if quote.token_in.reference == "native" {
+            return Ok(NoPermission);
+        }
+        let block = quote.block_number.expect("quote has pinned block");
+        let token = address(&quote.token_in.reference)?;
+        let owner_code = rpc_bytes(
+            &self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getCode",
+                    json!([lower_address(owner), format!("{block:#x}")]),
+                )
+                .await?,
+        )?;
+        if quote.protocol == "v4" {
+            let permit2 = address("0x000000000022d473030f116ddee9f6b43ac78ba3")?;
+            let underlying = self
+                .allowance(&quote.token_in, owner, permit2, Some(block))
+                .await?;
+            if underlying < u256(&quote.input)? || underlying == U256::MAX {
+                return Ok(TokenApproval);
+            }
+            let router = address(quote.router.as_deref().expect("configured router"))?;
+            let call = Permit2::allowanceCall {
+                owner,
+                token,
+                spender: router,
+            }
+            .abi_encode();
+            let response = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_call",
+                    json!([{"to":lower_address(permit2),"data":fin_evm::hex_bytes(&call)},format!("{block:#x}")]),
+                )
+                .await;
+            if let Ok(response) = response
+                && let Ok(bytes) = rpc_bytes(&response)
+                && let Ok(state) = Permit2::allowanceCall::abi_decode_returns(&bytes)
+                && U256::from(state.amount) >= u256(&quote.input)?
+                && state.amount < fin_evm::alloy::primitives::aliases::U160::MAX
+                && state.expiration.to::<u64>() > chrono::Utc::now().timestamp().max(0) as u64
+            {
+                return Ok(NoPermission);
+            }
+            return Ok(if owner_code.is_empty() {
+                Permit
+            } else {
+                TokenApproval
+            });
+        }
+        let router = address(quote.router.as_deref().expect("configured router"))?;
+        let allowance = self
+            .allowance(&quote.token_in, owner, router, Some(block))
+            .await?;
+        if allowance >= u256(&quote.input)? && allowance < U256::MAX {
+            return Ok(NoPermission);
+        }
+        if !owner_code.is_empty() {
+            return Ok(TokenApproval);
+        }
+        Ok(
+            if self.eip2612_nonce_at(token, owner, block).await.is_some() {
+                Permit
+            } else {
+                TokenApproval
+            },
+        )
+    }
+}
+
+fn spot_impact_bps(
+    input: U256,
+    output: U256,
+    sqrt_price_x96: U160,
+    zero_for_one: bool,
+    fee_ppm: u32,
+) -> u32 {
+    use fin_evm::alloy::primitives::U512;
+    let sqrt = U512::from(sqrt_price_x96);
+    let square = sqrt * sqrt;
+    let q192: U512 = U512::from(1u8) << 192;
+    let spot: U512 = if zero_for_one {
+        U512::from(input) * square / q192
+    } else {
+        U512::from(input) * q192 / square
+    };
+    let fee_denominator = U512::from(1_000_000u64);
+    let fee_retained = fee_denominator.saturating_sub(U512::from(fee_ppm));
+    if fee_retained.is_zero() {
+        return 10_000;
+    }
+    // Remove the pool fee from the observed output so impact describes curve
+    // movement; the fee remains independently bound by the selected tier.
+    let actual = U512::from(output) * fee_denominator / fee_retained;
+    if spot <= actual || spot.is_zero() {
+        return 0;
+    }
+    (((spot - actual) * U512::from(10_000u64)) / spot)
+        .try_into()
+        .unwrap_or(10_000)
+}
+
+/// Decode Uniswap v4's packed directional protocol fee and combine it with
+/// the pool's LP fee using ProtocolFeeLibrary.calculateSwapFee semantics.
+fn v4_swap_fee_ppm(packed_protocol_fee: u32, lp_fee_ppm: u32, zero_for_one: bool) -> Result<u32> {
+    let zero_for_one_fee = packed_protocol_fee & 0x0fff;
+    let one_for_zero_fee = (packed_protocol_fee >> 12) & 0x0fff;
+    require(
+        zero_for_one_fee <= 1_000 && one_for_zero_fee <= 1_000,
+        "V4_PROTOCOL_FEE_INVALID",
+        "StateView returned an invalid packed Uniswap v4 protocol fee.",
+    )?;
+    require(
+        lp_fee_ppm <= 1_000_000,
+        "V4_LP_FEE_INVALID",
+        "Uniswap v4 LP fee exceeds the pool fee denominator.",
+    )?;
+    let protocol_fee_ppm = if zero_for_one {
+        zero_for_one_fee
+    } else {
+        one_for_zero_fee
+    };
+    let cross_fee = protocol_fee_ppm * lp_fee_ppm / 1_000_000;
+    protocol_fee_ppm
+        .checked_add(lp_fee_ppm)
+        .and_then(|total| total.checked_sub(cross_fee))
+        .ok_or_else(|| {
+            error(
+                "V4_SWAP_FEE_INVALID",
+                "quote",
+                "Combined Uniswap v4 protocol and LP fee is invalid.",
+            )
+        })
+}
+
+impl EthereumAdapter {
+    pub(crate) async fn v3_weth(&self, block: Option<u64>) -> Result<Address> {
+        let router = address(&self.uniswap()?.router)?;
+        self.runtime.code_at(router, block).await?;
+        let weth = self
+            .runtime
+            .call(router, &V3RouterInfo::WETH9Call {}, block)
+            .await?;
+        require(
+            weth != Address::ZERO,
+            "WETH_DEPLOYMENT_INVALID",
+            "Configured v3 router returned a zero WETH9 address.",
+        )?;
+        self.runtime.code_at(weth, block).await?;
+        Ok(weth)
+    }
     pub async fn token(&self, reference: &str, block: Option<u64>) -> Result<Token> {
         if reference == "native" {
             return Ok(Token {
@@ -488,7 +845,7 @@ impl EthereumAdapter {
             "USD valuation requires the reviewed Aave USD base currency and unit.",
         )?;
         let reference = if token.reference == "native" {
-            address(self.weth()?)?
+            address(&self.resolved_weth(None).await?)?
         } else {
             address(&token.reference)?
         };
@@ -535,7 +892,7 @@ impl EthereumAdapter {
             }
         };
         let current = U256::from(self.oracle_clock.unix_seconds().await?);
-        let heartbeat = if reference == address(self.weth()?)? {
+        let heartbeat = if reference == address(&self.resolved_weth(None).await?)? {
             7200
         } else {
             86400
@@ -571,12 +928,99 @@ impl EthereumAdapter {
         tier: Option<u32>,
         block: Option<u64>,
     ) -> Result<SwapQuote> {
+        self.quote_protocol(ProtocolQuoteRequest {
+            input,
+            output,
+            amount: qty,
+            fee_tier: tier,
+            protocol: None,
+            v4_key: None,
+            block,
+        })
+        .await
+    }
+    pub(crate) async fn quote_protocol(
+        &self,
+        request: ProtocolQuoteRequest<'_>,
+    ) -> Result<SwapQuote> {
+        let ProtocolQuoteRequest {
+            input,
+            output,
+            amount: qty,
+            fee_tier: tier,
+            protocol,
+            v4_key,
+            block,
+        } = request;
+        let block_number = match block {
+            Some(number) => number,
+            None => rpc_u64(
+                &self
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?,
+        };
+        let block = Some(block_number);
+        let header = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([format!("{block_number:#x}"), false]),
+            )
+            .await?;
+        let block_hash = header["hash"].as_str().map(str::to_owned).ok_or_else(|| {
+            error(
+                "QUOTE_EVIDENCE_INVALID",
+                "preview",
+                "Pinned quote block has no hash.",
+            )
+        })?;
+        fin_evm::hash(&block_hash)?;
+        let observed_at = now();
+        let protocol = super::uniswap::Protocol::parse(protocol)?;
+        if protocol == super::uniswap::Protocol::V4 {
+            let mut quote = self
+                .quote_v4(
+                    input,
+                    output,
+                    qty,
+                    v4_key.ok_or_else(|| {
+                        error(
+                            "V4_POOL_REQUIRED",
+                            "validation",
+                            "Uniswap v4 requires an explicit pool key.",
+                        )
+                    })?,
+                    block,
+                )
+                .await?;
+            quote.observed_at = observed_at;
+            quote.block_number = block;
+            quote.block_hash = Some(block_hash);
+            quote.router = Some(configured_quote_router(self, "v4")?);
+            quote.permit2 = Some("0x000000000022d473030f116ddee9f6b43ac78ba3".into());
+            quote.permission_strategy = Some(if quote.token_in.reference == "native" {
+                "Native input is settled directly; no token allowance is needed. ERC-20 output is delivered to the wallet.".into()
+            } else {
+                "ERC-20 input needs a finite token allowance to canonical Permit2 and a finite Permit2 allowance to this v4 router. Finite existing authority is reused; an EOA may use a typed Permit2 permit for the router allowance, otherwise approve the missing finite layer explicitly.".into()
+            });
+            quote.permission_verification = Some("Router, Permit2, code and exact allowance state are not attested by this quote; preparation verifies the configured deployments and required authority before signing or submission.".into());
+            return Ok(quote);
+        }
+        require(
+            v4_key.is_none(),
+            "V4_POOL_UNEXPECTED",
+            "Uniswap v3 does not accept a v4 pool key.",
+        )?;
         let ti = self.token(input, block).await?;
         let to = self.token(output, block).await?;
         require(
-            ti.reference != "native" && to.reference != "native" && ti.reference != to.reference,
+            ti.reference != to.reference,
             "SWAP_ASSET_INVALID",
-            "Single-pool swaps require two distinct ERC-20 contracts.",
+            "Single-pool swaps require two distinct asset identities.",
         )?;
         let units = exact(qty, ti.decimals)?;
         require(
@@ -584,10 +1028,32 @@ impl EthereumAdapter {
             "ZERO_AMOUNT",
             "Swap input must be positive.",
         )?;
+        let weth = if ti.reference == "native" || to.reference == "native" {
+            Some(self.v3_weth(block).await?)
+        } else {
+            None
+        };
+        let pool_in = if ti.reference == "native" {
+            weth.expect("resolved WETH")
+        } else {
+            address(&ti.reference)?
+        };
+        let pool_out = if to.reference == "native" {
+            weth.expect("resolved WETH")
+        } else {
+            address(&to.reference)?
+        };
+        require(
+            pool_in != pool_out,
+            "SWAP_ASSET_INVALID",
+            "The v3 route resolves to the same pool currency.",
+        )?;
         self.runtime
-            .code(address(&self.uniswap()?.factory)?)
+            .code_at(address(&self.uniswap()?.factory)?, block)
             .await?;
-        self.runtime.code(address(&self.uniswap()?.quoter)?).await?;
+        self.runtime
+            .code_at(address(&self.uniswap()?.quoter)?, block)
+            .await?;
         let tiers = if let Some(t) = tier {
             vec![t]
         } else {
@@ -600,8 +1066,8 @@ impl EthereumAdapter {
                 .call(
                     address(&self.uniswap()?.factory)?,
                     &Factory::getPoolCall {
-                        tokenA: address(&ti.reference)?,
-                        tokenB: address(&to.reference)?,
+                        tokenA: pool_in,
+                        tokenB: pool_out,
                         fee: U24::from(fee),
                     },
                     block,
@@ -610,15 +1076,35 @@ impl EthereumAdapter {
             if pool == Address::ZERO {
                 continue;
             }
-            self.runtime.code(pool).await?;
+            self.runtime.code_at(pool, block).await?;
+            let pool_token0 = self
+                .runtime
+                .call(pool, &UniswapPool::token0Call {}, block)
+                .await?;
+            let pool_token1 = self
+                .runtime
+                .call(pool, &UniswapPool::token1Call {}, block)
+                .await?;
+            if !((pool_token0 == pool_in && pool_token1 == pool_out)
+                || (pool_token0 == pool_out && pool_token1 == pool_in))
+            {
+                continue;
+            }
+            let slot = self
+                .runtime
+                .call(pool, &UniswapPool::slot0Call {}, block)
+                .await?;
+            if slot.sqrtPriceX96.is_zero() {
+                continue;
+            }
             let quoted = self
                 .runtime
                 .call(
                     address(&self.uniswap()?.quoter)?,
                     &Quoter::quoteExactInputSingleCall {
                         params: Quoter::QuoteParams {
-                            tokenIn: address(&ti.reference)?,
-                            tokenOut: address(&to.reference)?,
+                            tokenIn: pool_in,
+                            tokenOut: pool_out,
                             amountIn: units,
                             fee: U24::from(fee),
                             sqrtPriceLimitX96: Default::default(),
@@ -640,15 +1126,181 @@ impl EthereumAdapter {
                     output: quantity(q.amountOut),
                     pool: lower_address(pool),
                     fee_tier: fee,
+                    swap_fee_ppm: Some(fee),
+                    protocol: "v3".into(),
+                    pool_key: None,
+                    pool_token_in: lower_address(pool_in),
+                    pool_token_out: lower_address(pool_out),
+                    price_impact_bps: spot_impact_bps(
+                        units,
+                        q.amountOut,
+                        slot.sqrtPriceX96,
+                        pool_in == pool_token0,
+                        fee,
+                    ),
+                    observed_at: observed_at.clone(),
+                    block_number: block,
+                    block_hash: Some(block_hash.clone()),
+                    router: None,
+                    permit2: None,
+                    permission_strategy: None,
+                    permission_verification: None,
+                    permission_requirement: None,
                 })
             }
         }
-        best.ok_or_else(|| {
+        let mut quote = best.ok_or_else(|| {
             error(
                 "QUOTE_UNAVAILABLE",
                 "preview",
                 "No reviewed single-pool fee tier returned a positive quote.",
             )
+        })?;
+        quote.router = Some(configured_quote_router(self, "v3")?);
+        quote.permission_strategy = Some(if quote.token_in.reference == "native" {
+            "Native input is wrapped by the reviewed v3 router; no token allowance is needed."
+                .into()
+        } else {
+            "ERC-20 input needs a finite allowance to the configured v3 router. Finite existing allowance is reused; an EOA may use an atomic EIP-2612 permit when the token supports it, otherwise approve a finite allowance explicitly.".into()
+        });
+        quote.permission_verification = Some("The configured router, token permit support and exact allowance state are verified during preparation; this quote does not attest them.".into());
+        Ok(quote)
+    }
+    async fn quote_v4(
+        &self,
+        input: &str,
+        output: &str,
+        qty: &str,
+        key: &super::V4PoolKey,
+        block: Option<u64>,
+    ) -> Result<SwapQuote> {
+        let ti = self.token(input, block).await?;
+        let to = self.token(output, block).await?;
+        require(
+            ti.reference != to.reference,
+            "SWAP_ASSET_INVALID",
+            "Swap assets must be distinct.",
+        )?;
+        let pool = super::uniswap::v4::pool_key(key)?;
+        let input_currency = if ti.reference == "native" {
+            Address::ZERO
+        } else {
+            address(&ti.reference)?
+        };
+        let output_currency = if to.reference == "native" {
+            Address::ZERO
+        } else {
+            address(&to.reference)?
+        };
+        let zero_for_one = if input_currency == pool.currency0 {
+            true
+        } else if input_currency == pool.currency1 {
+            false
+        } else {
+            return Err(error(
+                "V4_POOL_MISMATCH",
+                "validation",
+                "Input asset is not a currency in the selected v4 pool.",
+            ));
+        };
+        require(
+            output_currency
+                == if zero_for_one {
+                    pool.currency1
+                } else {
+                    pool.currency0
+                },
+            "V4_POOL_MISMATCH",
+            "Output asset does not match the selected v4 pool direction.",
+        )?;
+        let units = exact(qty, ti.decimals)?;
+        require(
+            units > U256::ZERO && units <= U256::from(u128::MAX),
+            "V4_AMOUNT_TOO_LARGE",
+            "Uniswap v4 amount must be positive and fit uint128.",
+        )?;
+        let config = self.uniswap()?.v4.as_ref().ok_or_else(|| {
+            error(
+                "OPERATION_UNAVAILABLE",
+                "validation",
+                "Uniswap v4 has no configured deployment on this network.",
+            )
+        })?;
+        let quoter = address(&config.quoter)?;
+        let manager = address(&config.pool_manager)?;
+        let router = address(&config.router)?;
+        let state_view = address(&config.state_view)?;
+        self.runtime.code_at(quoter, block).await?;
+        self.runtime.code_at(manager, block).await?;
+        self.runtime.code_at(router, block).await?;
+        self.runtime.code_at(state_view, block).await?;
+        let pool_id = super::uniswap::v4::pool_id(key)?;
+        let pool_hash = fin_evm::hash(&pool_id)?;
+        let slot = self
+            .runtime
+            .call(
+                state_view,
+                &V4StateView::getSlot0Call { poolId: pool_hash },
+                block,
+            )
+            .await?;
+        require(
+            !slot.sqrtPriceX96.is_zero() && slot.lpFee == U24::from(key.fee),
+            "V4_POOL_UNAVAILABLE",
+            "StateView does not confirm the selected v4 pool key and fixed fee.",
+        )?;
+        let swap_fee_ppm = v4_swap_fee_ppm(
+            slot.protocolFee.to::<u32>(),
+            slot.lpFee.to::<u32>(),
+            zero_for_one,
+        )?;
+        let quoted = self
+            .runtime
+            .call(
+                quoter,
+                &V4Quoter::quoteExactInputSingleCall {
+                    params: V4Quoter::QuoteExactSingleParams {
+                        poolKey: pool,
+                        zeroForOne: zero_for_one,
+                        exactAmount: units.to::<u128>(),
+                        hookData: fin_evm::alloy::primitives::Bytes::new(),
+                    },
+                },
+                block,
+            )
+            .await?;
+        require(
+            quoted.amountOut > U256::ZERO,
+            "QUOTE_UNAVAILABLE",
+            "The selected v4 pool returned no positive output.",
+        )?;
+        Ok(SwapQuote {
+            token_in: ti,
+            token_out: to,
+            input: quantity(units),
+            output: quantity(quoted.amountOut),
+            pool: pool_id,
+            fee_tier: key.fee,
+            swap_fee_ppm: Some(swap_fee_ppm),
+            protocol: "v4".into(),
+            pool_key: Some(key.clone()),
+            pool_token_in: lower_address(input_currency),
+            pool_token_out: lower_address(output_currency),
+            price_impact_bps: spot_impact_bps(
+                units,
+                quoted.amountOut,
+                slot.sqrtPriceX96,
+                zero_for_one,
+                swap_fee_ppm,
+            ),
+            observed_at: now(),
+            block_number: block,
+            block_hash: None,
+            router: None,
+            permit2: None,
+            permission_strategy: None,
+            permission_verification: None,
+            permission_requirement: None,
         })
     }
     pub(crate) async fn read_operation(&self, operation: &str, input: &Value) -> Result<Value> {
@@ -669,12 +1321,65 @@ impl EthereumAdapter {
                 .request("eth_blockNumber", json!([]))
                 .await?,
         )?;
+        let mut summary: Option<String> = None;
         let mut discovery = None;
         let data = match operation {
-            "wallet.token" => json!(
-                self.token(r.token.as_deref().expect("schema"), Some(block))
-                    .await?
-            ),
+            "wallet.token" => {
+                let token = self
+                    .token(r.token.as_deref().expect("schema"), Some(block))
+                    .await?;
+                let usd_valuation = self.wallet_usd_valuation_metadata(&token).await;
+                let eip2612 = if token.reference == "native" {
+                    json!({
+                        "supported":false,
+                        "verified":false,
+                        "reason":"Native assets do not use ERC-20 permits.",
+                        "chain_id":self.config.chain_id,
+                        "token":token.reference,
+                        "owner":lower_address(owner),
+                        "observed_block":block
+                    })
+                } else if let Ok(token_address) = address(&token.reference) {
+                    match self.eip2612_nonce_at(token_address, owner, block).await {
+                        Some((nonce, domain_separator)) => json!({
+                            "supported":true,
+                            "verified":true,
+                            "chain_id":self.config.chain_id,
+                            "token":lower_address(token_address),
+                            "owner":lower_address(owner),
+                            "nonce":quantity(nonce),
+                            "domain_separator":format!("{domain_separator:#x}"),
+                            "observed_block":block
+                        }),
+                        None => json!({
+                            "supported":false,
+                            "verified":false,
+                            "reason":"No standard EIP-2612 domain was verified for this token at the pinned block.",
+                            "chain_id":self.config.chain_id,
+                            "token":lower_address(token_address),
+                            "owner":lower_address(owner),
+                            "observed_block":block
+                        }),
+                    }
+                } else {
+                    json!({
+                        "supported":false,
+                        "verified":false,
+                        "reason":"Token identity is not a valid EVM address.",
+                        "chain_id":self.config.chain_id,
+                        "token":token.reference,
+                        "owner":lower_address(owner),
+                        "observed_block":block
+                    })
+                };
+                json!({
+                    "reference":token.reference,
+                    "decimals":token.decimals,
+                    "symbol":token.symbol,
+                    "eip2612":eip2612,
+                    "usd_valuation":usd_valuation
+                })
+            }
             "wallet.allowance" => {
                 let token = self
                     .token(r.token.as_deref().expect("schema"), Some(block))
@@ -682,6 +1387,7 @@ impl EthereumAdapter {
                 let spender = address(r.spender.as_deref().expect("schema"))?;
                 json!({"token":token,"spender":lower_address(spender),"units":quantity(self.allowance(&token,owner,spender,Some(block)).await?)})
             }
+            "wallet.permit2.allowance" => self.permit2_allowance(&r).await?,
             "wallet.balances" => {
                 let mut scope = self.wallet_tokens(&w.address, r.tokens.as_ref()).await?;
                 let ts = scope.candidates.clone();
@@ -724,16 +1430,41 @@ impl EthereumAdapter {
                     .await?;
                 json!({"receipt":receipt,"completion":"Raw receipt observation alone is not a verified operation."})
             }
-            "uniswap.quote" => json!(
-                self.quote(
-                    r.token_in.as_deref().expect("schema"),
-                    r.token_out.as_deref().expect("schema"),
-                    r.amount.as_deref().expect("schema"),
-                    r.fee_tier,
-                    Some(block)
-                )
-                .await?
-            ),
+            "uniswap.quote" => {
+                let mut quote = self
+                    .quote_protocol(ProtocolQuoteRequest {
+                        input: r.token_in.as_deref().expect("schema"),
+                        output: r.token_out.as_deref().expect("schema"),
+                        amount: r.amount.as_deref().expect("schema"),
+                        fee_tier: r.fee_tier,
+                        protocol: r.protocol.as_deref(),
+                        v4_key: r.v4_pool_key.as_ref(),
+                        block: Some(block),
+                    })
+                    .await?;
+                let permission = self.swap_permission_requirement(owner, &quote).await?;
+                quote.permission_requirement = Some(permission.clone());
+                quote.permission_strategy = Some(match permission.clone() {
+                    fin_amm::PermissionRequirement::None if quote.token_in.reference == "native" => "No ERC-20 allowance is needed because the swap input is native ETH.".into(),
+                    fin_amm::PermissionRequirement::None => "No new token authority is needed; the pinned quote block has sufficient finite allowance.".into(),
+                    fin_amm::PermissionRequirement::Permit if quote.protocol == "v4" => "The pinned quote block has sufficient finite token allowance to Permit2; a router-scoped Permit2 permit is available for an EOA wallet.".into(),
+                    fin_amm::PermissionRequirement::Permit => "The pinned quote block lacks sufficient finite router allowance; a verified EIP-2612 permit is available for an EOA wallet.".into(),
+                    fin_amm::PermissionRequirement::TokenApproval if quote.protocol == "v4" => "The pinned quote block requires a finite token allowance to Permit2 or a finite Permit2 allowance to the router.".into(),
+                    fin_amm::PermissionRequirement::TokenApproval => "The pinned quote block requires a finite ERC-20 allowance to the configured router.".into(),
+                });
+                quote.permission_verification = Some(format!(
+                    "Allowance and permit-method classification used pinned block {block}; preparation rechecks deployments, wallet capability and authority immediately before execution."
+                ));
+                let amm_quote = super::uniswap::as_amm_quote(
+                    self,
+                    resource(self.config.chain_id, owner),
+                    &quote,
+                    Quantity::zero(),
+                    permission,
+                )?;
+                summary = Some(fin_amm::format_quote(&amm_quote)?);
+                json!(quote)
+            }
             "aave.reserves" => {
                 let mut reserves = Vec::new();
                 for t in self.all_tokens(r.tokens.as_ref(), Some(block)).await? {
@@ -762,8 +1493,46 @@ impl EthereumAdapter {
             }
             _ => return Err(FinError::validation("Unsupported read.")),
         };
-        Ok(
-            json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data,"discovery":discovery}),
-        )
+        let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data,"discovery":discovery});
+        if let Some(summary) = summary {
+            result["summary"] = json!(summary);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod v4_fee_tests {
+    use super::{spot_impact_bps, v4_swap_fee_ppm};
+    use fin_evm::alloy::primitives::{U160, U256};
+
+    #[test]
+    fn directional_protocol_fee_combines_once_with_lp_fee_and_spot_impact() {
+        let packed = (900 << 12) | 125;
+        let zero_for_one = v4_swap_fee_ppm(packed, 500, true).unwrap();
+        let one_for_zero = v4_swap_fee_ppm(packed, 500, false).unwrap();
+        assert_eq!(zero_for_one, 625);
+        assert_eq!(one_for_zero, 1_400);
+
+        // At a 1:1 spot price, a quote reflecting exactly the 625 ppm
+        // combined fee has zero curve impact after that fee is removed.
+        // Passing only the 500 ppm LP fee would incorrectly count the
+        // 125 ppm protocol fee again as price impact.
+        let q96 = U160::from(1u8) << 96;
+        assert_eq!(
+            spot_impact_bps(
+                U256::from(1_000_000u64),
+                U256::from(999_375u64),
+                q96,
+                true,
+                zero_for_one,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_directional_protocol_fee_is_rejected() {
+        assert!(v4_swap_fee_ppm((1_001 << 12) | 1, 500, true).is_err());
     }
 }

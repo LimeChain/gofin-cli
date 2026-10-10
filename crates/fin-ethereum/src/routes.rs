@@ -440,13 +440,13 @@ impl EthereumAdapter {
         )?;
         self.runtime.assert_chain().await?;
         let reference = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
-            self.weth()?
+            self.resolved_weth(None).await?
         } else if operation == "uniswap.swap" {
-            r.token_in.as_deref().expect("schema")
+            r.token_in.as_deref().expect("schema").to_owned()
         } else {
-            r.token.as_deref().expect("schema")
+            r.token.as_deref().expect("schema").to_owned()
         };
-        let token = self.token(reference, None).await?;
+        let token = self.token(&reference, None).await?;
         let principal = if operation == "wallet.wrap" {
             self.native_asset()
         } else {

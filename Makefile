@@ -6,8 +6,9 @@ DEV_MODE ?= synthetic
 DEV_CREDENTIALS_FILE ?=
 DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
+AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-amm-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -23,6 +24,7 @@ help:
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
+	  'make test-amm-fork     Owned v3/v4 forks on reviewed networks; AMM_FORK_ARGS="--chain ID" selects one' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
 	  'make test              Full offline Rust test suite' \
@@ -68,14 +70,19 @@ test-dev-env:
 	@python3 scripts/test-dev-runtime.py
 	@python3 scripts/test-fork-runner.py
 	@python3 scripts/test-base-aave-fork-runner.py
+	@python3 scripts/test-amm-fork-runner.py
 	@python3 scripts/test-dev-workflow.py
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh
 
+test-amm-fork:
+	@python3 scripts/verify-amm-fork.py $(AMM_FORK_ARGS)
+
 test-integration: test-dev-env
 	@cargo test --locked -p fin-broker -p fin-engine -p fin-store -p fin-authorization -p fin-human-terminal
 	@python3 scripts/test-rust-macos-installer.py
+	@python3 scripts/test-runtime-store-compatibility.py
 	@python3 scripts/test-rust-macos-runtime-update.py
 	@python3 scripts/test-rust-macos-uninstall.py
 

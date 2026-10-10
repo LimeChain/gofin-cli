@@ -81,16 +81,14 @@ These are API mapping notes, not permission to expose arbitrary signed venue met
    blocked rather than inferred from the chain observer.
 8. Reconcile source, main-account, and destination balances, fees, and any remaining in-flight funds. This establishes the outward leg; complete the return sequence below before marking the live run passed.
 
-The one-block sequencer rule applies only to receipt verification for an
-external Binance withdrawal to an Arbitrum or Robinhood recipient. It verifies
-the original transaction hash, chain and canonical block header, recipient,
-asset and expected net amount, plus the historical recipient holdings evidence.
-Its label is sequencer inclusion; it does not claim parent-chain finality.
-Fin-originated wallet transfers and Binance deposits keep their existing
-RPC-finality rule. Their pending submissions continue to reconcile against the
-same original operation ID after a restart or lost response. The L2 cases are
-synthetic verification here; they do not establish live settlement or extend
-the current production Ethereum-mainnet live-test contract.
+All reviewed rollup writes and external credits use canonical sequencer
+inclusion. This includes Binance withdrawals, wallet transfers and Binance
+deposits on Arbitrum or Robinhood. Verify the original hash, chain, canonical
+header, recipient, asset and expected amount, with application-specific effects
+and cost evidence. The label is `sequencer-inclusion`, not parent-chain finality.
+Pending submissions reconcile under the original operation ID after restart or
+response loss. Route availability remains independent; synthetic L2 verification
+does not establish live Binance settlement or a Robinhood withdrawal route.
 
 A blockchain receipt alone is insufficient if the asset or recipient is wrong. Balance changes alone may also be ambiguous when unrelated activity occurs; correlate them with transfer history, identifiers, and transaction/event evidence.
 

@@ -1,15 +1,27 @@
+// This module consists solely of deployed ABI declarations. Alloy-generated
+// methods must preserve the protocols' fixed positional function signatures.
+#![allow(clippy::too_many_arguments)]
+
 use fin_evm::alloy::sol;
 sol! {
     interface Erc20 {
         function decimals() external view returns (uint8 value);
         function symbol() external view returns (string value);
+        function name() external view returns (string value);
+        function version() external view returns (string value);
         function balanceOf(address owner) external view returns (uint256 value);
         function totalSupply() external view returns (uint256 value);
         function allowance(address owner,address spender) external view returns (uint256 value);
+        function nonces(address owner) external view returns (uint256 value);
+        function DOMAIN_SEPARATOR() external view returns (bytes32 value);
         function transfer(address to,uint256 amount) external returns (bool value);
         function approve(address spender,uint256 amount) external returns (bool value);
         event Transfer(address indexed from,address indexed to,uint256 value);
         event Approval(address indexed owner,address indexed spender,uint256 value);
+    }
+    interface Permit2 {
+        function allowance(address owner,address token,address spender) external view returns (uint160 amount,uint48 expiration,uint48 nonce);
+        event Permit(address indexed owner,address indexed token,address indexed spender,uint160 amount,uint48 expiration,uint48 nonce);
     }
     interface Bytes32Symbol { function symbol() external view returns (bytes32 value); }
     interface Weth {
@@ -26,6 +38,40 @@ sol! {
     interface Router {
         struct SwapParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
         function exactInputSingle(SwapParams params) external payable returns (uint256 amountOut);
+        function selfPermit(address token,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s) external;
+    }
+    interface SwapRouter02 {
+        struct SwapParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
+        function exactInputSingle(SwapParams params) external payable returns (uint256 amountOut);
+        function selfPermit(address token,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s) external;
+        function multicall(uint256 deadline, bytes[] data) external payable returns (bytes[] results);
+        function unwrapWETH9(uint256 amountMinimum,address recipient) external payable;
+    }
+    interface LegacyRouterPayments {
+        function multicall(bytes[] data) external payable returns (bytes[] results);
+        function unwrapWETH9(uint256 amountMinimum,address recipient) external payable;
+    }
+    interface V3RouterInfo { function WETH9() external view returns (address value); }
+    interface V4Quoter {
+        struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }
+        struct QuoteExactSingleParams { PoolKey poolKey; bool zeroForOne; uint128 exactAmount; bytes hookData; }
+        function quoteExactInputSingle(QuoteExactSingleParams params) external returns (uint256 amountOut,uint256 gasEstimate);
+    }
+    interface UniversalRouter {
+        struct V4ExactInputSingle { V4Quoter.PoolKey poolKey; bool zeroForOne; uint128 amountIn; uint128 amountOutMinimum; uint256 minHopPriceX36; bytes hookData; }
+        struct V4ExactInputSingleLegacy { V4Quoter.PoolKey poolKey; bool zeroForOne; uint128 amountIn; uint128 amountOutMinimum; bytes hookData; }
+        function execute(bytes commands,bytes[] inputs,uint256 deadline) external payable;
+        function encodeV4Swap(bytes actions,bytes[] params) external pure;
+        function encodeV4Single(V4Quoter.PoolKey poolKey,bool zeroForOne,uint128 amountIn,uint128 amountOutMinimum,uint256 minHopPriceX36,bytes hookData) external pure;
+        function encodeV4SingleLegacy(V4Quoter.PoolKey poolKey,bool zeroForOne,uint128 amountIn,uint128 amountOutMinimum,bytes hookData) external pure;
+        function encodeSettleAll(address currency,uint256 maximumAmount) external pure;
+        function encodeTakeAll(address currency,uint256 minimumAmount) external pure;
+    }
+    interface V4PoolManager {
+        event Swap(bytes32 indexed id,address indexed sender,int128 amount0,int128 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick,uint24 fee);
+    }
+    interface V4StateView {
+        function getSlot0(bytes32 poolId) external view returns (uint160 sqrtPriceX96,int24 tick,uint24 protocolFee,uint24 lpFee);
     }
     interface Pool {
         function ADDRESSES_PROVIDER() external view returns (address value);
@@ -53,6 +99,9 @@ sol! {
         event Mint(address indexed caller,address indexed onBehalfOf,uint256 value,uint256 balanceIncrease,uint256 index);
     }
     interface UniswapPool {
+        function token0() external view returns (address value);
+        function token1() external view returns (address value);
+        function slot0() external view returns (uint160 sqrtPriceX96,int24 tick,uint16 observationIndex,uint16 observationCardinality,uint16 observationCardinalityNext,uint8 feeProtocol,bool unlocked);
         event Swap(address indexed sender,address indexed recipient,int256 amount0,int256 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick);
     }
     interface AddressesProvider {

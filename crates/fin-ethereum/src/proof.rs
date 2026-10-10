@@ -60,6 +60,40 @@ fn transfers(receipt: &Value, token: Address, from: Address, to: Address) -> Res
     }
     Ok(total)
 }
+fn verify_native_input_weth_settlement(
+    receipt: &Value,
+    weth: Address,
+    router: Address,
+    pool: Address,
+    amount: U256,
+) -> Result<()> {
+    let deposit = events::<Weth::Deposit>(receipt, weth)?
+        .iter()
+        .any(|event| event.dst == router && event.wad == amount);
+    let mint = transfers(receipt, weth, Address::ZERO, router)? == amount;
+    require(
+        (deposit || mint) && transfers(receipt, weth, router, pool)? == amount,
+        "SWAP_NATIVE_INPUT_MISMATCH",
+        "Native input lacks exact router WETH mint/deposit and pool transfer proof.",
+    )
+}
+fn verify_native_output_weth_settlement(
+    receipt: &Value,
+    weth: Address,
+    pool: Address,
+    router: Address,
+    amount: U256,
+) -> Result<()> {
+    let withdrawal = events::<Weth::Withdrawal>(receipt, weth)?
+        .iter()
+        .any(|event| event.src == router && event.wad == amount);
+    let burn = transfers(receipt, weth, router, Address::ZERO)? == amount;
+    require(
+        transfers(receipt, weth, pool, router)? == amount && (withdrawal || burn),
+        "SWAP_NATIVE_OUTPUT_MISMATCH",
+        "Native output lacks exact pool WETH transfer and router WETH burn/unwrap proof.",
+    )
+}
 fn exact_one<T>(events: Vec<T>) -> Result<T> {
     require(
         events.len() == 1,
@@ -68,13 +102,16 @@ fn exact_one<T>(events: Vec<T>) -> Result<T> {
     )?;
     Ok(events.into_iter().next().expect("one"))
 }
-
 fn external_credit_rpc_error(mut error: FinError, method: &str) -> FinError {
     // Surface the reviewed RPC method in sanitized reconciliation evidence so
     // an operator can distinguish a transient read failure from an unsupported
     // proof layout. Never include the configured endpoint or request payload.
     error.stage = format!("external-credit:{method}");
     error
+}
+
+fn qty_if(condition: bool, quantity: U256) -> U256 {
+    if condition { quantity } else { U256::ZERO }
 }
 /// Accrued expenses are accounted before principal; carry unpaid amounts across partial repayments.
 pub(crate) fn settle_debt_costs(
@@ -210,16 +247,25 @@ impl EthereumAdapter {
         maximum_amount: &str,
         confirmations: u32,
     ) -> Result<ExternalCredit> {
-        // Reviewed Arbitrum One and Robinhood Chain proofs accept canonical
-        // sequencer inclusion without waiting for the Ethereum L1 finalized tag.
+        // External and Fin-originated writes share the reviewed rollup
+        // completion policy: canonical sequencer inclusion plus configured
+        // confirmations, without an Ethereum L1 finalized-tag wait.
         let sequencer_inclusion =
-            EthereumConfig::external_credit_uses_sequencer(self.config.chain_id);
+            EthereumConfig::is_reviewed_sequencer_rollup(self.config.chain_id);
         require(
             confirmations > 0
                 && (sequencer_inclusion || u64::from(confirmations) >= self.config.confirmations),
             "FINALITY_LIMIT",
             "External funding proof cannot weaken the configured confirmation floor on this network.",
         )?;
+        // Older durable payout requests can retain a higher confirmation
+        // count. For reviewed rollups, current protected configuration is the
+        // floor and is expected to be one sequencer-included block.
+        let required_confirmations = if sequencer_inclusion {
+            self.config.confirmations
+        } else {
+            u64::from(confirmations)
+        };
         require(
             asset.network == format!("ethereum:{}", self.config.chain_id),
             "WRONG_CHAIN",
@@ -316,10 +362,10 @@ impl EthereumAdapter {
         } else {
             0
         };
-        if observed_confirmations < u64::from(confirmations) {
+        if observed_confirmations < required_confirmations {
             return Ok(pending());
         }
-        if self.config.require_finalized && !sequencer_inclusion {
+        if self.config.requires_rpc_finalized() {
             let finalized = self
                 .runtime
                 .rpc
@@ -369,7 +415,7 @@ impl EthereumAdapter {
             "FUNDING_STATUS_INVALID",
             "Funding receipt status is not success or revert.",
         )?;
-        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true,"finality":if sequencer_inclusion {"sequencer-inclusion"} else if self.config.require_finalized {"rpc-finalized"} else {"confirmation-count"}});
+        let evidence = json!({"original_hash":tx_hash,"chain_id":self.config.chain_id,"block":block,"block_hash":format!("{block_hash:#x}"),"confirmations":observed_confirmations,"recipient":lower_address(recipient),"asset":asset,"canonical_confirmed":true,"finality":self.config.finality_label()});
         if status == 0 {
             if sequencer_inclusion
                 && !self
@@ -516,13 +562,25 @@ impl EthereumAdapter {
             "BINDING_IDENTITY_MISMATCH",
             "Record operation/input differs from original preview.",
         )?;
-        let b: Binding = serde_json::from_value(preview.binding.clone()).map_err(|_| {
+        let mut b: Binding = serde_json::from_value(preview.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
                 "reconciliation",
                 "Original transaction binding is malformed.",
             )
         })?;
+        let submitted: FrozenTransaction =
+            serde_json::from_value(submission.data["transaction"].clone()).map_err(|_| {
+                error(
+                    "SUBMISSION_IDENTITY_MISMATCH",
+                    "reconciliation",
+                    "Durable transaction envelope is malformed.",
+                )
+            })?;
+        if let Some(template) = &b.permit_template {
+            fin_evm::validate_materialized_permit_template(template, &submitted)?;
+            b.transaction = submitted;
+        }
         require(
             submission.data["transaction"]
                 == serde_json::to_value(&b.transaction).expect("serializable")
@@ -545,7 +603,7 @@ impl EthereumAdapter {
                 });
             }
         };
-        if self.config.require_finalized {
+        if self.config.requires_rpc_finalized() {
             let finalized = self
                 .runtime
                 .rpc
@@ -596,10 +654,17 @@ impl EthereumAdapter {
             category: "ethereum_gas".into(),
             treatment: CostTreatment::AdditionalDebit,
         }];
-        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":if self.config.require_finalized {"rpc-finalized"} else if EthereumConfig::external_credit_uses_sequencer(self.config.chain_id) {"sequencer-inclusion"} else {"confirmation-count"}});
+        let mut details = json!({"block_number":receipt.block_number,"block_hash":format!("{:#x}",receipt.block_hash),"confirmations":receipt.confirmations,"original_hash":submission.reference,"original_envelope_verified":true,"success":receipt.success,"fee_wei":quantity(receipt.fee),"finality":self.config.finality_label()});
         if receipt.success {
             self.success_effects(&record.operation, &b, &receipt, &mut effects, &mut details)
                 .await?;
+        }
+        if !self.inclusion_still_canonical(&receipt).await? {
+            return Ok(Reconciliation {
+                status: Status::Pending,
+                evidence: json!({"original_hash":submission.reference,"canonical_confirmed":false,"finality":"inclusion-changed"}),
+                verified: None,
+            });
         }
         let mut bundle = VerifiedEffects {
             evidence_version: 1,
@@ -619,6 +684,24 @@ impl EthereumAdapter {
             evidence: details,
             verified: Some(bundle),
         })
+    }
+    // Pinned post-state reads must belong to the same canonical inclusion even
+    // if a provider observes a reorg while assembling protocol evidence.
+    pub(crate) async fn inclusion_still_canonical(
+        &self,
+        receipt: &CanonicalReceipt,
+    ) -> Result<bool> {
+        let block = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([fin_evm::block_tag(Some(receipt.block_number)), false]),
+            )
+            .await?;
+        Ok(!block.is_null()
+            && block["hash"] == json!(format!("{:#x}", receipt.block_hash))
+            && fin_evm::rpc_u64(&block["number"])? == receipt.block_number)
     }
     async fn success_effects(
         &self,
@@ -653,7 +736,7 @@ impl EthereumAdapter {
                 });
             }
             "wallet.wrap" | "wallet.unwrap" => {
-                let weth = address(self.weth()?)?;
+                let weth = address(&self.resolved_weth(Some(r.block_number)).await?)?;
                 if operation == "wallet.wrap" {
                     let e = exact_one(
                         events::<Weth::Deposit>(receipt, weth)?
@@ -718,29 +801,302 @@ impl EthereumAdapter {
                 });
             }
             "uniswap.swap" => {
-                let pool = address(b.pool.as_deref().expect("pool"))?;
                 let recipient = address(b.recipient.as_deref().expect("recipient"))?;
                 let router = address(&b.transaction.to)?;
-                let swap = exact_one(
-                    events::<UniswapPool::Swap>(receipt, pool)?
-                        .into_iter()
-                        .filter(|e| e.sender == router && e.recipient == recipient)
-                        .collect(),
-                )?;
+                let route_in = address(b.route_token_in.as_deref().expect("route input"))?;
+                let route_out = address(b.route_token_out.as_deref().expect("route output"))?;
+                let v4 = b.protocol.as_deref() == Some("v4");
+                let (pool, token0, token1, amount0_positive, amount0, amount1_positive, amount1) =
+                    if v4 {
+                        let key = b.v4_pool_key.as_ref().ok_or_else(|| {
+                            error(
+                                "BINDING_INVALID",
+                                "reconciliation",
+                                "V4 swap lacks its immutable pool key.",
+                            )
+                        })?;
+                        let pool = address(
+                            &self
+                                .uniswap()?
+                                .v4
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    error(
+                                        "OPERATION_UNAVAILABLE",
+                                        "reconciliation",
+                                        "V4 deployment is no longer configured.",
+                                    )
+                                })?
+                                .pool_manager,
+                        )?;
+                        let id = fin_evm::hash(&super::uniswap::v4::pool_id(key)?)?;
+                        let event = exact_one(
+                            events::<V4PoolManager::Swap>(receipt, pool)?
+                                .into_iter()
+                                .filter(|e| e.id == id && e.sender == router)
+                                .collect(),
+                        )?;
+                        (
+                            pool,
+                            address(&key.currency0)?,
+                            address(&key.currency1)?,
+                            event.amount0.is_positive(),
+                            U256::from(event.amount0.unsigned_abs()),
+                            event.amount1.is_positive(),
+                            U256::from(event.amount1.unsigned_abs()),
+                        )
+                    } else {
+                        let pool = address(b.pool.as_deref().expect("pool"))?;
+                        let token0 = self
+                            .runtime
+                            .call(pool, &UniswapPool::token0Call {}, Some(r.block_number))
+                            .await?;
+                        let token1 = self
+                            .runtime
+                            .call(pool, &UniswapPool::token1Call {}, Some(r.block_number))
+                            .await?;
+                        let event = exact_one(
+                            events::<UniswapPool::Swap>(receipt, pool)?
+                                .into_iter()
+                                .filter(|e| {
+                                    e.sender == router
+                                        && (e.recipient == recipient
+                                            || (b
+                                                .output
+                                                .as_ref()
+                                                .is_some_and(|a| a.reference == "native")
+                                                && e.recipient == router))
+                                })
+                                .collect(),
+                        )?;
+                        (
+                            pool,
+                            token0,
+                            token1,
+                            event.amount0.is_positive(),
+                            event.amount0.unsigned_abs(),
+                            event.amount1.is_positive(),
+                            event.amount1.unsigned_abs(),
+                        )
+                    };
                 require(
-                    (swap.amount0.is_positive() && swap.amount1.is_negative())
-                        || (swap.amount1.is_positive() && swap.amount0.is_negative()),
-                    "SWAP_PROOF_MISMATCH",
-                    "Pool swap event does not contain one input and one output.",
+                    (route_in == token0 && route_out == token1)
+                        || (route_in == token1 && route_out == token0),
+                    "SWAP_POOL_ASSETS_MISMATCH",
+                    "Receipt pool currencies differ from the reviewed swap route.",
+                )?;
+                let (in_positive, input_atoms, out_positive, output_atoms) = if route_in == token0 {
+                    (amount0_positive, amount0, amount1_positive, amount1)
+                } else {
+                    (amount1_positive, amount1, amount0_positive, amount0)
+                };
+                // V3 Swap events report pool balance movement (input positive,
+                // output negative). V4 PoolManager reports the caller's signed
+                // BalanceDelta, so an exact-input swap has input negative and
+                // output positive.
+                let input_direction_matches = if v4 {
+                    !in_positive && out_positive
+                } else {
+                    in_positive && !out_positive
+                };
+                require(
+                    input_direction_matches && input_atoms == qty,
+                    "SWAP_POOL_LEG_MISMATCH",
+                    "Pool receipt event does not prove the exact input and opposite output direction.",
                 )?;
                 let output = b.output.as_ref().expect("output");
-                let credited = transfers(receipt, address(&output.reference)?, pool, recipient)?;
+                let native_input = b.token.reference == "native";
+                let native_output = output.reference == "native";
+                if native_input {
+                    require(
+                        u256(&b.transaction.value)? == qty,
+                        "SWAP_NATIVE_INPUT_MISMATCH",
+                        "Frozen transaction value differs from exact native swap input.",
+                    )?;
+                    if !v4 {
+                        let weth = address(b.route_token_in.as_deref().expect("wrapped input"))?;
+                        verify_native_input_weth_settlement(receipt, weth, router, pool, qty)?;
+                    }
+                } else {
+                    require(
+                        u256(&b.transaction.value)?.is_zero()
+                            && transfers(receipt, token_addr, owner, pool)? == qty,
+                        "SWAP_INPUT_CASH_MISMATCH",
+                        "Receipt lacks exact ERC-20 input cash transfer to the pool.",
+                    )?;
+                }
+                let credited = if native_output {
+                    if !v4 {
+                        let weth = address(b.route_token_out.as_deref().expect("wrapped output"))?;
+                        verify_native_output_weth_settlement(
+                            receipt,
+                            weth,
+                            pool,
+                            router,
+                            output_atoms,
+                        )?;
+                    }
+                    output_atoms
+                } else {
+                    let amount_out =
+                        transfers(receipt, address(&output.reference)?, pool, recipient)?;
+                    require(
+                        amount_out == output_atoms,
+                        "SWAP_OUTPUT_CASH_MISMATCH",
+                        "Output token cash transfer differs from its pool event amount.",
+                    )?;
+                    amount_out
+                };
                 require(
-                    transfers(receipt, token_addr, owner, pool)? == qty
-                        && credited >= u256(b.minimum_output.as_ref().expect("minimum"))?,
+                    credited >= u256(b.minimum_output.as_ref().expect("minimum"))?,
                     "SWAP_PROOF_MISMATCH",
-                    "Pool cash legs differ from exact input or minimum output.",
+                    "Pool cash legs are below the approved minimum output.",
                 )?;
+                if native_input || native_output {
+                    self.verify_native_swap_balance(
+                        owner,
+                        r,
+                        qty_if(native_input, qty),
+                        qty_if(native_output, credited),
+                    )
+                    .await?;
+                }
+                if let Some(template) = &b.permit_template {
+                    match template.permit() {
+                        fin_evm::AuthorizedPermit::Eip2612(permit) => {
+                            let permit_token = address(&permit.token)?;
+                            let permit_owner = address(&permit.owner)?;
+                            let spender = address(&permit.spender)?;
+                            let permit_approvals =
+                                events::<Erc20::Approval>(receipt, permit_token)?
+                                    .into_iter()
+                                    .filter(|event| {
+                                        event.owner == permit_owner
+                                            && event.spender == spender
+                                            && event.value == qty
+                                    })
+                                    .count();
+                            let post = self
+                                .runtime
+                                .call(
+                                    permit_token,
+                                    &Erc20::allowanceCall {
+                                        owner: permit_owner,
+                                        spender,
+                                    },
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            let nonce_after = self
+                                .runtime
+                                .call(
+                                    permit_token,
+                                    &Erc20::noncesCall {
+                                        owner: permit_owner,
+                                    },
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            let nonce_before = u256(&permit.nonce)?;
+                            require(
+                                nonce_before < U256::MAX
+                                    && permit_approvals > 0
+                                    && post == U256::ZERO
+                                    && nonce_after == nonce_before + U256::from(1),
+                                "PERMIT_AUTHORITY_PROOF_MISMATCH",
+                                "EIP-2612 event, nonce and inclusion-block allowance differ from the typed finite permit.",
+                            )?;
+                            effects.push(FinancialEffect::AuthorityChange {
+                                resource: b.resource.clone(),
+                                authority: authority(&permit.token, &permit.spender),
+                                before: b
+                                    .allowance_before
+                                    .clone()
+                                    .unwrap_or_else(Quantity::zero)
+                                    .to_string(),
+                                after: Quantity::zero().to_string(),
+                            });
+                        }
+                        fin_evm::AuthorizedPermit::Permit2Single(permit) => {
+                            let permit2 = address(&permit.verifying_contract)?;
+                            let permit_owner = address(&permit.owner)?;
+                            let permit_token = address(&permit.token)?;
+                            let spender = address(&permit.spender)?;
+                            let nonce =
+                                fin_evm::alloy::primitives::aliases::U48::from(permit.nonce);
+                            let expiration =
+                                fin_evm::alloy::primitives::aliases::U48::from(permit.expiration);
+                            let amount_u256 = u256(&permit.amount)?;
+                            let amount_max =
+                                U256::from(fin_evm::alloy::primitives::aliases::U160::MAX);
+                            require(
+                                amount_u256 <= amount_max,
+                                "PERMIT_AUTHORITY_PROOF_MISMATCH",
+                                "Permit2 amount exceeds uint160.",
+                            )?;
+                            let limbs = amount_u256.into_limbs();
+                            let amount = fin_evm::alloy::primitives::aliases::U160::from_limbs([
+                                limbs[0], limbs[1], limbs[2],
+                            ]);
+                            exact_one(
+                                events::<Permit2::Permit>(receipt, permit2)?
+                                    .into_iter()
+                                    .filter(|event| {
+                                        event.owner == permit_owner
+                                            && event.token == permit_token
+                                            && event.spender == spender
+                                            && event.amount == amount
+                                            && event.expiration == expiration
+                                            && event.nonce == nonce
+                                    })
+                                    .collect(),
+                            )?;
+                            let post = self
+                                .runtime
+                                .call(
+                                    permit2,
+                                    &Permit2::allowanceCall {
+                                        owner: permit_owner,
+                                        token: permit_token,
+                                        spender,
+                                    },
+                                    Some(r.block_number),
+                                )
+                                .await?;
+                            let before = b.permit2_allowance_before.as_ref().ok_or_else(|| {
+                                error(
+                                    "BINDING_INVALID",
+                                    "reconciliation",
+                                    "Permit2 swap lacks its original allowance state.",
+                                )
+                            })?;
+                            require(
+                                U256::from(post.amount).is_zero()
+                                    && post.expiration == expiration
+                                    && post.nonce.to::<u64>() == permit.nonce + 1,
+                                "PERMIT_AUTHORITY_PROOF_MISMATCH",
+                                "Permit2 event and inclusion-block allowance differ from the typed finite permit.",
+                            )?;
+                            effects.push(FinancialEffect::AuthorityChange {
+                                resource: b.resource.clone(),
+                                authority: super::permit2::approval_authority(
+                                    &b.token,
+                                    &permit.spender,
+                                ),
+                                before: super::permit2::allowance_state_text(
+                                    &before.amount,
+                                    before.expiration,
+                                    before.nonce,
+                                ),
+                                after: super::permit2::allowance_state_text(
+                                    &Quantity::zero(),
+                                    permit.expiration,
+                                    permit.nonce + 1,
+                                ),
+                            });
+                        }
+                    }
+                }
                 effects.push(FinancialEffect::Conversion {
                     resource: b.resource.clone(),
                     spent: amount(&b.token, qty),
@@ -1478,6 +1834,58 @@ impl EthereumAdapter {
         }
         Ok(())
     }
+
+    async fn verify_native_swap_balance(
+        &self,
+        owner: Address,
+        receipt: &CanonicalReceipt,
+        native_input: U256,
+        native_output: U256,
+    ) -> Result<()> {
+        require(
+            receipt.block_number > 0,
+            "NATIVE_SWAP_POSTSTATE_UNAVAILABLE",
+            "Native swap proof needs a parent inclusion block.",
+        )?;
+        let block = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([format!("{:#x}", receipt.block_number), true]),
+            )
+            .await?;
+        let transactions = block["transactions"].as_array().ok_or_else(|| {
+            error(
+                "NATIVE_SWAP_POSTSTATE_UNAVAILABLE",
+                "reconciliation",
+                "Inclusion block lacks transaction details for native balance attribution.",
+            )
+        })?;
+        let sender_txs = transactions
+            .iter()
+            .filter(|tx| address(tx["from"].as_str().unwrap_or("")).is_ok_and(|from| from == owner))
+            .collect::<Vec<_>>();
+        require(
+            sender_txs.len() == 1 && sender_txs[0]["hash"] == json!(format!("{:#x}", receipt.hash)),
+            "NATIVE_SWAP_POSTSTATE_AMBIGUOUS",
+            "Wallet has another transaction in the inclusion block, so native balance change cannot be attributed safely.",
+        )?;
+        let before = self
+            .runtime
+            .balance(owner, Some(receipt.block_number - 1))
+            .await?;
+        let after = self
+            .runtime
+            .balance(owner, Some(receipt.block_number))
+            .await?;
+        require(
+            add(before, native_output)? == add(add(after, receipt.fee)?, native_input)?,
+            "NATIVE_SWAP_POSTSTATE_MISMATCH",
+            "Inclusion-block native balance change does not match the verified swap leg, exact native input and receipt gas.",
+        )?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1485,4 +1893,209 @@ pub struct ExternalCredit {
     pub status: Status,
     pub amount_atoms: Option<Quantity>,
     pub evidence: Value,
+}
+
+#[cfg(test)]
+mod native_weth_settlement_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn log<E: SolEvent>(emitter: Address, event: E) -> Value {
+        let encoded = event.encode_log_data();
+        json!({
+            "address": format!("{emitter:#x}"),
+            "topics": encoded.topics().iter().map(|topic| format!("{topic:#x}")).collect::<Vec<_>>(),
+            "data": format!("0x{}", hex::encode(&encoded.data)),
+            "removed": false,
+            "transactionHash": format!("0x{}", "11".repeat(32)),
+            "blockHash": format!("0x{}", "22".repeat(32)),
+            "blockNumber": "0x1",
+        })
+    }
+
+    fn receipt(logs: Vec<Value>) -> Value {
+        json!({
+            "transactionHash": format!("0x{}", "11".repeat(32)),
+            "blockHash": format!("0x{}", "22".repeat(32)),
+            "blockNumber": "0x1",
+            "logs": logs,
+        })
+    }
+
+    fn a(byte: u8) -> Address {
+        Address::from([byte; 20])
+    }
+
+    #[test]
+    fn native_input_accepts_deposit_or_exact_router_mint() {
+        let (weth, router, pool) = (a(10), a(11), a(12));
+        let amount = U256::from(100);
+        let pool_transfer = log(
+            weth,
+            Erc20::Transfer {
+                from: router,
+                to: pool,
+                value: amount,
+            },
+        );
+        let deposit = log(
+            weth,
+            Weth::Deposit {
+                dst: router,
+                wad: amount,
+            },
+        );
+        assert!(
+            verify_native_input_weth_settlement(
+                &receipt(vec![deposit, pool_transfer.clone()]),
+                weth,
+                router,
+                pool,
+                amount,
+            )
+            .is_ok()
+        );
+
+        let mint = log(
+            weth,
+            Erc20::Transfer {
+                from: Address::ZERO,
+                to: router,
+                value: amount,
+            },
+        );
+        assert!(
+            verify_native_input_weth_settlement(
+                &receipt(vec![mint.clone(), pool_transfer.clone()]),
+                weth,
+                router,
+                pool,
+                amount,
+            )
+            .is_ok()
+        );
+
+        let wrong_mint = log(
+            weth,
+            Erc20::Transfer {
+                from: Address::ZERO,
+                to: router,
+                value: amount + U256::from(1),
+            },
+        );
+        assert!(
+            verify_native_input_weth_settlement(
+                &receipt(vec![wrong_mint, pool_transfer.clone()]),
+                weth,
+                router,
+                pool,
+                amount,
+            )
+            .is_err()
+        );
+        let wrong_pool_amount = log(
+            weth,
+            Erc20::Transfer {
+                from: router,
+                to: pool,
+                value: amount - U256::from(1),
+            },
+        );
+        assert!(
+            verify_native_input_weth_settlement(
+                &receipt(vec![mint, wrong_pool_amount]),
+                weth,
+                router,
+                pool,
+                amount,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_output_accepts_withdrawal_or_exact_router_burn() {
+        let (weth, pool, router) = (a(20), a(21), a(22));
+        let amount = U256::from(200);
+        let pool_transfer = log(
+            weth,
+            Erc20::Transfer {
+                from: pool,
+                to: router,
+                value: amount,
+            },
+        );
+        let withdrawal = log(
+            weth,
+            Weth::Withdrawal {
+                src: router,
+                wad: amount,
+            },
+        );
+        assert!(
+            verify_native_output_weth_settlement(
+                &receipt(vec![pool_transfer.clone(), withdrawal]),
+                weth,
+                pool,
+                router,
+                amount,
+            )
+            .is_ok()
+        );
+        let burn = log(
+            weth,
+            Erc20::Transfer {
+                from: router,
+                to: Address::ZERO,
+                value: amount,
+            },
+        );
+        assert!(
+            verify_native_output_weth_settlement(
+                &receipt(vec![pool_transfer.clone(), burn.clone()]),
+                weth,
+                pool,
+                router,
+                amount,
+            )
+            .is_ok()
+        );
+
+        let wrong_burn = log(
+            weth,
+            Erc20::Transfer {
+                from: router,
+                to: Address::ZERO,
+                value: amount - U256::from(1),
+            },
+        );
+        assert!(
+            verify_native_output_weth_settlement(
+                &receipt(vec![pool_transfer.clone(), wrong_burn]),
+                weth,
+                pool,
+                router,
+                amount,
+            )
+            .is_err()
+        );
+        let wrong_pool_amount = log(
+            weth,
+            Erc20::Transfer {
+                from: pool,
+                to: router,
+                value: amount - U256::from(1),
+            },
+        );
+        assert!(
+            verify_native_output_weth_settlement(
+                &receipt(vec![wrong_pool_amount, burn]),
+                weth,
+                pool,
+                router,
+                amount,
+            )
+            .is_err()
+        );
+    }
 }

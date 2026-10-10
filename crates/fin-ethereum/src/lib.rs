@@ -1,6 +1,10 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
 mod abi;
+#[cfg(test)]
+mod amm_conformance_tests;
+mod amm_permissions;
 mod anchors;
+mod permit2;
 mod prepare;
 mod proof;
 mod reads;
@@ -9,6 +13,7 @@ mod routes;
 mod snapshot;
 #[cfg(test)]
 mod tests;
+mod uniswap;
 
 use async_trait::async_trait;
 use fin_domain::*;
@@ -22,7 +27,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, sync::Arc};
 
+#[cfg(any(test, feature = "test-support"))]
 pub const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+#[cfg(any(test, feature = "test-support"))]
 pub const USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 pub fn operation_definitions() -> Vec<Definition> {
     request::definitions()
@@ -65,6 +72,59 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 /// Recheck adapter-owned valuation immediately before entering the signing
 /// runtime. The engine may have added origin prices for a bounded run, so
 /// compare exact asset identities rather than requiring identical price lists.
+// A concrete EVM attempt keeps its own cent-rounded USD reservation even when
+// reusable quantity consent deliberately omits an exact-price marker. This
+// uses the existing shared price-identity/freshness/ceiling validator; it does
+// not constrain other venues' repricing semantics or broaden the grant.
+fn carry_attempt_valuation(
+    approved: &PreparedOperation,
+    fresh: &mut PreparedOperation,
+) -> Result<()> {
+    if approved
+        .binding
+        .get(fin_domain::value_bounds::KEY)
+        .is_none()
+        && approved
+            .binding
+            .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+            .is_some()
+    {
+        let mut guarded = approved.clone();
+        fin_domain::value_bounds::bind(&mut guarded);
+        fin_domain::value_bounds::carry(&guarded, fresh)?;
+        fresh
+            .binding
+            .as_object_mut()
+            .ok_or_else(|| FinError::validation("Invalid attempt binding."))?
+            .remove(fin_domain::value_bounds::KEY);
+        fresh.summary = approved.summary.clone();
+        Ok(())
+    } else {
+        fin_domain::value_bounds::carry(approved, fresh)
+    }
+}
+
+fn require_attempt_valuation(
+    approved: &PreparedOperation,
+    fresh: &PreparedOperation,
+) -> Result<()> {
+    if approved
+        .binding
+        .get(fin_domain::value_bounds::KEY)
+        .is_some()
+    {
+        fin_domain::value_bounds::validate(fresh)
+    } else if approved
+        .binding
+        .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
+        .is_some()
+    {
+        carry_attempt_valuation(approved, &mut fresh.clone())
+    } else {
+        require_frozen_valuation(fresh.valuation.as_ref(), approved.valuation.as_ref())
+    }
+}
+
 fn require_frozen_valuation(fresh: Option<&Valuation>, approved: Option<&Valuation>) -> Result<()> {
     let changed = || {
         error(
@@ -185,6 +245,36 @@ pub struct UniswapConfig {
     pub factory: String,
     pub quoter: String,
     pub router: String,
+    #[serde(default)]
+    pub router_kind: RouterKind,
+    #[serde(default)]
+    pub v4: Option<V4Config>,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterKind {
+    #[default]
+    LegacyV3,
+    SwapRouter02,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct V4Config {
+    pub router: String,
+    pub quoter: String,
+    pub pool_manager: String,
+    pub state_view: String,
+    #[serde(default)]
+    pub router_has_hop_price: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct V4PoolKey {
+    pub currency0: String,
+    pub currency1: String,
+    pub fee: u32,
+    pub tick_spacing: i32,
+    pub hooks: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -215,12 +305,14 @@ impl Default for EthereumConfig {
             chain_id: 1,
             confirmations: 2,
             require_finalized: false,
-            weth: Some(WETH.into()),
-            snapshot_tokens: vec![WETH.into(), USDC.into()],
+            weth: None,
+            snapshot_tokens: vec![],
             uniswap: Some(UniswapConfig {
                 factory: "0x1f98431c8ad98523631ae4a59f267346ea31f984".into(),
                 quoter: "0x61ffe014ba17989e743c5f6cb21bf9697530b21e".into(),
                 router: "0xe592427a0aece92de3edee1f18e0157c05861564".into(),
+                router_kind: RouterKind::LegacyV3,
+                v4: None,
             }),
             aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
@@ -230,12 +322,6 @@ impl Default for EthereumConfig {
     }
 }
 impl EthereumConfig {
-    /// Reviewed Arbitrum, Robinhood Chain and Base operations settle at canonical
-    /// sequencer inclusion rather than waiting for Ethereum L1 finality.
-    pub const fn external_credit_uses_sequencer(chain_id: u64) -> bool {
-        matches!(chain_id, 42161 | 4663 | 8453)
-    }
-
     /// Reviewed Base Aave pool/oracle. Each selected write still verifies the
     /// provider relationship and requires token revision 5's exact backing math.
     /// This profile does not attest current deployment compatibility or enable Uniswap.
@@ -249,18 +335,40 @@ impl EthereumConfig {
         config
     }
 
+    /// Networks reviewed to settle at canonical rollup sequencer inclusion.
+    /// Adding a network here requires reviewing its canonical receipt and
+    /// inclusion semantics before it can use this completion policy.
+    pub const fn is_reviewed_sequencer_rollup(chain_id: u64) -> bool {
+        matches!(chain_id, 42161 | 4663 | 8453)
+    }
+
+    /// Whether this operation must wait for the RPC's finalized tag. Reviewed
+    /// rollups use sequencer inclusion even if legacy config set the old flag.
+    pub const fn requires_rpc_finalized(&self) -> bool {
+        self.require_finalized && !Self::is_reviewed_sequencer_rollup(self.chain_id)
+    }
+
+    pub const fn finality_label(&self) -> &'static str {
+        if Self::is_reviewed_sequencer_rollup(self.chain_id) {
+            "sequencer-inclusion"
+        } else if self.require_finalized {
+            "rpc-finalized"
+        } else {
+            "confirmation-count"
+        }
+    }
+
+    /// Legacy external-credit helper retained for the broker's payout proof
+    /// path; the classification is shared with all Fin-originated writes.
+    pub const fn external_credit_uses_sequencer(chain_id: u64) -> bool {
+        Self::is_reviewed_sequencer_rollup(chain_id)
+    }
+
     pub fn wallet_only(chain_id: u64, confirmations: u64, snapshot_tokens: Vec<String>) -> Self {
-        let sequencer_inclusion = Self::external_credit_uses_sequencer(chain_id);
         Self {
             chain_id,
-            // Legacy protected configs may still say two confirmations. The
-            // reviewed L2 wallet policy is one sequencer-produced block.
-            confirmations: if sequencer_inclusion {
-                1
-            } else {
-                confirmations
-            },
-            require_finalized: !sequencer_inclusion,
+            confirmations,
+            require_finalized: !Self::is_reviewed_sequencer_rollup(chain_id),
             snapshot_tokens,
             // Base WETH9 is reviewed deployment metadata, not a token whitelist.
             // https://docs.base.org/specifications/reference/base-contracts
@@ -382,6 +490,14 @@ impl EthereumAdapter {
                 &mut uniswap.quoter,
                 &mut uniswap.router,
             ]);
+            if let Some(v4) = &mut uniswap.v4 {
+                deployments.extend([
+                    &mut v4.router,
+                    &mut v4.quoter,
+                    &mut v4.pool_manager,
+                    &mut v4.state_view,
+                ]);
+            }
         }
         if let Some(aave) = &mut config.aave {
             deployments.extend([&mut aave.pool, &mut aave.oracle]);
@@ -451,7 +567,14 @@ impl EthereumAdapter {
         match operation {
             "wallet.balances" | "wallet.token" | "wallet.allowance" | "wallet.receipt"
             | "wallet.transfer" => true,
-            "wallet.wrap" | "wallet.unwrap" => self.config.weth.is_some(),
+            "wallet.permit2.allowance" | "wallet.permit2.approve" => self
+                .config
+                .uniswap
+                .as_ref()
+                .is_some_and(|uniswap| uniswap.v4.is_some()),
+            "wallet.wrap" | "wallet.unwrap" => {
+                self.config.weth.is_some() || self.config.uniswap.is_some()
+            }
             "wallet.approve" => self.config.aave.is_some() || self.config.uniswap.is_some(),
             name if name.starts_with("aave.") => self.config.aave.is_some(),
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
@@ -493,14 +616,23 @@ impl EthereumAdapter {
             )
         })
     }
-    fn weth(&self) -> Result<&str> {
-        self.config.weth.as_deref().ok_or_else(|| {
-            error(
-                "OPERATION_UNAVAILABLE",
-                "validation",
-                "Wrapped native coin is not configured on this network.",
-            )
-        })
+    async fn resolved_weth(&self, block: Option<u64>) -> Result<String> {
+        if let Some(weth) = &self.config.weth {
+            return Ok(weth.clone());
+        }
+        let router = address(&self.uniswap()?.router)?;
+        self.runtime.code_at(router, block).await?;
+        let weth = self
+            .runtime
+            .call(router, &abi::V3RouterInfo::WETH9Call {}, block)
+            .await?;
+        require(
+            weth != Address::ZERO,
+            "WETH_DEPLOYMENT_INVALID",
+            "Configured v3 router returned a zero WETH9 address.",
+        )?;
+        self.runtime.code_at(weth, block).await?;
+        Ok(lower_address(weth))
     }
     fn wallet(&self, name: &str) -> Result<&WalletConnection> {
         self.wallets.iter().find(|w| w.name == name).ok_or_else(|| {
@@ -553,6 +685,22 @@ struct Binding {
     pub deadline: Option<u64>,
     pub pool: Option<String>,
     pub fee_tier: Option<u32>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub v4_pool_key: Option<V4PoolKey>,
+    #[serde(default)]
+    pub route_token_in: Option<String>,
+    #[serde(default)]
+    pub route_token_out: Option<String>,
+    #[serde(default)]
+    pub quote_output: Option<Quantity>,
+    #[serde(default)]
+    pub price_impact_bps: Option<u32>,
+    #[serde(default)]
+    pub permit_template: Option<fin_evm::PreparedPermitTemplate>,
+    #[serde(default)]
+    pub permit2_allowance_before: Option<Permit2AllowanceState>,
     pub allowance_before: Option<Quantity>,
     pub supplied_before: Option<Quantity>,
     pub debt_before: Option<Quantity>,
@@ -572,6 +720,24 @@ struct Binding {
         skip_serializing_if = "Option::is_none"
     )]
     pub value_bounds: Option<Value>,
+    #[serde(
+        default,
+        rename = "__fin_boundary_authorization",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub boundary_authorization: Option<Value>,
+    #[serde(
+        default,
+        rename = "__fin_financial_plan",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub financial_plan: Option<Value>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct Permit2AllowanceState {
+    amount: Quantity,
+    expiration: u64,
+    nonce: u64,
 }
 
 #[async_trait]
@@ -582,8 +748,8 @@ impl Adapter for EthereumAdapter {
             .filter(|definition| self.supports_operation(&definition.name))
             .map(|mut definition| {
                 for example in &mut definition.examples { example["chain_id"] = json!(self.config.chain_id); }
-                if !self.config.require_finalized && self.config.confirmations == 1 && EthereumConfig::external_credit_uses_sequencer(self.config.chain_id) {
-                    definition.completion = "Writes require the original canonical envelope and receipt, one canonical full sequencer-produced L2 block (no Flashblocks preconfirmation), bounded actual fees and verified transfer effects; no RPC finalized-tag wait is required.".into();
+                if self.config.finality_label() == "sequencer-inclusion" {
+                    definition.completion = "Writes require the original canonical envelope and receipt, bounded actual fees, verified transfer effects, the configured confirmation minimum, and one canonical full sequencer-produced L2 block (no Flashblocks preconfirmation); no Ethereum L1 finality claim is made.".into();
                 } else if self.config.require_finalized {
                     definition.completion = "Writes require the original canonical envelope and receipt, bounded actual fees, verified transfer effects, and RPC finalized inclusion; sequencer confirmation alone remains pending.".into();
                 }
@@ -634,7 +800,48 @@ impl Adapter for EthereumAdapter {
     ) -> Result<ReturnRouteProof> {
         self.preflight_route(operation, input, context).await
     }
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> Result<boundaries::BoundarySpec> {
+        if prepared.operation == "uniswap.swap" {
+            return self.swap_boundaries(prepared, bounds);
+        }
+        Err(FinError::new(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "Ethereum boundary authorization supports uniswap.swap only.",
+            "Use the ordinary exact-operation approval flow.",
+        ))
+    }
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> Result<financial_plans::PlanPermission> {
+        self.swap_plan_permission(operation, input, bounds).await
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> Result<()> {
+        if spec.fixed.get("operation").and_then(Value::as_str) == Some("uniswap.swap") {
+            return self.validate_swap_candidate(spec, prepared);
+        }
+        Err(FinError::new(
+            "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
+            "authorization",
+            "Boundary candidate does not identify a supported Uniswap swap.",
+            "Use the ordinary exact-operation approval flow.",
+        ))
+    }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if prepared.operation == "wallet.permit2.approve" {
+            return self.permit2_revalidate(prepared).await;
+        }
         let original: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
@@ -661,7 +868,7 @@ impl Adapter for EthereumAdapter {
                 &context,
             )
             .await?;
-        fin_domain::value_bounds::carry(prepared, &mut refreshed)?;
+        carry_attempt_valuation(prepared, &mut refreshed)?;
         Ok(refreshed)
     }
     async fn submit(
@@ -669,21 +876,16 @@ impl Adapter for EthereumAdapter {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
+        if prepared.operation == "wallet.permit2.approve" {
+            return self.permit2_submit(prepared, journal).await;
+        }
         let fresh = self.revalidate(prepared).await?;
         require(
             fresh.binding == prepared.binding,
             "BINDING_CHANGED",
             "Current executable fields differ from approved envelope.",
         )?;
-        if prepared
-            .binding
-            .get(fin_domain::value_bounds::KEY)
-            .is_some()
-        {
-            fin_domain::value_bounds::validate(&fresh)?;
-        } else {
-            require_frozen_valuation(fresh.valuation.as_ref(), prepared.valuation.as_ref())?;
-        }
+        require_attempt_valuation(prepared, &fresh)?;
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
@@ -691,15 +893,26 @@ impl Adapter for EthereumAdapter {
                 "Original binding is malformed.",
             )
         })?;
+        let transaction = if let Some(template) = &binding.permit_template {
+            self.runtime
+                .materialize_permit_template(template, journal.clone())
+                .await?
+                .transaction
+        } else {
+            binding.transaction.clone()
+        };
         self.runtime
             .submit(
-                &binding.transaction,
+                &transaction,
                 json!({"operation":prepared.operation,"resource":binding.resource}),
                 journal,
             )
             .await
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        if record.operation == "wallet.permit2.approve" {
+            return self.permit2_reconcile(record).await;
+        }
         self.reconcile_operation(record).await
     }
 }

@@ -6,6 +6,14 @@ and [onboarding](onboarding.md) for human and agent contracts. This guide descri
 how to extend Fin; test outcomes and development-session logs belong outside the
 maintained documentation.
 
+## Integration baseline
+
+After the human updated the installed bundle, integration resumed on the
+schema 9 mainline through a safe fast-forward. AMM work was carried forward on
+that baseline so protected runtime, journal and configuration compatibility
+remain aligned with the updated installation while retaining the existing
+bridge implementation and its evidence.
+
 ## Extending an integration
 
 1. Define the operation's exact asset, network, account and unit identities.
@@ -91,6 +99,14 @@ are also supported; Across, LayerZero/Stargate and Chainlink CCIP remain deferre
 [bridge testing guide](testing/bridge.md) for synthetic coverage and the separate
 human/live verification recipe.
 
+Uniswap's current exact-input v3/v4 swaps add finite typed EIP-2612 and Permit2
+signing behind the same durable per-attempt or approved-boundary/plan authority.
+Unsigned templates may be prepared, but signature creation follows journal
+authorization; the materialized frozen transaction is then simulated before
+submission. Swap deadlines must fit within the governing authority expiry. The
+[Uniswap acceptance guide](testing/uniswap-amm.md) records implemented CLI paths
+and the outstanding human Touch ID and mainnet restoration checks.
+
 Standalone writes use exact, fresh approval. Operation-boundary consent is an
 explicit adapter capability, not a general spending session. Fixed identities,
 permitted variations, cumulative debits and fee caps, and expiry belong to the
@@ -145,12 +161,16 @@ Keep administrative approval separate from financial authority. Credential and
 protected policy changes belong to the human's private Terminal and independent
 configuration approval. No production authorization-disable switch is permitted.
 
-Touch ID reasons use a shared 240-character presentation budget. Complete EVM
+Most Touch ID reasons use a shared 240-character presentation budget. Complete EVM
 addresses become `0x1111…1111`, repeated financial labels are shortened, and
 oversized summaries stop at a complete clause with an explicit reference to the
 full terminal review. Exact amounts are never cut midway. Terminal/agent review
 and the complete hash-bound authorization remain unchanged; this presentation
 budget does not guarantee the system dialog's layout on every macOS version.
+Typed Uniswap swap, boundary and plan reasons use a separate 1,024-character
+application limit so route identity, output floor, slippage, fees and expiry
+can remain together. This does not guarantee macOS dialog layout; visual Touch
+ID acceptance remains pending.
 Bridge approval summaries retain readable wallet aliases and chain names, the
 chosen source amount/range, route, selected guaranteed receipt floor and maximum
 fees. The complete review identifies recipient, refund scope, finite steps,
@@ -184,18 +204,19 @@ networks, while legacy chain-qualified identities remain unchanged until a
 protected human-approved update. Wallet-only support does not imply dapp support.
 
 Indexers supply bounded discovery candidates. Confirm token metadata and balances
-with pinned RPC reads and declare partial coverage. Fin-originated EVM writes
-must verify the network receipt rule. Wallet transfers, Binance deposits and
-bridge payouts on Arbitrum and Robinhood require successful inclusion in one
-canonical sequencer-produced block, without waiting for RPC finality. Other
-chains keep their configured confirmation/finality rules. For withdrawals mapped to
-Arbitrum One (`42161`) or Robinhood Chain (`4663`), one canonical
-sequencer-included block is sufficient when the original hash, chain, recipient,
-asset identity and expected amount match the approved withdrawal. Preserve its
-original operation identity for reconciliation after response loss or restart.
-This evidence does not claim parent-chain finality, and an observer does not
-establish that Binance offers a route; the Robinhood network mapping is currently
-unavailable/unverified.
+with pinned RPC reads and declare partial coverage. All reviewed rollup writes
+and external credits settle on canonical sequencer inclusion. Arbitrum One
+(`42161`) and Robinhood Chain (`4663`) use this shared rule for wallet transfers,
+Binance deposits, bridge payouts, swaps and permission changes without waiting
+for the RPC `finalized` marker. Verify the original envelope, hash, chain,
+canonical receipt, recipient, exact assets, protocol effects and costs. For
+mapped Binance withdrawals, one canonical sequencer-included block suffices
+when the saved hash, chain, recipient, asset identity and expected amount match.
+Label evidence `sequencer-inclusion`; it does not claim parent-chain finality.
+Other networks retain configured confirmation/finality policy. Preserve the
+original operation identity after response loss or restart. A chain observer
+does not establish that Binance offers a route; Robinhood's Binance network
+mapping is currently unavailable/unverified.
 
 ## CLI and local development
 
@@ -340,6 +361,48 @@ Compatible runtime updates refresh only recorded, existing, unmodified copies;
 conflicting or edited files remain for human review. Skill installation grants no
 financial authority. See the [companion skill guide](companion-skill.md).
 
+## AMM extension and Uniswap
+
+`fin-amm` supplies typed `quote` and `prepare_swap` contracts, exact asset
+quantities, route/freshness evidence, finite permission requirements, shared
+financial bounds and concise quote presentation. Application adapters own
+reviewed deployments, pinned token reads, routing, calldata, permits and receipt
+proof. A synthetic second AMM exercises the existing engine, approval, journal,
+accounting and restart path without Uniswap branches. Aave and wallet operations
+keep their separate behavior.
+
+Uniswap v3 legacy/SwapRouter02 and deployed-version-specific v4 Universal Router
+implementations support native wrapping/unwrapping. Protocol deployment
+constants are reviewed; token contracts are caller inputs and wrapped ETH is
+read from the reviewed router. V4 pool keys are fixed and unreviewed hooks are
+rejected. Availability follows network deployments independently of Aave.
+Protected enrollment broadens legacy configuration only with configuration
+approval; pending identities are retained.
+
+Use existing finite allowances, finite standard EIP-2612 permits or Permit2
+permits before explicit finite approvals. Permit2's separate ERC-20 prerequisite
+must be disclosed and authorized. The protected signer accepts only typed,
+operation-bound scope; actual signatures stay inside the broker and public
+submission responses withhold calldata. Post-authorization signature-dependent
+simulation precedes durable concrete-envelope persistence and broadcast.
+
+Each concrete attempt freezes its on-chain minimum, nonce, gas limit and gas
+bid. Requotes cannot lower the minimum. Independently require the fresh
+slippage floor and approved intent floor, rounded upward; quotes expire within
+120 seconds and deadlines fit the ten-minute/authority windows. A new node tip
+recommendation does not mutate a frozen transaction. Require the current base
+fee plus its full frozen priority tip to fit its frozen max fee, conserving the
+approved fee ceiling ([EIP-1559](https://eips.ethereum.org/EIPS/eip-1559)).
+Revocation, cumulative usage, reservations and uncertain identities survive
+restart. All reviewed rollup transactions use canonical sequencer inclusion,
+with one sequenced block as the default confirmation floor.
+
+The read-only Touch ID checklist generator emits actual unsigned CLI inputs,
+bounds and named-plan reviews. Human installation, enrollment, native prompt
+observations and credential isolation remain pending until independently
+observed. Engineering and owned-fork verification run in isolated Make
+environments and never update the installed protected runtime.
+
 ## Verification and delivery
 
 Follow the [testing guide](testing/README.md), [onboarding acceptance
@@ -386,9 +449,9 @@ includes it. Existing debt keeps principal/accrual separation and deferred-cost
 proofs. Shared accounting still rejects unanchored accrual. Historical previews
 with narrower debt caps are not widened or replayed.
 
-Uniswap swaps remain dependent on the separately owned foundation's merge to
-`main`; no uncommitted implementation is copied. Liquidity is not implemented
-by current Fin. See [the Base matrix, reproducible checks and pending human/live
+The human authorized merging committed `codex/uniswap-amm` (`fd26ad2`) into
+this Base work. Uniswap v3/v4 now reuse that shared foundation with independently
+reviewed Base deployments. Liquidity is not implemented by current Fin. See [the Base matrix, reproducible checks and pending human/live
 checklist](testing/base.md) for evidence limits, current blockers and test-only
 OP fork fee modeling.
 
@@ -416,3 +479,25 @@ log; the relayer remains the transaction sender. Extra calldata, malformed ABI,
 wrong order/request tag, self-credit, wrong token/owner/amount and duplicate
 matching logs remain rejected. No provider-success or balance-only shortcut
 establishes completion.
+
+## Uniswap foundation merge and Base swaps
+
+A local Base snapshot precedes the merge, retaining every bridge operation and
+recovery change. Base joins the shared reviewed sequencer classification while
+keeping configured confirmation minima. Optional deployment fields remain
+backward compatible. Base's existing profile supplies reviewed Aave and
+Uniswap without a second signer; explicit protocol configuration remains honored.
+
+Permit2 unsigned templates reserve pinned Base L1/operator fees and reduce the
+execution bid only inside the original total fee ceiling. The size-based oracle
+bound includes the fixed signature slot; signature materialization preserves
+length. Fresh revalidation checks both extra-fee reservations and frozen funded
+EIP-1559 bid before signing, then normal exact simulation precedes submission.
+Synthetic tests reject extra-fee drift and inadequate total caps without signing.
+
+The owned Base AMM fork verifies deployed v3 and v4 round trips and permission
+restoration. Anvil lacks authentic OP receipt fee components; the guarded
+fork-only overlay conservatively reserves deployed oracle/operator costs and
+uses exact single-transaction native balance conservation plus call-trace
+inflows to model total extra debit. Final native/token conservation is asserted.
+This model never enters a production adapter and is not live fee evidence.

@@ -1216,6 +1216,12 @@ impl Engine {
                     "Use a step from the active plan revision.",
                 )
             })?;
+        super::validate_authority_expiry_for_adapter(
+            adapter,
+            &step.operation,
+            prepared,
+            &revision.expires_at,
+        )?;
         let permission = permission_for_step(revision, step_id)?;
         if let Some(exact) = &permission.exact {
             validate_exact_plan_candidate(
@@ -5334,6 +5340,95 @@ mod tests {
             }],
             active_attempt_id: None,
         }
+    }
+
+    struct AuthorityExpiryAdapter;
+    #[async_trait::async_trait]
+    impl fin_domain::Adapter for AuthorityExpiryAdapter {
+        fn definitions(&self) -> Vec<fin_domain::Definition> {
+            vec![fin_domain::Definition {
+                name: "synthetic.write".into(),
+                description: "synthetic write with a signed deadline".into(),
+                kind: OperationKind::Write,
+                execution_actor: fin_domain::ExecutionActor::AgentInvocable,
+                input_schema: json!({"type":"object"}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"type":"object"}),
+                examples: vec![],
+                coverage: "synthetic".into(),
+                completion: "synthetic".into(),
+                semantics: json!({
+                    "authority_expiry_fields":[{"pointer":"/deadline","format":"unix_seconds"}]
+                }),
+            }]
+        }
+        async fn read(&self, _: &str, _: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+        async fn prepare(&self, _: &str, _: &Value) -> Result<PreparedOperation> {
+            Err(internal("not used in authority expiry unit scenario"))
+        }
+        fn validate_boundary_candidate(
+            &self,
+            _: &BoundarySpec,
+            _: &PreparedOperation,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+        async fn submit(
+            &self,
+            _: &PreparedOperation,
+            _: Arc<dyn fin_domain::SubmissionJournal>,
+        ) -> Result<Submission> {
+            Err(internal("not used in authority expiry unit scenario"))
+        }
+        async fn reconcile(&self, _: &OperationRecord) -> Result<Reconciliation> {
+            Err(internal("not used in authority expiry unit scenario"))
+        }
+    }
+
+    #[test]
+    fn named_plan_candidate_rejects_deadline_after_revision_expiry() {
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![Arc::new(AuthorityExpiryAdapter)],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut revision = prior_record().revision;
+        revision.expires_at = "2027-01-01T00:10:00Z".into();
+        let prepared = PreparedOperation {
+            operation: "synthetic.write".into(),
+            input: json!({"request_id":"seed-a","deadline":"1798762201"}),
+            binding: json!({}),
+            summary: "synthetic write".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: "2027-01-01T00:00:00Z".into(),
+            expires_at: "2027-01-01T00:02:00Z".into(),
+            valuation: None,
+            intent: FinancialIntent::default(),
+            operation_version: 1,
+        };
+        let error = engine
+            .validate_plan_candidate(
+                &AuthorityExpiryAdapter,
+                &revision,
+                "step-1",
+                &prepared.input,
+                "attempt-1",
+                &prepared,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_VIOLATION");
+        assert_eq!(
+            error.details.unwrap()["boundary_violation"]["constraint"],
+            "deadline"
+        );
     }
 
     #[test]

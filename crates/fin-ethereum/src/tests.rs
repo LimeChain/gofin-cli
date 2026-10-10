@@ -5,7 +5,7 @@ use fin_evm::{
     alloy::{
         primitives::{
             B256, I256,
-            aliases::{U40, U80},
+            aliases::{I24, U40, U80, U160},
         },
         sol_types::{SolCall, SolEvent, SolValue},
     },
@@ -16,7 +16,7 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
-fn addr(n: u64) -> Address {
+pub(super) fn addr(n: u64) -> Address {
     Address::from_word(B256::from(U256::from(n).to_be_bytes::<32>()))
 }
 fn ray() -> U256 {
@@ -36,33 +36,34 @@ struct AtBlock {
     collateral: bool,
     stable_debt: U256,
 }
-struct Fixture {
-    latest: AtomicU64,
+pub(super) struct Fixture {
+    pub(super) latest: AtomicU64,
     states: Mutex<std::collections::BTreeMap<u64, AtBlock>>,
     tx: Mutex<Option<FrozenTransaction>>,
-    receipt: Mutex<Value>,
+    pub(super) receipt: Mutex<Value>,
+    pub(super) send_hash: Mutex<Option<String>>,
     paused: Mutex<bool>,
     frozen: Mutex<bool>,
     erc20_false: Mutex<bool>,
-    allowance: Mutex<U256>,
-    nonce: AtomicU64,
-    chain: AtomicU64,
-    calls: Mutex<Vec<String>>,
+    pub(super) allowance: Mutex<U256>,
+    pub(super) nonce: AtomicU64,
+    pub(super) chain: AtomicU64,
+    pub(super) calls: Mutex<Vec<String>>,
     missing_selector: Mutex<Option<[u8; 4]>>,
     other_revision_reserve: Mutex<bool>,
     other_revision_balance: Mutex<U256>,
     selected_revision: AtomicU64,
-    cash_override: Mutex<Option<U256>>,
+    pub(super) cash_override: Mutex<Option<U256>>,
     cash_by_owner: Mutex<std::collections::BTreeMap<Address, U256>>,
     other_stable: AtomicU64,
     include_weth: Mutex<bool>,
     feed_updated_at: Mutex<Option<u64>>,
     call_overrides: Mutex<std::collections::BTreeMap<[u8; 4], Value>>,
-    simulation_override: Mutex<Option<Value>>,
-    simulation_failure: Mutex<bool>,
+    pub(super) simulation_override: Mutex<Option<Value>>,
+    pub(super) simulation_failure: Mutex<bool>,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let mut states = std::collections::BTreeMap::new();
         states.insert(
             20,
@@ -77,6 +78,7 @@ impl Fixture {
             states: Mutex::new(states),
             tx: Mutex::new(None),
             receipt: Mutex::new(Value::Null),
+            send_hash: Mutex::new(None),
             paused: Mutex::new(false),
             frozen: Mutex::new(false),
             erc20_false: Mutex::new(false),
@@ -841,7 +843,15 @@ impl EvmRpc for ReorgAfterHistoricalTokenReadRpc {
 
 fn payout_proof_adapter(chain: u64, rpc: Arc<dyn EvmRpc>) -> EthereumAdapter {
     EthereumAdapter::new(
-        EthereumConfig::wallet_only(chain, 2, vec![]),
+        EthereumConfig::wallet_only(
+            chain,
+            if EthereumConfig::is_reviewed_sequencer_rollup(chain) {
+                1
+            } else {
+                2
+            },
+            vec![],
+        ),
         vec![WalletConnection {
             name: "synthetic-payout-target".into(),
             address: lower_address(addr(2)),
@@ -1350,16 +1360,29 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     v["slippage_bps"] = json!(100);
     v["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 120);
     *rpc.allowance.lock().unwrap() = U256::MAX;
-    assert_eq!(
-        a.prepare("uniswap.swap", &v).await.unwrap_err().code,
-        "ALLOWANCE_INSUFFICIENT"
-    );
+    let permit_preview = a.prepare("uniswap.swap", &v).await.unwrap_or_else(|error| {
+        panic!(
+            "atomic permit preview failed: {error:?}; calls={:?}",
+            rpc.calls.lock().unwrap()
+        )
+    });
+    let permit_binding: Binding = serde_json::from_value(permit_preview.binding.clone()).unwrap();
+    assert!(permit_binding.permit_template.is_some());
     *rpc.allowance.lock().unwrap() = U256::from(10_000_000_000_000_000u64);
     let p = a.prepare("uniswap.swap", &v).await.unwrap();
     assert_eq!(
         p.valuation.as_ref().unwrap().movement_usd_micros,
         Quantity::from_u64(3_000_000)
     );
+    assert!(p.summary.contains("0.001"));
+    assert!(p.summary.contains("for at least 2.97"));
+    assert!(p.summary.contains(&lower_address(addr(1))));
+    assert!(p.summary.contains(&lower_address(addr(470))));
+    assert!(p.summary.contains("Uniswap v3 fee 500 ppm"));
+    assert!(p.summary.contains("slippage 100 bps"));
+    assert!(p.summary.contains("impact max 10000 bps"));
+    assert!(p.summary.contains("deadline"));
+    assert!(p.summary.contains("permission:"));
     let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
     assert_eq!(b.fee_tier, Some(500));
     let q = fin_evm::u256(&b.units).unwrap();
@@ -1408,6 +1431,95 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     rpc.set_receipt(&b, 21, logs(U256::from(3_000_000)));
     assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
 }
+#[tokio::test]
+async fn eip2612_permit_domain_is_bound_to_token_and_configured_chain() {
+    let rpc = Arc::new(Fixture::new());
+    let adapter = adapter(rpc.clone());
+    assert!(
+        adapter
+            .eip2612_nonce_at(addr(101), addr(1), 20)
+            .await
+            .is_some()
+    );
+    *rpc.missing_selector.lock().unwrap() = Some(Erc20::versionCall::SELECTOR);
+    assert!(
+        adapter
+            .eip2612_nonce_at(addr(101), addr(1), 20)
+            .await
+            .is_some(),
+        "version 1 is considered only when the token's domain hash proves it"
+    );
+    *rpc.missing_selector.lock().unwrap() = None;
+    rpc.chain.store(42161, Ordering::SeqCst);
+    assert!(
+        adapter
+            .eip2612_nonce_at(addr(101), addr(1), 20)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn uniswap_quote_exposes_shared_summary_at_the_read_result_root() {
+    let adapter = adapter(Arc::new(Fixture::new()));
+    let result = adapter
+        .read(
+            "uniswap.quote",
+            &json!({
+                "wallet":"synthetic",
+                "network":"ethereum",
+                "chain_id":1,
+                "token_in":lower_address(addr(100)),
+                "token_out":lower_address(addr(101)),
+                "amount":"0.001",
+                "fee_tier":500,
+                "protocol":"v3"
+            }),
+        )
+        .await
+        .unwrap();
+    let summary = result["summary"].as_str().expect("top-level quote summary");
+    assert!(summary.contains("via uniswap v3"));
+    assert!(summary.contains("permission"));
+    assert!(result["data"]["summary"].is_null());
+}
+
+#[tokio::test]
+async fn wallet_token_exposes_only_pinned_verified_permit_metadata() {
+    let adapter = adapter(Arc::new(Fixture::new()));
+    let result = adapter
+        .read(
+            "wallet.token",
+            &json!({
+                "wallet":"synthetic",
+                "network":"ethereum",
+                "chain_id":1,
+                "token":lower_address(addr(101))
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["data"]["symbol"], "USDC");
+    assert_eq!(result["data"]["eip2612"]["supported"], true);
+    assert_eq!(result["data"]["eip2612"]["verified"], true);
+    assert_eq!(result["data"]["eip2612"]["chain_id"], 1);
+    assert_eq!(result["data"]["eip2612"]["token"], lower_address(addr(101)));
+    assert_eq!(result["data"]["eip2612"]["owner"], lower_address(addr(1)));
+    assert_eq!(result["data"]["eip2612"]["nonce"], "0");
+    assert_eq!(result["data"]["eip2612"]["observed_block"], 20);
+    assert_eq!(result["data"]["usd_valuation"]["available"], false);
+    assert_eq!(
+        result["data"]["usd_valuation"]["error_code"],
+        "VALUATION_UNAVAILABLE"
+    );
+    assert!(
+        result["data"]["eip2612"]["domain_separator"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x")
+    );
+}
+
 fn blockhash(n: u64) -> String {
     format!("{:#x}", B256::from(U256::from(n).to_be_bytes::<32>()))
 }
@@ -1429,7 +1541,7 @@ impl EvmRpc for Fixture {
                     .filter(|s| *s != "latest" && *s != "finalized")
                     .map(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap())
                     .unwrap_or(latest);
-                json!({"hash":blockhash(n),"number":format!("{n:#x}"),"baseFeePerGas":"0x1"})
+                json!({"hash":blockhash(n),"number":format!("{n:#x}"),"timestamp":format!("{:#x}", chrono::Utc::now().timestamp() as u64),"baseFeePerGas":"0x1"})
             }
             "eth_getCode" => json!(if [addr(1), addr(2)]
                 .contains(&address(params[0].as_str().unwrap())?)
@@ -1491,6 +1603,26 @@ impl EvmRpc for Fixture {
                     }
                     Erc20::symbolCall::SELECTOR => {
                         abi_value(if token == WETH { "WETH" } else { "USDC" }.to_string())
+                    }
+                    Erc20::nameCall::SELECTOR => abi_value("Synthetic USDC".to_string()),
+                    Erc20::versionCall::SELECTOR => abi_value("1".to_string()),
+                    Erc20::noncesCall::SELECTOR => {
+                        abi_value(U256::from(self.nonce.load(Ordering::SeqCst)))
+                    }
+                    Erc20::DOMAIN_SEPARATORCall::SELECTOR => {
+                        let type_hash = fin_evm::alloy::primitives::keccak256(
+                            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+                        );
+                        abi_value(fin_evm::alloy::primitives::keccak256(
+                            (
+                                type_hash,
+                                fin_evm::alloy::primitives::keccak256("Synthetic USDC"),
+                                fin_evm::alloy::primitives::keccak256("1"),
+                                U256::from(self.chain.load(Ordering::SeqCst)),
+                                to,
+                            )
+                                .abi_encode(),
+                        ))
                     }
                     Erc20::balanceOfCall::SELECTOR => {
                         abi_value(if to == addr(111) || to == addr(121) {
@@ -1659,6 +1791,17 @@ impl EvmRpc for Fixture {
                             Address::ZERO
                         })
                     }
+                    UniswapPool::token0Call::SELECTOR => abi_value(addr(100)),
+                    UniswapPool::token1Call::SELECTOR => abi_value(addr(101)),
+                    UniswapPool::slot0Call::SELECTOR => abi_value((
+                        U160::from(1u64) << 96,
+                        I24::ZERO,
+                        0u16,
+                        0u16,
+                        0u16,
+                        0u32,
+                        true,
+                    )),
                     Quoter::quoteExactInputSingleCall::SELECTOR => abi_value((
                         U256::from(3_000_000),
                         fin_evm::alloy::primitives::aliases::U160::ZERO,
@@ -1687,6 +1830,9 @@ impl EvmRpc for Fixture {
                 }
             }
             "eth_sendRawTransaction" => {
+                if let Some(hash) = self.send_hash.lock().unwrap().clone() {
+                    return Ok(json!(hash));
+                }
                 return Err(FinError::validation(
                     "Protocol fixtures must never dispatch.",
                 ));
@@ -1695,7 +1841,7 @@ impl EvmRpc for Fixture {
         })
     }
 }
-fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
+pub(super) fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
     let config = EthereumConfig {
         weth: Some(lower_address(addr(100))),
         snapshot_tokens: vec![lower_address(addr(101))],
@@ -1703,6 +1849,8 @@ fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
             factory: lower_address(addr(450)),
             quoter: lower_address(addr(460)),
             router: lower_address(addr(470)),
+            router_kind: RouterKind::LegacyV3,
+            v4: None,
         }),
         aave: Some(AaveConfig {
             pool: lower_address(addr(300)),
@@ -1721,10 +1869,10 @@ fn adapter(rpc: Arc<Fixture>) -> EthereumAdapter {
     )
     .unwrap()
 }
-fn input() -> Value {
+pub(super) fn input() -> Value {
     json!({"wallet":"synthetic","network":"ethereum","chain_id":1,"request_id":"isolated-request","max_fee_eth":"0.001"})
 }
-fn swap_input() -> Value {
+pub(super) fn swap_input() -> Value {
     let mut value = input();
     value.as_object_mut().unwrap().extend(
         json!({
@@ -1900,6 +2048,46 @@ async fn failed_malformed_and_below_minimum_simulations_never_become_swap_previe
                     .contains(&"eth_estimateGas".into())
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn requotes_preserve_the_frozen_minimum_and_independently_enforce_fresh_slippage() {
+    for (explicit_minimum, output_atoms, expected) in [
+        ("2.90", 2_999_000u64, None), // A falling quote never lowers the encoded minimum.
+        ("2.90", 3_001_000, Some("SLIPPAGE_LIMIT")), // A rising fresh slippage floor must still fit.
+        ("2.99", 3_001_000, None), // A stronger explicit receipt floor has enough headroom.
+        ("2.99", 2_989_999, Some("SLIPPAGE_LIMIT")), // The frozen floor must remain attainable.
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+        let a = adapter(rpc.clone());
+        let mut request = swap_input();
+        request["slippage_bps"] = json!(50);
+        request["min_output"] = json!(explicit_minimum);
+        let prepared = a.prepare("uniswap.swap", &request).await.unwrap();
+        let original_binding = prepared.binding.clone();
+        rpc.call_overrides.lock().unwrap().insert(
+            Quoter::quoteExactInputSingleCall::SELECTOR,
+            abi_value((
+                U256::from(output_atoms),
+                U160::ZERO,
+                0u32,
+                U256::from(100000),
+            )),
+        );
+        let result = a.revalidate(&prepared).await;
+        match expected {
+            Some(code) => assert_eq!(result.unwrap_err().code, code),
+            None => assert_eq!(result.unwrap().binding, original_binding),
+        }
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction")
+        );
     }
 }
 
@@ -2080,10 +2268,45 @@ fn record(preview: PreparedOperation) -> OperationRecord {
 #[test]
 fn schemas_are_operation_specific_and_unknown_or_imprecise_requests_fail() {
     let defs = operation_definitions();
-    assert_eq!(defs.len(), 17);
+    assert_eq!(defs.len(), request::OPERATIONS.len());
     let transfer = defs.iter().find(|d| d.name == "wallet.transfer").unwrap();
     assert_eq!(transfer.input_schema["additionalProperties"], json!(false));
     assert!(transfer.input_schema["properties"].get("enabled").is_none());
+    let swap = defs.iter().find(|d| d.name == "uniswap.swap").unwrap();
+    let mut ignored_v4_fee = swap_input();
+    ignored_v4_fee["protocol"] = json!("v4");
+    ignored_v4_fee["fee_tier"] = json!(500);
+    ignored_v4_fee["v4_pool_key"] = json!({
+        "currency0": lower_address(addr(100)),
+        "currency1": lower_address(addr(101)),
+        "fee": 500,
+        "tick_spacing": 10,
+        "hooks": format!("{:#x}", Address::ZERO),
+    });
+    assert!(request::parse("uniswap.swap", &ignored_v4_fee).is_err());
+    assert_eq!(
+        swap.semantics["boundary_authorization"]["supported"],
+        json!(true)
+    );
+    assert_eq!(
+        swap.semantics["broker_generated_attempt_input_fields"],
+        json!(["/request_id"])
+    );
+    assert_eq!(
+        swap.semantics["authority_expiry_fields"],
+        json!([{"pointer":"/deadline","format":"unix_seconds"}])
+    );
+    assert!(
+        swap.semantics["boundary_authorization"]["bounds_schema"]["properties"]
+            .get("max_price_impact_bps")
+            .is_some()
+    );
+    assert!(
+        swap.semantics["boundary_authorization"]["quote_and_checks"]["permit_signature_simulation"]
+            .as_str()
+            .unwrap()
+            .contains("Unchecked in preview")
+    );
     let mut bad = input();
     bad["amount"] = json!("1");
     bad["enabled"] = json!(true);
@@ -4623,6 +4846,20 @@ mod wallet_only_tests {
             ))
         }
     }
+    struct MisidentifiedPrices;
+    #[async_trait]
+    impl WalletValuation for MisidentifiedPrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            let value = fin_evm::u256(&units)?
+                .checked_mul(U256::from(730_000u64))
+                .ok_or_else(|| error("SYNTHETIC_OVERFLOW", "test", "Price overflowed."))?
+                / pow10(asset.decimals)?;
+            Ok((
+                quantity(value),
+                "synthetic wrong-symbol source coin_id=wrapped-bitcoin contract=0x000000000000000000000000000000000000beef".into(),
+            ))
+        }
+    }
     struct Discovery {
         complete: bool,
         failure: bool,
@@ -4661,7 +4898,15 @@ mod wallet_only_tests {
             rpc
         };
         EthereumAdapter::new(
-            EthereumConfig::wallet_only(chain, 2, vec![]),
+            EthereumConfig::wallet_only(
+                chain,
+                if EthereumConfig::is_reviewed_sequencer_rollup(chain) {
+                    1
+                } else {
+                    2
+                },
+                vec![],
+            ),
             vec![WalletConnection {
                 name: "synthetic".into(),
                 address: lower_address(addr(1)),
@@ -4673,6 +4918,36 @@ mod wallet_only_tests {
     }
     fn transfer(chain: u64, token: &str) -> Value {
         json!({"wallet":"synthetic","network":"evm","chain_id":chain,"request_id":"synthetic-wallet-request","max_fee_eth":"0.001","token":token,"amount":if token=="native" {"0.001"}else{"1"},"recipient":lower_address(addr(2))})
+    }
+    #[tokio::test]
+    async fn token_preflight_prices_the_exact_contract_even_when_source_claims_another_asset() {
+        let rpc = Arc::new(Fixture::new());
+        let adapter =
+            wallet_adapter(42161, rpc).with_wallet_valuation(Arc::new(MisidentifiedPrices));
+        let result = adapter
+            .read(
+                "wallet.token",
+                &json!({
+                    "wallet":"synthetic",
+                    "network":"evm",
+                    "chain_id":42161,
+                    "token":lower_address(addr(101))
+                }),
+            )
+            .await
+            .unwrap();
+        let price = &result["data"]["usd_valuation"];
+        assert_eq!(price["available"], true);
+        assert_eq!(price["asset"]["network"], "ethereum:42161");
+        assert_eq!(price["asset"]["reference"], lower_address(addr(101)));
+        assert_eq!(price["asset"]["decimals"], 6);
+        assert_eq!(price["usd_micros_per_unit"], "730000");
+        assert!(
+            price["source"]
+                .as_str()
+                .unwrap()
+                .contains("wrapped-bitcoin")
+        );
     }
     #[test]
     fn optional_deployments_serialize_without_dummy_addresses_and_capabilities_are_wallet_only() {
@@ -5709,6 +5984,7 @@ mod wallet_only_tests {
         inner: Arc<Fixture>,
         mode: AtomicU64,
         finalized_seen: AtomicU64,
+        canonical_reads: AtomicU64,
     }
     #[async_trait]
     impl EvmRpc for FinalityRpc {
@@ -5727,6 +6003,13 @@ mod wallet_only_tests {
                     _ => Ok(json!({"number":"0x16","hash":blockhash(22)})),
                 };
             }
+            if self.mode.load(Ordering::SeqCst) == 6
+                && method == "eth_getBlockByNumber"
+                && params[0] == json!("0x15")
+                && self.canonical_reads.fetch_add(1, Ordering::SeqCst) > 0
+            {
+                return Ok(json!({"number":"0x15","hash":blockhash(99)}));
+            }
             if self.mode.load(Ordering::SeqCst) == 5
                 && self.finalized_seen.load(Ordering::SeqCst) == 1
                 && method == "eth_getBlockByNumber"
@@ -5740,7 +6023,7 @@ mod wallet_only_tests {
     #[tokio::test]
     async fn finalized_evidence_is_required_and_never_settles_missing_lagging_or_changed_inclusion()
     {
-        for chain in [42161, 4663] {
+        for chain in [1, 31337] {
             let rpc = Arc::new(Fixture::new());
             let mut a = wallet_adapter(chain, rpc.clone())
                 .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
@@ -5752,6 +6035,7 @@ mod wallet_only_tests {
                 inner: rpc.clone(),
                 mode: AtomicU64::new(0),
                 finalized_seen: AtomicU64::new(0),
+                canonical_reads: AtomicU64::new(0),
             });
             a.runtime = Arc::new(EvmRuntime::new(finality.clone(), chain, None));
             let prepared = a
@@ -5787,6 +6071,7 @@ mod wallet_only_tests {
                 inner: rpc.clone(),
                 mode: AtomicU64::new(1), // finalized tag unavailable
                 finalized_seen: AtomicU64::new(0),
+                canonical_reads: AtomicU64::new(0),
             });
             a.runtime = Arc::new(EvmRuntime::new(finality.clone(), chain, None));
             let prepared = a
@@ -5801,6 +6086,61 @@ mod wallet_only_tests {
             assert_eq!(result.evidence["finality"], json!("sequencer-inclusion"));
             assert_eq!(result.evidence["confirmations"], json!(1));
             assert_eq!(finality.finalized_seen.load(Ordering::SeqCst), 0);
+        }
+    }
+    #[tokio::test]
+    async fn rollup_writes_use_sequencer_inclusion_even_with_legacy_finalized_config() {
+        for chain in [42161, 4663] {
+            for token in ["native".into(), lower_address(addr(101))] {
+                let rpc = Arc::new(Fixture::new());
+                let mut a = wallet_adapter(chain, rpc.clone())
+                    .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+                a.config.confirmations = 1;
+                a.config.require_finalized = true; // Durable legacy flag does not impose L1 finality.
+                let finality = Arc::new(FinalityRpc {
+                    inner: rpc.clone(),
+                    mode: AtomicU64::new(1),
+                    finalized_seen: AtomicU64::new(0),
+                    canonical_reads: AtomicU64::new(0),
+                });
+                a.runtime = Arc::new(EvmRuntime::new(finality.clone(), chain, None));
+                let prepared = a
+                    .prepare("wallet.transfer", &transfer(chain, &token))
+                    .await
+                    .unwrap();
+                let binding: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+                let r = record(prepared);
+                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                let logs = if token == "native" {
+                    vec![]
+                } else {
+                    vec![event(
+                        addr(101),
+                        Erc20::Transfer {
+                            from: addr(1),
+                            to: addr(2),
+                            value: fin_evm::u256(&binding.units).unwrap(),
+                        },
+                        21,
+                    )]
+                };
+                rpc.set_receipt(&binding, 21, logs);
+                rpc.latest.store(21, Ordering::SeqCst);
+                let done = a.reconcile(&r).await.unwrap();
+                assert_eq!(done.status, Status::Completed);
+                assert!(done.verified.is_some());
+                assert_eq!(done.evidence["finality"], json!("sequencer-inclusion"));
+                assert_eq!(finality.finalized_seen.load(Ordering::SeqCst), 0);
+                finality.mode.store(6, Ordering::SeqCst);
+                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                finality.mode.store(1, Ordering::SeqCst);
+                a.config.confirmations = 2;
+                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                a.config.confirmations = 1;
+                rpc.receipt.lock().unwrap()["blockHash"] = json!(blockhash(99));
+                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                assert_eq!(finality.finalized_seen.load(Ordering::SeqCst), 0);
+            }
         }
     }
     #[tokio::test]

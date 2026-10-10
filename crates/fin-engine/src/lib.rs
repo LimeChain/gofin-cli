@@ -1280,6 +1280,12 @@ impl Engine {
             None
         };
         let boundary_attempt_hash = if let Some(boundary) = &boundary {
+            validate_authority_expiry_for_adapter(
+                adapter.as_ref(),
+                &request.operation,
+                &prepared,
+                &boundary.authorization.expires_at,
+            )?;
             adapter.validate_boundary_candidate(&boundary.authorization.spec, &prepared)?;
             validate_candidate_caps(&boundary.authorization, &prepared)?;
             prepared.summary = boundary.authorization.spec.summary.clone();
@@ -1390,6 +1396,12 @@ impl Engine {
                     "Refresh the candidate and verify it remains within the approved limits.",
                 ));
             }
+            validate_authority_expiry_for_adapter(
+                adapter.as_ref(),
+                &request.operation,
+                &refreshed,
+                &boundary.authorization.expires_at,
+            )?;
             adapter.validate_boundary_candidate(&boundary.authorization.spec, &refreshed)?;
             validate_candidate_caps(&boundary.authorization, &refreshed)?;
             inject_boundary_marker(
@@ -3759,6 +3771,10 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     "Keep the attempt unresolved and inspect its original record.",
                 )
             })?;
+            let adapter = self
+                .adapter
+                .as_ref()
+                .ok_or_else(|| internal("plan execution adapter is missing"))?;
             let linkage = current
                 .attempts
                 .iter()
@@ -3770,6 +3786,19 @@ impl SubmissionJournal for OperationSubmissionJournal {
                         "Keep the attempt unresolved and reconcile its original record.",
                     )
                 })?;
+            let step = current
+                .revision
+                .spec
+                .steps
+                .iter()
+                .find(|step| step.step_id == linkage.step_id)
+                .ok_or_else(|| internal("plan step disappeared"))?;
+            validate_authority_expiry_for_adapter(
+                adapter.as_ref(),
+                &step.operation,
+                &prepared,
+                &current.revision.expires_at,
+            )?;
             let candidate_hash = binding_hash(
                 &fin_domain::financial_plans::financial_plan_attempt_binding(
                     &prepared,
@@ -3871,6 +3900,19 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 .adapter
                 .as_ref()
                 .ok_or_else(|| internal("plan execution adapter is missing"))?;
+            validate_authority_expiry_for_adapter(
+                adapter.as_ref(),
+                &current
+                    .revision
+                    .spec
+                    .steps
+                    .iter()
+                    .find(|step| step.step_id == linkage.step_id)
+                    .ok_or_else(|| internal("plan step disappeared"))?
+                    .operation,
+                prepared,
+                &current.revision.expires_at,
+            )?;
             let permission = permission_for_step(&current.revision, &linkage.step_id)?;
             if let Some(exact) = &permission.exact {
                 let step = current
@@ -4040,6 +4082,14 @@ impl OperationSubmissionJournal {
         grant: &BoundaryAuthorizationRecord,
         prepared: &PreparedOperation,
     ) -> Result<()> {
+        if let Some(adapter) = self.adapter.as_ref() {
+            validate_authority_expiry_for_adapter(
+                adapter.as_ref(),
+                &grant.authorization.operation,
+                prepared,
+                &grant.authorization.expires_at,
+            )?;
+        }
         let metadata = prepared
             .binding
             .get(boundaries::BOUNDARY_METADATA_KEY)
@@ -10484,6 +10534,28 @@ fn internal(message: &str) -> FinError {
         message,
         "Preserve the operation identity and inspect the durable record.",
     )
+}
+
+fn validate_authority_expiry_for_adapter(
+    adapter: &dyn Adapter,
+    operation: &str,
+    prepared: &PreparedOperation,
+    expires_at: &str,
+) -> Result<()> {
+    if prepared.operation != operation {
+        return Err(FinError::new(
+            "PREPARED_OPERATION_MISMATCH",
+            "authorization",
+            "Prepared candidate differs from the trusted authorized operation definition.",
+            "Prepare the selected operation again before continuing.",
+        ));
+    }
+    let definition = adapter
+        .definitions()
+        .into_iter()
+        .find(|definition| definition.name == operation)
+        .ok_or_else(|| internal("registered operation definition disappeared"))?;
+    fin_domain::authority_expiry::validate_authority_expiry(&definition, prepared, expires_at)
 }
 
 fn cost_origin_price_unavailable() -> FinError {

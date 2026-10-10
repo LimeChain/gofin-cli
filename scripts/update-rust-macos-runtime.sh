@@ -3,11 +3,13 @@
 # behavior. Helper/installer changes require an explicit human-selected
 # --presentation-update flag and still pass the same bundle checks.
 # Human: stop issuing Fin commands and finish/cancel enrollment first. Review
-# this script and both bundles, then run in your own fresh macOS Terminal:
+# this script, its companion schema checker, and both bundles, then run in your
+# own fresh macOS Terminal:
 #   sudo -k /bin/bash /absolute/path/to/this-script --from OLD_BUNDLE --to NEW_BUNDLE
 #   sudo -K
 # Only the user-owned companion-skill refresh runs after runtime commit.
-# No service restart, private-state access, or financial call occurs.
+# No service restart or financial-record/credential access occurs. The updater
+# reads only the protected SQLite schema-version metadata for compatibility.
 # Existing daemon processes keep their loaded image; enrollment starts the new
 # broker directly. Process checks are advisory, not a synchronization guarantee.
 # Per-file renames are atomic, not the entire bundle; ordinary partial failures
@@ -253,6 +255,21 @@ if [ "$fin_auth_initial" = 0 ] || ! /usr/bin/cmp -s "$fin_backup/previous-Fin" "
   fin_auth_changed=1
 fi
 [ -n "$fin_changed" ] || [ "$fin_auth_changed" = 1 ] || fail 'Bundles are identical; no runtime update is needed.'
+
+# Read only the schema contract from the already verified incoming broker. The
+# broker's export path is metadata-only and runs before protected state access.
+fin_storage_contract=$("$fin_backup/incoming/fin-broker" --export-storage-contract) || fail 'Incoming broker could not report its journal schema; runtime and journal were preserved.'
+fin_supported_schema=$(printf '%s' "$fin_storage_contract" | /usr/bin/python3 -I -c 'import json,sys
+try:
+ value=json.load(sys.stdin)
+ version=value["journal_schema_version"]
+ if type(version) is not int or version <= 0: raise ValueError()
+ print(version)
+except Exception:
+ sys.exit(1)') || fail 'Incoming broker reported an invalid journal schema contract; runtime and journal were preserved.'
+fin_script_dir=$(/usr/bin/dirname "$0")
+/usr/bin/python3 -I "$fin_script_dir/check-runtime-store-compatibility.py" --supported-schema "$fin_supported_schema" >/dev/null || fail 'Journal schema is incompatible or could not be checked safely; runtime and journal were preserved.'
+
 check_idle_clients
 for fin_component in $fin_files; do
   /usr/bin/cmp -s "$fin_backup/previous/$fin_component" "$fin_runtime/$fin_component" || fail 'Installed runtime changed during staging.'

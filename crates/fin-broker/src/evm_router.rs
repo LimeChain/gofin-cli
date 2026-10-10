@@ -119,6 +119,32 @@ impl Adapter for EvmNetworkRouter {
     ) -> fin_domain::Result<PreparedOperation> {
         self.route(input)?.prepare(operation, input).await
     }
+    fn prepare_boundaries(
+        &self,
+        prepared: &PreparedOperation,
+        bounds: &Value,
+    ) -> fin_domain::Result<fin_domain::boundaries::BoundarySpec> {
+        self.prepared(prepared)?
+            .prepare_boundaries(prepared, bounds)
+    }
+    async fn prepare_plan_permission(
+        &self,
+        operation: &str,
+        input: &Value,
+        bounds: &Value,
+    ) -> fin_domain::Result<fin_domain::financial_plans::PlanPermission> {
+        self.route(input)?
+            .prepare_plan_permission(operation, input, bounds)
+            .await
+    }
+    fn validate_boundary_candidate(
+        &self,
+        spec: &fin_domain::boundaries::BoundarySpec,
+        prepared: &PreparedOperation,
+    ) -> fin_domain::Result<()> {
+        self.prepared(prepared)?
+            .validate_boundary_candidate(spec, prepared)
+    }
     async fn prepare_with_context(
         &self,
         operation: &str,
@@ -205,7 +231,8 @@ mod tests {
         }
     }
     #[test]
-    fn broker_composes_one_wallet_on_all_reviewed_networks_without_protocols_or_keys() {
+    fn broker_composes_one_wallet_on_all_reviewed_networks_with_reviewed_base_protocols_without_keys()
+     {
         let mut config = shared_config();
         config.validate().unwrap();
         let applications =
@@ -243,9 +270,9 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(ids, [1, 8453, 42161, 4663].into_iter().collect());
         assert!(
-            !evm.definitions()
+            evm.definitions()
                 .iter()
-                .any(|definition| definition.name.starts_with("uniswap."))
+                .any(|definition| definition.name == "uniswap.swap")
         );
         let mut duplicate = config.connections[0].clone();
         if let ConnectionConfig::Evm { name, .. } = &mut duplicate {

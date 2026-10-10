@@ -15,6 +15,9 @@ struct Args {
     /// Export the shared operation registry without opening protected state.
     #[arg(long)]
     export_registry: bool,
+    /// Export journal compatibility metadata without opening protected state.
+    #[arg(long, conflicts_with = "export_registry")]
+    export_storage_contract: bool,
     /// Human approver account configured by the root installer.
     #[arg(long, requires = "approver_gid")]
     approver_uid: Option<u32>,
@@ -106,6 +109,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> fin_domain::Result<()> {
+    if args.export_storage_contract {
+        println!(
+            "{}",
+            serde_json::json!({"journal_schema_version": fin_store::supported_schema_version()})
+        );
+        return Ok(());
+    }
     if args.export_registry {
         let definitions = fin_broker::operation_definitions();
         let bytes = serde_json::to_vec_pretty(&definitions).map_err(|_| {

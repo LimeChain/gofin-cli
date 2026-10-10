@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -68,6 +69,10 @@ if name in ("mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod"):
     os.execv(path, [name] + args)
 elif name in ("awk", "shasum", "cmp", "sudo"):
     os.execv("/usr/bin/" + name, [name] + args)
+elif name == "python3":
+    os.execv(sys.executable, [sys.executable] + args)
+elif name == "dirname":
+    print(os.path.dirname(args[-1]))
 elif name == "uname":
     print("Darwin" if args == ["-s"] else "arm64")
 elif name == "id":
@@ -152,16 +157,23 @@ class RuntimeUpdateFixture(unittest.TestCase):
         (authorization / "Fin").chmod(0o755)
         self.new.joinpath("fin").write_text("synthetic new discovery\n")
         self.new.joinpath("fin-broker").write_text("synthetic new enrollment\n")
+        self.install_fake_broker(self.old / "fin-broker", "old")
+        self.install_fake_broker(self.new / "fin-broker", "new")
+        shutil.copy2(self.old / "fin-broker", self.runtime / "fin-broker")
+        self.manifest(self.old)
+        self.manifest(self.runtime)
         self.new.joinpath("BUILDINFO").write_text("source_commit=synthetic-patch\nsource_state=modified\narchitecture=arm64\n")
         self.manifest(self.new)
         self.private.joinpath("config.json").write_bytes(b"synthetic private config\x00")
-        self.private.joinpath("operations.sqlite").write_bytes(b"synthetic unresolved journal\x00")
+        with sqlite3.connect(self.private / "operations.sqlite") as connection:
+            connection.execute("PRAGMA user_version=4")
+            connection.execute("CREATE TABLE synthetic_unresolved_record (id TEXT)")
         self.private.joinpath("credentials").mkdir()
         self.private.joinpath("credentials/synthetic-only").write_bytes(b"synthetic credential\x00")
         self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
                                for path in self.private.rglob("*") if path.is_file()}
         driver = "#!" + sys.executable + "\n" + DRIVER.replace("ROOT", repr(str(self.root)))
-        for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown",
+        for name in ("uname", "id", "stat", "ls", "codesign", "otool", "pgrep", "chown", "python3", "dirname",
                      "mkdir", "rmdir", "cp", "rm", "mv", "mktemp", "chmod", "awk", "shasum", "cmp", "sudo"):
             self.bin.joinpath(name).write_text(driver)
             self.bin.joinpath(name).chmod(0o755)
@@ -176,6 +188,19 @@ class RuntimeUpdateFixture(unittest.TestCase):
                         lambda match: str(self.bin / match.group(1)), source)
         self.script = self.root / "update.sh"
         self.script.write_text(source)
+        checker = SCRIPT.with_name("check-runtime-store-compatibility.py").read_text()
+        checker = re.sub(r'(?<![\w/])/Library(?=[/\s";:]|$)',
+                         lambda match: str(self.root) + match.group(0), checker)
+        checker = checker.replace("if os.geteuid() != 0:", "if False:")
+        checker = checker.replace("expected_uid=0)", "expected_uid=os.geteuid())")
+        self.root.joinpath("check-runtime-store-compatibility.py").write_text(checker)
+
+    def install_fake_broker(self, path, label):
+        path.write_text("#!" + sys.executable + "\n# synthetic " + label + " broker\nimport json, os, sys\n"
+                        "if sys.argv[1:] == ['--export-storage-contract']:\n"
+                        " print(json.dumps({'journal_schema_version': int(os.environ.get('FIN_TEST_SCHEMA', '4'))}))\n"
+                        "else: sys.exit(2)\n")
+        path.chmod(0o755)
 
     @staticmethod
     def manifest(bundle):
@@ -192,7 +217,8 @@ class RuntimeUpdateFixture(unittest.TestCase):
         result = subprocess.run(
             arguments,
             capture_output=True, text=True, timeout=30,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "SUDO_UID": sudo_uid})
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "SUDO_UID": sudo_uid,
+                 "FIN_TEST_SCHEMA": str(self.options.get("supported_schema", 4))})
         self.assertEqual(self.private_before, {str(path.relative_to(self.private)): path.read_bytes()
                                               for path in self.private.rglob("*") if path.is_file()})
         for command, args in self.events():
@@ -241,6 +267,25 @@ class RuntimeUpdateFixture(unittest.TestCase):
         self.assertEqual(renamed, ["fin", "fin-broker", "BUILDINFO", "SHA256SUMS"])
         self.assertFalse(self.lock.exists())
         self.assertEqual(result.stdout, "Updating Fin...\n✓ Fin updated.\n")
+
+    def test_newer_journal_schema_refuses_before_any_runtime_replacement(self):
+        with sqlite3.connect(self.private / "operations.sqlite") as connection:
+            connection.execute("PRAGMA user_version=9")
+        self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
+                               for path in self.private.rglob("*") if path.is_file()}
+        result = self.assert_refused("newer than incoming broker schema")
+        self.assert_runtime_matches(self.old)
+        self.assertNotIn("restoring changed runtime files", result.stderr)
+
+    def test_matching_newer_schema_allows_update(self):
+        with sqlite3.connect(self.private / "operations.sqlite") as connection:
+            connection.execute("PRAGMA user_version=9")
+        self.private_before = {str(path.relative_to(self.private)): path.read_bytes()
+                               for path in self.private.rglob("*") if path.is_file()}
+        self.options["supported_schema"] = 9
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_runtime_matches(self.new)
 
     def test_installed_runtime_can_supply_verified_old_bundle_without_private_access(self):
         self.new.joinpath("fin-touch-id").write_text("synthetic new presentation helper\n")

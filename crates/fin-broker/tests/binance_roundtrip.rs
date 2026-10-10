@@ -662,6 +662,16 @@ fn adapter(venue: Arc<SyntheticVenue>) -> Arc<BinanceAdapter> {
     )
 }
 
+/// The Binance roundtrip fixtures use mainnet transaction routes, so provide
+/// the test chain's reviewed WETH identity instead of expecting mocked RPC to
+/// implement the Uniswap router's WETH9 getter.
+fn synthetic_mainnet_ethereum_config() -> fin_ethereum::EthereumConfig {
+    fin_ethereum::EthereumConfig {
+        weth: Some(fin_ethereum::WETH.into()),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn composite_deposit_hides_route_rows_publicly_but_binds_binance_and_evm_identities() {
     let compose = |main_resource: &str, wallet_address: &str| {
@@ -678,7 +688,7 @@ fn composite_deposit_hides_route_rows_publicly_but_binds_binance_and_evm_identit
         );
         let ethereum = Arc::new(
             fin_ethereum::EthereumAdapter::new(
-                fin_ethereum::EthereumConfig::default(),
+                synthetic_mainnet_ethereum_config(),
                 vec![fin_ethereum::WalletConnection {
                     name: "synthetic-wallet".into(),
                     address: wallet_address.into(),
@@ -1295,6 +1305,7 @@ impl EvmRpc for BaseTokenPreviewRpc {
 struct DepositExecutionRpc {
     oracle_updated_at: u128,
     priority_fee: AtomicU64,
+    base_fee: AtomicU64,
     nonce: AtomicU64,
     gas_estimate: AtomicU64,
     simulation_failure: AtomicBool,
@@ -1514,7 +1525,7 @@ impl EvmRpc for DepositExecutionRpc {
         let deposit = "0x1111111111111111111111111111111111111111";
         let wallet = self.wallet_address.as_str();
         let payout_hash = format!("0x{}", "ee".repeat(32));
-        let oracle = fin_ethereum::EthereumConfig::default()
+        let oracle = synthetic_mainnet_ethereum_config()
             .aave
             .expect("mainnet Aave")
             .oracle;
@@ -1627,7 +1638,8 @@ impl EvmRpc for DepositExecutionRpc {
                     params[0].as_str().unwrap()
                 };
                 let mut value = json!({"hash":format!("0x{}", "cd".repeat(32)),"number":number});
-                value["baseFeePerGas"] = json!("0x3b9aca00");
+                value["baseFeePerGas"] =
+                    json!(format!("{:#x}", self.base_fee.load(Ordering::SeqCst)));
                 Ok(value)
             }
             "eth_getCode" => Ok(json!(if [deposit, wallet]
@@ -1707,7 +1719,7 @@ impl EvmRpc for DepositExecutionRpc {
 impl EvmRpc for DepositPreviewRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let deposit = "0x1111111111111111111111111111111111111111";
-        let oracle = fin_ethereum::EthereumConfig::default()
+        let oracle = synthetic_mainnet_ethereum_config()
             .aave
             .expect("mainnet Aave")
             .oracle;
@@ -1835,7 +1847,7 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
     let rpc = Arc::new(CanonicalNativeCreditRpc::new(1));
     let wallet = "0x1111111111111111111111111111111111111111";
     let ethereum = fin_ethereum::EthereumAdapter::new(
-        fin_ethereum::EthereumConfig::default(),
+        synthetic_mainnet_ethereum_config(),
         vec![fin_ethereum::WalletConnection {
             name: "synthetic-payout-recipient".into(),
             address: wallet.into(),
@@ -1867,7 +1879,7 @@ async fn canonical_native_payout_proof_checks_inclusion_finality_recipient_and_e
     let unconfirmed = CanonicalNativeCreditRpc::new(1);
     *unconfirmed.latest.lock().unwrap() = "0x64".into();
     let pending = fin_ethereum::EthereumAdapter::new(
-        fin_ethereum::EthereumConfig::default(),
+        synthetic_mainnet_ethereum_config(),
         vec![fin_ethereum::WalletConnection {
             name: "synthetic-payout-recipient".into(),
             address: wallet.into(),
@@ -1899,7 +1911,7 @@ async fn arbitrum_payout_verifier_recovers_legacy_confirmation_count_at_sequence
     let recipient = "0x1111111111111111111111111111111111111111";
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            fin_ethereum::EthereumConfig::wallet_only(42161, 1, vec![]),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-arbitrum-payout".into(),
                 address: recipient.into(),
@@ -1995,7 +2007,7 @@ async fn base_payout_requires_full_canonical_l2_inclusion_and_exact_identity() {
     let recipient = "0x1111111111111111111111111111111111111111";
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::wallet_only(8453, 2, vec![]),
+            fin_ethereum::EthereumConfig::wallet_only(8453, 1, vec![]),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-base-payout".into(),
                 address: recipient.into(),
@@ -2168,7 +2180,7 @@ async fn binance_deposit_preview_freezes_dynamic_main_or_subaccount_target_and_e
     let wallet_address = "0x2222222222222222222222222222222222222222";
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address.into(),
@@ -2254,7 +2266,7 @@ async fn subaccount_only_credentials_and_dynamic_arbitrum_usdc_route_are_support
     let wallet_address = "0x2222222222222222222222222222222222222222";
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            fin_ethereum::EthereumConfig::wallet_only(42161, 1, vec![]),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address.into(),
@@ -2448,7 +2460,7 @@ async fn binance_deposit_return_route_proof_binds_fresh_address_and_cross_asset_
     let wallet_address = "0x2222222222222222222222222222222222222222";
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address.into(),
@@ -2591,6 +2603,7 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at,
         priority_fee: AtomicU64::new(10_000_000),
+        base_fee: AtomicU64::new(1_000_000_000),
         nonce: AtomicU64::new(0),
         gas_estimate: AtomicU64::new(21_000),
         simulation_failure: AtomicBool::new(false),
@@ -2607,7 +2620,7 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address,
@@ -2684,11 +2697,19 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     );
     rpc.simulation_failure.store(false, Ordering::SeqCst);
     rpc.priority_fee.store(100_000_000_000, Ordering::SeqCst);
+    let unchanged_bid = composite.revalidate(&prepared).await.unwrap();
+    assert_eq!(
+        unchanged_bid.binding["inner_preview"]["binding"],
+        prepared.binding["inner_preview"]["binding"],
+        "a new recommended tip must not mutate the frozen envelope"
+    );
+    rpc.base_fee.store(5_000_000_000, Ordering::SeqCst);
     assert_eq!(
         composite.revalidate(&prepared).await.unwrap_err().code,
         "FEE_BOUND_CHANGED",
-        "a gas quote beyond the approved envelope must still block submission"
+        "base fee beyond the approved cap must block submission"
     );
+    rpc.base_fee.store(1_000_000_000, Ordering::SeqCst);
     rpc.priority_fee.store(1, Ordering::SeqCst);
     let submission = composite.submit(&prepared, journal.clone()).await.unwrap();
     assert_eq!(submission.kind, "ethereum");
@@ -2842,6 +2863,7 @@ async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repric
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at: synthetic_oracle_updated_at(),
         priority_fee: AtomicU64::new(10_000_000),
+        base_fee: AtomicU64::new(1_000_000_000),
         nonce: AtomicU64::new(0),
         gas_estimate: AtomicU64::new(21_000),
         simulation_failure: AtomicBool::new(false),
@@ -2858,7 +2880,7 @@ async fn composite_deposit_keeps_exact_approved_transfer_across_fresh_usd_repric
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address,
@@ -2972,7 +2994,7 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::wallet_only(42161, 2, vec![]),
+            fin_ethereum::EthereumConfig::wallet_only(42161, 1, vec![]),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: wallet_address,
@@ -3093,6 +3115,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at: synthetic_oracle_updated_at(),
         priority_fee: AtomicU64::new(10_000_000),
+        base_fee: AtomicU64::new(1_000_000_000),
         nonce: AtomicU64::new(0),
         gas_estimate: AtomicU64::new(21_000),
         simulation_failure: AtomicBool::new(false),
@@ -3109,7 +3132,7 @@ async fn scoped_deposit_withdraw_roundtrip_is_broker_preflighted_executed_and_fi
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: address.clone(),
@@ -3300,6 +3323,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
     let rpc = Arc::new(DepositExecutionRpc {
         oracle_updated_at: synthetic_oracle_updated_at(),
         priority_fee: AtomicU64::new(10_000_000),
+        base_fee: AtomicU64::new(1_000_000_000),
         nonce: AtomicU64::new(0),
         gas_estimate: AtomicU64::new(21_000),
         simulation_failure: AtomicBool::new(false),
@@ -3316,7 +3340,7 @@ async fn two_child_consolidation_withdrawal_and_deposit_redistribution_restores_
     });
     let ethereum = Arc::new(
         fin_ethereum::EthereumAdapter::new(
-            fin_ethereum::EthereumConfig::default(),
+            synthetic_mainnet_ethereum_config(),
             vec![fin_ethereum::WalletConnection {
                 name: "synthetic-wallet".into(),
                 address: address.clone(),

@@ -3,7 +3,7 @@
 use alloy::{
     consensus::{SignableTransaction, TxEip1559, TxEnvelope, transaction::SignerRecoverable},
     eips::{eip2718::Decodable2718, eip2930::AccessList},
-    primitives::{Address, B256, Bytes, TxKind, U256, keccak256},
+    primitives::{Address, B256, Bytes, Signature, TxKind, U256, keccak256},
     signers::{SignerSync, local::PrivateKeySigner},
     sol_types::SolCall,
 };
@@ -44,6 +44,20 @@ fn ceil_percent(value: U256, percent: u64) -> Option<U256> {
         .checked_mul(U256::from(percent))
         .and_then(|scaled| scaled.checked_add(U256::from(99)))
         .map(|scaled| scaled / U256::from(100))
+}
+
+fn validate_frozen_fee_bid(transaction: &FrozenTransaction, base_fee: U256) -> Result<()> {
+    let max_fee = u256(&transaction.max_fee_per_gas)?;
+    let priority = u256(&transaction.max_priority_fee_per_gas)?;
+    let fully_funded_bid = base_fee.checked_add(priority);
+    if fully_funded_bid.is_none_or(|bid| bid > max_fee) {
+        return Err(error(
+            "FEE_BOUND_CHANGED",
+            "submission",
+            "Current base fee exceeds the approved frozen fee bid and full priority tip.",
+        ));
+    }
+    Ok(())
 }
 pub fn address(value: &str) -> Result<Address> {
     Address::from_str(value).map_err(|_| {
@@ -140,6 +154,239 @@ pub fn lower_address(value: Address) -> String {
     format!("{value:#x}")
 }
 
+/// The complete EIP-2612 permit authorization. `domain_separator` must come
+/// from the broker's verified on-chain token-domain read; this type never
+/// accepts an arbitrary digest to sign.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct Eip2612Permit {
+    pub chain_id: u64,
+    pub token: String,
+    pub owner: String,
+    pub spender: String,
+    pub value: Quantity,
+    pub nonce: Quantity,
+    pub deadline: u64,
+    pub domain_separator: String,
+}
+
+/// One Permit2 `PermitSingle`, using its canonical domain (name `Permit2`, no
+/// version field) and nested `PermitDetails` struct.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct Permit2PermitSingle {
+    pub chain_id: u64,
+    pub verifying_contract: String,
+    pub owner: String,
+    pub token: String,
+    pub amount: Quantity,
+    pub expiration: u64,
+    pub nonce: u64,
+    pub spender: String,
+    pub sig_deadline: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    content = "permit",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+#[schemars(deny_unknown_fields)]
+pub enum AuthorizedPermit {
+    Eip2612(Eip2612Permit),
+    Permit2Single(Permit2PermitSingle),
+}
+
+fn word(value: U256) -> [u8; 32] {
+    value.to_be_bytes::<32>()
+}
+fn address_word(value: Address) -> [u8; 32] {
+    let mut out = [0; 32];
+    out[12..].copy_from_slice(value.as_slice());
+    out
+}
+fn append_word(encoded: &mut Vec<u8>, value: [u8; 32]) {
+    encoded.extend_from_slice(&value);
+}
+fn permit_error(message: &str) -> FinError {
+    error("INVALID_AUTHORIZED_PERMIT", "validation", message)
+}
+fn nonzero_permit_address(value: &str) -> Result<Address> {
+    let parsed = address(value).map_err(|_| permit_error("Permit contains an invalid address."))?;
+    if parsed.is_zero() {
+        return Err(permit_error("Permit addresses must be nonzero."));
+    }
+    Ok(parsed)
+}
+fn quantity_in_range(value: &Quantity, maximum: U256, label: &str) -> Result<U256> {
+    let parsed = U256::from_str(value.as_str())
+        .map_err(|_| permit_error("Permit quantity is not a canonical uint256 value."))?;
+    if parsed.is_zero() || parsed >= maximum {
+        return Err(permit_error(label));
+    }
+    Ok(parsed)
+}
+fn digest(domain_separator: B256, struct_hash: B256) -> B256 {
+    let mut bytes = [0u8; 66];
+    bytes[0] = 0x19;
+    bytes[1] = 0x01;
+    bytes[2..34].copy_from_slice(domain_separator.as_slice());
+    bytes[34..].copy_from_slice(struct_hash.as_slice());
+    keccak256(bytes)
+}
+
+impl Eip2612Permit {
+    pub fn validate(&self, expected_chain_id: u64, now: u64) -> Result<()> {
+        if self.chain_id == 0 || self.chain_id != expected_chain_id {
+            return Err(permit_error(
+                "Permit chain differs from the configured wallet chain.",
+            ));
+        }
+        nonzero_permit_address(&self.token)?;
+        nonzero_permit_address(&self.owner)?;
+        nonzero_permit_address(&self.spender)?;
+        quantity_in_range(
+            &self.value,
+            U256::MAX,
+            "Permit value must be finite and positive.",
+        )?;
+        // EIP-2612 nonce is a uint256, and may be zero.
+        U256::from_str(self.nonce.as_str())
+            .map_err(|_| permit_error("Permit nonce exceeds uint256."))?;
+        hash(&self.domain_separator)
+            .map_err(|_| permit_error("Permit domain separator must be exactly 32 bytes."))?;
+        if self.deadline <= now {
+            return Err(permit_error("Permit deadline has expired."));
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<B256> {
+        let owner = nonzero_permit_address(&self.owner)?;
+        let spender = nonzero_permit_address(&self.spender)?;
+        let value = quantity_in_range(
+            &self.value,
+            U256::MAX,
+            "Permit value must be finite and positive.",
+        )?;
+        let nonce = U256::from_str(self.nonce.as_str())
+            .map_err(|_| permit_error("Permit nonce exceeds uint256."))?;
+        let domain = hash(&self.domain_separator)
+            .map_err(|_| permit_error("Permit domain separator must be exactly 32 bytes."))?;
+        let type_hash = keccak256(
+            "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)",
+        );
+        let mut encoded = Vec::with_capacity(192);
+        append_word(&mut encoded, type_hash.0);
+        append_word(&mut encoded, address_word(owner));
+        append_word(&mut encoded, address_word(spender));
+        append_word(&mut encoded, word(value));
+        append_word(&mut encoded, word(nonce));
+        append_word(&mut encoded, word(U256::from(self.deadline)));
+        Ok(digest(domain, keccak256(encoded)))
+    }
+}
+
+impl Permit2PermitSingle {
+    pub fn validate(&self, expected_chain_id: u64, now: u64) -> Result<()> {
+        if self.chain_id == 0 || self.chain_id != expected_chain_id {
+            return Err(permit_error(
+                "Permit chain differs from the configured wallet chain.",
+            ));
+        }
+        nonzero_permit_address(&self.verifying_contract)?;
+        nonzero_permit_address(&self.owner)?;
+        nonzero_permit_address(&self.token)?;
+        nonzero_permit_address(&self.spender)?;
+        quantity_in_range(
+            &self.amount,
+            (U256::from(1) << 160) - U256::from(1),
+            "Permit2 amount must be finite, positive, and below uint160 max.",
+        )?;
+        let max_u48 = (1u64 << 48) - 1;
+        if self.expiration > max_u48 || self.nonce > max_u48 || self.sig_deadline <= now {
+            return Err(permit_error(
+                "Permit2 expiration, nonce, or signature deadline is invalid.",
+            ));
+        }
+        if self.expiration != 0 && self.expiration <= now {
+            return Err(permit_error("Permit2 allowance expiration has expired."));
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<B256> {
+        let verifying_contract = nonzero_permit_address(&self.verifying_contract)?;
+        let token = nonzero_permit_address(&self.token)?;
+        let spender = nonzero_permit_address(&self.spender)?;
+        let amount = quantity_in_range(
+            &self.amount,
+            (U256::from(1) << 160) - U256::from(1),
+            "Permit2 amount must be finite, positive, and below uint160 max.",
+        )?;
+        let details_type_hash =
+            keccak256("PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)");
+        let mut details = Vec::with_capacity(160);
+        append_word(&mut details, details_type_hash.0);
+        append_word(&mut details, address_word(token));
+        append_word(&mut details, word(amount));
+        append_word(&mut details, word(U256::from(self.expiration)));
+        append_word(&mut details, word(U256::from(self.nonce)));
+        let details_hash = keccak256(details);
+
+        let single_type_hash = keccak256(
+            "PermitSingle(PermitDetails details,address spender,uint256 sigDeadline)PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)",
+        );
+        let mut single = Vec::with_capacity(128);
+        append_word(&mut single, single_type_hash.0);
+        append_word(&mut single, details_hash.0);
+        append_word(&mut single, address_word(spender));
+        append_word(&mut single, word(U256::from(self.sig_deadline)));
+        let struct_hash = keccak256(single);
+
+        let domain_type_hash =
+            keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)");
+        let name_hash = keccak256("Permit2");
+        let mut domain = Vec::with_capacity(128);
+        append_word(&mut domain, domain_type_hash.0);
+        append_word(&mut domain, name_hash.0);
+        append_word(&mut domain, word(U256::from(self.chain_id)));
+        append_word(&mut domain, address_word(verifying_contract));
+        Ok(digest(keccak256(domain), struct_hash))
+    }
+}
+
+impl AuthorizedPermit {
+    pub fn owner(&self) -> Result<Address> {
+        match self {
+            Self::Eip2612(p) => nonzero_permit_address(&p.owner),
+            Self::Permit2Single(p) => nonzero_permit_address(&p.owner),
+        }
+    }
+    pub fn validate(&self, expected_chain_id: u64, now: u64) -> Result<()> {
+        match self {
+            Self::Eip2612(p) => p.validate(expected_chain_id, now),
+            Self::Permit2Single(p) => p.validate(expected_chain_id, now),
+        }
+    }
+    pub fn digest(&self) -> Result<B256> {
+        match self {
+            Self::Eip2612(p) => p.digest(),
+            Self::Permit2Single(p) => p.digest(),
+        }
+    }
+    fn chain_id(&self) -> u64 {
+        match self {
+            Self::Eip2612(p) => p.chain_id,
+            Self::Permit2Single(p) => p.chain_id,
+        }
+    }
+}
+
 #[async_trait]
 pub trait EvmRpc: Send + Sync {
     /// Internal runtime boundary, never an agent-visible raw-method endpoint.
@@ -160,6 +407,55 @@ struct RpcAttemptFailure {
 
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
+const MAX_REVERT_DIAGNOSTIC_BYTES: usize = 4096;
+
+fn four_byte_selector(bytes: &[u8]) -> Option<String> {
+    let selector: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
+    Some(format!("0x{}", hex::encode(selector)))
+}
+
+fn hex_revert_payload(value: &Value) -> Option<Vec<u8>> {
+    let text = value.as_str()?.strip_prefix("0x")?;
+    if text.len() < 8
+        || text.len() % 2 != 0
+        || text.len() > MAX_REVERT_DIAGNOSTIC_BYTES.saturating_mul(2)
+    {
+        return None;
+    }
+    hex::decode(text).ok()
+}
+
+fn universal_router_inner_error_selector(bytes: &[u8]) -> Option<String> {
+    // Universal Router's `ExecutionFailed(uint256,bytes)` wraps the original
+    // revert payload in a canonical ABI dynamic-bytes field. Bound both the
+    // payload and every offset before extracting only its four-byte selector.
+    let wrapper = keccak256("ExecutionFailed(uint256,bytes)");
+    if bytes.get(..4)? != &wrapper[..4] {
+        return None;
+    }
+    let offset = U256::from_be_slice(bytes.get(36..68)?);
+    if offset != U256::from(64) {
+        return None;
+    }
+    let length = usize::try_from(U256::from_be_slice(bytes.get(68..100)?)).ok()?;
+    if !(4..=MAX_REVERT_DIAGNOSTIC_BYTES).contains(&length) {
+        return None;
+    }
+    let padded_length = length.checked_add(31)? / 32 * 32;
+    let payload_end = 100usize.checked_add(padded_length)?;
+    if bytes.len() != payload_end {
+        return None;
+    }
+    let payload = bytes.get(100..100usize.checked_add(length)?)?;
+    if bytes
+        .get(100 + length..payload_end)?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return None;
+    }
+    four_byte_selector(payload)
+}
 
 fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttemptFailure {
     // Read only an exact signed integer. Provider messages, data and other
@@ -200,8 +496,27 @@ fn rpc_rejection(details: &Value, historical_state_fallback: bool) -> RpcAttempt
         "rpc",
         &message,
     );
+    let mut diagnostics = serde_json::Map::new();
     if let Some(code) = code {
-        error = error.with_details(json!({"json_rpc_code":code}));
+        diagnostics.insert("json_rpc_code".into(), json!(code));
+    }
+    if details
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| message.starts_with("execution reverted"))
+    {
+        diagnostics.insert("error_class".into(), json!("contract_revert"));
+        if let Some(bytes) = details.get("data").and_then(hex_revert_payload) {
+            if let Some(selector) = four_byte_selector(&bytes) {
+                diagnostics.insert("error_selector".into(), Value::String(selector));
+            }
+            if let Some(selector) = universal_router_inner_error_selector(&bytes) {
+                diagnostics.insert("inner_error_selector".into(), Value::String(selector));
+            }
+        }
+    }
+    if !diagnostics.is_empty() {
+        error = error.with_details(Value::Object(diagnostics));
     }
     RpcAttemptFailure {
         retryable: historical_state_unavailable
@@ -634,6 +949,16 @@ impl FrozenTransaction {
 pub trait EnvelopeSigner: Send + Sync {
     /// Never called until the broker's single-write journal confirms authorization.
     async fn sign_prepared(&self, transaction: &FrozenTransaction) -> Result<Bytes>;
+
+    /// Typed permit signing is deliberately separate from transaction/hash
+    /// signing. Providers that do not implement reviewed permit signing fail closed.
+    async fn sign_authorized_permit(&self, _permit: &AuthorizedPermit) -> Result<Bytes> {
+        Err(error(
+            "PERMIT_SIGNING_UNAVAILABLE",
+            "signing",
+            "The protected signing provider does not support typed permit signing.",
+        ))
+    }
 }
 pub struct LocalEnvelopeSigner {
     signer: PrivateKeySigner,
@@ -679,6 +1004,42 @@ impl EnvelopeSigner for LocalEnvelopeSigner {
         let envelope: TxEnvelope = tx.into_signed(signature).into();
         use alloy::eips::eip2718::Encodable2718;
         Ok(envelope.encoded_2718().into())
+    }
+
+    async fn sign_authorized_permit(&self, permit: &AuthorizedPermit) -> Result<Bytes> {
+        if permit.owner()? != self.signer.address() {
+            return Err(error(
+                "SIGNER_MISMATCH",
+                "signing",
+                "Protected signer does not match the typed permit owner.",
+            ));
+        }
+        let digest = permit.digest()?;
+        let signature = self.signer.sign_hash_sync(&digest).map_err(|_| {
+            error(
+                "SIGNING_FAILED",
+                "signing",
+                "Protected signing did not succeed.",
+            )
+        })?;
+        if signature
+            .recover_address_from_prehash(&digest)
+            .map_err(|_| {
+                error(
+                    "SIGNING_FAILED",
+                    "signing",
+                    "Permit signer recovery failed.",
+                )
+            })?
+            != permit.owner()?
+        {
+            return Err(error(
+                "SIGNER_MISMATCH",
+                "signing",
+                "Typed permit signature does not recover the authorized owner.",
+            ));
+        }
+        Ok(Bytes::from(signature.as_bytes().to_vec()))
     }
 }
 
@@ -732,6 +1093,211 @@ pub struct EvmRuntime {
 pub struct PreparedCall {
     pub transaction: FrozenTransaction,
     pub simulation: Bytes,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub enum SignatureLayout {
+    Packed65 {
+        offset: usize,
+    },
+    /// ABI-word offsets for `v`, `r` and `s`, each pointing at a distinct
+    /// 32-byte slot in the complete calldata.
+    Eip2612Abi {
+        v_offset: usize,
+        r_offset: usize,
+        s_offset: usize,
+    },
+}
+
+impl SignatureLayout {
+    fn ranges(&self, calldata_len: usize) -> Result<Vec<(usize, usize)>> {
+        let ranges = match self {
+            Self::Packed65 { offset } => vec![(*offset, offset.checked_add(65))],
+            Self::Eip2612Abi {
+                v_offset,
+                r_offset,
+                s_offset,
+            } => vec![
+                (*v_offset, v_offset.checked_add(32)),
+                (*r_offset, r_offset.checked_add(32)),
+                (*s_offset, s_offset.checked_add(32)),
+            ],
+        };
+        let mut resolved = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            let end = end.ok_or_else(|| {
+                error(
+                    "INVALID_PERMIT_TEMPLATE",
+                    "validation",
+                    "Permit signature slot offset overflowed.",
+                )
+            })?;
+            if end > calldata_len {
+                return Err(error(
+                    "INVALID_PERMIT_TEMPLATE",
+                    "validation",
+                    "Permit signature slot lies outside calldata.",
+                ));
+            }
+            resolved.push((start, end));
+        }
+        let mut sorted = resolved.clone();
+        sorted.sort_unstable();
+        if sorted.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+            return Err(error(
+                "INVALID_PERMIT_TEMPLATE",
+                "validation",
+                "Permit signature slots overlap.",
+            ));
+        }
+        Ok(resolved)
+    }
+
+    fn validate_zero_template(&self, calldata: &[u8]) -> Result<()> {
+        for (start, end) in self.ranges(calldata.len())? {
+            if calldata[start..end].iter().any(|byte| *byte != 0) {
+                return Err(error(
+                    "INVALID_PERMIT_TEMPLATE",
+                    "validation",
+                    "Permit signature template slots must be zeroed.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize(&self, calldata: &mut [u8], signature: &[u8]) -> Result<()> {
+        if signature.len() != 65 || !matches!(signature[64], 27 | 28) {
+            return Err(error(
+                "PERMIT_SIGNATURE_MISMATCH",
+                "signing",
+                "Protected permit signer returned a noncanonical 65-byte signature.",
+            ));
+        }
+        self.validate_zero_template(calldata)?;
+        match self {
+            Self::Packed65 { offset } => {
+                calldata[*offset..*offset + 65].copy_from_slice(signature);
+            }
+            Self::Eip2612Abi {
+                v_offset,
+                r_offset,
+                s_offset,
+            } => {
+                calldata[*r_offset..*r_offset + 32].copy_from_slice(&signature[..32]);
+                calldata[*s_offset..*s_offset + 32].copy_from_slice(&signature[32..64]);
+                calldata[*v_offset..*v_offset + 32].fill(0);
+                calldata[*v_offset + 31] = signature[64];
+            }
+        }
+        Ok(())
+    }
+
+    fn signature_from(&self, calldata: &[u8]) -> Result<Bytes> {
+        self.ranges(calldata.len())?;
+        let signature = match self {
+            Self::Packed65 { offset } => calldata[*offset..*offset + 65].to_vec(),
+            Self::Eip2612Abi {
+                v_offset,
+                r_offset,
+                s_offset,
+            } => {
+                if calldata[*v_offset..*v_offset + 31]
+                    .iter()
+                    .any(|byte| *byte != 0)
+                {
+                    return Err(error(
+                        "PERMIT_SIGNATURE_MISMATCH",
+                        "reconciliation",
+                        "ABI permit signature has a malformed v word.",
+                    ));
+                }
+                let mut bytes = Vec::with_capacity(65);
+                bytes.extend_from_slice(&calldata[*r_offset..*r_offset + 32]);
+                bytes.extend_from_slice(&calldata[*s_offset..*s_offset + 32]);
+                bytes.push(calldata[*v_offset + 31]);
+                bytes
+            }
+        };
+        if signature[64] != 27 && signature[64] != 28 {
+            return Err(error(
+                "PERMIT_SIGNATURE_MISMATCH",
+                "reconciliation",
+                "Permit signature v must be 27 or 28.",
+            ));
+        }
+        Ok(Bytes::from(signature))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
+pub struct PreparedPermitTemplate {
+    /// Preview envelope with an all-zero 65-byte signature slot. It must never
+    /// be submitted; materialization replaces that slot after authorization.
+    transaction: FrozenTransaction,
+    permit: AuthorizedPermit,
+    signature_layout: SignatureLayout,
+}
+
+/// Unsigned transaction fields frozen around a typed permit signature slot.
+/// The adapter supplies a finite, reviewed gas limit and fee ceiling; this
+/// request never contains a signature or a caller-provided digest.
+#[derive(Clone, Debug)]
+pub struct UnsignedPermitTransaction {
+    pub sender: Address,
+    pub to: Address,
+    pub value: U256,
+    pub calldata: Bytes,
+    pub gas_limit: u64,
+    pub maximum_total_fee: U256,
+}
+impl PreparedPermitTemplate {
+    pub fn transaction(&self) -> &FrozenTransaction {
+        &self.transaction
+    }
+    pub fn permit(&self) -> &AuthorizedPermit {
+        &self.permit
+    }
+    pub fn signature_layout(&self) -> &SignatureLayout {
+        &self.signature_layout
+    }
+}
+fn verify_authorized_permit_signature(permit: &AuthorizedPermit, bytes: &[u8]) -> Result<()> {
+    if bytes.len() != 65 || !matches!(bytes[64], 27 | 28) {
+        return Err(error(
+            "PERMIT_SIGNATURE_MISMATCH",
+            "signing",
+            "Protected permit signer returned a noncanonical 65-byte signature.",
+        ));
+    }
+    let signature = Signature::from_raw(bytes).map_err(|_| {
+        error(
+            "PERMIT_SIGNATURE_MISMATCH",
+            "signing",
+            "Protected permit signer returned a malformed signature.",
+        )
+    })?;
+    let digest = permit.digest()?;
+    let recovered = signature
+        .recover_address_from_prehash(&digest)
+        .map_err(|_| {
+            error(
+                "PERMIT_SIGNATURE_MISMATCH",
+                "signing",
+                "Protected permit signature could not be recovered.",
+            )
+        })?;
+    if recovered != permit.owner()? {
+        return Err(error(
+            "PERMIT_SIGNATURE_MISMATCH",
+            "signing",
+            "Protected permit signature does not recover the authorized owner.",
+        ));
+    }
+    Ok(())
 }
 #[derive(Clone, Debug)]
 pub struct CanonicalReceipt {
@@ -1004,6 +1570,261 @@ impl EvmRuntime {
             simulation,
         })
     }
+
+    /// Freeze a finite transaction envelope around a typed permit without
+    /// signing or simulating its signature-dependent calldata. `gas_limit` is
+    /// supplied by the trusted adapter as a reviewed worst-case bound. The
+    /// signature slot must be exactly 65 zero bytes.
+    pub async fn prepare_permit_template(
+        &self,
+        request: UnsignedPermitTransaction,
+        signature_offset: usize,
+        permit: AuthorizedPermit,
+    ) -> Result<PreparedPermitTemplate> {
+        self.prepare_permit_template_with_layout(
+            request,
+            SignatureLayout::Packed65 {
+                offset: signature_offset,
+            },
+            permit,
+        )
+        .await
+    }
+
+    pub async fn prepare_permit_template_with_layout(
+        &self,
+        request: UnsignedPermitTransaction,
+        signature_layout: SignatureLayout,
+        permit: AuthorizedPermit,
+    ) -> Result<PreparedPermitTemplate> {
+        let UnsignedPermitTransaction {
+            sender,
+            to,
+            value,
+            calldata: calldata_template,
+            gas_limit,
+            maximum_total_fee,
+        } = request;
+        if gas_limit == 0 {
+            return Err(error(
+                "INVALID_PERMIT_TEMPLATE",
+                "preview",
+                "Permit template requires a finite gas limit.",
+            ));
+        }
+        signature_layout.validate_zero_template(&calldata_template)?;
+        if permit.owner()? != sender {
+            return Err(error(
+                "SIGNER_MISMATCH",
+                "preview",
+                "Permit owner differs from the transaction sender.",
+            ));
+        }
+        self.assert_chain().await?;
+        let block = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        permit.validate(self.chain_id, rpc_u64(&block["timestamp"])?)?;
+        let (required, priority) = self.fees().await?;
+        let affordable = maximum_total_fee / U256::from(gas_limit);
+        if affordable < required {
+            return Err(error(
+                "FEE_LIMIT",
+                "preview",
+                "Current required fee exceeds the explicit total fee bound.",
+            ));
+        }
+        let max_fee = ceil_percent(required, 150)
+            .ok_or_else(|| error("U256_OVERFLOW", "preview", "Fee headroom overflowed."))?
+            .min(affordable);
+        let max_priority = ceil_percent(priority, 150)
+            .ok_or_else(|| {
+                error(
+                    "U256_OVERFLOW",
+                    "preview",
+                    "Priority fee headroom overflowed.",
+                )
+            })?
+            .min(max_fee);
+        let mut transaction = FrozenTransaction {
+            chain_id: self.chain_id,
+            sender: lower_address(sender),
+            to: lower_address(to),
+            value: quantity(value),
+            calldata: hex_bytes(&calldata_template),
+            nonce: self.pending_nonce(sender).await?,
+            gas: gas_limit,
+            max_fee_per_gas: quantity(max_fee),
+            max_priority_fee_per_gas: quantity(max_priority),
+            rollup_fee: None,
+        };
+        // Signature replacement keeps calldata length fixed. The OP oracle's
+        // size-based upper bound therefore reserves its eventual signed cost.
+        transaction.rollup_fee = self.rollup_fee_bound(&transaction).await?;
+        let execution_budget = maximum_total_fee
+            .checked_sub(fees::bound_cost(&transaction)?)
+            .ok_or_else(|| {
+                error(
+                    "FEE_LIMIT",
+                    "preview",
+                    "The permit fee ceiling cannot fund rollup fees.",
+                )
+            })?;
+        let affordable = execution_budget / U256::from(gas_limit);
+        if affordable < required {
+            return Err(error(
+                "FEE_LIMIT",
+                "preview",
+                "The permit fee ceiling cannot fund execution and rollup fees.",
+            ));
+        }
+        transaction.max_fee_per_gas = quantity(max_fee.min(affordable));
+        transaction.max_priority_fee_per_gas = quantity(max_priority.min(max_fee.min(affordable)));
+        transaction.consensus()?;
+        let cost = transaction.maximum_cost()?;
+        if cost > maximum_total_fee
+            || self.balance(sender, None).await?
+                < value.checked_add(cost).ok_or_else(|| {
+                    error("U256_OVERFLOW", "preview", "Gross debit overflows uint256.")
+                })?
+        {
+            return Err(error(
+                "FEE_LIMIT",
+                "preview",
+                "Frozen permit transaction exceeds its explicit fee or balance bound.",
+            ));
+        }
+        Ok(PreparedPermitTemplate {
+            transaction,
+            permit,
+            signature_layout,
+        })
+    }
+
+    /// Revalidate a permit template created during preview without rebuilding
+    /// its pending nonce, gas limit, or fee bid. This deliberately avoids
+    /// simulating unsigned signature-dependent calldata; materialization runs
+    /// the exact signed transaction through normal simulation before submit.
+    pub async fn revalidate_permit_template(
+        &self,
+        template: &PreparedPermitTemplate,
+        request: UnsignedPermitTransaction,
+        signature_layout: SignatureLayout,
+        permit: AuthorizedPermit,
+    ) -> Result<PreparedPermitTemplate> {
+        let transaction = &template.transaction;
+        if template.permit != permit || template.signature_layout != signature_layout {
+            return Err(error(
+                "PERMIT_STATE_CHANGED",
+                "submission",
+                "Fresh typed permit authorization differs from the reviewed permit template.",
+            ));
+        }
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id
+            || transaction.chain_id != permit.chain_id()
+            || address(&transaction.sender)? != request.sender
+            || address(&transaction.to)? != request.to
+            || u256(&transaction.value)? != request.value
+            || transaction.gas != request.gas_limit
+            || transaction.calldata != hex_bytes(&request.calldata)
+            || address(&transaction.sender)? != permit.owner()?
+        {
+            return Err(error(
+                "PERMIT_TRANSACTION_MISMATCH",
+                "submission",
+                "Fresh unsigned permit transaction differs from its frozen preview envelope.",
+            ));
+        }
+        signature_layout.validate_zero_template(&request.calldata)?;
+        self.assert_chain().await?;
+        let latest = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        permit.validate(self.chain_id, rpc_u64(&latest["timestamp"])?)?;
+        validate_frozen_fee_bid(transaction, rpc_u256(&latest["baseFeePerGas"])?)?;
+        self.revalidate_rollup_fee(transaction).await?;
+        if self.pending_nonce(request.sender).await? != transaction.nonce {
+            return Err(error(
+                "NONCE_CHANGED",
+                "submission",
+                "Pending nonce differs from the reviewed frozen permit envelope.",
+            ));
+        }
+        let maximum_cost = transaction.maximum_cost()?;
+        if maximum_cost > request.maximum_total_fee {
+            return Err(error(
+                "FEE_LIMIT",
+                "submission",
+                "Frozen permit gas ceiling exceeds the reviewed total fee bound.",
+            ));
+        }
+        let debit = request.value.checked_add(maximum_cost).ok_or_else(|| {
+            error(
+                "U256_OVERFLOW",
+                "submission",
+                "Gross debit overflows uint256.",
+            )
+        })?;
+        if self.balance(request.sender, None).await? < debit {
+            return Err(error(
+                "INSUFFICIENT_GAS_BALANCE",
+                "submission",
+                "Sender cannot fund the reviewed frozen permit value and gas ceiling.",
+            ));
+        }
+        Ok(template.clone())
+    }
+
+    /// Obtain the typed signature only after the operation journal authorizes
+    /// the write, replace the one frozen slot, and simulate/revalidate the exact
+    /// resulting transaction before normal journaled submission.
+    pub async fn materialize_permit_template(
+        &self,
+        template: &PreparedPermitTemplate,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<PreparedCall> {
+        journal.assert_authorized()?;
+        let mut transaction = template.transaction.clone();
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id
+            || template.permit.chain_id() != self.chain_id
+            || address(&transaction.sender)? != template.permit.owner()?
+        {
+            return Err(error(
+                "INVALID_PERMIT_TEMPLATE",
+                "submission",
+                "Restored permit template does not match this chain and owner.",
+            ));
+        }
+        self.assert_chain().await?;
+        let latest = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        template
+            .permit
+            .validate(self.chain_id, rpc_u64(&latest["timestamp"])?)?;
+        let mut calldata = rpc_bytes(&json!(transaction.calldata))?.to_vec();
+        template
+            .signature_layout
+            .validate_zero_template(&calldata)?;
+        let signature = self
+            .sign_authorized_permit(&template.permit, journal)
+            .await?;
+        template
+            .signature_layout
+            .materialize(&mut calldata, &signature)?;
+        transaction.calldata = hex_bytes(&calldata);
+        validate_materialized_permit_template(template, &transaction)?;
+        let simulation = self.revalidate(&transaction).await?;
+        Ok(PreparedCall {
+            transaction,
+            simulation,
+        })
+    }
     pub async fn revalidate(&self, transaction: &FrozenTransaction) -> Result<Bytes> {
         transaction.consensus()?;
         if transaction.chain_id != self.chain_id {
@@ -1014,21 +1835,16 @@ impl EvmRuntime {
             ));
         }
         self.assert_chain().await?;
+        let latest = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        validate_frozen_fee_bid(transaction, rpc_u256(&latest["baseFeePerGas"])?)?;
         if self.pending_nonce(address(&transaction.sender)?).await? != transaction.nonce {
             return Err(error(
                 "NONCE_CHANGED",
                 "submission",
                 "Pending nonce differs from the authorized frozen envelope.",
-            ));
-        }
-        let (max, priority) = self.fees().await?;
-        if max > u256(&transaction.max_fee_per_gas)?
-            || priority > u256(&transaction.max_priority_fee_per_gas)?
-        {
-            return Err(error(
-                "FEE_BOUND_CHANGED",
-                "submission",
-                "Current fee conditions exceed the approved frozen envelope.",
             ));
         }
         self.revalidate_rollup_fee(transaction).await?;
@@ -1106,6 +1922,51 @@ impl EvmRuntime {
             ));
         }
         Ok(submission)
+    }
+
+    /// Sign one broker-reviewed typed permit. The fresh journal authorization
+    /// is checked immediately before the protected signer and again afterward.
+    /// The signature remains an internal adapter result and is never persisted
+    /// or exposed by this crate's CLI-facing surface.
+    pub async fn sign_authorized_permit(
+        &self,
+        permit: &AuthorizedPermit,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Bytes> {
+        journal.assert_authorized()?;
+        if permit.chain_id() != self.chain_id {
+            return Err(permit_error(
+                "Permit chain differs from the configured wallet chain.",
+            ));
+        }
+        self.assert_chain().await?;
+        let latest = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        let now = rpc_u64(&latest["timestamp"])?;
+        permit.validate(self.chain_id, now)?;
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            error(
+                "PROTECTED_SIGNER_REQUIRED",
+                "signing",
+                "No protected signing provider is configured.",
+            )
+        })?;
+        let signature = signer.sign_authorized_permit(permit).await?;
+        verify_authorized_permit_signature(permit, &signature)?;
+        journal.assert_authorized()?;
+        // Recheck time and chain after potentially slow hardware signing so an
+        // expired or cross-chain result is never released to the caller.
+        self.assert_chain().await?;
+        let latest = self
+            .rpc
+            .request("eth_getBlockByNumber", json!(["latest", false]))
+            .await?;
+        permit
+            .validate(self.chain_id, rpc_u64(&latest["timestamp"])?)
+            .map_err(|_| permit_error("Permit expired while protected signing was in progress."))?;
+        Ok(signature)
     }
     pub async fn receipt(
         &self,
@@ -1345,6 +2206,61 @@ impl EvmRuntime {
         }))
     }
 }
+
+/// Prove that a concrete submitted envelope is precisely the reviewed permit
+/// template with only its declared signature slots materialized.
+pub fn validate_materialized_permit_template(
+    template: &PreparedPermitTemplate,
+    concrete: &FrozenTransaction,
+) -> Result<()> {
+    let expected = &template.transaction;
+    if concrete.chain_id != expected.chain_id
+        || concrete.sender != expected.sender
+        || concrete.to != expected.to
+        || concrete.value != expected.value
+        || concrete.nonce != expected.nonce
+        || concrete.gas != expected.gas
+        || concrete.max_fee_per_gas != expected.max_fee_per_gas
+        || concrete.max_priority_fee_per_gas != expected.max_priority_fee_per_gas
+    {
+        return Err(error(
+            "PERMIT_TRANSACTION_MISMATCH",
+            "reconciliation",
+            "Concrete permit transaction changed an approved envelope field.",
+        ));
+    }
+    concrete.consensus()?;
+    if address(&expected.sender)? != template.permit.owner()?
+        || concrete.chain_id != template.permit.chain_id()
+    {
+        return Err(error(
+            "PERMIT_TRANSACTION_MISMATCH",
+            "reconciliation",
+            "Permit owner or chain differs from its frozen transaction template.",
+        ));
+    }
+    let mut expected_calldata = rpc_bytes(&json!(expected.calldata))?.to_vec();
+    template
+        .signature_layout
+        .validate_zero_template(&expected_calldata)?;
+    let concrete_calldata = rpc_bytes(&json!(concrete.calldata))?;
+    let signature = template
+        .signature_layout
+        .signature_from(&concrete_calldata)?;
+    verify_authorized_permit_signature(&template.permit, &signature)?;
+    template
+        .signature_layout
+        .materialize(&mut expected_calldata, &signature)?;
+    if concrete_calldata.as_ref() != expected_calldata.as_slice() {
+        return Err(error(
+            "PERMIT_TRANSACTION_MISMATCH",
+            "reconciliation",
+            "Concrete permit calldata changed bytes outside its typed signature slots.",
+        ));
+    }
+    Ok(())
+}
+
 pub fn block_tag(block: Option<u64>) -> String {
     block
         .map(|n| format!("{n:#x}"))
@@ -1807,6 +2723,54 @@ mod http_rpc_tests {
             worker.join().unwrap(),
             vec!["eth_chainId", "eth_call", "eth_call", "eth_call"]
         );
+    }
+
+    #[test]
+    fn revert_diagnostics_expose_only_selectors_and_reject_noncanonical_wrappers() {
+        let mut payload = keccak256("ExecutionFailed(uint256,bytes)")[..4].to_vec();
+        payload.extend_from_slice(&U256::ZERO.to_be_bytes::<32>());
+        payload.extend_from_slice(&U256::from(64).to_be_bytes::<32>());
+        let private = b"\x12\x34\x56\x78SYNTHETIC_PRIVATE_SIGNATURE";
+        payload.extend_from_slice(&U256::from(private.len()).to_be_bytes::<32>());
+        payload.extend_from_slice(private);
+        payload.resize(100 + private.len().div_ceil(32) * 32, 0);
+        let failure = rpc_rejection(
+            &json!({"code":3,"message":"execution reverted SYNTHETIC_PRIVATE_MESSAGE","data":format!("0x{}",hex::encode(&payload))}),
+            false,
+        );
+        assert!(!failure.retryable);
+        let encoded = serde_json::to_value(&failure.error).unwrap();
+        assert_eq!(encoded["details"]["inner_error_selector"], "0x12345678");
+        assert_eq!(encoded["details"]["error_class"], "contract_revert");
+        assert!(!encoded.to_string().contains("SYNTHETIC_PRIVATE"));
+        assert!(!encoded.to_string().contains(&hex::encode(private)));
+        for mutation in [0, 1, 2, 3, 4] {
+            let mut invalid = payload.clone();
+            match mutation {
+                0 => invalid[67] = 32,
+                1 => invalid[68..100].fill(0xff),
+                2 => invalid.truncate(103),
+                3 => invalid.push(0),
+                _ => *invalid.last_mut().unwrap() = 1,
+            }
+            assert_eq!(universal_router_inner_error_selector(&invalid), None);
+        }
+        for invalid in [
+            "0x123",
+            "0xzzzzzzzz",
+            "12345678",
+            &format!("0x{}", "ab".repeat(4097)),
+        ] {
+            assert!(hex_revert_payload(&json!(invalid)).is_none());
+        }
+        let no_revert = rpc_rejection(
+            &json!({"code":3,"message":"private error","data":"0x12345678"}),
+            false,
+        );
+        let details = no_revert.error.details.as_deref().unwrap();
+        assert_eq!(details["json_rpc_code"], 3);
+        assert!(details.get("error_class").is_none());
+        assert!(details.get("error_selector").is_none());
     }
 
     #[test]

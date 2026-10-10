@@ -305,7 +305,7 @@ mod tests {
             }
         }
         fn block() -> Value {
-            json!({"number":"0x10","hash":format!("0x{}", "22".repeat(32)), "extraData":format!("0x01{}", "00".repeat(16))})
+            json!({"number":"0x10","timestamp":"0x64","hash":format!("0x{}", "22".repeat(32)), "extraData":format!("0x01{}", "00".repeat(16))})
         }
     }
     #[async_trait]
@@ -411,6 +411,75 @@ mod tests {
             U256::from(67_200_007)
         );
         assert!(operator_cost(OperatorFeeModel::Jovian, u64::MAX, u32::MAX, u64::MAX) < U256::MAX);
+    }
+    #[tokio::test]
+    async fn base_permit_templates_reserve_extra_fees_and_reject_drift_before_signing() {
+        let rpc = Arc::new(Fixture::new());
+        let runtime = EvmRuntime::new(rpc.clone(), BASE, None);
+        let original = tx();
+        let permit = AuthorizedPermit::Permit2Single(Permit2PermitSingle {
+            chain_id: BASE,
+            verifying_contract: "0x000000000022d473030f116ddee9f6b43ac78ba3".into(),
+            owner: original.sender.clone(),
+            token: "0x2222222222222222222222222222222222222222".into(),
+            amount: Quantity::from_u64(100),
+            expiration: 200,
+            nonce: 0,
+            spender: original.to.clone(),
+            sig_deadline: 200,
+        });
+        let request = || UnsignedPermitTransaction {
+            sender: address(&original.sender).unwrap(),
+            to: address(&original.to).unwrap(),
+            value: U256::ZERO,
+            calldata: Bytes::from(vec![0; 65]),
+            gas_limit: 30_000,
+            maximum_total_fee: U256::from(10).pow(U256::from(15)),
+        };
+        let template = runtime
+            .prepare_permit_template(request(), 0, permit.clone())
+            .await
+            .unwrap();
+        let frozen = template.transaction();
+        let extra = bound_cost(frozen).unwrap();
+        assert!(extra > U256::ZERO);
+        assert_eq!(
+            frozen.maximum_cost().unwrap(),
+            U256::from(frozen.gas) * u256(&frozen.max_fee_per_gas).unwrap() + extra
+        );
+        assert!(frozen.maximum_cost().unwrap() <= request().maximum_total_fee);
+        let fresh = runtime
+            .revalidate_permit_template(
+                &template,
+                request(),
+                SignatureLayout::Packed65 { offset: 0 },
+                permit.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fresh, template);
+        *rpc.l1.lock().unwrap() = U256::from(10).pow(U256::from(16));
+        assert!(
+            runtime
+                .revalidate_permit_template(
+                    &template,
+                    request(),
+                    SignatureLayout::Packed65 { offset: 0 },
+                    permit.clone()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            runtime
+                .prepare_permit_template(request(), 0, permit)
+                .await
+                .unwrap_err()
+                .code,
+            "FEE_LIMIT"
+        );
+        // No signer was supplied and no eth_sendRawTransaction fixture exists:
+        // all unsigned preparation and rejected revalidation remain read-only.
     }
     #[test]
     fn legacy_serialization_remains_absent_and_base_requires_evidence() {

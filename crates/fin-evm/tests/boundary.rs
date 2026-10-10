@@ -213,19 +213,13 @@ async fn revalidation_accepts_only_changes_inside_the_frozen_fee_and_gas_envelop
         "revalidation never mutates the signed envelope"
     );
 
-    // Isolate the priority bound: aggregate fee remains below its own cap.
+    // A new market recommendation cannot alter or invalidate the frozen tip.
     transport.base_fee.store(1_000_000, Ordering::SeqCst);
     transport.priority_fee.store(15_000_001, Ordering::SeqCst);
-    assert_eq!(
-        runtime
-            .revalidate(&prepared.transaction)
-            .await
-            .unwrap_err()
-            .code,
-        "FEE_BOUND_CHANGED"
-    );
-    transport.priority_fee.store(14_000_000, Ordering::SeqCst);
-    transport.base_fee.store(2_500_001, Ordering::SeqCst);
+    runtime.revalidate(&prepared.transaction).await.unwrap();
+    assert_eq!(prepared.transaction, frozen);
+    // Reject when current base plus the full frozen 15m tip exceeds the 18m cap.
+    transport.base_fee.store(3_000_001, Ordering::SeqCst);
     assert_eq!(
         runtime
             .revalidate(&prepared.transaction)
@@ -282,6 +276,9 @@ async fn total_fee_cap_clips_priority_headroom() {
     );
     assert_eq!(prepared.transaction.maximum_cost().unwrap(), cap);
     transport.priority_fee.store(10_000_001, Ordering::SeqCst);
+    runtime.revalidate(&prepared.transaction).await.unwrap();
+    assert_eq!(prepared.transaction.maximum_cost().unwrap(), cap);
+    transport.base_fee.store(1, Ordering::SeqCst);
     assert_eq!(
         runtime
             .revalidate(&prepared.transaction)
@@ -405,7 +402,7 @@ async fn changed_nonce_fees_gas_balance_and_failed_simulation_stop_before_signin
         match case {
             0 => transport.wrong_chain = true,
             1 => transport.nonce = 4,
-            2 => transport.priority_fee.store(101_000_000, Ordering::SeqCst),
+            2 => transport.base_fee.store(90_000_001, Ordering::SeqCst),
             3 => transport.gas_estimate.store(30001, Ordering::SeqCst),
             4 => transport.balance = U256::from(6),
             5 => transport.simulation_failure = true,

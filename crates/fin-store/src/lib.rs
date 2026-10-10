@@ -23,6 +23,12 @@ pub mod legacy;
 
 const SCHEMA_VERSION: i64 = 9;
 
+/// Maximum journal schema understood by this binary. Exporting this contract
+/// requires neither opening a journal nor loading credentials.
+pub const fn supported_schema_version() -> i64 {
+    SCHEMA_VERSION
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("request identity already names different parameters")]
@@ -57,6 +63,117 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl StoreError {
+    /// Return a bounded diagnostic class and SQLite's numeric extended code.
+    /// Never include a database path, SQL, or persisted record content here.
+    pub fn startup_diagnostic(&self) -> (&'static str, Option<i32>) {
+        match self {
+            Self::UnsupportedSchema { .. } => ("unsupported_schema", None),
+            Self::ForeignDatabase => ("unrecognized_database", None),
+            Self::UnsafeDirectory(_) => ("unsafe_directory", None),
+            Self::Io(_) => ("filesystem", None),
+            Self::Json(_) => ("stored_json_invalid", None),
+            Self::Sqlite(rusqlite::Error::SqliteFailure(error, _)) => {
+                let extended = error.extended_code;
+                let class = match extended & 0xff {
+                    14 => "sqlite_cannot_open",
+                    5 | 6 => "sqlite_busy",
+                    11 | 26 => "sqlite_database_invalid",
+                    _ => "sqlite_failure",
+                };
+                (class, Some(extended))
+            }
+            Self::Sqlite(_) => ("sqlite_failure", None),
+            _ => ("store_state", None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn startup_diagnostic_classifies_sqlite_primary_codes_without_messages() {
+        for (code, expected) in [
+            (rusqlite::ffi::SQLITE_CANTOPEN, "sqlite_cannot_open"),
+            (rusqlite::ffi::SQLITE_BUSY, "sqlite_busy"),
+            (rusqlite::ffi::SQLITE_LOCKED, "sqlite_busy"),
+            (rusqlite::ffi::SQLITE_CORRUPT, "sqlite_database_invalid"),
+            (rusqlite::ffi::SQLITE_NOTADB, "sqlite_database_invalid"),
+        ] {
+            let failure = rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some("sensitive path and SQL must not escape".into()),
+            );
+            assert_eq!(
+                StoreError::Sqlite(failure).startup_diagnostic(),
+                (expected, Some(code))
+            );
+        }
+    }
+
+    #[test]
+    fn startup_diagnostic_classifies_schema_and_io_without_exposing_values() {
+        assert_eq!(
+            StoreError::UnsupportedSchema {
+                found: 99,
+                supported: SCHEMA_VERSION
+            }
+            .startup_diagnostic(),
+            ("unsupported_schema", None)
+        );
+        assert_eq!(
+            StoreError::ForeignDatabase.startup_diagnostic(),
+            ("unrecognized_database", None)
+        );
+        assert_eq!(
+            StoreError::UnsafeDirectory("/private/path".into()).startup_diagnostic(),
+            ("unsafe_directory", None)
+        );
+        assert_eq!(
+            StoreError::Io("/private/path: details".into()).startup_diagnostic(),
+            ("filesystem", None)
+        );
+    }
+
+    #[test]
+    fn invalid_wal_sidecar_preserves_existing_journal_and_reports_numeric_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SYNTHETIC.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        let record = json!({"id":"SYNTHETIC-op","status":"submitted"});
+        store
+            .create_request(
+                "SYNTHETIC-op",
+                "SYNTHETIC-request",
+                "SYNTHETIC-fingerprint",
+                "synthetic.transfer",
+                None,
+                "submitted",
+                &record,
+                "t0",
+            )
+            .unwrap();
+        drop(store);
+        let original = std::fs::read(&path).unwrap();
+        let wal = path.with_extension("sqlite-wal");
+        std::fs::create_dir(&wal).unwrap();
+        let error = match Store::open(&path) {
+            Ok(_) => panic!("invalid WAL sidecar must prevent opening"),
+            Err(error) => error,
+        };
+        let (class, numeric) = error.startup_diagnostic();
+        assert_eq!(class, "sqlite_cannot_open");
+        assert_eq!(numeric.unwrap() & 0xff, 14);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(wal.is_dir());
+        std::fs::remove_dir(wal).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.get_record("SYNTHETIC-op").unwrap(), Some(record));
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;

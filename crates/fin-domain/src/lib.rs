@@ -1,4 +1,5 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
+pub mod authority_expiry;
 pub mod boundaries;
 pub mod financial_plans;
 pub mod money;
