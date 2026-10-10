@@ -252,8 +252,12 @@ calling the existing execution/recovery path. `--verbose` exposes its exact
 technical details. Agent execution with `--json` adds no presentation or extra
 preview request: the agent obtains a dry-run and presents it before execution.
 The helper opens only the system Touch ID prompt, with the protected broker's
-operation summary as its authentication reason. It still checks the canonical
-binding hash, nonce and deadline and grants no reusable authority. The engine
+operation summary as its authentication reason. For every named plan, it derives
+the same concise reason from the bound plan name, step count and consent duration,
+with explicit revision wording when applicable. Complete step scopes and
+financial limits remain in the conversation/terminal review and canonical binding.
+It still checks the canonical binding hash, nonce and deadline and grants no
+reusable authority. The engine
 revalidates the complete approved binding before submission. Client previews
 are informative and may be refreshed; they cannot authorize a write.
 

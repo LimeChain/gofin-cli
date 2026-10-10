@@ -293,8 +293,10 @@ After update:
 3. Preview the plan. Confirm all step scopes, completion conditions, conditional
    funding, debit/fee totals and duration. Future proceeds must not appear as
    verified funds or guaranteed execution readiness.
-4. Authorize once. Confirm the native Fin prompt identifies the same plan name;
-   verify that optional movement text does not hide or truncate that name.
+4. After conversational approval, authorize once. Confirm the native Fin prompt
+   identifies the same complete plan name, step count and human consent duration.
+   Single-swap, mixed funding/bridge/swap and other named plans must use the same
+   format, without replacing the name with an action or aggregate-fee inventory.
    Decline/cancel a separate deliberate approval request and verify no grant or
    financial submission is created. Native approval expiry should explain the
    correct retry action without automatically prompting again.

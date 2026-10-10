@@ -165,8 +165,8 @@ unpriced exchange assets require the protected policy exception described below.
 Every replacement needs a fresh preview and approval; reconcile the original
 operation before creating a replacement.
 
-AMM Touch ID prompts lead with the swap intent, verified token labels and
-readable amount, fee and expiry limits. Exact contracts, routing and price
+Standalone and operation-boundary AMM Touch ID prompts lead with the swap intent,
+verified token labels and readable amount, fee and expiry limits. Exact contracts, routing and price
 formulas remain in structured review for the agent to explain. A bounded
 authorization says what may be executed; it does not promise the initial quote
 as the outcome of every later attempt. Use standalone execution for one exact
@@ -856,6 +856,14 @@ identity and separate request/venue timestamps.
 ## Named sequential plans
 
 A named plan authorizes ordered financial steps with one fresh Touch ID approval.
+The agent first presents the comprehensive plan and waits for conversational
+approval before requesting Fin authorization. Every named plan uses the same
+native prompt: `approve the plan “Name” (5 steps, 10 minutes)`. Revisions say
+`approve the revised plan`. The name, step count and duration come from the
+hash-bound approval; amounts, destinations, permitted variations and fee caps
+remain in the conversation and terminal review. This applies equally to single
+swaps, mixed sequences and plans using other adapters.
+
 The agent submits each step explicitly. Exact-input plans sequence the current
 operation registry, including transfers, withdrawals, deposits, orders, wallet
 operations, swaps, lending operations and reads. Future registered financial
@@ -868,10 +876,11 @@ Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
 Uniswap v3/v4 exact-input swaps through the shared `fin-amm` interface.
 Swap previews bind recipient, route, output floor, slippage, fee and deadline;
 typed EIP-2612/Permit2 signatures, when required, are created only after the
-approved attempt is journaled. Its native approval reason uses a separate
-1,024-character application cap for the material swap scope; actual macOS dialog
-display remains to be checked. See the [Uniswap verification and human handoff
-guide](docs/testing/uniswap-amm.md) for exact discovery, boundary/plan commands,
+approved attempt is journaled. Standalone and operation-boundary swap reasons
+have a 300-character application cap; named plans use the common 240-character
+budget. Actual macOS dialog display remains to be checked. See the
+[Uniswap verification and human handoff guide](docs/testing/uniswap-amm.md)
+for exact discovery, boundary/plan commands,
 permit behavior and pending protected Touch ID checks. Rollup transactions
 settle on verified canonical sequencer inclusion. Caller-supplied token contracts
 are verified through pinned reads; token contracts are not product defaults.

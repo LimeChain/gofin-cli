@@ -23,14 +23,22 @@ reload share this derivation, allowing an installed broker update to expose its
 new reviewed profiles without asking the human to re-enroll the wallet or
 granting financial authority.
 
-AMM native approval presentation uses concise intent, verified display labels,
-readable quantities and human durations. Adapter display labels come from
+Standalone and operation-boundary AMM native approval presentation uses concise
+intent, verified display labels, readable quantities and human durations.
+Adapter display labels come from
 pinned token metadata and fall back safely when unavailable or unsafe. The
 labels change presentation prose only; financial asset identities, route
 fingerprints, pending bindings and all execution bounds remain unchanged. Exact
 technical details stay in structured review, which the LLM explains to the
 human. Bounded approval wording must not promise an initial minimum receipt
 that its permitted requotes could lower.
+
+All named-plan approvals use one presentation path: the complete bound plan
+name, ordered step count and human consent duration. Revisions explicitly say
+"revised plan". Adapter-specific action inventories and gross aggregate spend
+lists do not replace the plan name in Touch ID. The comprehensive plan is
+reviewed in conversation before Fin authorization and remains available in the
+terminal; the canonical approval still binds all scopes, amounts and fees.
 
 ## Extending an integration
 
@@ -185,10 +193,10 @@ oversized summaries stop at a complete clause with an explicit reference to the
 full terminal review. Exact amounts are never cut midway. Terminal/agent review
 and the complete hash-bound authorization remain unchanged; this presentation
 budget does not guarantee the system dialog's layout on every macOS version.
-Typed Uniswap swap, boundary and plan reasons use a separate 1,024-character
-application limit so route identity, output floor, slippage, fees and expiry
-can remain together. This does not guarantee macOS dialog layout; visual Touch
-ID acceptance remains pending.
+Typed AMM standalone swap and boundary reasons use a separate 300-character
+application limit. Named plans, including AMM plans, use the shared 240-character
+budget and the same name, step count and duration format. These budgets do not
+guarantee macOS dialog layout; visual Touch ID acceptance remains pending.
 Bridge approval summaries retain readable wallet aliases and chain names, the
 chosen source amount/range, route, selected guaranteed receipt floor and maximum
 fees. The complete review identifies recipient, refund scope, finite steps,

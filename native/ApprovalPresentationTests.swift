@@ -458,15 +458,12 @@ struct ApprovalPresentationTests {
                                                                                      "treatment":"additional_debit"]]]],
                                       "permissions":[ammPlanPermission], "valid_for_seconds":600]
         let ammPlanReason = financialPlanAuthenticationReason(ammPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
-        for detail in ["allow swapping up to 0.1 WETH for at least 190 USDC", "10 minutes",
-                       "max fees 0.001 ETH", "Total spending up to 0.1 WETH", "limited to its swap"] {
-            assert(ammPlanReason.contains(detail), detail)
-        }
-        for hidden in ["Synthetic bounded swap", "0x", "router", "fee tier", "bps", "atoms", "1791500000"] {
-            assert(!ammPlanReason.contains(hidden), hidden)
-        }
-        assert(ammPlanReason.count <= 300)
-        assert(nativeApprovalReasonForOS(ammPlanReason + ".") == String(ammPlanReason.dropLast()))
+        assert(ammPlanReason == "approve the plan “Synthetic bounded swap” (1 step, 10 minutes)")
+        assert(nativeApprovalReasonForOS(ammPlanReason + ".") == ammPlanReason)
+        var revisedAMMPlan = ammPlan; revisedAMMPlan["replaces_revision_id"] = "synthetic-prior-amm-revision"
+        assert(financialPlanAuthenticationReason(revisedAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == "approve the revised plan “Synthetic bounded swap” (1 step, 10 minutes)")
+        var spoofedAMMPlan = ammPlan; spoofedAMMPlan["name"] = "Different plan"
+        assert(financialPlanAuthenticationReason(spoofedAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == nil)
         var ramsesInput = swapInput
         ramsesInput.removeValue(forKey: "fee_tier")
         ramsesInput["tick_spacing"] = 10
@@ -498,12 +495,7 @@ struct ApprovalPresentationTests {
         ramsesPlan["plan"] = ramsesPlanBody
         ramsesPlan["permissions"] = [ramsesPlanPermission]
         let ramsesPlanReason = financialPlanAuthenticationReason(ramsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
-        for detail in ["allow swapping up to 0.1 WETH for at least 190 USDC", "10 minutes",
-                       "max fees 0.001 ETH", "Total spending up to 0.1 WETH", "limited to its swap"] {
-            assert(ramsesPlanReason.contains(detail), detail)
-        }
-        for hidden in ["0x", "pool", "factory", "ppm", "bps", "atoms", "1791500000"] { assert(!ramsesPlanReason.contains(hidden), hidden) }
-        assert(ramsesPlanReason.count <= 300)
+        assert(ramsesPlanReason == ammPlanReason)
         var higherAggregatePlan = ammPlan
         var higherAggregateBody = ammPlan["plan"] as! [String: Any]
         var higherAggregateBounds = higherAggregateBody["aggregate_bounds"] as! [String: Any]
@@ -515,8 +507,18 @@ struct ApprovalPresentationTests {
         higherAggregateBody["aggregate_bounds"] = higherAggregateBounds
         higherAggregatePlan["plan"] = higherAggregateBody
         let higherAggregateReason = financialPlanAuthenticationReason(higherAggregatePlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
-        assert(higherAggregateReason.contains("max fees 0.002 ETH"))
-        assert(!higherAggregateReason.contains("max fees 0.001 ETH"))
+        // Complete fee bindings stay intact even though the prompt identifies the plan.
+        assert(higherAggregateReason == ammPlanReason)
+        let boundCosts = ((higherAggregatePlan["plan"] as! [String: Any])["aggregate_bounds"] as! [String: Any])["maximum_costs"] as! [[String: Any]]
+        assert((boundCosts[0]["amount"] as! [String: Any])["atoms"] as? String == "2000000000000000")
+        var malformedAggregatePlan = higherAggregatePlan
+        var malformedAggregateBody = higherAggregateBody
+        higherCostAmount["atoms"] = "not-an-amount"
+        higherCost["amount"] = higherCostAmount
+        higherAggregateBounds["maximum_costs"] = [higherCost]
+        malformedAggregateBody["aggregate_bounds"] = higherAggregateBounds
+        malformedAggregatePlan["plan"] = malformedAggregateBody
+        assert(financialPlanAuthenticationReason(malformedAggregatePlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == nil)
         var overWideRamsesPlan = ramsesPlan
         var overWideRamsesSteps = ramsesPlanBody
         var overWideRamsesStep = ramsesPlanStep
@@ -533,10 +535,7 @@ struct ApprovalPresentationTests {
         var twoStepBody = ammPlan["plan"] as! [String: Any]; twoStepBody["steps"] = [swapPlanStep, twoSwapStep]
         twoSwapPlan["plan"] = twoStepBody; twoSwapPlan["permissions"] = [ammPlanPermission, twoSwapPermission]
         let twoSwapReason = financialPlanAuthenticationReason(twoSwapPlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")!
-        assert(twoSwapReason.count <= 400)
-        assert(twoSwapReason.contains("Allow swaps for 10 minutes: swap up to 0.1 WETH" ) && twoSwapReason.contains("; then swap up to 0.1 WETH"))
-        assert(twoSwapReason.contains("Total spending up to") && twoSwapReason.contains("max fees"))
-        for hidden in ["0x", "atoms", "1791500000", "router"] { assert(!twoSwapReason.contains(hidden), hidden) }
+        assert(twoSwapReason == "approve the plan “Synthetic bounded swap” (2 steps, 10 minutes)")
         var mixedStep = swapPlanStep
         mixedStep["step_id"] = "second-action"
         mixedStep["operation"] = "wallet.sweep"
@@ -550,9 +549,24 @@ struct ApprovalPresentationTests {
             "definition_hash":"synthetic", "connections_hash":"synthetic"]]
         mixedPlan["permissions"] = [ammPlanPermission, mixedExactPermission]
         let mixedReason = financialPlanAuthenticationReason(mixedPlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")!
-        assert(mixedReason.contains("swap up to 0.1 WETH"))
-        assert(mixedReason.contains("; then one other reviewed action"))
-        assert(mixedReason.contains("Total spending up to") && mixedReason.contains("max fees"))
+        assert(mixedReason == twoSwapReason)
+        // Reproduce the five-step funding/withdrawal/bridge/swap shape in the report.
+        var fundingSteps: [[String: Any]] = []
+        var fundingPermissions: [[String: Any]] = []
+        for (index, operation) in ["binance.spot.order-place", "binance.transfer", "binance.withdraw", "bridge.transfer"].enumerated() {
+            let id = "funding-\(index)"
+            var step = mixedStep; step["step_id"] = id; step["operation"] = operation
+            var permission = mixedExactPermission; permission["step_id"] = id
+            fundingSteps.append(step); fundingPermissions.append(permission)
+        }
+        fundingSteps.append(swapPlanStep); fundingPermissions.append(ammPlanPermission)
+        let fundingName = "Fund Ethereum, bridge to Base and swap to USDC"
+        var fundingPlan = ammPlan; fundingPlan["name"] = fundingName
+        var fundingBody = mixedPlanBody; fundingBody["name"] = fundingName; fundingBody["steps"] = fundingSteps
+        fundingPlan["plan"] = fundingBody; fundingPlan["permissions"] = fundingPermissions
+        let fundingReason = financialPlanAuthenticationReason(fundingPlan, summary:"Approve the plan “\(fundingName)” with 5 ordered steps for 600 seconds.")!
+        assert(fundingReason == "approve the plan “\(fundingName)” (5 steps, 10 minutes)")
+        assert(fundingReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
         var malformedAMMPlan = ammPlan
         var malformedAMMSpec = ammSpec
         malformedAMMSpec.removeValue(forKey:"parameters")
@@ -582,10 +596,15 @@ struct ApprovalPresentationTests {
         longPlanBody["aggregate_bounds"] = longAggregateBounds
         longAMMPlan["plan"] = longPlanBody; longAMMPlan["permissions"] = longPermissions
         let longAMMReason = financialPlanAuthenticationReason(longAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 12 ordered steps for 600 seconds.")!
-        assert(longAMMReason.count <= 400)
-        assert(longAMMReason.contains("Synthetic bounded swap") && longAMMReason.contains("12 reviewed actions, including 12 swaps"))
-        assert(longAMMReason.contains("Total spending up to 1.2 WETH") && longAMMReason.contains("max fees 0.012 ETH"))
-        assert(!longAMMReason.contains("See terminal review for full details."))
+        assert(longAMMReason == "approve the plan “Synthetic bounded swap” (12 steps, 10 minutes)")
+        assert(longAMMReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+        var longNamedAMMPlan = ammPlan
+        longNamedAMMPlan["name"] = longPlanName
+        var longNamedAMMBody = ammPlan["plan"] as! [String: Any]
+        longNamedAMMBody["name"] = longPlanName
+        longNamedAMMPlan["plan"] = longNamedAMMBody
+        assert(financialPlanAuthenticationReason(longNamedAMMPlan, summary:"Approve the plan “\(longPlanName)” with 1 ordered steps for 600 seconds.") == "approve the plan “\(longPlanName)” (1 step, 10 minutes)")
+        assert(financialPlanAuthenticationReason(ammPlan, summary:"Approve a different plan") == nil)
         let address = "0x1111111111111111111111111111111111111111"
         let withdrawal = "Withdraw API quantity 0.00765 ETH from SYNTHETIC-main SPOT to SYNTHETIC-wallet (\(address)) on ARBITRUM; published fee 0.00005, approved maximum fee 0.00005, maximum gross debit 0.0077, minimum net receipt 0.0076. USD ceilings: $19.67 movement, $0.13 fees."
         let withdrawalReason = financialAuthenticationReason(write, summary: withdrawal)!
