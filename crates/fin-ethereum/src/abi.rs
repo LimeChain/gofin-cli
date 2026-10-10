@@ -31,9 +31,18 @@ sol! {
         event Withdrawal(address indexed src,uint256 wad);
     }
     interface Factory { function getPool(address tokenA,address tokenB,uint24 fee) external view returns (address value); }
+    interface RamsesFactory {
+        function getPool(address tokenA,address tokenB,int24 tickSpacing) external view returns (address value);
+        function ramsesV3PoolDeployer() external view returns (address value);
+    }
     interface Quoter {
         struct QuoteParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }
         function quoteExactInputSingle(QuoteParams params) external returns (uint256 amountOut,uint160 sqrtPriceX96After,uint32 initializedTicksCrossed,uint256 gasEstimate);
+    }
+    interface RamsesQuoter {
+        struct QuoteParams { address tokenIn; address tokenOut; uint256 amountIn; int24 tickSpacing; uint160 sqrtPriceLimitX96; }
+        function quoteExactInputSingle(QuoteParams params) external returns (uint256 amountOut,uint160 sqrtPriceX96After,uint32 initializedTicksCrossed,uint256 gasEstimate);
+        function deployer() external view returns (address value);
     }
     interface Router {
         struct SwapParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
@@ -52,6 +61,22 @@ sol! {
         function unwrapWETH9(uint256 amountMinimum,address recipient) external payable;
     }
     interface V3RouterInfo { function WETH9() external view returns (address value); }
+    interface RamsesRouter {
+        struct SwapParams { address tokenIn; address tokenOut; int24 tickSpacing; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
+        function exactInputSingle(SwapParams params) external payable returns (uint256 amountOut);
+        function selfPermit(address token,uint256 value,uint256 deadline,uint8 v,bytes32 r,bytes32 s) external;
+        function multicall(bytes[] data) external payable returns (bytes[] results);
+        function unwrapWETH9(uint256 amountMinimum,address recipient) external payable;
+        function deployer() external view returns (address value);
+    }
+    interface RamsesPool {
+        function token0() external view returns (address value);
+        function token1() external view returns (address value);
+        function fee() external view returns (uint24 value);
+        function tickSpacing() external view returns (int24 value);
+        function slot0() external view returns (uint160 sqrtPriceX96,int24 tick,uint16 observationIndex,uint16 observationCardinality,uint16 observationCardinalityNext,uint8 feeProtocol,bool unlocked);
+        event Swap(address indexed sender,address indexed recipient,int256 amount0,int256 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick);
+    }
     interface V4Quoter {
         struct PoolKey { address currency0; address currency1; uint24 fee; int24 tickSpacing; address hooks; }
         struct QuoteExactSingleParams { PoolKey poolKey; bool zeroForOne; uint128 exactAmount; bytes hookData; }

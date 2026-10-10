@@ -284,7 +284,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
         version: 2,
         approver_uid: args.approver_uid,
         networks: NetworkConfig::reviewed_evm_networks(),
-        deployments: DeploymentConfig::reviewed_uniswap_networks(),
+        deployments: DeploymentConfig::reviewed_amm_networks(),
         connections: vec![],
         policy,
         extensions: BTreeMap::new(),
@@ -362,12 +362,21 @@ fn collect_material(
     Ok(Some(material))
 }
 
-/// Add only missing reviewed chain and Uniswap coverage during the human's
+/// Add only missing reviewed chain and AMM coverage during the human's
 /// protected EVM enrollment. Existing deployment choices remain authoritative.
 fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
     let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+    let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+    expand_reviewed_evm_coverage_with(config, &reviewed_networks, &reviewed_amms)
+}
+
+fn expand_reviewed_evm_coverage_with(
+    config: &mut BrokerConfigV2,
+    reviewed_networks: &[NetworkConfig],
+    reviewed_amms: &[DeploymentConfig],
+) -> Vec<String> {
     let mut warnings = Vec::new();
-    for network in &reviewed_networks {
+    for network in reviewed_networks {
         if !config
             .networks
             .iter()
@@ -375,16 +384,20 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
         {
             config.networks.push(network.clone());
             warnings.push(format!(
-                "Added reviewed EVM network {} (chain {}).",
-                network.id, network.chain_id
+                "Added reviewed EVM network {} ({}, chain {}).",
+                fin_networks::by_chain_id(network.chain_id)
+                    .map(|descriptor| descriptor.display_name)
+                    .unwrap_or("reviewed network"),
+                network.id,
+                network.chain_id
             ));
         }
     }
 
-    for reviewed in DeploymentConfig::reviewed_uniswap_networks() {
-        let Some(reviewed_uniswap) = reviewed.uniswap.as_ref() else {
+    for reviewed in reviewed_amms {
+        if reviewed.uniswap.is_none() && reviewed.ramses.is_none() {
             continue;
-        };
+        }
         let Some(index) = config
             .deployments
             .iter()
@@ -392,38 +405,99 @@ fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
         else {
             config.deployments.push(DeploymentConfig {
                 network: reviewed.network.clone(),
-                weth: None,
+                weth: reviewed.weth.clone(),
                 snapshot_tokens: Vec::new(),
-                uniswap: Some(reviewed_uniswap.clone()),
-                aave: None,
+                uniswap: reviewed.uniswap.clone(),
+                ramses: reviewed.ramses.clone(),
+                aave: if reviewed.network == "ethereum:8453" {
+                    reviewed.aave.clone()
+                } else {
+                    None
+                },
             });
-            warnings.push(format!(
-                "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
-                reviewed.network
-            ));
-            continue;
-        };
-
-        let existing = &mut config.deployments[index];
-        match existing.uniswap.as_mut() {
-            None => {
-                existing.uniswap = Some(reviewed_uniswap.clone());
+            if reviewed.uniswap.is_some() {
                 warnings.push(format!(
                     "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
                     reviewed.network
                 ));
             }
-            Some(uniswap) if uniswap.v4.is_none() && reviewed_uniswap.v4.is_some() => {
-                uniswap.v4 = reviewed_uniswap.v4.clone();
+            if reviewed.ramses.is_some() {
                 warnings.push(format!(
-                    "Added reviewed Uniswap v4 deployment coverage for {} while preserving the existing v3 deployment.",
+                    "Added reviewed Ramses v3 deployment coverage for {}.",
                     reviewed.network
                 ));
             }
-            Some(_) => {}
+            continue;
+        };
+
+        let existing = &mut config.deployments[index];
+        if reviewed.network == "ethereum:8453" {
+            if existing.weth.is_none() {
+                existing.weth = reviewed.weth.clone();
+                warnings.push("Added reviewed Base WETH deployment coverage.".into());
+            }
+            if existing.aave.is_none() {
+                existing.aave = reviewed.aave.clone();
+                warnings.push("Added reviewed Base Aave deployment coverage.".into());
+            }
+        }
+        if let Some(reviewed_uniswap) = reviewed.uniswap.as_ref() {
+            match existing.uniswap.as_mut() {
+                None => {
+                    existing.uniswap = Some(reviewed_uniswap.clone());
+                    warnings.push(format!(
+                        "Added reviewed Uniswap v3 and v4 deployment coverage for {}.",
+                        reviewed.network
+                    ));
+                }
+                Some(uniswap) if uniswap.v4.is_none() && reviewed_uniswap.v4.is_some() => {
+                    uniswap.v4 = reviewed_uniswap.v4.clone();
+                    warnings.push(format!(
+                        "Added reviewed Uniswap v4 deployment coverage for {} while preserving the existing v3 deployment.",
+                        reviewed.network
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if existing.ramses.is_none() && reviewed.ramses.is_some() {
+            existing.ramses = reviewed.ramses.clone();
+            warnings.push(format!(
+                "Added reviewed Ramses v3 deployment coverage for {}.",
+                reviewed.network
+            ));
         }
     }
     warnings
+}
+
+/// Derive the effective protected configuration from the stored config and the
+/// reviewed coverage shipped by this broker. This never persists configuration
+/// or touches credentials, and legacy chain-scoped Ethereum connections do not
+/// opt in to the reusable-wallet coverage.
+pub(crate) fn effective_protected_config(
+    config: BrokerConfigV2,
+) -> fin_domain::Result<BrokerConfigV2> {
+    let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+    let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+    effective_protected_config_with(config, &reviewed_networks, &reviewed_amms)
+}
+
+pub(crate) fn effective_protected_config_with(
+    mut config: BrokerConfigV2,
+    reviewed_networks: &[NetworkConfig],
+    reviewed_amms: &[DeploymentConfig],
+) -> fin_domain::Result<BrokerConfigV2> {
+    config.validate()?;
+    let reusable_wallet_enrolled = config
+        .connections
+        .iter()
+        .any(|connection| matches!(connection, ConnectionConfig::Evm { .. }));
+    if reusable_wallet_enrolled {
+        expand_reviewed_evm_coverage_with(&mut config, reviewed_networks, reviewed_amms);
+    }
+    config.validate()?;
+    Ok(config)
 }
 
 async fn validate_connection(
@@ -469,7 +543,10 @@ async fn validate_connection(
                 fin_pricing::UsdPriceSource::quote(
                     &source,
                     &fin_domain::AssetId {
-                        network: "ethereum:1".into(),
+                        network: fin_networks::by_chain_id(1)
+                            .expect("Ethereum is reviewed")
+                            .network_id
+                            .into(),
                         reference: "native".into(),
                         decimals: 18,
                     },
@@ -494,7 +571,14 @@ async fn validate_connection(
             let network = config
                 .networks
                 .iter()
-                .find(|network| network.id == args.network.as_deref().unwrap_or("ethereum:1"))
+                .find(|network| {
+                    network.id
+                        == args.network.as_deref().unwrap_or_else(|| {
+                            fin_networks::by_chain_id(1)
+                                .expect("Ethereum is reviewed")
+                                .network_id
+                        })
+                })
                 .ok_or_else(|| {
                     error(
                         "NETWORK_NOT_CONFIGURED",
@@ -1009,6 +1093,7 @@ fn outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fin_domain::AssetId;
 
     fn empty_config(
         networks: Vec<NetworkConfig>,
@@ -1041,7 +1126,12 @@ mod tests {
                 .iter()
                 .any(|network| network.chain_id == 4663)
         );
-        for network in ["ethereum:1", "ethereum:42161", "ethereum:4663"] {
+        for network in [
+            "ethereum:1",
+            "ethereum:8453",
+            "ethereum:42161",
+            "ethereum:4663",
+        ] {
             let deployment = config
                 .deployments
                 .iter()
@@ -1050,6 +1140,22 @@ mod tests {
             assert!(deployment.uniswap.as_ref().unwrap().v4.is_some());
             assert!(warnings.iter().any(|warning| warning.contains(network)));
         }
+        let robinhood = config
+            .deployments
+            .iter()
+            .find(|deployment| deployment.network == "ethereum:4663")
+            .unwrap();
+        let ramses = robinhood.ramses.as_ref().unwrap();
+        assert_eq!(ramses.factory, "0xE0c4ceb92d08CA985bB70fe0a22fEb121A9854A8");
+        assert_eq!(ramses.quoter, "0x4730e03EB4a58A5e20244062D5f9A99bCf5770a6");
+        assert_eq!(ramses.router, "0xFCBBe2Af83F94e7E2a9C35a535B3A04719aFD2Ae");
+        assert_eq!(
+            ramses.pool_deployer,
+            "0x4b37359BF291AbE8453692DB58d515a8b013Dca9"
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("Added reviewed Ramses v3 deployment coverage for ethereum:4663")
+        }));
         assert!(
             warnings
                 .iter()
@@ -1078,6 +1184,7 @@ mod tests {
             weth: Some("0x6666666666666666666666666666666666666666".into()),
             snapshot_tokens: vec!["0x7777777777777777777777777777777777777777".into()],
             uniswap: Some(custom_uniswap.clone()),
+            ramses: None,
             aave: Some(custom_aave.clone()),
         };
         let mut config = empty_config(
@@ -1107,6 +1214,50 @@ mod tests {
     }
 
     #[test]
+    fn base_coverage_preserves_custom_deployments_and_adds_missing_protocols() {
+        let mut config = empty_config(
+            NetworkConfig::reviewed_evm_networks(),
+            DeploymentConfig::reviewed_amm_networks(),
+        );
+        let base = config
+            .deployments
+            .iter_mut()
+            .find(|d| d.network == "ethereum:8453")
+            .unwrap();
+        base.uniswap.as_mut().unwrap().router = "0x1111111111111111111111111111111111111111".into();
+        base.weth = Some("0x2222222222222222222222222222222222222222".into());
+        base.aave.as_mut().unwrap().pool = "0x3333333333333333333333333333333333333333".into();
+        let original = serde_json::to_value(&config.deployments).unwrap();
+        assert!(expand_reviewed_evm_coverage(&mut config).is_empty());
+        assert_eq!(serde_json::to_value(&config.deployments).unwrap(), original);
+
+        let base = config
+            .deployments
+            .iter_mut()
+            .find(|d| d.network == "ethereum:8453")
+            .unwrap();
+        base.weth = None;
+        base.aave = None;
+        assert_eq!(expand_reviewed_evm_coverage(&mut config).len(), 2);
+        let base = config
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:8453")
+            .unwrap();
+        assert_eq!(
+            base.weth.as_deref(),
+            Some("0x4200000000000000000000000000000000000006")
+        );
+        assert!(base.aave.is_some());
+        assert_eq!(
+            base.uniswap.as_ref().unwrap().router,
+            "0x1111111111111111111111111111111111111111"
+        );
+        assert!(expand_reviewed_evm_coverage(&mut config).is_empty());
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn reviewed_evm_expansion_is_idempotent_and_keeps_custom_v4() {
         let mut reviewed = DeploymentConfig::reviewed_uniswap_networks();
         let mainnet = reviewed
@@ -1121,6 +1272,291 @@ mod tests {
         assert_eq!(serde_json::to_value(&config.deployments).unwrap(), before);
         let again = expand_reviewed_evm_coverage(&mut config);
         assert!(again.is_empty());
+    }
+
+    #[test]
+    fn reviewed_amm_profiles_add_ramses_only_on_robinhood_and_preserve_custom_profile() {
+        let profiles = DeploymentConfig::reviewed_amm_networks();
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:1")
+                .unwrap()
+                .ramses
+                .is_none()
+        );
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:42161")
+                .unwrap()
+                .ramses
+                .is_none()
+        );
+        assert!(
+            profiles
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:4663")
+                .unwrap()
+                .ramses
+                .is_some()
+        );
+
+        let custom = fin_ethereum::RamsesConfig {
+            factory: "0x1111111111111111111111111111111111111111".into(),
+            quoter: "0x2222222222222222222222222222222222222222".into(),
+            router: "0x3333333333333333333333333333333333333333".into(),
+            pool_deployer: "0x4444444444444444444444444444444444444444".into(),
+        };
+        let mut profiles = profiles;
+        profiles
+            .iter_mut()
+            .find(|deployment| deployment.network == "ethereum:4663")
+            .unwrap()
+            .ramses = Some(custom.clone());
+        let mut config = empty_config(NetworkConfig::reviewed_evm_networks(), profiles);
+        assert!(expand_reviewed_evm_coverage(&mut config).is_empty());
+        assert_eq!(
+            config
+                .deployments
+                .iter()
+                .find(|deployment| deployment.network == "ethereum:4663")
+                .unwrap()
+                .ramses
+                .as_ref()
+                .unwrap()
+                .router,
+            custom.router
+        );
+    }
+
+    #[test]
+    fn legacy_deployment_without_ramses_deserializes_and_omits_none_when_saved() {
+        let legacy = json!({
+            "network":"ethereum:4663",
+            "weth":null,
+            "snapshot_tokens":[],
+            "uniswap":null,
+            "aave":null
+        });
+        let decoded: DeploymentConfig = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.ramses.is_none());
+        assert!(
+            serde_json::to_value(decoded)
+                .unwrap()
+                .get("ramses")
+                .is_none()
+        );
+    }
+
+    fn reusable_read_only_wallet() -> ConnectionConfig {
+        ConnectionConfig::Evm {
+            name: "wallet".into(),
+            resource: ResourceId("evm:0x1111111111111111111111111111111111111111".into()),
+            credential_ref: None,
+            address: "0x1111111111111111111111111111111111111111".into(),
+            signing_enabled: false,
+        }
+    }
+
+    #[test]
+    fn effective_protected_config_adds_reviewed_coverage_without_touching_custom_data() {
+        let reviewed_networks = NetworkConfig::reviewed_evm_networks();
+        let mut custom_mainnet = NetworkConfig::ethereum_mainnet();
+        custom_mainnet.rpc_urls = vec!["https://custom.example/rpc".into()];
+        let mut custom_rh = reviewed_networks
+            .iter()
+            .find(|network| network.chain_id == 4663)
+            .unwrap()
+            .clone();
+        custom_rh.rpc_urls = vec!["https://rh-custom.example/rpc".into()];
+        let reviewed_mainnet = DeploymentConfig::reviewed_amm_networks()
+            .into_iter()
+            .find(|deployment| deployment.network == "ethereum:1")
+            .unwrap();
+        let mut custom_uniswap = reviewed_mainnet.uniswap.unwrap();
+        custom_uniswap.factory = "0x1111111111111111111111111111111111111111".into();
+        custom_uniswap.router = "0x2222222222222222222222222222222222222222".into();
+        custom_uniswap.quoter = "0x3333333333333333333333333333333333333333".into();
+        custom_uniswap.v4 = None;
+        let custom_ramses = fin_ethereum::RamsesConfig {
+            factory: "0x4444444444444444444444444444444444444444".into(),
+            quoter: "0x5555555555555555555555555555555555555555".into(),
+            router: "0x6666666666666666666666666666666666666666".into(),
+            pool_deployer: "0x7777777777777777777777777777777777777777".into(),
+        };
+        let mut config = empty_config(
+            vec![custom_mainnet.clone(), custom_rh.clone()],
+            vec![
+                DeploymentConfig {
+                    network: "ethereum:1".into(),
+                    weth: Some("0x8888888888888888888888888888888888888888".into()),
+                    snapshot_tokens: vec!["0x9999999999999999999999999999999999999999".into()],
+                    uniswap: Some(custom_uniswap.clone()),
+                    ramses: None,
+                    aave: Some(fin_ethereum::EthereumConfig::default().aave.unwrap()),
+                },
+                DeploymentConfig {
+                    network: "ethereum:4663".into(),
+                    weth: None,
+                    snapshot_tokens: vec![],
+                    uniswap: None,
+                    ramses: Some(custom_ramses.clone()),
+                    aave: None,
+                },
+            ],
+        );
+        config.connections.push(reusable_read_only_wallet());
+        config.connections.push(ConnectionConfig::Evm {
+            name: "synthetic-signer".into(),
+            resource: ResourceId("evm:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            signing_enabled: true,
+        });
+        config.extensions.insert(
+            "preserved".into(),
+            json!({"journal_identity":"pending-123"}),
+        );
+        let original_connections = config.connections.clone();
+        let original_policy = config.policy.clone();
+        let original_extensions = config.extensions.clone();
+
+        let reviewed_amms = DeploymentConfig::reviewed_amm_networks();
+        let first =
+            effective_protected_config_with(config, &reviewed_networks, &reviewed_amms).unwrap();
+        first.validate().unwrap();
+        assert_eq!(first.connections, original_connections);
+        assert_eq!(first.policy, original_policy);
+        assert_eq!(first.extensions, original_extensions);
+        assert_eq!(first.approver_uid, 501);
+        assert_eq!(
+            first.networks.iter().find(|n| n.chain_id == 1).unwrap(),
+            &custom_mainnet
+        );
+        assert_eq!(
+            first.networks.iter().find(|n| n.chain_id == 4663).unwrap(),
+            &custom_rh
+        );
+        assert!(first.networks.iter().any(|n| n.chain_id == 42161));
+        let base = first.networks.iter().find(|n| n.chain_id == 8453).unwrap();
+        assert_eq!(base.rpc_urls, ["https://mainnet.base.org"]);
+        let base_deployment = first
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:8453")
+            .unwrap();
+        assert!(base_deployment.uniswap.as_ref().unwrap().v4.is_some());
+        assert!(base_deployment.aave.is_some());
+        assert_eq!(
+            base_deployment.weth.as_deref(),
+            Some("0x4200000000000000000000000000000000000006")
+        );
+        let mainnet = first
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:1")
+            .unwrap();
+        assert_eq!(
+            mainnet.uniswap.as_ref().unwrap().factory,
+            custom_uniswap.factory
+        );
+        assert!(mainnet.uniswap.as_ref().unwrap().v4.is_some());
+        assert_eq!(
+            mainnet.weth.as_deref(),
+            Some("0x8888888888888888888888888888888888888888")
+        );
+        assert_eq!(
+            mainnet.snapshot_tokens,
+            vec!["0x9999999999999999999999999999999999999999"]
+        );
+        assert_eq!(
+            serde_json::to_value(
+                first
+                    .deployments
+                    .iter()
+                    .find(|d| d.network == "ethereum:4663")
+                    .unwrap()
+                    .ramses
+                    .as_ref()
+            )
+            .unwrap(),
+            serde_json::to_value(Some(&custom_ramses)).unwrap()
+        );
+
+        let serialized = serde_json::to_value(&first).unwrap();
+        let second =
+            effective_protected_config_with(first, &reviewed_networks, &reviewed_amms).unwrap();
+        assert_eq!(serde_json::to_value(second).unwrap(), serialized);
+    }
+
+    #[test]
+    fn effective_coverage_is_gated_to_reusable_wallets_and_keeps_legacy_scope() {
+        let mut legacy_only = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        let legacy = ConnectionConfig::Ethereum {
+            name: "legacy-wallet".into(),
+            resource: ResourceId("ethereum:1:0x2222222222222222222222222222222222222222".into()),
+            credential_ref: None,
+            network: "ethereum:1".into(),
+            address: "0x2222222222222222222222222222222222222222".into(),
+            signing_enabled: false,
+            assets: vec![AssetId {
+                network: "ethereum:1".into(),
+                reference: "native".into(),
+                decimals: 18,
+            }],
+        };
+        legacy_only.connections.push(legacy.clone());
+        let original = serde_json::to_value(&legacy_only).unwrap();
+        let unchanged = effective_protected_config(legacy_only).unwrap();
+        assert_eq!(serde_json::to_value(unchanged).unwrap(), original);
+
+        let mut mixed = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        mixed.connections.push(legacy.clone());
+        mixed.connections.push(reusable_read_only_wallet());
+        let expanded = effective_protected_config(mixed).unwrap();
+        assert_eq!(expanded.connections[0], legacy);
+        assert!(
+            expanded
+                .networks
+                .iter()
+                .any(|network| network.chain_id == 4663)
+        );
+    }
+
+    #[test]
+    fn effective_overlay_rejects_reviewed_deployments_with_dangling_networks() {
+        let mut config = empty_config(
+            vec![NetworkConfig::ethereum_mainnet()],
+            vec![DeploymentConfig::ethereum_mainnet()],
+        );
+        config.connections.push(reusable_read_only_wallet());
+        let dangling = DeploymentConfig {
+            network: "ethereum:999999".into(),
+            weth: None,
+            snapshot_tokens: vec![],
+            uniswap: None,
+            ramses: Some(fin_ethereum::RamsesConfig {
+                factory: "0x1111111111111111111111111111111111111111".into(),
+                quoter: "0x2222222222222222222222222222222222222222".into(),
+                router: "0x3333333333333333333333333333333333333333".into(),
+                pool_deployer: "0x4444444444444444444444444444444444444444".into(),
+            }),
+            aave: None,
+        };
+        let error = effective_protected_config_with(
+            config,
+            &NetworkConfig::reviewed_evm_networks(),
+            &[dangling],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "CONFIG_DEPLOYMENT_INVALID");
     }
 
     fn pricing_connection(plan: &str, reference: &str) -> ConnectionConfig {

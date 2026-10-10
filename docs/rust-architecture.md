@@ -77,7 +77,36 @@ same root ownership, hardened signature and ACL validation as other runtime code
 | Connection                       | Another main account, child, or wallet    | Human enrollment, credential reference, physical identity, authority/permissions, resource locking.                         |
 | Policy/platform                  | Different limits or native authentication | Explicit versioned policy and a tested authorization/storage provider through the existing engine.                          |
 
-Wallet, Uniswap, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+Wallet, AMM, and Aave operations share the EVM runtime; their financial semantics remain application-owned. A new RPC URL does not add a chain. Token symbols and identical contract addresses on different chains do not establish asset identity or compatibility.
+
+`fin-networks` is the single reviewed wallet-network registry: identity, public
+RPC defaults, confirmation floor and settlement classification. Broker
+validation, enrollment, discovery, development RPC overrides and canonical
+receipt policy consume it. Protocol deployments remain application-owned.
+Adding a network requires reviewing its fee model as well as sequencing and
+registering its deployments; an Optimism-style additional L1 data fee needs
+bounded estimation and verified receipt accounting before enabling writes.
+
+At protected configuration load, the broker derives missing reviewed networks
+and AMM deployments for any reusable `ConnectionConfig::Evm`, including
+read-only wallets. The validated effective config is in memory only: this
+overlay does not rewrite protected config, inspect credentials, or create
+financial authority. Existing RPCs, deployment overrides and asset scope win;
+legacy chain-scoped Ethereum connections remain limited to their configured
+network. The same pure derivation runs on startup and protected reload so a
+broker update can expose newly shipped reviewed coverage without reenrollment.
+When the effective config changes, the existing reload path recomposes adapters
+against the same journal; pending submission identities remain in place and
+are never replayed as a consequence of coverage derivation.
+
+Closed v3 deployment profiles separate factory pool lookup, quoter ABI,
+router encoding and fee semantics. Uniswap identifies pools by a fixed fee
+tier. Ramses identifies pools by signed tick spacing and reads their mutable
+fee at the quote block. It uses its own reviewed router, factory, quoter and
+pool deployer. The same `fin-amm` contract, finite permit path, financial
+limits, journal and receipt settlement handle both implementations. A
+compatible fork can reuse the v3 kernel after ABI/deployment review; changed
+encodings or fee models require an explicit profile implementation and tests.
 
 Uniswap v3/v4 swaps use exact-input, single-pool requests with a wallet-bound
 recipient, fresh quote, minimum-output floor, bounded slippage/impact, native
@@ -98,9 +127,10 @@ finality requirements and configured token scope. Operation requests use
 `network: evm` plus `chain_id`; accepted legacy `ethereum` inputs remain
 compatible. New setup includes Ethereum mainnet (1), Base (8453), Arbitrum One (42161) and
 Robinhood Chain (4663). A wallet-only adapter works without protocol deployments;
-Aave supports the reviewed Base deployment; Uniswap v3/v4 use Base-specific
-reviewed router, quoter and pool deployments. Base fee envelopes include execution, L1 data and
-operator costs, while receipt completion uses one canonical full L2 block. Relay transfers are a separate application
+Uniswap v3/v4 has reviewed deployments on all four networks; Ramses v3 is
+reviewed on Robinhood and Aave on Ethereum and Base. Base fee envelopes include
+execution, L1 data and operator costs, while receipt completion uses canonical
+L2 inclusion. Relay transfers are a separate application
 capability, not a general wallet write or arbitrary calldata interface.
 
 ### Relay bridge composition and settlement

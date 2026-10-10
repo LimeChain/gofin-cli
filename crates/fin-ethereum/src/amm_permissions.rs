@@ -1,4 +1,4 @@
-//! Reviewed variation scopes for Uniswap exact-input swaps.
+//! Reviewed variation scopes for single-pool exact-input AMM swaps.
 //!
 //! This module only defines authorization metadata and candidate checks. The
 //! operation adapter remains responsible for quotes, simulation and dispatch.
@@ -47,9 +47,14 @@ pub struct SwapBounds {
     )]
     pub absolute_minimum_output: Option<String>,
     #[schemars(
-        description = "Allowed Uniswap v3 fee tiers; must be empty for v4, whose pool key fixes its fee."
+        description = "Allowed Uniswap v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing."
     )]
     pub allowed_fee_tiers: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Optional maximum pinned Ramses pool fee in ppm; this is a quote-time ceiling, not an on-chain fee cap."
+    )]
+    pub max_pool_fee_ppm: Option<u32>,
     #[serde(default = "default_deadline_seconds")]
     #[schemars(
         range(min = 1, max = 600),
@@ -123,6 +128,12 @@ fn parse_bounds(
                 "Uniswap v4 pool keys fix the fee; allowed_fee_tiers must be empty.",
             ));
         }
+        "ramses" if !tiers.is_empty() => {
+            return Err(FinError::validation(
+                "Ramses pool identity uses tick spacing, so allowed_fee_tiers must be empty.",
+            ));
+        }
+        "ramses" => {}
         "v3" | "v4" => {}
         _ => {
             return Err(FinError::validation(
@@ -131,6 +142,11 @@ fn parse_bounds(
         }
     }
     bounds.allowed_fee_tiers = tiers;
+    if bounds.max_pool_fee_ppm.is_some_and(|fee| fee >= 1_000_000) {
+        return Err(FinError::validation(
+            "Ramses maximum quoted pool fee must be below one million ppm.",
+        ));
+    }
     Ok(bounds)
 }
 
@@ -183,20 +199,96 @@ async fn token_asset_at(adapter: &EthereumAdapter, reference: &str, block: u64) 
     Ok(adapter.asset(&lower_address(token), decimals))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayLabels {
+    input: String,
+    output: String,
+}
+
+fn safe_display_label(symbol: Option<&str>) -> String {
+    const MAX_LABEL_BYTES: usize = 32;
+    match symbol {
+        Some(value)
+            if !value.is_empty()
+                && value.as_bytes()[0].is_ascii_alphanumeric()
+                && value.len() <= MAX_LABEL_BYTES
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            value.to_owned()
+        }
+        _ => "token".to_owned(),
+    }
+}
+
+async fn display_label_at(adapter: &EthereumAdapter, reference: &str, block: u64) -> String {
+    // The financial identity and decimals have already been validated at this
+    // block. Symbol metadata is presentation-only: unavailable or unsafe
+    // metadata must never invalidate an otherwise valid operation.
+    let symbol = adapter
+        .token(reference, Some(block))
+        .await
+        .ok()
+        .map(|token| token.symbol);
+    safe_display_label(symbol.as_deref())
+}
+
+fn display_labels_from_prepared(summary: &str) -> DisplayLabels {
+    let fallback = || DisplayLabels {
+        input: "token".into(),
+        output: "token".into(),
+    };
+    let Some(body) = summary.strip_prefix("Swap ") else {
+        return fallback();
+    };
+    let Some((input_part, output_part)) = body.split_once(" for at least ") else {
+        return fallback();
+    };
+    let Some((_, input_symbol)) = input_part.split_once(' ') else {
+        return fallback();
+    };
+    let Some((_, output_label)) = output_part.split_once(' ') else {
+        return fallback();
+    };
+    let Some((output_symbol, _)) = output_label.split_once(';') else {
+        return fallback();
+    };
+    if output_symbol.is_empty() {
+        return fallback();
+    }
+    DisplayLabels {
+        input: safe_display_label(Some(input_symbol)),
+        output: safe_display_label(Some(output_symbol)),
+    }
+}
+
 async fn request_identity(
     adapter: &EthereumAdapter,
     input: &Value,
-) -> Result<(request::Request, Value, AssetId, AssetId)> {
-    let request = request::parse("uniswap.swap", input)?;
+    operation: &str,
+) -> Result<(request::Request, Value, AssetId, AssetId, DisplayLabels)> {
+    let config = adapter.config.uniswap.as_ref();
+    let is_ramses = operation == "ramses.swap";
+    let request = request::parse(operation, input)?;
     let wallet = adapter.resolve(&request, true)?;
     let owner = address(&wallet.address)?;
     let resource = resource(adapter.config.chain_id, owner);
-    let protocol = request.protocol.as_deref().unwrap_or("v3");
-    let config = adapter.uniswap()?;
+    let protocol = if is_ramses {
+        "ramses"
+    } else {
+        request.protocol.as_deref().unwrap_or("v3")
+    };
+    let v3_profile = if is_ramses {
+        super::uniswap::profile::V3DeploymentProfile::ramses(adapter.ramses()?)
+    } else {
+        super::uniswap::profile::V3DeploymentProfile::uniswap(adapter.uniswap()?)
+    };
     let router = match protocol {
-        "v3" => address(&config.router)?,
+        "v3" | "ramses" => address(v3_profile.router)?,
         "v4" => address(
             &config
+                .ok_or_else(|| FinError::validation("Uniswap is not configured."))?
                 .v4
                 .as_ref()
                 .ok_or_else(|| {
@@ -237,28 +329,84 @@ async fn request_identity(
         block,
     )
     .await?;
-    let input_router = if protocol == "v3" {
-        address(&config.router)?
+    let labels = DisplayLabels {
+        input: display_label_at(adapter, request.token_in.as_deref().expect("parsed"), block).await,
+        output: display_label_at(
+            adapter,
+            request.token_out.as_deref().expect("parsed"),
+            block,
+        )
+        .await,
+    };
+    let input_router = if protocol == "v3" || protocol == "ramses" {
+        address(v3_profile.router)?
     } else {
-        address(&config.v4.as_ref().expect("configured above").router)?
+        address(
+            &config
+                .expect("configured above")
+                .v4
+                .as_ref()
+                .expect("configured above")
+                .router,
+        )?
     };
     adapter.runtime.code_at(input_router, Some(block)).await?;
-    if protocol == "v3" {
+    if protocol == "v3" || protocol == "ramses" {
         adapter
             .runtime
-            .code_at(address(&config.factory)?, Some(block))
+            .code_at(address(v3_profile.factory)?, Some(block))
             .await?;
         adapter
             .runtime
-            .code_at(address(&config.quoter)?, Some(block))
+            .code_at(address(v3_profile.quoter)?, Some(block))
             .await?;
+        if protocol == "ramses" {
+            let config = adapter.ramses()?;
+            let expected_deployer = address(&config.pool_deployer)?;
+            let observed = adapter
+                .runtime
+                .call(
+                    address(&config.factory)?,
+                    &abi::RamsesFactory::ramsesV3PoolDeployerCall {},
+                    Some(block),
+                )
+                .await?;
+            if observed != expected_deployer {
+                return Err(FinError::validation(
+                    "Ramses factory deployer differs from reviewed config.",
+                ));
+            }
+            let router_deployer = adapter
+                .runtime
+                .call(
+                    address(&config.router)?,
+                    &abi::RamsesRouter::deployerCall {},
+                    Some(block),
+                )
+                .await?;
+            let quoter_deployer = adapter
+                .runtime
+                .call(
+                    address(&config.quoter)?,
+                    &abi::RamsesQuoter::deployerCall {},
+                    Some(block),
+                )
+                .await?;
+            if router_deployer != expected_deployer || quoter_deployer != expected_deployer {
+                return Err(FinError::validation(
+                    "Ramses router and quoter do not share the reviewed pool-deployer identity.",
+                ));
+            }
+        }
         if request.token_in.as_deref() == Some("native")
             || request.token_out.as_deref() == Some("native")
         {
             adapter.v3_weth(Some(block)).await?;
         }
     } else {
-        let v4 = config.v4.as_ref().expect("configured above");
+        let v4 = config
+            .and_then(|config| config.v4.as_ref())
+            .expect("configured above");
         adapter
             .runtime
             .code_at(address(&v4.quoter)?, Some(block))
@@ -272,26 +420,53 @@ async fn request_identity(
     if protocol == "v4" {
         super::uniswap::v4::pool_key(v4_key.as_ref().expect("parser enforces v4 pool key"))?;
     }
-    let fixed = json!({
-        "operation":"uniswap.swap", "network":format!("ethereum:{}", adapter.config.chain_id),
+    let mut fixed = json!({
+        "operation":operation, "network":format!("ethereum:{}", adapter.config.chain_id),
         "chain_id":adapter.config.chain_id, "wallet":request.wallet, "resource":resource,
         "signer":lower_address(owner), "recipient":lower_address(recipient),
-        "router":lower_address(router), "protocol":protocol,
+        "router":lower_address(router), "protocol":if is_ramses {"v3"} else {protocol},
         "token_in":token_in, "token_out":token_out,
         "v4_pool_key":v4_key,
     });
-    Ok((request, fixed, token_in, token_out))
+    if is_ramses {
+        let amount_text = if request.amount.as_deref() == Some("all") {
+            request.max_amount.as_deref().expect("validated all cap")
+        } else {
+            request.amount.as_deref().expect("validated amount")
+        };
+        let quote = adapter
+            .quote_protocol(crate::reads::ProtocolQuoteRequest {
+                dex: "ramses",
+                input: request.token_in.as_deref().expect("parsed"),
+                output: request.token_out.as_deref().expect("parsed"),
+                amount: amount_text,
+                fee_tier: None,
+                tick_spacing: request.tick_spacing,
+                protocol: None,
+                v4_key: None,
+                block: Some(block),
+            })
+            .await?;
+        fixed["dex"] = json!("ramses");
+        fixed["tick_spacing"] = json!(request.tick_spacing);
+        fixed["pool"] = json!(quote.pool);
+        fixed["factory"] = json!(adapter.ramses()?.factory);
+        fixed["pool_deployer"] = json!(adapter.ramses()?.pool_deployer);
+        fixed["initial_pool_fee_ppm"] = json!(quote.swap_fee_ppm);
+    }
+    Ok((request, fixed, token_in, token_out, labels))
 }
 
 fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
-    if prepared.operation != "uniswap.swap" {
+    if !matches!(prepared.operation.as_str(), "uniswap.swap" | "ramses.swap") {
         return Err(FinError::validation(
-            "AMM boundary applies only to uniswap.swap.",
+            "AMM boundary applies only to configured single-pool swaps.",
         ));
     }
-    let request = request::parse("uniswap.swap", &prepared.input)?;
+    let request = request::parse(&prepared.operation, &prepared.input)?;
     let b: Binding = serde_json::from_value(prepared.binding.clone())
         .map_err(|_| FinError::validation("Prepared AMM binding is invalid."))?;
+    let is_ramses = b.dex.as_deref() == Some("ramses") || prepared.operation == "ramses.swap";
     let protocol = b.protocol.as_deref().unwrap_or("v3");
     let router = match protocol {
         "v3" => b.transaction.to.clone(),
@@ -340,17 +515,26 @@ fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
                 .expect("parser validates token_out"),
         )? != output.reference
         || request.v4_pool_key != b.v4_pool_key
+        || (is_ramses && request.tick_spacing != b.tick_spacing)
     {
         return Err(FinError::validation(
             "Prepared swap identity differs from its complete request.",
         ));
     }
-    Ok(json!({
-        "operation":"uniswap.swap", "network":b.token.network, "chain_id":b.transaction.chain_id,
+    let mut fixed = json!({
+        "operation":prepared.operation, "network":b.token.network, "chain_id":b.transaction.chain_id,
         "wallet":request.wallet, "resource":b.resource, "signer":signer,
         "recipient":b.recipient, "router":router, "protocol":protocol,
         "token_in":b.token, "token_out":output, "v4_pool_key":b.v4_pool_key,
-    }))
+    });
+    if is_ramses {
+        fixed["dex"] = json!("ramses");
+        fixed["tick_spacing"] = json!(b.tick_spacing);
+        fixed["pool"] = json!(b.pool);
+        fixed["factory"] = json!(b.factory);
+        fixed["pool_deployer"] = json!(b.pool_deployer);
+    }
+    Ok(fixed)
 }
 
 fn make_spec(
@@ -359,6 +543,7 @@ fn make_spec(
     input_asset: AssetId,
     output_asset: AssetId,
     resource: ResourceId,
+    labels: &DisplayLabels,
 ) -> Result<BoundarySpec> {
     let max_input = typed_amount(&input_asset, &bounds.max_input)?;
     let fee = Quantity::from_decimal(&bounds.max_fee_eth, 18)?;
@@ -374,12 +559,19 @@ fn make_spec(
     let parameters = serde_json::to_value(&bounds)
         .map_err(|_| FinError::validation("AMM boundary parameters could not be encoded."))?;
     let protocol = fixed["protocol"].as_str().unwrap_or("");
+    let dex = fixed["dex"].as_str().unwrap_or("uniswap");
     let route = if protocol == "v4" {
         let key: V4PoolKey = serde_json::from_value(fixed["v4_pool_key"].clone())
             .map_err(|_| FinError::validation("Fixed v4 pool key is invalid."))?;
         format!(
             "Uniswap v4 pool-key fee {} ppm, tick spacing {}",
             key.fee, key.tick_spacing
+        )
+    } else if dex == "ramses" {
+        format!(
+            "Ramses pool spacing {} (maximum observed fee {} ppm)",
+            fixed["tick_spacing"],
+            bounds.max_pool_fee_ppm.unwrap_or_default()
         )
     } else {
         format!(
@@ -421,8 +613,8 @@ fn make_spec(
     let summary = format!(
         "Swap up to {} {} for {}; recipient {}; router {}; {route}; fixed minimum rate {rate_output} {} per {rate_input} {}; max native fee {} ETH; max selected slippage {} bps; max price impact {} bps; deadline within {} seconds; permission scope: {permission}{absolute_floor}.",
         bounds.max_input,
-        input_asset.reference,
-        output_asset.reference,
+        labels.input,
+        labels.output,
         fixed["recipient"],
         fixed["router"],
         output_asset.reference,
@@ -455,23 +647,54 @@ impl EthereumAdapter {
         input: &Value,
         raw_bounds: &Value,
     ) -> Result<PlanPermission> {
-        if operation != "uniswap.swap" {
+        if !matches!(operation, "uniswap.swap" | "ramses.swap") {
             return Err(FinError::new(
                 "PLAN_PERMISSION_UNSUPPORTED",
                 "authorization",
-                "AMM plan permission supports uniswap.swap only.",
+                "AMM plan permission supports reviewed Uniswap and Ramses swaps only.",
                 "Choose a supported swap step.",
             ));
         }
         self.runtime.assert_chain().await?;
-        let (request, fixed, input_asset, output_asset) = request_identity(self, input).await?;
-        let protocol = fixed["protocol"].as_str().unwrap_or("v3");
-        let bounds = parse_bounds(
+        let (request, fixed, input_asset, output_asset, labels) =
+            request_identity(self, input, operation).await?;
+        let protocol = fixed["protocol"].as_str().unwrap_or("v3").to_owned();
+        let bounds_protocol = fixed["dex"].as_str().unwrap_or(&protocol).to_owned();
+        let mut bounds = parse_bounds(
             raw_bounds,
             input_asset.decimals,
             output_asset.decimals,
-            protocol,
+            &bounds_protocol,
         )?;
+        let mut fixed = fixed;
+        if bounds_protocol == "ramses" {
+            let observed_fee = fixed["initial_pool_fee_ppm"]
+                .as_u64()
+                .and_then(|fee| u32::try_from(fee).ok())
+                .ok_or_else(|| FinError::validation("Pinned Ramses pool fee is missing."))?;
+            let ceiling = bounds
+                .max_pool_fee_ppm
+                .or(request.max_pool_fee_ppm)
+                .unwrap_or(observed_fee);
+            if request
+                .max_pool_fee_ppm
+                .is_some_and(|requested| requested > ceiling)
+            {
+                return Err(FinError::validation(
+                    "Requested Ramses quote fee ceiling exceeds the approved plan bound.",
+                ));
+            }
+            if observed_fee > ceiling {
+                return Err(FinError::validation(
+                    "Pinned Ramses pool fee exceeds the approved quote-time ceiling.",
+                ));
+            }
+            bounds.max_pool_fee_ppm = Some(ceiling);
+            fixed
+                .as_object_mut()
+                .expect("fixed object")
+                .remove("initial_pool_fee_ppm");
+        }
         let cap = Quantity::from_decimal(&bounds.max_input, input_asset.decimals)?;
         let initial_text = if request.amount.as_deref() == Some("all") {
             request
@@ -549,6 +772,7 @@ impl EthereumAdapter {
             input_asset.clone(),
             output_asset.clone(),
             resource.clone(),
+            &labels,
         )?;
         Ok(PlanPermission {
             deferred_receipt: None,
@@ -582,15 +806,26 @@ impl EthereumAdapter {
             .map_err(|_| FinError::validation("Input asset identity is invalid."))?;
         let output_asset: AssetId = serde_json::from_value(fixed["token_out"].clone())
             .map_err(|_| FinError::validation("Output asset identity is invalid."))?;
+        let bounds_protocol = fixed["dex"]
+            .as_str()
+            .or_else(|| fixed["protocol"].as_str())
+            .unwrap_or("v3")
+            .to_owned();
         let resource: ResourceId = serde_json::from_value(fixed["resource"].clone())
             .map_err(|_| FinError::validation("Physical resource identity is invalid."))?;
-        let bounds = parse_bounds(
+        let mut bounds = parse_bounds(
             raw_bounds,
             input_asset.decimals,
             output_asset.decimals,
-            fixed["protocol"].as_str().unwrap_or("v3"),
+            &bounds_protocol,
         )?;
-        let spec = make_spec(fixed, bounds, input_asset, output_asset, resource)?;
+        if bounds_protocol == "ramses" && bounds.max_pool_fee_ppm.is_none() {
+            let binding: Binding = serde_json::from_value(prepared.binding.clone())
+                .map_err(|_| FinError::validation("Prepared Ramses binding is invalid."))?;
+            bounds.max_pool_fee_ppm = binding.max_pool_fee_ppm.or(binding.swap_fee_ppm);
+        }
+        let labels = display_labels_from_prepared(&prepared.summary);
+        let spec = make_spec(fixed, bounds, input_asset, output_asset, resource, &labels)?;
         self.validate_swap_candidate(&spec, prepared)?;
         Ok(spec)
     }
@@ -617,11 +852,13 @@ fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Resu
         &spec.parameters,
         input_asset.decimals,
         output_asset.decimals,
-        spec.fixed["protocol"].as_str().unwrap_or("v3"),
+        spec.fixed["dex"]
+            .as_str()
+            .unwrap_or(spec.fixed["protocol"].as_str().unwrap_or("v3")),
     )?;
     let b: Binding = serde_json::from_value(prepared.binding.clone())
         .map_err(|_| FinError::validation("Prepared AMM binding is invalid."))?;
-    let request = request::parse("uniswap.swap", &prepared.input)?;
+    let request = request::parse(&prepared.operation, &prepared.input)?;
     let units = b.units.clone();
     let max_input = Quantity::from_decimal(&bounds.max_input, input_asset.decimals)?;
     if units > max_input {
@@ -659,7 +896,38 @@ fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Resu
             json!(request.slippage_bps),
         ));
     }
-    if request.protocol.as_deref().unwrap_or("v3") == "v3" {
+    if spec.fixed["dex"].as_str() == Some("ramses") {
+        let spacing = b.tick_spacing.ok_or_else(|| {
+            FinError::validation("Prepared Ramses pool is missing its fixed tick spacing.")
+        })?;
+        if request.tick_spacing != Some(spacing) {
+            return Err(fail(
+                "tick_spacing",
+                json!(spacing),
+                json!(request.tick_spacing),
+            ));
+        }
+        let observed_fee = b
+            .swap_fee_ppm
+            .ok_or_else(|| FinError::validation("Prepared Ramses pool fee quote is missing."))?;
+        let fee_cap = bounds.max_pool_fee_ppm.unwrap_or_default();
+        let prepared_fee_cap = b.max_pool_fee_ppm.or(b.swap_fee_ppm).unwrap_or_default();
+        let candidate_fee_cap = request.max_pool_fee_ppm.unwrap_or(prepared_fee_cap);
+        if candidate_fee_cap > fee_cap || candidate_fee_cap > prepared_fee_cap {
+            return Err(fail(
+                "max_pool_fee_ppm",
+                json!({"approved":fee_cap,"prepared":prepared_fee_cap}),
+                json!(candidate_fee_cap),
+            ));
+        }
+        if observed_fee > fee_cap {
+            return Err(fail(
+                "max_pool_fee_ppm",
+                json!(fee_cap),
+                json!(observed_fee),
+            ));
+        }
+    } else if request.protocol.as_deref().unwrap_or("v3") == "v3" {
         let tier = b.fee_tier.ok_or_else(|| {
             FinError::validation("Prepared v3 swap is missing its exact fee tier.")
         })?;
@@ -846,6 +1114,44 @@ mod tests {
             "slippage_bps":100, "max_price_impact_bps":40, "deadline":deadline, "protocol":"v3"
         })
     }
+
+    #[test]
+    fn display_labels_are_bounded_safe_and_fall_back_without_changing_identity() {
+        assert_eq!(safe_display_label(Some("USDG-2")), "USDG-2");
+        assert_eq!(safe_display_label(Some("ETH")), "ETH");
+        assert_eq!(safe_display_label(Some("-")), "token");
+        assert_eq!(safe_display_label(None), "token");
+        assert_eq!(safe_display_label(Some("USDC; send funds")), "token");
+        assert_eq!(safe_display_label(Some("US\u{202e}DC")), "token");
+        let too_long = "A".repeat(33);
+        assert_eq!(safe_display_label(Some(&too_long)), "token");
+        assert_eq!(
+            display_labels_from_prepared(
+                "Swap 1 ETH for at least 2 USDC; recipient 0x1111; router 0x2222."
+            ),
+            DisplayLabels {
+                input: "ETH".into(),
+                output: "USDC".into(),
+            }
+        );
+        assert_eq!(
+            display_labels_from_prepared("untrusted or changed summary"),
+            DisplayLabels {
+                input: "token".into(),
+                output: "token".into(),
+            }
+        );
+        assert_eq!(
+            display_labels_from_prepared(
+                "Swap 1 USDC; ignore review for at least 2 USDG; recipient wallet."
+            ),
+            DisplayLabels {
+                input: "token".into(),
+                output: "USDG".into(),
+            }
+        );
+    }
+
     fn prepared(deadline: u64) -> PreparedOperation {
         let resource = ResourceId("ethereum:1:0x1111111111111111111111111111111111111111".into());
         let native = AssetId {
@@ -882,6 +1188,12 @@ mod tests {
             deadline: Some(deadline),
             pool: Some("pool-3000".into()),
             fee_tier: Some(3000),
+            dex: None,
+            tick_spacing: None,
+            pool_deployer: None,
+            factory: None,
+            swap_fee_ppm: None,
+            max_pool_fee_ppm: None,
             protocol: Some("v3".into()),
             v4_pool_key: None,
             route_token_in: Some("weth".into()),
@@ -993,7 +1305,20 @@ mod tests {
         let output_asset: AssetId = serde_json::from_value(fixed["token_out"].clone()).unwrap();
         let resource: ResourceId = serde_json::from_value(fixed["resource"].clone()).unwrap();
         let parsed = parse_bounds(&bounds(), 18, 6, "v3").unwrap();
-        let spec = make_spec(fixed, parsed, input_asset, output_asset, resource).unwrap();
+        let spec = make_spec(
+            fixed,
+            parsed,
+            input_asset,
+            output_asset,
+            resource,
+            &DisplayLabels {
+                input: "ETH".into(),
+                output: "USDC".into(),
+            },
+        )
+        .unwrap();
+        assert!(spec.summary.starts_with("Swap up to 1.5 ETH for USDC;"));
+        assert!(spec.fixed.get("display_labels").is_none());
         assert!(validate_candidate(&spec, &candidate).is_ok());
         let mut bad = candidate.clone();
         bad.binding["price_impact_bps"] = json!(41);

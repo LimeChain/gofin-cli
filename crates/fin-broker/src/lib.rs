@@ -100,6 +100,8 @@ pub struct DeploymentConfig {
     pub snapshot_tokens: Vec<String>,
     #[serde(default)]
     pub uniswap: Option<fin_ethereum::UniswapConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ramses: Option<fin_ethereum::RamsesConfig>,
     #[serde(default)]
     pub aave: Option<fin_ethereum::AaveConfig>,
 }
@@ -163,69 +165,56 @@ pub struct BrokerPolicy {
 
 impl NetworkConfig {
     pub fn ethereum_mainnet() -> Self {
-        Self {
-            id: "ethereum:1".into(),
-            chain_id: 1,
-            rpc_urls: vec![
-                "https://ethereum-rpc.publicnode.com".into(),
-                "https://eth.drpc.org".into(),
-            ],
-            confirmations: 2,
-            snapshot_tokens: vec![],
-        }
+        Self::from_reviewed(fin_networks::by_chain_id(1).expect("Ethereum is reviewed"))
     }
     pub fn reviewed_evm_networks() -> Vec<Self> {
-        vec![
-            Self::ethereum_mainnet(),
-            Self {
-                id: "ethereum:42161".into(),
-                chain_id: 42161,
-                rpc_urls: vec!["https://arb1.arbitrum.io/rpc".into()],
-                confirmations: 1,
-                snapshot_tokens: vec![],
-            },
-            Self {
-                id: "ethereum:4663".into(),
-                chain_id: 4663,
-                rpc_urls: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
-                confirmations: 1,
-                snapshot_tokens: vec![],
-            },
-            Self {
-                id: "ethereum:8453".into(),
-                chain_id: 8453,
-                // Standard RPC: settlement reads use canonical full blocks,
-                // never pending/Flashblocks preconfirmations.
-                // https://docs.base.org/get-started/connect-to-base
-                rpc_urls: vec!["https://mainnet.base.org".into()],
-                confirmations: 1,
-                snapshot_tokens: vec![],
-            },
-        ]
+        fin_networks::all()
+            .iter()
+            .map(Self::from_reviewed)
+            .collect()
+    }
+
+    fn from_reviewed(network: &fin_networks::EvmNetwork) -> Self {
+        Self {
+            id: network.network_id.into(),
+            chain_id: network.chain_id,
+            rpc_urls: network.rpc_urls.iter().map(|url| (*url).into()).collect(),
+            confirmations: network.minimum_confirmations,
+            snapshot_tokens: vec![],
+        }
     }
 }
 
 impl DeploymentConfig {
-    pub fn reviewed_uniswap_networks() -> Vec<Self> {
+    pub fn reviewed_amm_networks() -> Vec<Self> {
         NetworkConfig::reviewed_evm_networks()
             .into_iter()
             .filter_map(|network| {
-                amm_deployments::reviewed_uniswap(network.chain_id).map(|uniswap| Self {
+                let uniswap = amm_deployments::reviewed_uniswap(network.chain_id);
+                let ramses = amm_deployments::reviewed_ramses(network.chain_id);
+                let aave = if network.chain_id == 1 {
+                    fin_ethereum::EthereumConfig::default().aave
+                } else if network.chain_id == 8453 {
+                    fin_ethereum::EthereumConfig::base_aave(vec![]).aave
+                } else {
+                    None
+                };
+                (uniswap.is_some() || ramses.is_some() || aave.is_some()).then(|| Self {
                     network: network.id,
                     weth: (network.chain_id == 8453)
                         .then(|| "0x4200000000000000000000000000000000000006".into()),
                     snapshot_tokens: vec![],
-                    uniswap: Some(uniswap),
-                    aave: if network.chain_id == 1 {
-                        fin_ethereum::EthereumConfig::default().aave
-                    } else if network.chain_id == 8453 {
-                        fin_ethereum::EthereumConfig::base_aave(vec![]).aave
-                    } else {
-                        None
-                    },
+                    uniswap,
+                    ramses,
+                    aave,
                 })
             })
             .collect()
+    }
+
+    /// Backwards-compatible name for callers that only require Uniswap profiles.
+    pub fn reviewed_uniswap_networks() -> Vec<Self> {
+        Self::reviewed_amm_networks()
     }
     pub fn ethereum_mainnet() -> Self {
         let defaults = fin_ethereum::EthereumConfig::default();
@@ -234,6 +223,7 @@ impl DeploymentConfig {
             weth: defaults.weth,
             snapshot_tokens: defaults.snapshot_tokens,
             uniswap: amm_deployments::reviewed_uniswap(1),
+            ramses: amm_deployments::reviewed_ramses(1),
             aave: defaults.aave,
         }
     }
@@ -289,7 +279,7 @@ impl BrokerConfigV2 {
                 || !networks.insert(network.id.clone())
                 || network.id != format!("ethereum:{}", network.chain_id)
                 || !chain_ids.insert(network.chain_id)
-                || ![1, 42161, 4663, 8453].contains(&network.chain_id)
+                || !fin_networks::supports_chain(network.chain_id)
                 || network.snapshot_tokens.len() > 64
                 || network
                     .snapshot_tokens
@@ -944,6 +934,7 @@ pub fn build_applications_with_price_source(
                 weth: deployment.weth.clone(),
                 snapshot_tokens: deployment.snapshot_tokens.clone(),
                 uniswap: deployment.uniswap.clone(),
+                ramses: deployment.ramses.clone(),
                 aave: deployment.aave.clone(),
             }
         } else if network.chain_id == 8453 {
@@ -1155,7 +1146,7 @@ fn configured_binance_destinations(
                     .into_iter()
                     .map(|asset| {
                         let key = if asset.reference == "native"
-                            && matches!(network.chain_id, 1 | 42161 | 4663 | 8453)
+                            && fin_networks::supports_chain(network.chain_id)
                         {
                             "ETH".to_owned()
                         } else {
@@ -1212,7 +1203,7 @@ impl fin_binance::BinanceRecipientVerifier for EthereumPayoutVerifier {
         let Some(adapter) = self.adapters.get(&chain_id) else {
             return Ok(None);
         };
-        if !matches!(chain_id, 1 | 42161 | 4663 | 8453)
+        if !fin_networks::supports_chain(chain_id)
             || adapter.config.chain_id != chain_id
             || adapter.runtime.chain_id != chain_id
         {
@@ -2397,8 +2388,7 @@ pub fn load_protected_config() -> fin_domain::Result<BrokerConfigV2> {
             "Repair it through human enrollment.",
         )
     })?;
-    config.validate()?;
-    Ok(config)
+    enrollment::effective_protected_config(config)
 }
 
 /// Enrollment helper. It is not exposed over the agent protocol and never
@@ -3915,6 +3905,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reviewed_wallet_coverage_reload_preserves_pending_submission_without_credentials() {
+        let directory = test_directory();
+        let loader = FixtureRuntimeLoader {
+            database: directory.join("operations.sqlite"),
+            loads: AtomicUsize::new(0),
+            fail: false,
+        };
+        let mut stored = config();
+        stored.connections.push(ConnectionConfig::Evm {
+            name: "read-only-wallet".into(),
+            resource: ResourceId("evm:0x1111111111111111111111111111111111111111".into()),
+            credential_ref: None,
+            address: "0x1111111111111111111111111111111111111111".into(),
+            signing_enabled: false,
+        });
+        let old_reviewed_networks = vec![NetworkConfig::ethereum_mainnet()];
+        let old_reviewed_deployments = vec![DeploymentConfig::ethereum_mainnet()];
+        let initial = enrollment::effective_protected_config_with(
+            stored.clone(),
+            &old_reviewed_networks,
+            &old_reviewed_deployments,
+        )
+        .unwrap();
+        let mut runtime = loader.load(initial).await.unwrap();
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 1);
+        assert!(
+            runtime
+                .engine
+                .definitions()
+                .unwrap()
+                .iter()
+                .all(|definition| definition.name != "ramses.quote")
+        );
+
+        let mut store = Store::open(&loader.database).unwrap();
+        let record = OperationRecord {
+            id: "reviewed-wallet-pending".into(),
+            request_id: "reviewed-wallet-request".into(),
+            fingerprint: "reviewed-wallet-fingerprint".into(),
+            fingerprint_version: 1,
+            operation: "synthetic.write".into(),
+            input: json!({}),
+            status: fin_domain::Status::Submitted,
+            created_at: now(),
+            updated_at: now(),
+            preview: None,
+            approval: None,
+            submission: Some(Submission {
+                kind: "synthetic".into(),
+                reference: "reviewed-wallet-original-submission".into(),
+                data: json!({"nonce":7}),
+            }),
+            dispatch_evidence: None,
+            effects: None,
+            last_reconciliation_evidence: None,
+            error: None,
+            run_id: None,
+        };
+        store
+            .create_request(
+                &record.id,
+                &record.request_id,
+                &record.fingerprint,
+                &record.operation,
+                None,
+                "submitted",
+                &serde_json::to_value(&record).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        drop(store);
+
+        let reviewed = enrollment::effective_protected_config(stored).unwrap();
+        assert_eq!(
+            reviewed.networks.len(),
+            NetworkConfig::reviewed_evm_networks().len()
+        );
+        let prior = runtime.clone();
+        refresh_runtime(&mut runtime, reviewed.clone(), 501, &loader)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&runtime, &prior));
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 2);
+        let definitions = runtime.engine.definitions().unwrap();
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "ramses.quote")
+        );
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "ramses.swap")
+        );
+        assert_eq!(runtime.engine.operations().unwrap(), vec![record.clone()]);
+
+        let refreshed = runtime.clone();
+        refresh_runtime(&mut runtime, reviewed, 501, &loader)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&runtime, &refreshed));
+        assert_eq!(loader.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.engine.operations().unwrap(), vec![record]);
+        drop(runtime);
+        drop(prior);
+        drop(refreshed);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn configuration_reload_failure_or_approver_change_never_replaces_runtime() {
         let directory = test_directory();
         let loader = FixtureRuntimeLoader {
@@ -4134,7 +4234,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             reusable.iter().map(|d| d.chain_id).collect::<Vec<_>>(),
-            vec![1, 42161, 4663, 8453]
+            vec![1, 8453, 42161, 4663]
         );
         for destination in reusable {
             assert_eq!(

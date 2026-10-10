@@ -66,7 +66,7 @@ pub struct AddConnectionArgs {
     /// Accepted only for role=sub.
     #[arg(long)]
     pub email: Option<String>,
-    /// Optional enrollment read-check network: ethereum:1, ethereum:8453, ethereum:42161 or ethereum:4663.
+    /// Optional enrollment read-check network from Fin's reviewed EVM registry.
     /// The EVM wallet remains reusable across all reviewed networks.
     #[arg(long)]
     pub network: Option<String>,
@@ -109,7 +109,36 @@ pub struct CompletionInput {
 
 /// Reviewed network capabilities available before enrollment or broker setup.
 pub fn evm_network_profiles() -> Value {
-    json!([{"network":"ethereum:1","name":"Ethereum Mainnet","chain_id":1,"native_coin":"ETH","operations":["wallet","Uniswap","Aave"]},{"network":"ethereum:8453","name":"Base","chain_id":8453,"native_coin":"ETH","operations":["wallet","Uniswap","Aave"]},{"network":"ethereum:42161","name":"Arbitrum One","chain_id":42161,"native_coin":"ETH","operations":["wallet","Uniswap"]},{"network":"ethereum:4663","name":"Robinhood Chain","chain_id":4663,"native_coin":"ETH","operations":["wallet","Uniswap"]}])
+    Value::Array(
+        fin_networks::all()
+            .iter()
+            .map(|network| {
+                let operations = if matches!(network.chain_id, 1 | 8453) {
+                    json!(["wallet", "Uniswap", "Aave"])
+                } else if network.chain_id == 4663 {
+                    json!(["wallet", "Uniswap", "Ramses v3"])
+                } else if network.chain_id == 42161 {
+                    json!(["wallet", "Uniswap"])
+                } else {
+                    json!(["wallet"])
+                };
+                json!({
+                    "network": network.network_id,
+                    "name": network.display_name,
+                    "chain_id": network.chain_id,
+                    "native_coin": "ETH",
+                    "operations": operations
+                })
+            })
+            .collect(),
+    )
+}
+
+fn reviewed_evm_network_ids() -> Vec<String> {
+    fin_networks::all()
+        .iter()
+        .map(|network| network.network_id.to_owned())
+        .collect()
 }
 
 /// Offline bridge scope. The Relay settlement observer is intentionally kept
@@ -128,12 +157,11 @@ pub fn bridge_profile() -> Value {
             {"id":"base_canonical","coverage":"Ethereum ↔ Base ETH and verified StandardBridge ERC-20 pairs; Base withdrawal has separate source, proof and finalization stages"}
         ],
         "provider_credentials": "no provider keys; Relay uses anonymous quotes and the canonical provider uses configured read-only EVM RPC",
-        "wallet_chains": [
-            {"chain_id": 1, "network": "ethereum:1", "name": "Ethereum Mainnet"},
-            {"chain_id": 8453, "network": "ethereum:8453", "name": "Base"},
-            {"chain_id": 42161, "network": "ethereum:42161", "name": "Arbitrum One"},
-            {"chain_id": 4663, "network": "ethereum:4663", "name": "Robinhood Chain"}
-        ],
+        "wallet_chains": fin_networks::all().iter().map(|network| json!({
+            "chain_id": network.chain_id,
+            "network": network.network_id,
+            "name": network.display_name
+        })).collect::<Vec<_>>(),
         "settlement_observers": [
             {"chain_id": 537713, "name": "RelayChain", "role": "read_only_settlement_evidence", "wallet_authority": false}
         ],
@@ -371,14 +399,13 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
                     "EVM wallets do not accept Binance account relationships.",
                 ));
             }
-            if args.network.as_deref().is_some_and(|network| {
-                !matches!(
-                    network,
-                    "ethereum:1" | "ethereum:8453" | "ethereum:42161" | "ethereum:4663"
-                )
-            }) {
+            if args
+                .network
+                .as_deref()
+                .is_some_and(|network| fin_networks::by_network_id(network).is_none())
+            {
                 return Err(FinError::validation(
-                    "Choose ethereum:1, ethereum:8453, ethereum:42161 or ethereum:4663 for the optional enrollment check; wallets are reusable across networks.",
+                    "Choose a reviewed EVM network for the optional enrollment check; wallets are reusable across configured networks.",
                 ));
             }
             if !matches!(
@@ -424,6 +451,16 @@ fn definition<T: JsonSchema>(
 }
 
 pub fn operation_definitions() -> Vec<Definition> {
+    let evm_network_ids = reviewed_evm_network_ids();
+    let mut connection_network_enum = evm_network_ids
+        .iter()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    connection_network_enum.push(Value::Null);
+    let default_evm_network = fin_networks::by_chain_id(1)
+        .expect("Ethereum is reviewed")
+        .network_id;
     let administrator_authentication = json!({
         "provider":"macOS sudo",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
@@ -458,7 +495,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":"Optional read-only enrollment check; defaults to ethereum:1 and does not scope the wallet key.","networks":["ethereum:1","ethereum:8453","ethereum:42161","ethereum:4663"],"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
         "next_check":"fin connections list --json"
@@ -760,7 +797,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             "if": {"properties":{"provider":{"enum":["evm","ethereum"]}},"required":["provider"]},
             "then": {
                 "required":["credential_type"],
-                "properties":{"network":{"enum":["ethereum:1","ethereum:8453","ethereum:42161","ethereum:4663",null]},"credential_type":{"enum":["private_key","read_only"]}},
+                "properties":{"network":{"enum":connection_network_enum},"credential_type":{"enum":["private_key","read_only"]}},
                 "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["api_plan"]}]},
                 "oneOf":[
                     {"properties":{"credential_type":{"const":"private_key"}}},
@@ -1269,13 +1306,27 @@ mod tests {
             evm["network_profiles"][1]["operations"],
             json!(["wallet", "Uniswap", "Aave"])
         );
+        assert_eq!(
+            evm["network_profiles"][2]["operations"],
+            json!(["wallet", "Uniswap"])
+        );
+        assert_eq!(
+            evm["network_profiles"][3]["operations"],
+            json!(["wallet", "Uniswap", "Ramses v3"])
+        );
+        assert!(
+            !evm["network_profiles"][0]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("Ramses v3"))
+        );
+        assert!(
+            evm["dapp_scope"]
+                .as_str()
+                .unwrap()
+                .contains("Ramses v3 is available on Robinhood Chain only")
+        );
         assert_eq!(evm["network_profiles"][3]["name"], "Robinhood Chain");
-        for i in [2, 3] {
-            assert_eq!(
-                evm["network_profiles"][i]["operations"],
-                json!(["wallet", "Uniswap"])
-            );
-        }
         assert!(evm["wallet_scope"].as_str().unwrap().contains("reusable"));
         for example in add.semantics["command_line_examples"]
             .as_array()

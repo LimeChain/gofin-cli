@@ -169,12 +169,12 @@ impl BinanceEthereumDepositAdapter {
             ));
         }
         let expected = fin_binance::binance_evm_chain_id(&network);
-        if expected != Some(chain_id) || ![1, 42161, 4663, 8453].contains(&chain_id) {
+        if expected != Some(chain_id) || !fin_networks::supports_chain(chain_id) {
             return Err(error(
                 "DEPOSIT_ROUTE_UNSUPPORTED",
                 "validation",
                 "The Binance network does not match a supported Fin EVM chain.",
-                "Choose Ethereum, Arbitrum One, Robinhood Chain, or Base using its current Binance network code.",
+                "Choose ETH using a current Binance network code mapped to a reviewed Fin EVM network.",
             ));
         }
         Ok((coin, network, chain_id))

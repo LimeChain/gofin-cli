@@ -91,7 +91,16 @@ public user-facing upgrade command is separate work. For a reviewed local update
 the human runs `make update` in their own macOS Terminal. It builds a debug bundle,
 uses the verified installed runtime as `--from`, and accepts reviewed installer/
 helper changes through the existing updater option. It preserves protected state
-and retains a runtime backup. No reinstall or service restart occurs.
+and retains a runtime backup. It pauses the broker during replacement and
+restores its previous running or stopped state without reinstalling.
+
+When an updated broker starts or reloads protected configuration, it derives
+missing reviewed network and AMM deployment coverage for enrolled reusable EVM
+wallets. This applies to read-only wallets without credential entry, does not
+rewrite protected config or grant financial authority, and leaves legacy
+chain-scoped Ethereum connections unchanged. This broker behavior is available
+after an installed runtime update; it does not add a public release-upgrade
+command.
 
 The companion skill is compiled into `fin` (no new archive member). After a
 successful runtime commit the updater drops to the invoking user's UID, clears

@@ -156,7 +156,7 @@ fn offline_discovery_commands_work_without_service() {
     assert_eq!(capabilities["evm_networks"][1]["name"], "Base");
     assert_eq!(capabilities["evm_networks"][2]["chain_id"], 42161);
     assert!(!capabilities["commands"].as_array().unwrap().is_empty());
-    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 57);
+    assert_eq!(capabilities["operations"].as_array().unwrap().len(), 59);
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],

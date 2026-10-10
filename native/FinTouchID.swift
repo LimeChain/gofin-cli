@@ -121,7 +121,7 @@ application.setActivationPolicy(.accessory)
 guard Date() < expiry else { finish("expired") }
 
 // A fresh context and biometric-only policy prevent password fallback and previous unlock reuse.
-context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: approvalReason) { success, error in
+context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: nativeApprovalReasonForOS(approvalReason)) { success, error in
     DispatchQueue.main.async {
         guard Date() < expiry else { finish("expired") }
         if success {

@@ -441,7 +441,7 @@ impl EthereumAdapter {
         self.runtime.assert_chain().await?;
         let reference = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
-        } else if operation == "uniswap.swap" {
+        } else if matches!(operation, "uniswap.swap" | "ramses.swap") {
             r.token_in.as_deref().expect("schema").to_owned()
         } else {
             r.token.as_deref().expect("schema").to_owned()
@@ -734,8 +734,23 @@ impl EthereumAdapter {
                 let spender = address(r.spender.as_deref().expect("schema"))?;
                 require(
                     spender != Address::ZERO
-                        && [self.aave()?.pool.as_str(), self.uniswap()?.router.as_str()]
-                            .contains(&lower_address(spender).as_str()),
+                        && [
+                            self.config.aave.as_ref().map(|value| value.pool.as_str()),
+                            self.config
+                                .uniswap
+                                .as_ref()
+                                .map(|value| value.router.as_str()),
+                            self.config
+                                .ramses
+                                .as_ref()
+                                .map(|value| value.router.as_str()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| {
+                            lower_address(address(candidate).expect("validated deployment"))
+                                == lower_address(spender)
+                        }),
                     "PLAN_SPENDER_UNSUPPORTED",
                     "This restoration profile approves only its reviewed Pool and router.",
                 )?;
@@ -806,7 +821,7 @@ impl EthereumAdapter {
                 });
                 evidence["spender"] = json!(lower_address(spender));
             }
-            "uniswap.swap" => {
+            "uniswap.swap" | "ramses.swap" => {
                 let input_cash = cash(context, &resource, &principal)?;
                 let lo = if all { u256(&input_cash.minimum)? } else { cap };
                 let hi = if all { u256(&input_cash.maximum)? } else { cap };
@@ -815,28 +830,35 @@ impl EthereumAdapter {
                     "PLAN_PRINCIPAL_UNFUNDED",
                     "Swap principal must fit finite broker-selected cash.",
                 )?;
-                finite_allowance(
-                    context,
-                    &resource,
-                    &token.reference,
-                    &self.uniswap()?.router,
-                    hi,
-                )?;
+                let router_address = if operation == "ramses.swap" {
+                    &self.ramses()?.router
+                } else {
+                    &self.uniswap()?.router
+                };
+                finite_allowance(context, &resource, &token.reference, router_address, hi)?;
                 require(
                     address(r.recipient.as_deref().expect("schema"))? == owner,
                     "SWAP_RECIPIENT_UNSUPPORTED",
                     "The scoped swap returns its output to the selected wallet.",
                 )?;
                 let quote = self
-                    .quote(
-                        &token.reference,
-                        r.token_out.as_deref().expect("schema"),
-                        &quantity(lo).to_decimal(token.decimals),
-                        r.fee_tier,
-                        None,
-                    )
+                    .quote_protocol(crate::reads::ProtocolQuoteRequest {
+                        dex: if operation == "ramses.swap" {
+                            "ramses"
+                        } else {
+                            "uniswap"
+                        },
+                        input: &token.reference,
+                        output: r.token_out.as_deref().expect("schema"),
+                        amount: &quantity(lo).to_decimal(token.decimals),
+                        fee_tier: r.fee_tier,
+                        tick_spacing: r.tick_spacing,
+                        protocol: r.protocol.as_deref(),
+                        v4_key: r.v4_pool_key.as_ref(),
+                        block: None,
+                    })
                     .await?;
-                self.runtime.code(address(&self.uniswap()?.router)?).await?;
+                self.runtime.code(address(router_address)?).await?;
                 let output = quote.token_out.asset(self);
                 let minimum = exact(r.min_output.as_deref().expect("schema"), output.decimals)?;
                 let quoted = u256(&quote.output)?;

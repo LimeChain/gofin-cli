@@ -1,7 +1,16 @@
 //! Reviewed protocol contracts; asset identities are supplied by callers.
 //! Source: https://github.com/Uniswap/contracts/tree/main/deployments
 //! Version-specific encodings require the owned AMM fork verification.
-use fin_ethereum::{RouterKind, UniswapConfig, V4Config};
+use fin_ethereum::{RamsesConfig, RouterKind, UniswapConfig, V4Config};
+
+pub fn reviewed_ramses(chain_id: u64) -> Option<RamsesConfig> {
+    (chain_id == 4663).then(|| RamsesConfig {
+        factory: "0xE0c4ceb92d08CA985bB70fe0a22fEb121A9854A8".into(),
+        quoter: "0x4730e03EB4a58A5e20244062D5f9A99bCf5770a6".into(),
+        router: "0xFCBBe2Af83F94e7E2a9C35a535B3A04719aFD2Ae".into(),
+        pool_deployer: "0x4b37359BF291AbE8453692DB58d515a8b013Dca9".into(),
+    })
+}
 
 pub fn reviewed_uniswap(chain_id: u64) -> Option<UniswapConfig> {
     let cfg = match chain_id {

@@ -12,7 +12,7 @@ use fin_evm::{quantity, rpc_bytes, rpc_u64, u256};
 fn configured_quote_router(adapter: &EthereumAdapter, protocol: &str) -> Result<String> {
     let deployment = adapter.uniswap()?;
     let router = if protocol == "v4" {
-        &deployment
+        deployment
             .v4
             .as_ref()
             .ok_or_else(|| {
@@ -23,10 +23,13 @@ fn configured_quote_router(adapter: &EthereumAdapter, protocol: &str) -> Result<
                 )
             })?
             .router
+            .clone()
     } else {
-        &deployment.router
+        super::uniswap::profile::V3DeploymentProfile::uniswap(deployment)
+            .router
+            .to_owned()
     };
-    Ok(lower_address(address(router)?))
+    Ok(lower_address(address(&router)?))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,7 +78,11 @@ pub struct SwapQuote {
     pub input: Quantity,
     pub output: Quantity,
     pub pool: String,
+    #[serde(default)]
+    pub dex: String,
     pub fee_tier: u32,
+    #[serde(default)]
+    pub tick_spacing: Option<i32>,
     #[serde(default)]
     pub swap_fee_ppm: Option<u32>,
     #[serde(default)]
@@ -103,10 +110,12 @@ pub struct SwapQuote {
 }
 
 pub(crate) struct ProtocolQuoteRequest<'a> {
+    pub dex: &'a str,
     pub input: &'a str,
     pub output: &'a str,
     pub amount: &'a str,
     pub fee_tier: Option<u32>,
+    pub tick_spacing: Option<i32>,
     pub protocol: Option<&'a str>,
     pub v4_key: Option<&'a super::V4PoolKey>,
     pub block: Option<u64>,
@@ -396,7 +405,11 @@ fn v4_swap_fee_ppm(packed_protocol_fee: u32, lp_fee_ppm: u32, zero_for_one: bool
 
 impl EthereumAdapter {
     pub(crate) async fn v3_weth(&self, block: Option<u64>) -> Result<Address> {
-        let router = address(&self.uniswap()?.router)?;
+        let router = if let Some(uniswap) = &self.config.uniswap {
+            address(&uniswap.router)?
+        } else {
+            address(&self.ramses()?.router)?
+        };
         self.runtime.code_at(router, block).await?;
         let weth = self
             .runtime
@@ -920,34 +933,17 @@ impl EthereumAdapter {
             ),
         ))
     }
-    pub(crate) async fn quote(
-        &self,
-        input: &str,
-        output: &str,
-        qty: &str,
-        tier: Option<u32>,
-        block: Option<u64>,
-    ) -> Result<SwapQuote> {
-        self.quote_protocol(ProtocolQuoteRequest {
-            input,
-            output,
-            amount: qty,
-            fee_tier: tier,
-            protocol: None,
-            v4_key: None,
-            block,
-        })
-        .await
-    }
     pub(crate) async fn quote_protocol(
         &self,
         request: ProtocolQuoteRequest<'_>,
     ) -> Result<SwapQuote> {
         let ProtocolQuoteRequest {
+            dex,
             input,
             output,
             amount: qty,
             fee_tier: tier,
+            tick_spacing,
             protocol,
             v4_key,
             block,
@@ -981,7 +977,12 @@ impl EthereumAdapter {
         fin_evm::hash(&block_hash)?;
         let observed_at = now();
         let protocol = super::uniswap::Protocol::parse(protocol)?;
-        if protocol == super::uniswap::Protocol::V4 {
+        require(
+            dex != "ramses" || protocol == super::uniswap::Protocol::V3,
+            "RAMSES_VERSION_UNSUPPORTED",
+            "Ramses currently supports only its reviewed v3-style pool and router interface.",
+        )?;
+        if dex == "uniswap" && protocol == super::uniswap::Protocol::V4 {
             let mut quote = self
                 .quote_v4(
                     input,
@@ -1028,8 +1029,31 @@ impl EthereumAdapter {
             "ZERO_AMOUNT",
             "Swap input must be positive.",
         )?;
+        let profile = match dex {
+            "uniswap" => super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?),
+            "ramses" => super::uniswap::profile::V3DeploymentProfile::ramses(self.ramses()?),
+            _ => {
+                return Err(error(
+                    "DEX_UNSUPPORTED",
+                    "validation",
+                    "This reviewed AMM deployment is unavailable.",
+                ));
+            }
+        };
         let weth = if ti.reference == "native" || to.reference == "native" {
-            Some(self.v3_weth(block).await?)
+            let router = address(profile.router)?;
+            self.runtime.code_at(router, block).await?;
+            let weth = self
+                .runtime
+                .call(router, &V3RouterInfo::WETH9Call {}, block)
+                .await?;
+            require(
+                weth != Address::ZERO,
+                "WETH_DEPLOYMENT_INVALID",
+                "Configured AMM router returned a zero WETH9 address.",
+            )?;
+            self.runtime.code_at(weth, block).await?;
+            Some(weth)
         } else {
             None
         };
@@ -1049,94 +1073,230 @@ impl EthereumAdapter {
             "The v3 route resolves to the same pool currency.",
         )?;
         self.runtime
-            .code_at(address(&self.uniswap()?.factory)?, block)
+            .code_at(address(profile.factory)?, block)
             .await?;
         self.runtime
-            .code_at(address(&self.uniswap()?.quoter)?, block)
+            .code_at(address(profile.quoter)?, block)
             .await?;
-        let tiers = if let Some(t) = tier {
+        if let Some(expected_deployer) = profile.pool_deployer {
+            self.runtime
+                .code_at(address(profile.router)?, block)
+                .await?;
+            self.runtime
+                .code_at(address(expected_deployer)?, block)
+                .await?;
+            let actual_deployer = self
+                .runtime
+                .call(
+                    address(profile.factory)?,
+                    &RamsesFactory::ramsesV3PoolDeployerCall {},
+                    block,
+                )
+                .await?;
+            require(
+                actual_deployer == address(expected_deployer)?,
+                "DEPLOYMENT_MISMATCH",
+                "Ramses factory pool deployer differs from its reviewed configuration.",
+            )?;
+            let expected = address(expected_deployer)?;
+            let router_deployer = self
+                .runtime
+                .call(
+                    address(profile.router)?,
+                    &RamsesRouter::deployerCall {},
+                    block,
+                )
+                .await?;
+            let quoter_deployer = self
+                .runtime
+                .call(
+                    address(profile.quoter)?,
+                    &RamsesQuoter::deployerCall {},
+                    block,
+                )
+                .await?;
+            require(
+                router_deployer == expected && quoter_deployer == expected,
+                "DEPLOYMENT_MISMATCH",
+                "Ramses quoter or router does not match the reviewed pool-deployer profile.",
+            )?;
+        }
+        let tiers: Vec<u32> = if profile.dex_id == "ramses" {
+            let spacing = tick_spacing.ok_or_else(|| {
+                error(
+                    "RAMSES_TICK_SPACING_REQUIRED",
+                    "validation",
+                    "Select a reviewed Ramses tick spacing.",
+                )
+            })?;
+            require(
+                [1, 5, 10, 50, 100, 200].contains(&spacing),
+                "RAMSES_TICK_SPACING_UNSUPPORTED",
+                "Ramses tick spacing is outside the reviewed candidate set.",
+            )?;
+            vec![spacing as u32]
+        } else if let Some(t) = tier {
             vec![t]
         } else {
             vec![100, 500, 3000, 10000]
         };
         let mut best = None;
         for fee in tiers {
-            let pool = self
-                .runtime
-                .call(
-                    address(&self.uniswap()?.factory)?,
-                    &Factory::getPoolCall {
-                        tokenA: pool_in,
-                        tokenB: pool_out,
-                        fee: U24::from(fee),
-                    },
-                    block,
-                )
-                .await?;
+            let pool = match profile.factory_lookup {
+                super::uniswap::profile::FactoryLookup::FeeTierU24 => {
+                    self.runtime
+                        .call(
+                            address(profile.factory)?,
+                            &Factory::getPoolCall {
+                                tokenA: pool_in,
+                                tokenB: pool_out,
+                                fee: U24::from(fee),
+                            },
+                            block,
+                        )
+                        .await?
+                }
+                super::uniswap::profile::FactoryLookup::TickSpacingI24 => {
+                    self.runtime
+                        .call(
+                            address(profile.factory)?,
+                            &RamsesFactory::getPoolCall {
+                                tokenA: pool_in,
+                                tokenB: pool_out,
+                                tickSpacing: fin_evm::alloy::primitives::aliases::I24::try_from(
+                                    i64::from(fee),
+                                )
+                                .expect("reviewed positive spacing"),
+                            },
+                            block,
+                        )
+                        .await?
+                }
+            };
             if pool == Address::ZERO {
                 continue;
             }
             self.runtime.code_at(pool, block).await?;
-            let pool_token0 = self
-                .runtime
-                .call(pool, &UniswapPool::token0Call {}, block)
-                .await?;
-            let pool_token1 = self
-                .runtime
-                .call(pool, &UniswapPool::token1Call {}, block)
-                .await?;
+            let (pool_token0, pool_token1, slot, actual_fee) = if profile.dex_id == "ramses" {
+                let token0 = self
+                    .runtime
+                    .call(pool, &RamsesPool::token0Call {}, block)
+                    .await?;
+                let token1 = self
+                    .runtime
+                    .call(pool, &RamsesPool::token1Call {}, block)
+                    .await?;
+                let slot = self
+                    .runtime
+                    .call(pool, &RamsesPool::slot0Call {}, block)
+                    .await?;
+                let dynamic_fee = self
+                    .runtime
+                    .call(pool, &RamsesPool::feeCall {}, block)
+                    .await?;
+                let observed_spacing = self
+                    .runtime
+                    .call(pool, &RamsesPool::tickSpacingCall {}, block)
+                    .await?;
+                require(
+                    observed_spacing
+                        == fin_evm::alloy::primitives::aliases::I24::try_from(i64::from(fee))
+                            .expect("reviewed positive spacing"),
+                    "POOL_IDENTITY_MISMATCH",
+                    "Ramses pool tick spacing differs from the factory lookup key.",
+                )?;
+                (token0, token1, slot.sqrtPriceX96, dynamic_fee.to::<u32>())
+            } else {
+                let token0 = self
+                    .runtime
+                    .call(pool, &UniswapPool::token0Call {}, block)
+                    .await?;
+                let token1 = self
+                    .runtime
+                    .call(pool, &UniswapPool::token1Call {}, block)
+                    .await?;
+                let slot = self
+                    .runtime
+                    .call(pool, &UniswapPool::slot0Call {}, block)
+                    .await?;
+                (token0, token1, slot.sqrtPriceX96, fee)
+            };
             if !((pool_token0 == pool_in && pool_token1 == pool_out)
                 || (pool_token0 == pool_out && pool_token1 == pool_in))
             {
                 continue;
             }
-            let slot = self
-                .runtime
-                .call(pool, &UniswapPool::slot0Call {}, block)
-                .await?;
-            if slot.sqrtPriceX96.is_zero() {
+            if slot.is_zero() || actual_fee >= 1_000_000 {
                 continue;
             }
-            let quoted = self
-                .runtime
-                .call(
-                    address(&self.uniswap()?.quoter)?,
-                    &Quoter::quoteExactInputSingleCall {
-                        params: Quoter::QuoteParams {
-                            tokenIn: pool_in,
-                            tokenOut: pool_out,
-                            amountIn: units,
-                            fee: U24::from(fee),
-                            sqrtPriceLimitX96: Default::default(),
+            let quoted = match profile.quoter_abi {
+                super::uniswap::profile::QuoterAbi::UniswapV3QuoterV2 => self
+                    .runtime
+                    .call(
+                        address(profile.quoter)?,
+                        &Quoter::quoteExactInputSingleCall {
+                            params: Quoter::QuoteParams {
+                                tokenIn: pool_in,
+                                tokenOut: pool_out,
+                                amountIn: units,
+                                fee: U24::from(fee),
+                                sqrtPriceLimitX96: Default::default(),
+                            },
                         },
-                    },
-                    block,
-                )
-                .await;
+                        block,
+                    )
+                    .await
+                    .map(|q| q.amountOut),
+                super::uniswap::profile::QuoterAbi::RamsesV3QuoterV2 => self
+                    .runtime
+                    .call(
+                        address(profile.quoter)?,
+                        &RamsesQuoter::quoteExactInputSingleCall {
+                            params: RamsesQuoter::QuoteParams {
+                                tokenIn: pool_in,
+                                tokenOut: pool_out,
+                                amountIn: units,
+                                tickSpacing: fin_evm::alloy::primitives::aliases::I24::try_from(
+                                    i64::from(fee),
+                                )
+                                .expect("reviewed positive spacing"),
+                                sqrtPriceLimitX96: Default::default(),
+                            },
+                        },
+                        block,
+                    )
+                    .await
+                    .map(|q| q.amountOut),
+            };
             if let Ok(q) = quoted
-                && q.amountOut > U256::ZERO
+                && q > U256::ZERO
                 && best
                     .as_ref()
-                    .is_none_or(|b: &SwapQuote| u256(&b.output).is_ok_and(|n| q.amountOut > n))
+                    .is_none_or(|b: &SwapQuote| u256(&b.output).is_ok_and(|n| q > n))
             {
                 best = Some(SwapQuote {
                     token_in: ti.clone(),
                     token_out: to.clone(),
                     input: quantity(units),
-                    output: quantity(q.amountOut),
+                    output: quantity(q),
                     pool: lower_address(pool),
-                    fee_tier: fee,
-                    swap_fee_ppm: Some(fee),
+                    dex: profile.dex_id.into(),
+                    fee_tier: actual_fee,
+                    tick_spacing: (profile.dex_id == "ramses").then_some(fee as i32),
+                    swap_fee_ppm: Some(match profile.pool_fee_semantics {
+                        super::uniswap::profile::PoolFeeSemantics::FixedFeeTier => fee,
+                        super::uniswap::profile::PoolFeeSemantics::DynamicPoolFee => actual_fee,
+                    }),
                     protocol: "v3".into(),
                     pool_key: None,
                     pool_token_in: lower_address(pool_in),
                     pool_token_out: lower_address(pool_out),
                     price_impact_bps: spot_impact_bps(
                         units,
-                        q.amountOut,
-                        slot.sqrtPriceX96,
+                        q,
+                        slot,
                         pool_in == pool_token0,
-                        fee,
+                        actual_fee,
                     ),
                     observed_at: observed_at.clone(),
                     block_number: block,
@@ -1156,10 +1316,16 @@ impl EthereumAdapter {
                 "No reviewed single-pool fee tier returned a positive quote.",
             )
         })?;
-        quote.router = Some(configured_quote_router(self, "v3")?);
+        quote.router = Some(if dex == "ramses" {
+            profile.router.to_owned()
+        } else {
+            configured_quote_router(self, "v3")?
+        });
         quote.permission_strategy = Some(if quote.token_in.reference == "native" {
             "Native input is wrapped by the reviewed v3 router; no token allowance is needed."
                 .into()
+        } else if dex == "ramses" {
+            "ERC-20 input needs a finite allowance to the configured Ramses router. Finite existing allowance is reused; an EOA may use atomic EIP-2612 when the token supports it, otherwise approve a finite allowance explicitly.".into()
         } else {
             "ERC-20 input needs a finite allowance to the configured v3 router. Finite existing allowance is reused; an EOA may use an atomic EIP-2612 permit when the token supports it, otherwise approve a finite allowance explicitly.".into()
         });
@@ -1280,7 +1446,9 @@ impl EthereumAdapter {
             input: quantity(units),
             output: quantity(quoted.amountOut),
             pool: pool_id,
+            dex: "uniswap".into(),
             fee_tier: key.fee,
+            tick_spacing: None,
             swap_fee_ppm: Some(swap_fee_ppm),
             protocol: "v4".into(),
             pool_key: Some(key.clone()),
@@ -1430,13 +1598,19 @@ impl EthereumAdapter {
                     .await?;
                 json!({"receipt":receipt,"completion":"Raw receipt observation alone is not a verified operation."})
             }
-            "uniswap.quote" => {
+            "uniswap.quote" | "ramses.quote" => {
                 let mut quote = self
                     .quote_protocol(ProtocolQuoteRequest {
+                        dex: if operation == "ramses.quote" {
+                            "ramses"
+                        } else {
+                            "uniswap"
+                        },
                         input: r.token_in.as_deref().expect("schema"),
                         output: r.token_out.as_deref().expect("schema"),
                         amount: r.amount.as_deref().expect("schema"),
                         fee_tier: r.fee_tier,
+                        tick_spacing: r.tick_spacing,
                         protocol: r.protocol.as_deref(),
                         v4_key: r.v4_pool_key.as_ref(),
                         block: Some(block),

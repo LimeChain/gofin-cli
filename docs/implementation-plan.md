@@ -14,6 +14,24 @@ that baseline so protected runtime, journal and configuration compatibility
 remain aligned with the updated installation while retaining the existing
 bridge implementation and its evidence.
 
+Reusable EVM wallets gain missing reviewed network and AMM deployment coverage
+through a pure effective-config overlay at protected configuration load. The
+overlay runs for read-only and signing wallets, preserves stored custom network
+and deployment fields, and never writes config or touches credential mappings.
+Legacy chain-scoped Ethereum connections are unchanged. Startup and protected
+reload share this derivation, allowing an installed broker update to expose its
+new reviewed profiles without asking the human to re-enroll the wallet or
+granting financial authority.
+
+AMM native approval presentation uses concise intent, verified display labels,
+readable quantities and human durations. Adapter display labels come from
+pinned token metadata and fall back safely when unavailable or unsafe. The
+labels change presentation prose only; financial asset identities, route
+fingerprints, pending bindings and all execution bounds remain unchanged. Exact
+technical details stay in structured review, which the LLM explains to the
+human. Bounded approval wording must not promise an initial minimum receipt
+that its permitted requotes could lower.
+
 ## Extending an integration
 
 1. Define the operation's exact asset, network, account and unit identities.
@@ -198,6 +216,13 @@ on-chain pricing or acceptance-test valuation requirements.
 
 ## Adding a network
 
+Use `fin-networks` for reviewed wallet identity, RPC defaults, confirmation
+floor and sequencer classification. Add protocol deployments separately in
+the application profile registry. Do not broaden protocol or external-provider
+coverage by inferring it from wallet support. New network fee components must
+be included in both maximum-cost authority and verified settlement; Optimism
+and Base are not enabled as wallet networks by this refactor.
+
 Keep protected wallet credentials separate from reviewed network RPCs, fees,
 finality and protocol deployments. A reusable EVM signer can serve reviewed
 networks, while legacy chain-qualified identities remain unchanged until a
@@ -379,6 +404,23 @@ rejected. Availability follows network deployments independently of Aave.
 Protected enrollment broadens legacy configuration only with configuration
 approval; pending identities are retained.
 
+Ramses v3 on Robinhood reuses the shared AMM contracts through a closed v3
+deployment profile. Its factory/quoter/router use signed tick spacing rather
+than Uniswap's unsigned fee-tier selector. Verify router and quoter deployers
+against the reviewed factory deployer, derive wrapped native from the router,
+and read the current pool fee at the pinned quote block. Fixed pool/tick-spacing
+identity and the maximum quoted pool fee bind approvals. The mutable pool fee
+cannot be proven from a later getter as the fee used by an earlier transaction;
+settlement instead proves actual conversion, on-chain minimum receipt,
+permission effects and gas costs. `max_pool_fee_ppm` limits fresh quotes, while
+the exact minimum output/rate floor protects the executed net receipt.
+
+Keep Uniswap's legacy configuration and immutable pending bindings byte-stable
+when the new optional Ramses fields are absent. Another compatible v3 fork
+needs reviewed profile capabilities, deployment registration, schemas and
+protocol evidence; shared financial accounting does not gain DEX branches.
+See [Ramses verification](testing/ramses-amm.md).
+
 Use existing finite allowances, finite standard EIP-2612 permits or Permit2
 permits before explicit finite approvals. Permit2's separate ERC-20 prerequisite
 must be disclosed and authorized. The protected signer accepts only typed,
@@ -501,3 +543,12 @@ fork-only overlay conservatively reserves deployed oracle/operator costs and
 uses exact single-transaction native balance conservation plus call-trace
 inflows to model total extra debit. Final native/token conservation is asserted.
 This model never enters a production adapter and is not live fee evidence.
+
+### Base integration with the reviewed-network registry
+
+Base remains a reviewed sequencer-inclusion network with the standard
+`https://mainnet.base.org` RPC when composing the shared network registry.
+The credential-preserving effective configuration overlay adds its missing
+Uniswap, WETH and Aave deployments while retaining existing custom profiles,
+connection identities and journal records. The owned AMM fork checks both Base
+principal/cost conservation and restart without signing or broadcasting again.

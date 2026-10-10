@@ -10,10 +10,23 @@ struct ConfigurationPresentation {
 // An application presentation budget, not a promise about macOS dialog sizing.
 // Never truncate exact amounts midway or change the complete approval binding.
 let authenticationReasonMaximumCharacters = 240
-// AMM prompts carry a concrete route, output floor, slippage, fee and expiry.
-// Keep that complete bound inside the broker's reviewed application limit;
-// this is not a guarantee about any macOS dialog's rendered size.
-let ammAuthenticationReasonMaximumCharacters = 1_024
+// A modest app-level cap for complete multi-action plans, not a promise about
+// macOS dialog sizing. Simple swap prompts use a stricter 300-character cap.
+let ammAuthenticationReasonMaximumCharacters = 400
+
+// LocalAuthentication appends its own final period to the app/reason sentence.
+// Strip only terminal full stops and whitespace at that call boundary; keep
+// the complete validated reason and every internal character unchanged.
+func nativeApprovalReasonForOS(_ reason: String) -> String {
+    var end = reason.endIndex
+    while end > reason.startIndex {
+        let previous = reason.index(before: end)
+        let character = reason[previous]
+        guard character == "." || character.isWhitespace else { break }
+        end = previous
+    }
+    return String(reason[..<end])
+}
 
 func compactAuthenticationReason(prefix: String, summary: String, maximumCharacters: Int = authenticationReasonMaximumCharacters) -> String {
     let visible = summary.unicodeScalars.map { scalar -> String in
@@ -82,9 +95,8 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     if operation == "bridge.transfer" {
         return bridgeAuthenticationReason(summary: summary)
     }
-    if operation == "uniswap.swap" {
-        return compactAuthenticationReason(prefix: "approve this action: ", summary: summary,
-                                           maximumCharacters: ammAuthenticationReasonMaximumCharacters)
+    if operation == "uniswap.swap" || operation == "ramses.swap" {
+        return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
 }
@@ -112,11 +124,8 @@ func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> 
             sourceAddress: fixed?["source_address"] as? String,
             refundAddress: fixed?["refund_to"] as? String)
     }
-    if operation == "uniswap.swap" {
-        guard let synopsis = uniswapBoundarySynopsis(binding) else { return nil }
-        return compactAuthenticationReason(prefix: "approve these boundaries: ",
-                                           summary: "\(summary) \(synopsis)",
-                                           maximumCharacters: ammAuthenticationReasonMaximumCharacters)
+    if operation == "uniswap.swap" || operation == "ramses.swap" {
+        return ammBoundarySynopsis(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
 }
@@ -268,9 +277,107 @@ private func presentationAssetEndpoint(_ value: String) -> Bool {
     value == "native" || presentationAddress(value) != nil
 }
 
-private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
+func approvalDuration(_ seconds: UInt64) -> String {
+    let units: [(UInt64, String)] = [(3_600, "hour"), (60, "minute"), (1, "second")]
+    var remaining = seconds
+    var parts: [String] = []
+    for (unitSeconds, name) in units {
+        let value = remaining / unitSeconds
+        remaining %= unitSeconds
+        if value > 0 {
+            parts.append("\(value) \(name)\(value == 1 ? "" : "s")")
+        }
+    }
+    return parts.isEmpty ? "0 seconds" : parts.prefix(2).joined(separator: " ")
+}
+
+private func safeAMMLabel(_ raw: String?) -> String? {
+    guard let raw else { return nil }
+    let label = raw.trimmingCharacters(in: .whitespaces)
+    guard !label.isEmpty, label.utf8.count <= 32,
+          label.range(of: #"^[A-Za-z][A-Za-z0-9._-]*(?: [A-Za-z][A-Za-z0-9._-]*)*$"#, options: .regularExpression) != nil,
+          !label.lowercased().hasPrefix("0x") else { return nil }
+    return label
+}
+
+// Asset names are presentation-only broker prose. Numeric authorization bounds
+// below always come from the structured binding, never this summary.
+private func ammLabels(summary: String, bounded: Bool, inputReference: String? = nil,
+                       outputReference: String? = nil) -> (input: String, output: String) {
+    let pattern = bounded
+        ? #"^Swap up to [^ ]+ (.+?) for (.+?);"#
+        : #"^Swap [^ ]+ (.+?) for at least [^ ]+ (.+?);"#
+    let proseInput = firstCapture(pattern, in: summary)
+    // Capture the second label separately to avoid accepting arbitrary clauses.
+    let outputPattern = bounded
+        ? #"^Swap up to [^ ]+ .+? for (.+?);"#
+        : #"^Swap [^ ]+ .+? for at least [^ ]+ (.+?);"#
+    let proseOutput = firstCapture(outputPattern, in: summary)
+    return (
+        safeAMMLabel(proseInput) ?? (inputReference == "native" ? "ETH" : "token"),
+        safeAMMLabel(proseOutput) ?? (outputReference == "native" ? "ETH" : "token")
+    )
+}
+
+func reviewedNetworkName(_ network: String) -> String {
+    guard network.hasPrefix("ethereum:"), let chainID = UInt64(network.dropFirst("ethereum:".count)) else {
+        return "the reviewed network"
+    }
+    switch chainID {
+    case 1: return "Ethereum"
+    case 42161: return "Arbitrum"
+    case 4663: return "Robinhood Chain"
+    default: return "the reviewed network"
+    }
+}
+
+private func ammStandaloneAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
+    guard let execution = binding["execution"] as? [String: Any],
+          let intent = binding["financial_intent"] as? [String: Any],
+          let token = execution["token"] as? [String: Any],
+          let tokenNetwork = presentationString(token["network"], maximum: 64),
+          let tokenReference = presentationString(token["reference"], maximum: 42),
+          presentationAssetEndpoint(tokenReference),
+          let tokenDecimals = presentationInteger(token["decimals"], maximum: 255),
+          let unitsAtoms = presentationString(execution["units"], maximum: 100),
+          let amount = presentationAtomicQuantity(unitsAtoms, decimals: tokenDecimals),
+          let outputAsset = execution["output"] as? [String: Any],
+          let outputNetwork = presentationString(outputAsset["network"], maximum: 64),
+          outputNetwork == tokenNetwork,
+          let outputReference = presentationString(outputAsset["reference"], maximum: 42),
+          presentationAssetEndpoint(outputReference),
+          let outputDecimals = presentationInteger(outputAsset["decimals"], maximum: 255),
+          let minimumAtoms = presentationString(execution["minimum_output"], maximum: 100),
+          let minimum = presentationAtomicQuantity(minimumAtoms, decimals: outputDecimals),
+          let deadline = presentationInteger(execution["deadline"], minimum: 1),
+          let costs = intent["maximum_costs"] as? [[String: Any]],
+          costs.count == 1,
+          let costAmount = costs[0]["amount"] as? [String: Any],
+          let feeAsset = costAmount["asset"] as? [String: Any],
+          feeAsset["network"] as? String == tokenNetwork,
+          feeAsset["reference"] as? String == "native",
+          presentationInteger(feeAsset["decimals"], minimum: 18, maximum: 18) != nil,
+          let feeAtoms = presentationString(costAmount["atoms"], maximum: 100),
+          let fee = presentationAtomicQuantity(feeAtoms, decimals: 18) else { return nil }
+    let labels = ammLabels(summary: summary, bounded: false,
+                           inputReference: tokenReference, outputReference: outputReference)
+    let now = Date().timeIntervalSince1970
+    guard now.isFinite, deadline > UInt64(max(0, now)) else { return nil }
+    let remaining = deadline - UInt64(max(0, now))
+    let reason = "allow swapping \(amount) \(labels.input) for at least \(minimum) \(labels.output) on \(reviewedNetworkName(tokenNetwork)); max network fees \(fee) ETH; expires in \(approvalDuration(remaining))."
+    let hasPermit = execution["permit_template"].map { !($0 is NSNull) } ?? false
+    let scopedPermit = hasPermit
+        ? " Any token permit is limited to this swap." : ""
+    let completeReason = reason + scopedPermit
+    return completeReason.count <= 300 ? completeReason : nil
+}
+
+private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> String? {
     guard let fixed = binding["fixed"] as? [String: Any],
           let bounds = binding["parameters"] as? [String: Any],
+          let operation = fixed["operation"] as? String,
+          operation == "uniswap.swap" || operation == "ramses.swap",
+          binding["operation"] as? String == operation,
           let network = presentationString(fixed["network"], maximum: 64),
           let chainID = presentationInteger(fixed["chain_id"], minimum: 1),
           network == "ethereum:\(chainID)",
@@ -283,9 +390,9 @@ private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
           presentationAssetEndpoint(inputToken), presentationAssetEndpoint(outputToken),
           let recipient = presentationAddress(fixed["recipient"]),
           recipient == presentationAddress(fixed["signer"]),
-          let router = presentationAddress(fixed["router"]),
+          presentationAddress(fixed["router"]) != nil,
           let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          protocolName == "v3" || protocolName == "v4",
+          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
           let maxInput = presentationDecimal(bounds["max_input"]),
           let maxFee = presentationDecimal(bounds["max_fee_eth"]),
           let maxSlippage = presentationInteger(bounds["max_slippage_bps"], maximum: 1000),
@@ -296,32 +403,53 @@ private func uniswapBoundarySynopsis(_ binding: [String: Any]) -> String? {
           let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
           rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          let tiers = bounds["allowed_fee_tiers"] as? [Any],
           let duration = presentationInteger(binding["valid_for_seconds"], minimum: 1) else { return nil }
 
-    let route: String
-    if protocolName == "v3" {
+    if operation == "ramses.swap" {
+        guard protocolName == "v3",
+              let spacing = presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200),
+              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
+              presentationAddress(fixed["factory"]) != nil,
+              presentationAddress(fixed["pool"]) != nil,
+              presentationAddress(fixed["pool_deployer"]) != nil,
+              fixed["dex"] as? String == "ramses" else { return nil }
+        if let tiers = bounds["allowed_fee_tiers"] as? [Any], !tiers.isEmpty { return nil }
+        guard presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999) != nil else { return nil }
+        _ = spacing
+    } else if protocolName == "v3" {
+        guard let tiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
         let parsed = tiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
         guard !parsed.isEmpty, parsed.count == tiers.count,
               parsed.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return nil }
-        route = "Uniswap v3 fee tiers \(parsed.map { String($0) }.joined(separator: ",")) ppm"
     } else {
-        guard tiers.isEmpty, let poolKey = fixed["v4_pool_key"] as? [String: Any],
-              let fee = presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000),
-              let spacing = presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) else { return nil }
-        route = "Uniswap v4 pool fee \(fee) ppm, tick spacing \(spacing)"
+        guard let tiers = bounds["allowed_fee_tiers"] as? [Any], tiers.isEmpty,
+              let poolKey = fixed["v4_pool_key"] as? [String: Any],
+              presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000) != nil,
+              presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) != nil else { return nil }
     }
     let absolute = bounds["absolute_minimum_output"].flatMap { value -> String? in
         value is NSNull ? nil : presentationDecimal(value)
     }
     if !(bounds["absolute_minimum_output"] == nil || bounds["absolute_minimum_output"] is NSNull || absolute != nil) { return nil }
-    return "Fixed assets \(inputToken) to \(outputToken); recipient \(recipient); router/spender \(router); \(route). Max input \(maxInput) \(inputToken), max fee \(maxFee) ETH, max slippage \(maxSlippage) bps and impact \(maxImpact) bps; minimum rate \(rateOutput)/\(rateInput) atoms\(absolute.map { ", absolute floor \($0) \(outputToken)" } ?? ""); deadline horizon \(maxDeadline)s; consent duration \(duration)s. Any typed permit is finite to each reviewed swap and signed only after journal authorization."
+    let labels = ammLabels(summary: summary, bounded: true,
+                           inputReference: inputToken, outputReference: outputToken)
+    let networkName = reviewedNetworkName(network)
+    let receipt = absolute.map { "for at least \($0) \(labels.output)" } ?? "for \(labels.output)"
+    let permitScope = inputToken == "native" ? "" : " A token permit, if needed, is limited to each swap."
+    _ = maxSlippage
+    _ = maxImpact
+    _ = rateInput
+    _ = rateOutput
+    _ = maxDeadline
+    let reason = "allow swapping up to \(maxInput) \(labels.input) \(receipt) on \(networkName) for \(approvalDuration(duration)); max network fees \(maxFee) ETH.\(permitScope)"
+    return reason.count <= 300 ? reason : nil
 }
 
 // Read the reviewed adapter permission from the hash-bound plan and pair it
 // with that step's exact request. Never infer token symbols or USD values here.
-private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String: Any]) -> String? {
-    guard step["operation"] as? String == "uniswap.swap",
+private func ammPlanStepSynopsis(_ step: [String: Any], permission: [String: Any]) -> String? {
+    guard let operation = step["operation"] as? String,
+          operation == "uniswap.swap" || operation == "ramses.swap",
           let stepID = presentationString(step["step_id"], maximum: 80),
           let input = step["input"] as? [String: Any],
           let permit = permission["permission"] as? [String: Any],
@@ -352,7 +480,7 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
           recipient == presentationAddress(fixed["signer"]),
           let router = presentationAddress(fixed["router"]),
           let protocolName = presentationString(fixed["protocol"], maximum: 8),
-          protocolName == "v3" || protocolName == "v4",
+          (protocolName == "v3" || (operation == "uniswap.swap" && protocolName == "v4")),
           let rawAmount = presentationString(input["amount"], maximum: 100),
           let minimumOutput = presentationDecimal(input["min_output"]),
           let selectedSlippage = presentationInteger(input["slippage_bps"], maximum: 1000),
@@ -367,62 +495,118 @@ private func uniswapPlanStepSynopsis(_ step: [String: Any], permission: [String:
           let rateInput = presentationString(rate["input_atoms"], maximum: 100),
           let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
-          let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
+          rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else { return nil }
 
-    let requestedProtocol = input["protocol"] == nil
-        ? "v3"
-        : presentationString(input["protocol"], maximum: 8)
+    guard fixed["operation"] as? String == operation else { return nil }
+    if operation == "ramses.swap", fixed["dex"] as? String != "ramses" { return nil }
+
+    let requestedProtocol = input["protocol"] == nil ? "v3" : presentationString(input["protocol"], maximum: 8)
     guard requestedProtocol == protocolName else { return nil }
 
-    let amount: String
     if rawAmount == "all" {
         guard let cap = presentationDecimal(input["max_amount"]), decimalAtMost(cap, maxInput) else { return nil }
-        amount = "all (up to \(cap))"
     } else {
         guard let exact = presentationDecimal(rawAmount), decimalAtMost(exact, maxInput) else { return nil }
-        amount = exact
     }
     guard selectedSlippage <= maxSlippage, decimalAtMost(requestFee, maxFee) else { return nil }
 
-    let feeDescription: String
-    if protocolName == "v3" {
+    if operation == "ramses.swap" {
+        let requestedFeeCap: UInt64?
+        if let raw = input["max_pool_fee_ppm"] {
+            guard let parsed = presentationInteger(raw, maximum: 999_999) else { return nil }
+            requestedFeeCap = parsed
+        } else {
+            requestedFeeCap = nil
+        }
+        guard protocolName == "v3",
+              let spacing = presentationInteger(input["tick_spacing"], minimum: 1, maximum: 200),
+              [1, 5, 10, 50, 100, 200].contains(Int(spacing)),
+              presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200) == spacing,
+              let factory = presentationAddress(fixed["factory"]),
+              let pool = presentationAddress(fixed["pool"]),
+              let deployer = presentationAddress(fixed["pool_deployer"]),
+              fixed["dex"] as? String == "ramses" else { return nil }
+        guard let effectiveCeiling = presentationInteger(bounds["max_pool_fee_ppm"], maximum: 999_999),
+              requestedFeeCap.map({ $0 <= effectiveCeiling }) ?? true else { return nil }
+        _ = spacing
+        _ = factory
+        _ = pool
+        _ = deployer
+    } else if protocolName == "v3" {
+        guard let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
         let tiers = allowedTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10_000) }
         guard !tiers.isEmpty, tiers.count == allowedTiers.count,
               tiers.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return nil }
-        let selectedTier: UInt64?
         if input["fee_tier"] != nil {
             guard let selected = presentationInteger(input["fee_tier"], minimum: 1, maximum: 10_000) else { return nil }
-            selectedTier = selected
-        } else {
-            selectedTier = nil
-        }
-        if let selected = selectedTier {
             guard tiers.contains(selected) else { return nil }
-            feeDescription = "v3 fee tier \(selected) ppm (allowed \(tiers.map { String($0) }.joined(separator: ",")))"
-        } else {
-            feeDescription = "v3 allowed fee tiers \(tiers.map { String($0) }.joined(separator: ",")) ppm"
         }
     } else {
-        guard input["fee_tier"] == nil, allowedTiers.isEmpty,
+        guard input["fee_tier"] == nil,
+              let allowedTiers = bounds["allowed_fee_tiers"] as? [Any], allowedTiers.isEmpty,
               let poolKey = fixed["v4_pool_key"] as? [String: Any],
               let poolFee = presentationInteger(poolKey["fee"], minimum: 1, maximum: 1_000_000),
               let spacing = presentationInteger(poolKey["tick_spacing"], minimum: 1, maximum: 32_767) else { return nil }
-        feeDescription = "v4 pool fee \(poolFee) ppm, tick spacing \(spacing)"
+        _ = poolFee
+        _ = spacing
     }
 
     let floor = bounds["absolute_minimum_output"].flatMap { value -> String? in
         value is NSNull ? nil : presentationDecimal(value)
     }
     if !(bounds["absolute_minimum_output"] == nil || bounds["absolute_minimum_output"] is NSNull || floor != nil) { return nil }
-    return "Swap step \(stepID): \(amount) \(inputToken) → min \(minimumOutput) \(outputToken); recipient \(recipient); router/spender \(router); \(feeDescription); slip \(selectedSlippage)/\(maxSlippage) bps, impact ≤\(maxImpact) bps; cap \(maxInput) \(inputToken), gas ≤\(maxFee) ETH; min rate \(rateOutput)/\(rateInput) atoms; deadline \(deadline), horizon ≤\(maxDeadline)s\(floor.map { "; absolute floor \($0) \(outputToken)" } ?? "")."
+    _ = stepID
+    _ = recipient
+    _ = router
+    _ = minimumOutput // This is an initial request, not a floor for bounded requotes.
+    _ = selectedSlippage
+    _ = deadline
+    _ = maxSlippage
+    _ = maxImpact
+    _ = rateInput
+    _ = rateOutput
+    _ = maxDeadline
+    let labels = ammLabels(summary: presentationString(spec["summary"], maximum: 2048)!, bounded: true,
+                           inputReference: inputReference, outputReference: outputReference)
+    let receipt = floor.map { "for at least \($0) \(labels.output)" } ?? "for \(labels.output)"
+    return "swap up to \(maxInput) \(labels.input) \(receipt)"
 }
 
-private func aggregatePlanCapsSynopsis(_ plan: [String: Any]) -> String? {
+private func presentationAtomicQuantity(_ atoms: String, decimals: UInt64) -> String? {
+    guard atoms.range(of: #"^[0-9]+$"#, options: .regularExpression) != nil,
+          decimals <= 255 else { return nil }
+    let significant = String(atoms.drop(while: { $0 == "0" }))
+    let digits = significant.isEmpty ? "0" : significant
+    guard decimals > 0 else { return digits }
+    let width = Int(decimals)
+    let padded = String(repeating: "0", count: max(0, width + 1 - digits.count)) + digits
+    let split = padded.index(padded.endIndex, offsetBy: -width)
+    let wholeDigits = String(padded[..<split]).drop(while: { $0 == "0" })
+    let whole = wholeDigits.isEmpty ? "0" : String(wholeDigits)
+    let fraction = String(padded[split...]).reversed().drop(while: { $0 == "0" }).reversed()
+    return fraction.isEmpty ? whole : "\(whole).\(String(fraction))"
+}
+
+private func aggregatePlanCapsSynopsis(_ plan: [String: Any], permissions: [[String: Any]]) -> String? {
     guard let aggregate = plan["aggregate_bounds"] as? [String: Any],
           let debits = aggregate["maximum_debits"] as? [[String: Any]],
           let costs = aggregate["maximum_costs"] as? [[String: Any]],
           !debits.isEmpty, !costs.isEmpty else { return nil }
+    var labelsByReference: [String: String] = [:]
+    for permission in permissions {
+        guard let spec = (permission["permission"] as? [String: Any])?["spec"] as? [String: Any],
+              let fixed = spec["fixed"] as? [String: Any],
+              let summary = presentationString(spec["summary"], maximum: 2048),
+              let inputAsset = fixed["token_in"] as? [String: Any],
+              let outputAsset = fixed["token_out"] as? [String: Any],
+              let inputReference = presentationString(inputAsset["reference"], maximum: 64),
+              let outputReference = presentationString(outputAsset["reference"], maximum: 64) else { continue }
+        let network = fixed["network"] as? String ?? ""
+        let labels = ammLabels(summary: summary, bounded: true,
+                               inputReference: inputReference, outputReference: outputReference)
+        labelsByReference["\(network.lowercased())|\(inputReference.lowercased())"] = labels.input
+        labelsByReference["\(network.lowercased())|\(outputReference.lowercased())"] = labels.output
+    }
     func amountDescription(_ value: Any?) -> String? {
         guard let amount = value as? [String: Any],
               let atoms = presentationString(amount["atoms"], maximum: 100),
@@ -430,29 +614,30 @@ private func aggregatePlanCapsSynopsis(_ plan: [String: Any]) -> String? {
               let asset = amount["asset"] as? [String: Any],
               let network = presentationString(asset["network"], maximum: 64),
               let reference = presentationString(asset["reference"], maximum: 64),
-              presentationInteger(asset["decimals"], maximum: 255) != nil else { return nil }
-        return "\(atoms) atoms \(network)/\(reference)"
+              let decimals = presentationInteger(asset["decimals"], maximum: 255),
+              let quantity = presentationAtomicQuantity(atoms, decimals: decimals) else { return nil }
+        let label = reference == "native" ? "ETH" : (labelsByReference["\(network.lowercased())|\(reference.lowercased())"] ?? "token")
+        return "\(quantity) \(label)"
     }
     let debitDescriptions = debits.compactMap { row -> String? in
-        guard let resource = presentationString(row["resource"], maximum: 256),
+        guard row["resource"] is String,
               let amount = amountDescription(row["amount"]) else { return nil }
-        return "\(amount) at \(resource)"
+        return amount
     }
     let costDescriptions = costs.compactMap { row -> String? in
         guard let location = row["location"] as? [String: Any],
               let kind = presentationString(location["kind"], maximum: 32),
               ["cash", "position"].contains(kind),
-              let resource = presentationString(location["resource"], maximum: 256),
+              location["resource"] is String,
               let amount = amountDescription(row["amount"]) else { return nil }
-        return "\(amount) at \(resource) (\(kind))"
+        return amount
     }
     guard debitDescriptions.count == debits.count, costDescriptions.count == costs.count else { return nil }
-    return "Aggregate debit caps: \(debitDescriptions.joined(separator: ", ")); cost caps: \(costDescriptions.joined(separator: ", "))."
+    return "Total spending up to \(debitDescriptions.joined(separator: ", ")); max fees \(costDescriptions.joined(separator: ", "))."
 }
 
-// One biometric action authorizes the complete named revision. Ordinary plans
-// keep the compact name/duration reason; an AMM step adds its validated exact
-// scope and aggregate caps under the separate application limit.
+// One biometric action authorizes the complete named revision. AMM actions are
+// rendered from validated bounds; the OS prompt omits route internals and formulas.
 func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
     guard binding["version"] as? Int == 1,
           binding["kind"] as? String == "financial_plan",
@@ -509,21 +694,50 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
     // lead fits. Include duration/step count only as a whole optional suffix.
     guard lead.unicodeScalars.count <= authenticationReasonMaximumCharacters else { return nil }
     let durationSeconds = duration.uint64Value
-    let details = " (\(steps.count) steps, \(durationSeconds) seconds)"
+    let details = " (\(steps.count) \(steps.count == 1 ? "step" : "steps"), \(approvalDuration(durationSeconds)))"
     let detailed = lead + details
     let ammSteps = zip(steps, permissions).compactMap { step, permission in
-        (step["operation"] as? String == "uniswap.swap")
-            ? uniswapPlanStepSynopsis(step, permission: permission)
+        (["uniswap.swap", "ramses.swap"].contains(step["operation"] as? String ?? ""))
+            ? ammPlanStepSynopsis(step, permission: permission)
             : nil
     }
-    let containsAMMStep = steps.contains { $0["operation"] as? String == "uniswap.swap" }
+    let containsAMMStep = steps.contains { ["uniswap.swap", "ramses.swap"].contains($0["operation"] as? String ?? "") }
     if containsAMMStep {
-        guard ammSteps.count == steps.filter({ $0["operation"] as? String == "uniswap.swap" }).count,
-              let aggregate = aggregatePlanCapsSynopsis(plan),
+        guard ammSteps.count == steps.filter({ ["uniswap.swap", "ramses.swap"].contains($0["operation"] as? String ?? "") }).count,
+              let aggregate = aggregatePlanCapsSynopsis(plan, permissions: permissions),
               summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
-        let review = "\(summary) AMM scope: \(ammSteps.joined(separator: " ")) \(aggregate) Any required typed permit is finite to its attempt and signed only after journal authorization."
-        return compactAuthenticationReason(prefix: "", summary: review,
-                                           maximumCharacters: ammAuthenticationReasonMaximumCharacters)
+        let mayUseTokenPermit = zip(steps, permissions).contains { step, permission in
+            guard ["uniswap.swap", "ramses.swap"].contains(step["operation"] as? String ?? ""),
+                  let spec = (permission["permission"] as? [String: Any])?["spec"] as? [String: Any],
+                  let fixed = spec["fixed"] as? [String: Any],
+                  let input = fixed["token_in"] as? [String: Any] else { return false }
+            return input["reference"] as? String != "native"
+        }
+        let permitScope = mayUseTokenPermit ? " Any token permit, if needed, is limited to its swap." : ""
+        if steps.count == 1, containsAMMStep {
+            let action = ammSteps[0]
+            guard let fee = (permissions[0]["permission"] as? [String: Any])?["spec"] as? [String: Any],
+                  let fixed = fee["fixed"] as? [String: Any],
+                  let network = presentationString(fixed["network"], maximum: 64) else { return nil }
+            let reason = "allow swapping \(action.dropFirst("swap ".count)) on \(reviewedNetworkName(network)) for \(approvalDuration(duration.uint64Value)); \(aggregate)\(permitScope)"
+            return reason.count <= 300 ? reason : nil
+        }
+        let actionList: [String] = zip(steps, permissions).compactMap { step, permission in
+            if ["uniswap.swap", "ramses.swap"].contains(step["operation"] as? String ?? "") {
+                return ammPlanStepSynopsis(step, permission: permission)
+            }
+            return "one other reviewed action"
+        }
+        guard actionList.count == steps.count else { return nil }
+        let isOnlyAMM = ammSteps.count == steps.count
+        let lead = isOnlyAMM ? "Allow swaps" : "Allow these actions"
+        let detailed = "\(lead) for \(approvalDuration(duration.uint64Value)): \(actionList.joined(separator: "; then ")); \(aggregate)\(permitScope)"
+        if detailed.count <= ammAuthenticationReasonMaximumCharacters { return detailed }
+        // Preserve the complete authorized action count and aggregate bounds
+        // when many reviewed steps would make a detailed list impractical.
+        let overviewName = name.range(of: #"0x[0-9a-fA-F]{40}"#, options: .regularExpression) == nil ? "\(name)" : "this plan"
+        let overview = "Allow plan “\(overviewName)” with \(steps.count) reviewed actions, including \(ammSteps.count) swaps, for \(approvalDuration(duration.uint64Value)); \(aggregate)\(permitScope)"
+        return overview.count <= ammAuthenticationReasonMaximumCharacters ? overview : nil
     }
     return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : lead
 }

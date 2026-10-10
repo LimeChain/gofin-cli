@@ -82,6 +82,23 @@ class OwnershipTests(unittest.TestCase):
             self.assertTrue(config["v4"]["router_has_hop_price"])
             self.assertNotIn("token", config)
 
+    def test_ramses_uses_its_reviewed_deployer_and_distinct_router(self):
+        config = RUNNER.protocol_config(4663, "ramses")
+        self.assertEqual(config["router"].lower(), "0xfcbbe2af83f94e7e2a9c35a535b3a04719afd2ae")
+        self.assertEqual(config["pool_deployer"].lower(), "0x4b37359bf291abe8453692db58d515a8b013dca9")
+        self.assertNotEqual(config["router"], RUNNER.protocol_config(4663)["router"])
+        self.assertNotIn("token", config)
+        self.assertNotIn("weth", config)
+        with self.assertRaisesRegex(RuntimeError, "Robinhood only"):
+            RUNNER.protocol_config(1, "ramses")
+
+    def test_ramses_invalid_scope_refuses_before_any_rpc(self):
+        with patch.object(RUNNER, "rpc") as transport, tempfile.TemporaryDirectory() as directory:
+            for chain, legacy in [(1, False), (4663, True)]:
+                with self.assertRaisesRegex(RuntimeError, "reviewed router"):
+                    RUNNER.run(chain, Path(directory), legacy, "ramses")
+            transport.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

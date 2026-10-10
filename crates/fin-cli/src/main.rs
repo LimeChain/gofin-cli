@@ -165,7 +165,7 @@ struct ConnectionCommandArgs {
     /// Binance subaccount email; required with --parent and accepted only for role=sub.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     email: Option<String>,
-    /// Optional enrollment read-check network: ethereum:1, ethereum:8453, ethereum:42161 or ethereum:4663.
+    /// Optional enrollment read-check network from Fin's reviewed EVM registry.
     /// The EVM wallet remains reusable across all reviewed networks.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     network: Option<String>,
@@ -2738,6 +2738,7 @@ mod tests {
             "wallet.balances",
             "wallet.token",
             "uniswap.quote",
+            "ramses.quote",
         ] {
             assert_eq!(
                 broker_response_timeout(&BrokerRequest::Read {
@@ -2854,8 +2855,13 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 57);
-        for name in ["wallet.permit2.allowance", "wallet.permit2.approve"] {
+        assert_eq!(financial_catalog().len(), 59);
+        for name in [
+            "wallet.permit2.allowance",
+            "wallet.permit2.approve",
+            "ramses.quote",
+            "ramses.swap",
+        ] {
             assert!(
                 financial_catalog()
                     .iter()

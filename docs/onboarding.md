@@ -102,9 +102,14 @@ match check. The optional `--network ethereum:1`, `ethereum:8453`, `ethereum:421
 `ethereum:4663` selects the read-only enrollment check, defaulting to mainnet;
 it does not restrict the key to that chain. `--provider ethereum` remains a
 legacy alias. Financial inputs use `"network":"evm"` plus `chain_id`.
-Existing chain-scoped Ethereum connections retain their authority until the
-human uses protected `connections update --provider evm` to broaden them; no
-upgrade silently widens a legacy signer's scope. See [EVM wallets](testing/evm-wallets.md).
+Existing chain-scoped Ethereum connections remain limited to their configured
+network; migrating one to a reusable `evm` wallet still requires protected
+`connections update --provider evm`. The automatic reviewed-coverage overlay
+applies only after that explicit migration. See [EVM wallets](testing/evm-wallets.md).
+For a reusable `evm` wallet, the protected broker derives additive reviewed
+network and AMM deployment coverage on startup and configuration reload. This
+also applies to read-only wallets; it does not collect or replace credentials,
+write the stored config, or grant financial authority.
 
 The same enrolled wallet can quote and execute the supported Relay bridge
 transfers between Ethereum, Base, Arbitrum One and Robinhood Chain; no bridge-specific

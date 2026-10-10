@@ -8,7 +8,8 @@ obtains human approval, executes it and keeps durable records for reconciliation
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
-EVM networks; Uniswap v3/v4 on reviewed deployments; and Ethereum mainnet Aave.
+EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood;
+and Ethereum mainnet Aave.
 The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
 bridge providers follow later. Fin is open source; license selection is pending.
@@ -104,6 +105,8 @@ and financial history are kept. A schema preflight rejects a bundle that cannot
 support the existing journal before replacing any runtime files. If replacement fails, the broker stays stopped for inspection; no
 financial operation is replayed. This is a local development update, not a general
 schema-migration or published-version updater.
+At broker startup, an installed update makes newly reviewed network and AMM
+deployments available to existing reusable EVM wallets without reenrollment.
 See [bundle instructions](packaging/README.md), [release maintenance](docs/releases.md)
 and [completion](docs/shell-completion.md).
 
@@ -162,6 +165,13 @@ unpriced exchange assets require the protected policy exception described below.
 Every replacement needs a fresh preview and approval; reconcile the original
 operation before creating a replacement.
 
+AMM Touch ID prompts lead with the swap intent, verified token labels and
+readable amount, fee and expiry limits. Exact contracts, routing and price
+formulas remain in structured review for the agent to explain. A bounded
+authorization says what may be executed; it does not promise the initial quote
+as the outcome of every later attempt. Use standalone execution for one exact
+swap and a named plan for a coherent sequence such as a swap and its return.
+
 Use `fin --help` for command descriptions, bare `fin explain` or `fin schema` for usage and examples,
 and `fin capabilities` to list all command and operation names. For a specific
 operation, run `fin explain wallet.balances`.
@@ -181,6 +191,11 @@ ETH. Reviewed deployments expose Uniswap v3/v4 swaps on Ethereum, Base, Arbitrum
 and Robinhood, subject to exact pool liquidity and protocol preflight. Base also
 supports the reviewed Aave deployment and WETH operations. The supported Relay and canonical bridge scope is
 described below; other dapps and bridge providers remain later work.
+At protected broker startup and configuration reload, an enrolled reusable EVM
+wallet receives additive coverage for reviewed networks and AMM deployments in
+the installed broker. This applies to read-only wallets, does not prompt for
+credentials or rewrite protected configuration, and grants no financial
+authority. Legacy chain-scoped Ethereum connections retain their original scope.
 Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. EVM pricing keeps the existing
 CoinGecko native-ETH and exact network/contract token path.
@@ -861,12 +876,21 @@ permit behavior and pending protected Touch ID checks. Rollup transactions
 settle on verified canonical sequencer inclusion. Caller-supplied token contracts
 are verified through pinned reads; token contracts are not product defaults.
 
+Robinhood also supports the reviewed Ramses v3 profile through `ramses.quote`
+and `ramses.swap`. Select its fixed `tick_spacing` rather than a Uniswap fee
+tier. Fin reads the mutable pool fee at the pinned quote block and binds its
+maximum quoted fee separately from the on-chain minimum receipt. Network
+identity, RPC defaults and sequencer classification come from `fin-networks`;
+ABI-specific AMM deployment profiles reuse the financial engine and signing
+paths. See the [Ramses verification and human checklist](docs/testing/ramses-amm.md).
+
 ```sh
 fin schema uniswap.swap --json
 fin read uniswap.quote --input "$QUOTE_JSON" --json
 fin preview uniswap.swap --input "$SWAP_JSON" --json
 cargo test --locked -p fin-amm -p fin-ethereum
 make test-amm-fork
+make test-amm-fork AMM_FORK_ARGS='--dex ramses'
 python3 scripts/prepare-amm-touch-id-checklist.py --help
 ```
 
