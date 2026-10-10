@@ -107,6 +107,19 @@ described above. Use installed capabilities to discover any additional providers
 
 Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
 
+For Uniswap, read `uniswap.quote` with exact chain, assets, amount, protocol and
+v3 tier or complete v4 pool key. Inspect the pinned pool, configured router,
+price impact, token precision and permission requirement. Use a fixed minimum
+rate, finite cumulative input/gas caps and slippage limits discovered from
+`uniswap.swap`. Fin may consume existing allowance or a verified one-use
+EIP-2612/Permit2 signature inside the reviewed swap. Missing token-to-Permit2
+allowance remains a separate finite `wallet.approve` write; Permit2 allowance
+is a distinct permission. Native input needs gas plus principal. Reconcile the
+original receipt and exact conversion before using proceeds for a reverse
+swap. Approved templates retain their on-chain minimum and signed bytes in the
+protected journal; public outputs withhold signature-bearing calldata.
+
+
 Binance quantities and fee caps are unsigned decimal strings with a whole-number
 digit: use `0.00415`, not `.00415`; avoid signs, exponents, leading zeros and
 more than 36 fractional digits. Withdrawal `amount` is the gross debit including
@@ -173,8 +186,8 @@ consumption. `--replaces-attempt OLD_OPERATION_ID` only supersedes an unsubmitte
 candidate inside existing consent. Reconcile submitted/uncertain attempts first.
 Fin does not schedule a limit-to-market switch: suggest it to the user, verify
 implemented order types and seek new approval when outside the authorized choices.
-Bounded consent is operation-specific: Binance spot LIMIT IOC/FOK and the
-declared bridge step plan have separate scopes. Use exact approval for other
+Bounded consent is operation-specific: Binance spot LIMIT IOC/FOK, configured
+Uniswap swaps and the declared bridge step plan have separate scopes. Use exact approval for other
 standalone operations that do not advertise bounded consent. Named plans cover
 only scopes confirmed by `fin plans preview`; they support adapter-reviewed
 bridge steps and other eligible financial operations. Enrollment and policy

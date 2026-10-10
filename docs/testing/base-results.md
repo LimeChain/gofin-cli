@@ -3,7 +3,9 @@
 Implementation worktree: based on `main` commit
 `58217d140eb62a034beb421097f346f38be9c676`. Remote `main` was fetched and checked
 again after implementation and after live funding verification; it remains at
-that commit. No commits, pushes or protected installation/update were performed.
+that commit. Local commits now preserve the Base implementation and the explicitly
+authorized Uniswap branch merge; no push or protected installation/update was
+performed.
 Disposable development credentials were explicitly imported into the isolated
 `base-live` environment for the human-authorized financial test described below.
 Existing installed Fin was used only for read-only discovery and venue routing
@@ -161,20 +163,62 @@ diagnostics rather than raw transaction input. This gap is recorded as a
 possible safe EVM transaction-inspection follow-up; every financial write and
 normal read/reconciliation ran through Fin.
 
-## Blocked and unrun
+## Foundation status
 
-Base Uniswap swaps are **blocked on the agreed dependency**: the independently
-owned foundation is completed in another worktree but remains unmerged into
-`main`. No uncommitted implementation was copied. Base swap integration and
-verification still need that merge. Current Fin has no liquidity operation to
-extend. CCTP was absent from current `main`, and this change introduces no CCTP
-adapter.
+The human subsequently authorized merging committed `codex/uniswap-amm`
+(`fd26ad2`) into this Base work. Local `codex/base-support` merge `c08dc43`
+retains the Base commit `e527083`; no push was performed. Base Uniswap v3/v4
+now uses reviewed Base-specific deployments. Current Fin has no liquidity
+operation to extend. CCTP remains unimplemented.
 
-Real delayed canonical withdrawal witness/finalization, Base outgoing wallet
-and dapp writes, live venue funding, protected installation and human Touch ID
-are unrun. Live incoming bridge receipts do not establish outgoing Base fee
-reservation/settlement acceptance. No previous chat's financial authorization
-was reused. The public [Base capability matrix and human checklist](base.md)
+## Uniswap merge and live development follow-up
+
+- Full merged workspace: **1,138 passed, eight explicitly ignored**, strict
+  all-target clippy, formatting and synthetic development workflow passed.
+- Independently owned deployed Base v3/v4 round trips and permission cleanup
+  passed, including exact native/token conservation and duplicate prevention.
+  OP Anvil uses the declared test-only aggregate fee model; no real
+  credentials or remote signing. Final evidence: `work/amm-fork-8453.by2lr9sl/`.
+- Explicitly authorized real **v3** round trip passed: **1 USDC →
+  0.000400727831595594 ETH → 0.999 USDC**, automatic disposable-development
+  approval. The finite EIP-2612 permit was consumed within the forward swap;
+  source router allowance remained zero. Native wrap/unwrap, pool/token
+  effects, original envelopes, canonical receipts and actual Base fees were
+  verified. Repeating the original request returned the same completed record.
+- Actual gas total: **0.000006089532818769 ETH**. Final retained Base holdings:
+  **9.976651 USDC + 0.000993910467181231 ETH**. Native balance exactly accounts
+  for gas; USDC roundtrip loss is **0.001**. All five environment operations
+  (three earlier bridges plus two swaps) completed with no unresolved records.
+- Return reconciliation initially saw incomplete RPC hash evidence; it remained
+  pending and subsequently completed under the same original operation/hash.
+  No replacement or replay was sent.
+
+The first owned fork was blocked when PublicNode rejected pinned historical
+account-state reads without a personal archive token. No financial write
+occurred; Base's standard RPC served the same independently pinned test, which
+passed. Public metadata availability does not establish archive-state access.
+Direct public archive pinning and guarded owned-node trace/funding controls are
+test orchestration gaps, not direct mainnet financial submissions.
+
+Two further sanitized Ogi text reviews completed on `glm-5.3-flash`; full
+answers and local assessment are retained in `work/ogi-base-uniswap-review.md`.
+Ogi's modeled-versus-live and v3-versus-v4 distinctions are retained. Real
+receipt fees came from actual pinned Base RPC evidence, while only owned
+Anvil uses the aggregate model. Live v4/Permit2 remains unrun.
+
+The eight default ignored cases are public Base canonical readiness, owned
+AMM roundtrip, Base canonical source fork, existing child-canonical source
+fork, deployed protocol broker fork, Relay source fork, Base Aave fork and
+public Base Aave readiness. Each requires its explicit network/fork runner.
+The AMM case was run separately on the owned Base fork.
+
+## Remaining unrun cases
+
+Real delayed canonical withdrawal witness/finalization, Base wallet transfer
+and Aave writes, live v4/Permit2, live venue funding, protected installation and
+human Touch ID are unrun. The v3 swaps establish their actual Base fee
+reservation/settlement path, separately from modeled OP fork components.
+No previous chat's financial authorization was reused. The public [Base capability matrix and human checklist](base.md)
 separates these evidence classes. The earlier private return checklist remains
 a proposal for its other scenarios; the latest authorized retained-funding
 result is recorded separately above and in the private live report.

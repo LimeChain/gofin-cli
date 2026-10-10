@@ -18,7 +18,7 @@ financial writes. Public compatibility reads have no signer.
 | Base | Token discovery and USD pricing | Exact contract precision/balance verified on RPC; Blockscout candidates are partial; CoinGecko Base contract pricing | Synthetic candidate and price identity tests; symbols never establish value or equivalence |
 | Base | WETH wrap / unwrap | Reviewed `0x4200000000000000000000000000000000000006` | Synthetic proof tests; owned Aave fork exercises deployed WETH |
 | Base | Aave V3 reads, supply, withdraw, borrow, repay, collateral on/off | Reviewed pool/oracle; existing revision-5 backing guards | Public deployed revision/provider compatibility passed; synthetic preparations and forged proof rejection passed; owned deployed six-action roundtrip and WETH/allowance cleanup passed with modeled OP extra fees |
-| Base | Uniswap v3/v4 swaps | Integrated committed AMM foundation; Base-specific reviewed contracts | Owned deployed Base v3/v4 round trips passed with explicit modeled OP extra fees; live development evidence recorded separately |
+| Base | Uniswap v3/v4 swaps | Integrated committed AMM foundation; Base-specific reviewed contracts | Owned deployed Base v3/v4 round trips passed with explicit modeled OP extra fees; real v3 EIP-2612 USDC→ETH→USDC and actual Base fee conservation passed with automatic development approval; live v4/Permit2 unrun |
 | Base | Uniswap liquidity | No current Fin liquidity implementation | A deployed protocol alone does not add a Fin operation |
 | Ethereum ↔ Base | Relay exact native / ERC-20 funding | Dynamic RPC-verified asset identities; provider quote must satisfy reviewed protocol contracts and direct deposit shape | Synthetic parser/order/proof tests; explicitly authorized Ethereum USDC→Base native USDC live receipt passed (10→9.977651), automatic development approval; other routes are not established by that pass |
 | Ethereum → Base | Canonical ETH / verified StandardBridge ERC-20 pair | Source deposit proof, derived type-`0x7e` locator, separate destination credit | Independent ABI vectors, deployed native source-only owned fork and explicitly authorized 0.001 ETH live destination credit passed; automatic development approval |
@@ -150,3 +150,22 @@ and [Aave address book](https://github.com/bgd-labs/aave-address-book/blob/main/
 Canonical vectors pin upstream revision in [fixture provenance](../../crates/fin-bridge/tests/fixtures/PROVENANCE.md).
 
 Recorded outcomes and resolved failures are in [Base verification results](base-results.md).
+
+## Merged Uniswap follow-up
+
+The human authorized importing committed `codex/uniswap-amm` directly into this
+Base branch. Base v3 uses its own factory/quoter/SwapRouter02; v4 uses reviewed
+PoolManager, StateView, Quoter and UniversalRouter 2.1.2. Contract identities
+come from [official Base v3 deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-base-deployments)
+and [official v4 deployments](https://developers.uniswap.org/docs/protocols/v4/deployments),
+not addresses assumed to match another chain.
+
+```sh
+make test-amm-fork AMM_FORK_ARGS='--chain 8453'
+```
+
+This separately owned fork uses synthetic credentials only, verifies both
+versions and cleanup, and explicitly models missing Anvil OP receipt fields.
+Actual live v3 development roundtrip evidence and remaining human/v4 limitations
+are in [the results](base-results.md). For human protected installation, named
+review, Touch ID and finite permit checks, use [the concrete AMM checklist](uniswap-amm.md).
