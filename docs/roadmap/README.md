@@ -2,7 +2,7 @@
 
 Updated 2026-10-10. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–23 inclusive, plus item 30 (release preparedness)**, as specified by the user through 2026-10-10. Items 24–28 are later roadmap work; items 29 and 31–34 have no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–12, 14–23 and 30 (release preparedness)**, as specified by the user through 2026-10-10. Item 13 (OKX) is deferred to the next release. Items 24–28 are later roadmap work; items 29 and 31–34 have no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -18,7 +18,7 @@ First-release scope: **items 1–23 inclusive, plus item 30 (release preparednes
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
 | 11 | [Kraken support](kraken-support.md) | Scoped — full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
-| 13 | [OKX support](integration-roadmap.md#13-okx-support) | Roadmap — scope to define |
+| 13 | [OKX support](integration-roadmap.md#13-okx-support) | Next release — deferred by user; scope to define |
 | 14 | [Solana wallet and transactions](integration-roadmap.md#14-solana-wallet-and-transactions) | Roadmap — foundation for Solana integrations |
 | 15 | [Solana Meteora support](integration-roadmap.md#15-solana-meteora-support) | Roadmap — scope to define |
 | 16 | [Solana Jupiter support](integration-roadmap.md#16-solana-jupiter-support) | Roadmap — interpreted from “Jupyter” |

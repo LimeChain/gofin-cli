@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–23 inclusive, plus item 30 ([release preparedness](release-preparedness.md))**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release scope reflects user decisions through 2026-10-10.
+The first release requires **backlog items 1–12, 14–23 and 30 ([release preparedness](release-preparedness.md))**. Integration entries 11–12 and 14–23 below are part of that scope. Item 13 (OKX) is deferred to the next release; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release scope reflects user decisions through 2026-10-10.
 
 ## Shared scoping rules
 
@@ -22,6 +22,8 @@ Implement and verify the full Kraken action suite supported by the selected CCXT
 Extend and verify Coinbase integration. Confirm the intended Coinbase product/API and required account, trading and funding actions; inspect existing integration coverage first.
 
 ## 13. OKX support
+
+Status: Deferred to the next release by the user on 2026-10-10. No longer required for the first release; item ID and requested capability are retained.
 
 Extend and verify OKX integration. Define supported account types, markets, trading and funding actions and their credential/authorization requirements.
 
