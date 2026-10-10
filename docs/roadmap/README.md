@@ -1,8 +1,8 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-09. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-10. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–23 inclusive**, as specified by the user on 2026-10-09. Items 24–28 are later roadmap work; item 29 has no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–23 inclusive, plus item 30 (release preparedness)**, as specified by the user through 2026-10-10. Items 24–28 are later roadmap work; item 29 has no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -35,5 +35,6 @@ First-release scope: **items 1–23 inclusive**, as specified by the user on 202
 | 27 | [Hedera SaucerSwap support](integration-roadmap.md#27-hedera-saucerswap-support) | Later release — action scope to define |
 | 28 | [Across.to support](integration-roadmap.md#28-acrossto-support) | Later release — requested; route and asset coverage to define |
 | 29 | [Ethereum Smart Wallet support](integration-roadmap.md#29-ethereum-smart-wallet-support) | Requested — wallet model, capabilities and release scope to define |
+| 30 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.

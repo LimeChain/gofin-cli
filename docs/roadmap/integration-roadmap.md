@@ -2,7 +2,7 @@
 
 Captured from the user's requests on 2026-10-09. All entries below are roadmap requests, not implementation or verification claims. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–23 inclusive**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release boundary was explicitly set by the user on 2026-10-09.
+The first release requires **backlog items 1–23 inclusive, plus item 30 ([release preparedness](release-preparedness.md))**. Integration entries 11–23 below are part of that scope; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release scope reflects user decisions through 2026-10-10.
 
 ## Shared scoping rules
 
