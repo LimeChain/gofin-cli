@@ -220,6 +220,61 @@ and production acceptance. Automated correctness, installed isolation, biometric
 authorization and live settlement establish different properties; verify each
 independently.
 
+### Complete workflow rehearsal
+
+Before a human handoff, execute the intended financial sequence through the
+public CLI and broker, engine authorization and reservations, real adapter
+preparation, transport, reconciliation and durable settlement. Synthetic
+rehearsals use isolated credentials, temporary journals, controlled external
+transport and a test authorizer; they retain the production financial logic.
+Direct adapter tests and plan schema previews are useful supporting evidence,
+but do not establish that the combined execution path works. Future-funded
+steps must be prepared and executed after their predecessor's verified credit;
+a successful plan preview alone cannot check those runtime intents.
+
+Keep a small scenario matrix for the affected workflow:
+
+| Dimension | Required representative cases |
+| --- | --- |
+| Authorization | The intended standalone, operation-boundary or named-plan path; verify that another mode's successful write does not substitute for it. |
+| Starting state | Empty/new and already funded accounts, materially different account modes, existing exposure, insufficient fee assets and unresolved operations. |
+| Financial costs | Absent cost rows, typed zero costs, positive costs, unauthorized asset/location identities, additional versus deducted fees and native precision/rounding. |
+| Outcomes | Full, partial and no fill; verified rejection, costs spent without the intended effect, conflicting or incomplete proof. |
+| Recovery | Response loss before and after external acceptance, duplicate/concurrent requests, cancellation races, consent expiry/revocation, restart and applicable migrations. |
+
+Prioritize combinations that cross component contracts rather than an exhaustive
+Cartesian product. For example, a fee-free operation inside a named plan with
+an empty cost scope must accept a typed zero candidate cost, reject any positive
+unauthorized fee, and settle principal without positive fee consumption.
+Exercise this with real adapter preparation as well as focused engine tests.
+
+Assert against independently specified fixture outcomes: external balances,
+positions and permissions; verified effects; journal identities; reservations;
+plan funding consumption and remaining authority. Do not generate expected
+results by calling the same accounting helper being tested. Lost responses and
+restarts must preserve the original submission, with no duplicate dispatch;
+uncertain outcomes retain outstanding reservations and block unsafe advancement.
+Every bug found during a live or human session should gain a reproducible
+synthetic regression at the component boundary that allowed it to escape.
+
+When live development is separately authorized, repeat the same sequence,
+authorization mode and materially relevant starting state with disposable
+credentials through `make dev-env-*`. Record matching build, finite scope,
+budget, settlement and cleanup; automatic development approval remains distinct
+from native Touch ID. The rehearsal must not silently substitute account modes,
+markets or standalone writes. This contract grants no live-write authorization
+and adds no production approval bypass.
+
+The handoff records each scenario as passed, failed, blocked or not run, with
+its exact command/harness, build and evidence class. Keep synthetic, fork,
+read-only live, automatic-development live-write and native protected-runtime
+results separate. Identify untested combinations and unresolved restoration;
+raw test counts or a working venue method are not workflow coverage. Supply the
+human with the verified build, reviewed sequence, expected financial changes
+and recovery actions. Human verification concentrates on native approval,
+credential isolation and user experience; actual venue settlement remains a
+separate observation, and no unrun case is marked passed.
+
 ### Implementation-stage evidence
 
 - Record Rust toolchain/dependency versions, commit, compiled artifact layout, build/install procedure, and actual test commands. Default tests use unmistakably synthetic credentials and never load production keys or submit mainnet transactions.

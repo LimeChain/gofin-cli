@@ -56,6 +56,22 @@ candidates, duplicate requests, response loss, restart, migrations and atomic
 settlement. Test malformed/admin scopes, standalone authority bypass attempts,
 name/binding changes, and quiet machine output as well.
 
+Apply the [complete workflow rehearsal contract](README.md#complete-workflow-rehearsal)
+to each intended plan before human handoff. Run the actual public CLI and broker
+with real adapter preparation and synthetic transport through approval,
+eligible-step execution, reconciliation and journal settlement. Generic engine
+fixtures and `plans preview` alone do not verify venue-specific prepared intents.
+
+Include a fee-free class transfer under an exact named-plan scope with an empty
+`maximum_costs` list: a typed zero candidate cost needs no fee authority, while
+a positive cost must fail before dispatch. Verify principal and predecessor
+credit consumption, no positive fee reservation or consumption, and restart
+without another submission. For Hyperliquid, rehearse separate spot/perpetual
+cash as well as unified cash; unified mode skips the class transfer and cannot
+establish its named-plan coverage. Rehearse future funding from an empty account
+and stop advancement on partial/no fill or unresolved receipt proof. These are
+required scenarios, not claims that the current test targets cover every case.
+
 ## Generic-operation verification evidence (2026-10-08)
 
 The final generic-operation implementation passed:
