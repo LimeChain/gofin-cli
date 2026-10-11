@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–23 inclusive**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–22 below are part of that scope. Item 24 (OKX) is deferred to the next release; entries 25–29 are later roadmap work, and item 30 has no release assignment yet. IDs were renumbered on 2026-10-11 to group release scope without changing feature scope or status.
+The first release requires **backlog items 1–23, 32 and 33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–22 below are part of that scope. Items 24–28, 30, 31 and 34 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decision on 2026-10-11; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -77,29 +77,37 @@ Extend and verify OKX integration. Define supported account types, markets, trad
 
 ## 25. SEI support
 
+Release: Next release, assigned by the user on 2026-10-11.
+
 Add SEI coverage for available onboarded dapps and bridging. Define the relevant network/execution environment, protocol deployments, assets and bridge routes before choosing reusable runtime components.
 
 ## 26. BSC support
+
+Release: Next release, assigned by the user on 2026-10-11.
 
 Add BSC coverage for available onboarded dapps and bridging. Verify chain/token identities, protocol deployments and supported source/destination routes; reuse shared EVM infrastructure where appropriate.
 
 ## 27. Hedera bridging
 
+Release: Next release, assigned by the user on 2026-10-11.
+
 Support bridging to/from Hedera. Define counterpart networks, assets, bridge mechanisms, required wallet/signing infrastructure and both source and destination receipt evidence. Coordinate any reusable Hedera foundation with item 28.
 
 ## 28. Hedera SaucerSwap support
+
+Release: Next release, assigned by the user on 2026-10-11.
 
 Integrate SaucerSwap on Hedera. Agree supported versions/products and actions, including whether swaps, liquidity provision or both are wanted. Identify required Hedera wallet/transaction foundations and share them with item 27 where applicable; bridging need not itself be a prerequisite for using an already funded wallet.
 
 ## 29. Across.to support
 
-Add Across.to bridge support as later roadmap work. “Accross.to” is interpreted as Across.to. Select supported source/destination networks, assets and actions after verifying current official capabilities; do not assume Solana or any other network is supported.
+Add Across.to bridge support in the unscheduled backlog; no release is assigned as of the user’s 2026-10-11 decision. “Accross.to” is interpreted as Across.to. Select supported source/destination networks, assets and actions after verifying current official capabilities; do not assume Solana or any other network is supported.
 
 Integrate discovery, bounded previews, plan-authorized execution, verified destination receipt and recovery using shared Fin contracts. Keep quoted timing and fees distinct from verified execution results. This entry remains separate from item 22 unless the user later selects it for first-release bridge coverage.
 
 ## 30. Ethereum Smart Wallet support
 
-Requested on 2026-10-09. Support Ethereum smart wallets through Fin. The wallet standard/provider, precise capabilities and target release remain to be defined; this request does not automatically expand the first-release scope.
+Requested on 2026-10-09. Support Ethereum smart wallets through Fin. Assigned to the next release by the user on 2026-10-11. The wallet standard/provider and precise capabilities remain to be defined.
 
 During scoping, agree whether Fin should connect existing smart wallets, create new accounts, or both, and identify required transaction, batching, signing and recovery capabilities. Clarify whether coverage starts on Ethereum mainnet only or extends to other supported EVM networks. Verify the selected wallet's actual account and execution model rather than treating all smart wallets as interchangeable.
 

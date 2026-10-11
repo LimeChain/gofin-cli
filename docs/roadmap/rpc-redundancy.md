@@ -1,6 +1,6 @@
 # Add RPC redundancy and safe failover
 
-Status: Requested on 2026-10-10. Target release, initial networks and provider-selection policy remain to be defined.
+Status: Requested on 2026-10-10. Assigned to the next release by the user on 2026-10-11. Initial networks and provider-selection policy remain to be defined.
 
 ## Description
 
@@ -38,7 +38,7 @@ AC4. All-provider failure terminates within defined limits with actionable diagn
 
 ### Planning
 
-- Keep this infrastructure feature independent of any new chain or dapp integration. Choose a target release explicitly; it is not yet included in the first-release scope.
+- Keep this infrastructure feature independent of any new chain or dapp integration. It is assigned to the next release.
 
 ### Implementation
 

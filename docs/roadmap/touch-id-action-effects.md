@@ -1,6 +1,6 @@
 # Represent action effects clearly in Touch ID approvals
 
-Status: Requested on 2026-10-10. Presentation design, initial operation coverage and target release remain to be defined.
+Status: Requested on 2026-10-10. Assigned to the next release by the user on 2026-10-11. Presentation design and initial operation coverage remain to be defined.
 
 ## Description
 

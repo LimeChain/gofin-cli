@@ -1,6 +1,6 @@
 # Estimate action duration and time to completion
 
-Status: In progress, reported by the user on 2026-10-11. The user identified action timing as a major UX hurdle. Initial operation coverage, estimation method and target release remain to be defined; completion and verification have not been reported.
+Status: In progress, reported by the user on 2026-10-11. The user identified action timing as a major UX hurdle. Required for the first release, assigned by the user on 2026-10-11. Initial operation coverage and estimation method remain to be defined; completion and verification have not been reported.
 
 ## Description
 
