@@ -1,6 +1,6 @@
 # Complete and verify Aave support
 
-Status: Requested on 2026-10-09. Existing repository documentation describes Ethereum Aave functionality; current implementation and verification must be reviewed before defining the delivery gap. Network/version scope and live test parameters are not yet agreed.
+Status: In progress, reported by the user on 2026-10-11. Requested on 2026-10-09. Existing repository documentation describes Ethereum Aave functionality; current implementation and verification must be reviewed before defining the delivery gap. Network/version scope and live test parameters are not yet agreed.
 
 ## Description
 

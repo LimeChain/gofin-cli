@@ -15,6 +15,8 @@ The first release requires **backlog items 1–23, 32 and 33**, including item 2
 
 ## 11. Kraken support
 
+Status: In progress, reported by the user on 2026-10-11.
+
 Implement and verify the full Kraken action suite supported by the selected CCXT version, including applicable market/account reads, trading, order management, funding, deposits and withdrawals. Use ask-ogi extensively for implementation and verification assistance, following the approach selected for Hyperliquid. See the [detailed Kraken draft](kraken-support.md). Inventory Kraken product/API distinctions explicitly; supported deposit assets/networks and live-test parameters require verification and selection rather than inheriting Hyperliquid's Arbitrum USDC route.
 
 ## 12. Coinbase support
@@ -23,6 +25,8 @@ Extend and verify Coinbase integration. Confirm the intended Coinbase product/AP
 
 ## 13. Solana wallet and transactions
 
+Status: In progress, reported by the user on 2026-10-11.
+
 Provide Solana wallet and transaction support through Fin, including the protected signing and transaction lifecycle needed by subsequent Solana integrations. Define native/token holdings and transfer scope, supported token programs, fee handling, confirmation and uncertain-submission recovery. Treat this as the foundation for on-chain Solana operations.
 
 ## 14. Solana Meteora support
@@ -30,6 +34,8 @@ Provide Solana wallet and transaction support through Fin, including the protect
 Integrate Meteora on Solana. Agree the intended products and actions—such as swaps or liquidity-position management—before implementation. Reuse item 13's wallet/transaction foundation.
 
 ## 15. Solana Jupiter support
+
+Status: In progress, reported by the user on 2026-10-11.
 
 Integrate Jupiter on Solana. “Jupyter” is interpreted as Jupiter based on the user's Solana integration context; this interpretation remains correctable. Define the intended Jupiter products and action coverage rather than assuming every product is included. Reuse item 13 where on-chain execution is required.
 

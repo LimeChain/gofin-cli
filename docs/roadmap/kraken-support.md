@@ -1,6 +1,6 @@
 # Support Kraken's full CCXT action suite and funding workflows
 
-Status: Scoped on 2026-10-09 to follow item 9's full-coverage approach, including extensive ask-ogi assistance. Part of the first release. Implementation and verification have not been reported.
+Status: In progress, reported by the user on 2026-10-11. Scoped on 2026-10-09 to follow item 9's full-coverage approach, including extensive ask-ogi assistance. Part of the first release. Completion and verification have not been reported.
 
 ## Description
 
