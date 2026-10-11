@@ -1,6 +1,6 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-10. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-11. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–12, 14–23 and 30 (release preparedness)**, as specified by the user through 2026-10-10. Item 13 (OKX) is deferred to the next release. Items 24–28 are later roadmap work; items 29 and 31–34 have no release assignment yet. Inclusion defines required release scope, not implementation or verification status.
 
@@ -14,7 +14,7 @@ First-release scope: **items 1–12, 14–23 and 30 (release preparedness)**, as
 | 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | Implemented — user reported |
 | 7 | [Aave support](aave-support.md) | Requested; review existing implementation and define network/version coverage |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
-| 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | In progress — user reported; full CCXT-supported suite plus Arbitrum USDC deposits; extensive ask-ogi consultation |
+| 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
 | 11 | [Kraken support](kraken-support.md) | Scoped — full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |

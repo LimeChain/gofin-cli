@@ -1,6 +1,6 @@
 # Support Hyperliquid, including USDC deposits from Arbitrum
 
-Status: In progress, reported by the user on 2026-10-09. Scope covers the full suite of Hyperliquid actions supported by CCXT, plus USDC deposits from Arbitrum. Use ask-ogi extensively for implementation and verification assistance. Completion and verification have not been reported.
+Status: Implemented, reported by the user on 2026-10-11. Implementation and verification evidence were not independently reviewed in this roadmap update. The original draft below records requested scope; current repository documentation governs delivered behavior.
 
 ## Description
 
