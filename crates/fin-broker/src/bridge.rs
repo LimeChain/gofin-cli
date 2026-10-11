@@ -3434,6 +3434,10 @@ impl Adapter for BridgeAdapter {
         Vec::new()
     }
 
+    fn snapshot_is_global(&self) -> bool {
+        true
+    }
+
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
         let transfers = self.state()?.transfers().map_err(store_error)?;
         let pending = transfers

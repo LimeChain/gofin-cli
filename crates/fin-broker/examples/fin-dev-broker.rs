@@ -724,6 +724,7 @@ async fn run(args: Args) -> Result<(), String> {
     #[cfg(unix)]
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .map_err(|error| error.to_string())?;
+    let mut peers = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             signal = tokio::signal::ctrl_c() => {
@@ -732,12 +733,16 @@ async fn run(args: Args) -> Result<(), String> {
             }
             _ = terminate.recv() => break,
             _ = hangup.recv() => break,
-            accepted = listener.accept() => {
+            _ = peers.join_next(), if !peers.is_empty() => {}
+            accepted = listener.accept(), if peers.len() < fin_broker::MAX_BROKER_CONNECTIONS => {
                 let (stream, _) = accepted.map_err(|e| e.to_string())?;
-                tokio::spawn(serve_peer(stream, runtime.clone(), args.identity.clone(), args.build_id.clone(), args.mode.clone(), development_metadata.clone()));
+                peers.spawn(serve_peer(stream, runtime.clone(), args.identity.clone(), args.build_id.clone(), args.mode.clone(), development_metadata.clone()));
             }
         }
     }
+    // Stop accepting peers, then finish journaled attempts under the same
+    // runtime. Do not drop a financial dispatch on a generic IPC deadline.
+    while peers.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -939,20 +944,7 @@ async fn serve_peer(
                 "Use the CLI built for this development environment.",
             ))
         } else {
-            match tokio::time::timeout(
-                Duration::from_secs(300),
-                handle_request(&runtime, request.request),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(_) => BrokerResponse::failure(FinError::new(
-                    "BROKER_TIMEOUT",
-                    "transport",
-                    "The development broker request exceeded its deadline.",
-                    "Inspect the persistent operation journal before retrying.",
-                )),
-            }
+            handle_request(&runtime, request.request).await
         };
     if is_capabilities
         && response.ok

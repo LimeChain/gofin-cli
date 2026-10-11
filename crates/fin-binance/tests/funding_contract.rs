@@ -4305,3 +4305,90 @@ impl fin_binance::BinancePriceProvider for DiagnosticPrices {
         })
     }
 }
+
+/// The excluded child fails on any access; selecting the main account must
+/// retain main-account exposure without querying that unrelated child.
+struct ScopedAccountSnapshotTransport {
+    inner: EmptyHistorySnapshotTransport,
+    requests: std::sync::Mutex<Vec<(String, BinanceRequest)>>,
+}
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for ScopedAccountSnapshotTransport {
+    async fn request(
+        &self,
+        credential: &fin_binance::CredentialHandle,
+        request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((credential.as_str().into(), request.clone()));
+        assert_eq!(
+            credential.as_str(),
+            "test-only:synthetic-main",
+            "unrelated child credential was queried"
+        );
+        assert!(
+            request.get("fromEmail").is_none() && request.get("email").is_none(),
+            "unrelated child endpoint was queried"
+        );
+        self.inner.request(credential, request).await
+    }
+}
+#[tokio::test]
+async fn scoped_snapshot_queries_only_selected_binance_account_and_keeps_account_wide_exposure() {
+    use fin_domain::Adapter;
+    let transport = std::sync::Arc::new(ScopedAccountSnapshotTransport {
+        inner: EmptyHistorySnapshotTransport {
+            accounts: std::sync::atomic::AtomicUsize::new(0),
+            from_emails: std::sync::Mutex::new(Vec::new()),
+        },
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let adapter =
+        fin_binance::BinanceAdapter::new(main_and_child_config(), transport.clone(), None, None)
+            .unwrap();
+    let scope = fin_domain::SnapshotScope {
+        resources: vec![fin_domain::ResourceId("binance:uid:1001:SPOT".into())],
+        networks: vec!["binance".into()],
+        ..Default::default()
+    };
+    let snapshot = adapter.snapshot_scoped(&scope).await.unwrap();
+    assert!(snapshot.complete, "{:?}", snapshot.pending);
+    assert!(
+        snapshot.state.holdings.len() >= 2,
+        "preserve all selected-account assets"
+    );
+    assert!(
+        snapshot
+            .state
+            .holdings
+            .iter()
+            .all(|holding| scope.resources.contains(&holding.resource))
+    );
+    assert!(
+        snapshot
+            .coverage
+            .iter()
+            .any(|coverage| coverage.contains("all-assets-and-related-exposure"))
+    );
+    assert_eq!(
+        transport
+            .inner
+            .accounts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        transport.inner.from_emails.lock().unwrap().as_slice(),
+        &[None]
+    );
+    let unknown = fin_domain::SnapshotScope {
+        resources: vec![fin_domain::ResourceId("binance:uid:9999:SPOT".into())],
+        ..Default::default()
+    };
+    let observed_calls = transport.requests.lock().unwrap().len();
+    let unknown_result = adapter.snapshot_scoped(&unknown).await.unwrap();
+    assert!(!unknown_result.complete && unknown_result.coverage.is_empty());
+    assert_eq!(transport.requests.lock().unwrap().len(), observed_calls);
+}

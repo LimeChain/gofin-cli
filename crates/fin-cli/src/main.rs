@@ -110,8 +110,12 @@ enum Command {
     Operations,
     /// Check configuration and protected service readiness.
     Doctor,
-    /// Read financial state within the configured tracking scope.
-    Snapshot,
+    /// Read selected financial state with explicit coverage and incomplete results.
+    Snapshot {
+        /// Optional scope JSON: resources, networks and exact assets; omitted means full portfolio.
+        #[arg(long)]
+        input: Option<String>,
+    },
     /// Install and start the protected service; macOS may request your Mac login password.
     #[command(
         after_help = "Setup asks for movement and run-allocation limits in your protected Terminal. Enter keeps $100; 0 means no personal limit. Fresh Touch ID approves the selected limits. After success, select Codex and/or Claude Code with arrows and Space, then Enter to install. Enter with none selected or Esc skips."
@@ -1306,7 +1310,20 @@ async fn dispatch_with_review_hash(
         Command::Status { id } => client.call(BrokerRequest::Status { id }).await,
         Command::Operations => client.call(BrokerRequest::Operations).await,
         Command::Doctor => client.call(BrokerRequest::Doctor).await,
-        Command::Snapshot => client.call(BrokerRequest::Snapshot).await,
+        Command::Snapshot { input } => {
+            if let Some(input) = input {
+                let scope: fin_domain::SnapshotScope =
+                    serde_json::from_str(&input).map_err(|_| generic_input_error())?;
+                client
+                    .call(BrokerRequest::Read {
+                        operation: "fin.snapshot".into(),
+                        input: serde_json::to_value(scope).map_err(|_| generic_input_error())?,
+                    })
+                    .await
+            } else {
+                client.call(BrokerRequest::Snapshot).await
+            }
+        }
         Command::Daemon { command } => daemon::run(command, client).await,
         Command::Setup => launch_human_privileged(PrivilegedAction::Setup, json, verbose),
         Command::Policy { command } => match command {
@@ -1863,7 +1880,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Status { .. } => "status",
         Command::Operations => "operations",
         Command::Doctor => "doctor",
-        Command::Snapshot => "snapshot",
+        Command::Snapshot { .. } => "snapshot",
         Command::Setup => "setup",
         Command::Daemon { .. } => "daemon",
         Command::Connections { .. } => "connections",
@@ -2111,7 +2128,7 @@ fn development_command_allowed(command: &Command) -> bool {
             | Command::Status { .. }
             | Command::Operations
             | Command::Doctor
-            | Command::Snapshot
+            | Command::Snapshot { .. }
             | Command::Policy {
                 command: PolicyCommand::Show
             }
@@ -2739,6 +2756,56 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["fin", "skill", "install", "--agent", "unreviewed"]).is_err());
         assert!(Cli::try_parse_from(["fin", "skill", "install"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn scoped_snapshot_uses_public_read_contract_and_keeps_partial_json() {
+        struct SnapshotClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for SnapshotClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(
+                    json!({"state":{"holdings":[],"positions":[],"authorities":[],"in_flight":[]},"observed_at":"2026-10-11T00:00:00Z","complete":false,"coverage":["ethereum:8453"],"pending":["observer:ethereum:8453:RPC_READ_TIMEOUT"]}),
+                )
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("snapshot cannot execute")
+            }
+        }
+        let client = SnapshotClient(Default::default());
+        let cli = Cli::try_parse_from([
+            "fin",
+            "snapshot",
+            "--input",
+            "{\"networks\":[\"ethereum:8453\"]}",
+            "--json",
+            "--verbose",
+        ])
+        .unwrap();
+        let result = dispatch(cli, &client).await.unwrap();
+        assert_eq!(result["complete"], false);
+        assert_eq!(
+            result["pending"][0],
+            "observer:ethereum:8453:RPC_READ_TIMEOUT"
+        );
+        assert!(
+            matches!(&client.0.lock().unwrap()[0], BrokerRequest::Read { operation, input } if operation == "fin.snapshot" && input["networks"][0] == "ethereum:8453")
+        );
+        let bad =
+            Cli::try_parse_from(["fin", "snapshot", "--input", "{\"unknown\":true}", "--json"])
+                .unwrap();
+        assert_eq!(
+            dispatch(bad, &client).await.unwrap_err().code,
+            "INVALID_INPUT"
+        );
+        assert_eq!(client.0.lock().unwrap().len(), 1);
+        let full = Cli::try_parse_from(["fin", "snapshot", "--json"]).unwrap();
+        dispatch(full, &client).await.unwrap();
+        assert!(matches!(
+            client.0.lock().unwrap()[1],
+            BrokerRequest::Snapshot
+        ));
     }
 
     #[test]

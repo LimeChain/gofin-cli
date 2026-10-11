@@ -252,22 +252,9 @@ impl BinanceProfile {
         let quantity = amount(&input.quantity)?;
         let price = amount(&input.limit_price)?;
         let account = self.account(&input.account)?;
-        let permissions = self.permissions(account).await?;
-        if permissions.enable_spot_and_margin_trading != Some(true) {
-            return Err(error(
-                "MISSING_PERMISSION",
-                "authorization",
-                "The enrolled Binance key does not report spot trading permission.",
-            ));
-        }
-        let (uid, _) = self.account_identity(account).await?;
-        if !account.resource.0.contains(&format!("uid:{uid}:")) {
-            return Err(error(
-                "ACCOUNT_IDENTITY_MISMATCH",
-                "authorization",
-                "Trading authority differs from the enrolled Binance account.",
-            ));
-        }
+        // Approval binds the enrolled protected identity. Credentials, live
+        // account identity, balances and commission are checked when preparing
+        // each concrete step, including steps funded by earlier receipts.
         let market = self.trading_market(account, &input.symbol, false).await?;
         let sell = matches!(input.side, Side::Sell);
         let spec = boundaries::prepare_plan_scope(
@@ -399,34 +386,6 @@ impl BinanceProfile {
         }
         validate_filters(&market.metadata, &quantity, &price, &notional, false)?;
 
-        let commission = self
-            .call(
-                account,
-                BinanceRequest::new(BinanceEndpoint::SpotCommission).push("symbol", &input.symbol),
-                "authorization",
-            )
-            .await?;
-        let rate = commission_rate(&commission, &input.side, false)?;
-        let fee_basis = if sell { &notional } else { &quantity };
-        let estimated_output_fee = product(fee_basis, &rate)?;
-        let seed_output_fee = amount(&input.maximum_fees[output_asset])?;
-        if seed_output_fee.checked_cmp(&estimated_output_fee).is_lt() {
-            return Err(error(
-                "FEE_BOUND_TOO_LOW",
-                "authorization",
-                "The plan's initial spot fee cap does not cover the currently advertised commission rate.",
-            ));
-        }
-        if commission["discount"]["enabledForAccount"] == true
-            && commission["discount"]["enabledForSymbol"] == true
-            && (!scope_fee_caps.contains_key("BNB") || !input.maximum_fees.contains_key("BNB"))
-        {
-            return Err(error(
-                "FEE_ASSET_UNRESERVED",
-                "authorization",
-                "Binance BNB discounts are enabled; include a BNB fee bound in the plan scope.",
-            ));
-        }
         let fees: Vec<_> = scope_fee_caps.keys().map(|coin| asset(coin)).collect();
         let possible_credits = vec![fin_domain::financial_plans::FinancialPlanFundingIdentity {
             resource: account.resource.clone(),
@@ -1673,8 +1632,14 @@ impl BinanceProfile {
         state: &mut FinancialState,
         coverage: &mut Vec<String>,
         pending: &mut Vec<String>,
+        scope: &fin_domain::SnapshotScope,
     ) -> Result<(), FinError> {
-        for account in &self.config.accounts {
+        for account in self
+            .config
+            .accounts
+            .iter()
+            .filter(|account| self.snapshot_account_selected(account, scope))
+        {
             let permissions = self.permissions(account).await?;
             if permissions.enable_spot_and_margin_trading == Some(true) {
                 let open = self

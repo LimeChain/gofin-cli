@@ -266,6 +266,43 @@ Automatic token discovery is partial; candidates are verified against RPC and
 explicit token addresses remain available. EVM pricing keeps the existing
 CoinGecko native-ETH and exact network/contract token path.
 
+## Responsive approval and scoped reads
+
+Use account-specific reads for a selected action. Combined snapshots accept an
+optional scope of intersecting resources, networks and exact assets:
+
+```sh
+fin schema snapshot --json
+fin connections --json
+fin snapshot --input '{"networks":["ethereum:8453"]}' --json
+fin read fin.snapshot --input '{"networks":["ethereum:8453"]}' --json
+```
+
+`resources` uses protected physical resource IDs from connection discovery.
+Omitting scope retains the full configured snapshot. `complete`, `coverage` and
+`pending` describe the observed scope; related exposure and native fee balances
+remain included. Binance observes all holdings and exposure in selected accounts.
+Observer failures and timeouts retain successful observations and identify the
+missing observer/network. Missing evidence cannot satisfy a financial write.
+
+Read-only broker requests and independent observers run with bounded concurrency.
+Financial mutations, reconciliation and configuration reload retain ordering;
+installation-wide policy, reservations and unresolved journal records still apply.
+RPC reads have one 10-second deadline across retries and fallback. Required
+preparation and post-approval evidence collection have 30-second stage deadlines.
+Financial dispatch retains its immutable identity when the client stops waiting.
+
+For a coherent sequence, review a named plan before conversational approval,
+then invoke `fin plans authorize` immediately with its unchanged review hash.
+Plan review uses schema, protected scope and selected identity metadata; future
+balances, fees, deployment checks and simulation remain deferred until each step.
+A full portfolio snapshot is optional inspection and unnecessary between consent,
+Touch ID and submission. Prepare only the next eligible step and let Fin refresh
+its required quotes and state. Reconcile the original operation after interruption
+or an uncertain result before considering another action.
+
+See the [responsiveness checks and human verification steps](docs/testing/responsiveness.md).
+
 ## Bridge transfers
 
 Fin supports direct native ETH and dynamically verified exact ERC-20 Relay deposits

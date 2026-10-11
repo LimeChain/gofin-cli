@@ -140,6 +140,28 @@ or the requested token/route is unsupported, stop and report the route
 unavailable. Canonical support is limited to the native-ETH deposit routes
 described above. Use installed capabilities to discover any additional providers.
 
+Keep the interval between conversational approval and Fin authorization short.
+Use selected-account reads or `fin snapshot --input SCOPE_JSON --json` when you
+need a combined view. Discover `fin schema snapshot --json` first; scope accepts
+`resources`, `networks` and exact `assets` whose selectors intersect. For example,
+`fin snapshot --input '{"networks":["ethereum:8453"]}' --json` observes Base only.
+Use protected resource identities from `fin connections --json`, not wallet aliases,
+in `resources`. Coverage includes native fees and related exposure on selected
+accounts. Binance account endpoints retain account-wide holdings and exposure.
+Inspect `complete`, `coverage` and `pending`; a timeout or missing observer leaves
+partial evidence. Never infer a zero balance or authorize a write from missing data.
+
+A full portfolio snapshot is optional portfolio inspection. Do not put it between
+human consent and `fin plans authorize` or `fin execute`. Plan schema and scope
+review defers future balances, execution fees, deployment checks and simulations
+to the eligible step. Review may need bounded metadata reads for the selected
+token or market identity. Once the human approves the unchanged review, invoke
+authorization promptly with its review hash. Avoid another full snapshot or
+refreshing every later step. Prepare only the next eligible submission and let
+Fin refresh its selected state and quotes within approved bounds. A failed
+required read blocks that step; report its network and recover the original
+operation after any timeout instead of submitting under a new ID.
+
 Read venue-specific balances and positions before planning. Resolve exact accounts, wallet types, network IDs, token contracts, recipients, and allowances. Aave supplied underlying and its receipt token represent one position; borrowed proceeds and debt remain distinct.
 
 For Uniswap, read `uniswap.quote` with exact chain, assets, amount, protocol and
@@ -251,7 +273,7 @@ attempt. The template remains bound, and human review labels those fields as
 Fin-assigned instead of showing the template value as the venue ID.
 Plan authorization checks fresh Fin pricing for selected USD bounds, but does
 not check future balances, execution-time fees or transaction simulations.
-Before requesting plan approval, preview each feasible concrete operation with
+Before conversational approval, preview feasible concrete operations with
 `fin preview OPERATION --input INPUT_JSON --json` where supported. This can catch
 input formatting and fee-treatment issues. For bridge plans, obtain a fresh
 `bridge.quotes` result first and use its persisted parent and step IDs; plan

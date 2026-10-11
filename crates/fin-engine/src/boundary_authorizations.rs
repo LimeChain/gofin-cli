@@ -14,7 +14,13 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
-        let mut prepared = adapter.prepare(&request.operation, &request.input).await?;
+        let mut prepared = bounded_evidence(
+            &request.operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare(&request.operation, &request.input),
+        )
+        .await?;
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
@@ -167,7 +173,13 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
-        let mut prepared = adapter.prepare(&request.operation, &request.input).await?;
+        let mut prepared = bounded_evidence(
+            &request.operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare(&request.operation, &request.input),
+        )
+        .await?;
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
@@ -584,7 +596,13 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
-        let mut prepared = adapter.prepare(operation, input).await?;
+        let mut prepared = bounded_evidence(
+            operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare(operation, input),
+        )
+        .await?;
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, operation, Utc::now())?;

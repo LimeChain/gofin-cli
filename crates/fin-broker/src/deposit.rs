@@ -795,6 +795,11 @@ impl Adapter for BinanceEthereumDepositAdapter {
         identities
     }
 
+    fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
+        // Constituent account/wallet observers own financial coverage.
+        Vec::new()
+    }
+
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         Ok(StateSnapshot {
             state: FinancialState::default(),

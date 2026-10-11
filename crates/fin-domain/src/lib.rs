@@ -1107,6 +1107,31 @@ pub trait Adapter: Send + Sync {
             "Do not begin a scoped run without a reviewed complete baseline.",
         ))
     }
+    /// Capture only the requested financial scope. Implementations must retain
+    /// related exposure and report a bounded coverage scope; unsupported scoped
+    /// observers fail closed instead of silently querying the whole portfolio.
+    /// Actual financial observers, distinct from identities bound by a composite
+    /// write adapter that delegates observation to its constituent providers.
+    fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
+        self.authorization_identities()
+    }
+    /// Journal-only global observers contribute unresolved activity to every
+    /// scope without querying unrelated accounts or external networks.
+    fn snapshot_is_global(&self) -> bool {
+        false
+    }
+    async fn snapshot_scoped(&self, scope: &SnapshotScope) -> Result<StateSnapshot> {
+        if scope.is_full() || self.snapshot_is_global() {
+            self.snapshot().await
+        } else {
+            Err(FinError::new(
+                "SNAPSHOT_SCOPE_UNSUPPORTED",
+                "snapshot",
+                "This observer does not implement scoped financial snapshots.",
+                "Use an observer with scoped coverage or request a full snapshot explicitly.",
+            ))
+        }
+    }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value>;
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation>;
     /// Validate an adapter-produced recovery child against the exact durable
@@ -1321,6 +1346,43 @@ pub struct FinancialState {
     pub positions: Vec<PositionState>,
     pub authorities: Vec<AuthorityState>,
     pub in_flight: Vec<String>,
+}
+
+/// Optional financial read scope. Empty selectors preserve the full snapshot.
+/// Selectors intersect; asset selection never excludes related account exposure
+/// (for example collateral/debt or the native asset required for execution fees).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotScope {
+    #[serde(default)]
+    pub resources: Vec<ResourceId>,
+    #[serde(default)]
+    pub networks: Vec<String>,
+    #[serde(default)]
+    pub assets: Vec<AssetId>,
+}
+impl SnapshotScope {
+    pub fn is_full(&self) -> bool {
+        self.resources.is_empty() && self.networks.is_empty() && self.assets.is_empty()
+    }
+    pub fn matches_resource(&self, resource: &ResourceId) -> bool {
+        self.resources.is_empty() || self.resources.contains(resource)
+    }
+    pub fn matches_network(&self, network: &str) -> bool {
+        (self.networks.is_empty() || self.networks.iter().any(|n| n == network))
+            && (self.assets.is_empty() || self.assets.iter().any(|a| a.network == network))
+    }
+    pub fn matches_asset(&self, asset: &AssetId) -> bool {
+        self.matches_network(&asset.network)
+            && (self.assets.is_empty() || self.assets.contains(asset))
+    }
+    pub fn matches_connection(&self, connection: &ConnectionMetadata) -> bool {
+        self.matches_resource(&connection.resource)
+            && connection
+                .network
+                .as_deref()
+                .is_none_or(|n| self.matches_network(n))
+    }
 }
 
 /// Created by reviewed observers, never proof merely because a client sets `complete`.

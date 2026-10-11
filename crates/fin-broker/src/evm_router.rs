@@ -9,6 +9,200 @@ impl EvmNetworkRouter {
     pub fn new(adapters: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>) -> Self {
         Self { adapters }
     }
+    fn network_scope(&self, chain: u64, scope: &SnapshotScope) -> SnapshotScope {
+        let mut selected = scope.clone();
+        if !scope.resources.is_empty() {
+            selected.resources = self.adapters[&chain]
+                .connections()
+                .into_iter()
+                .filter(|connection| {
+                    scope.matches_resource(&connection.resource)
+                        || connection.address.as_ref().is_some_and(|address| {
+                            scope.resources.iter().any(|resource| {
+                                resource.0.eq_ignore_ascii_case(&format!(
+                                    "evm:{}",
+                                    address.to_ascii_lowercase()
+                                ))
+                            })
+                        })
+                })
+                .map(|connection| connection.resource)
+                .collect();
+        }
+        selected
+    }
+    async fn observe(
+        &self,
+        scope: &SnapshotScope,
+        deadline: Duration,
+    ) -> fin_domain::Result<StateSnapshot> {
+        let mut combined = StateSnapshot {
+            state: FinancialState::default(),
+            observed_at: now(),
+            complete: true,
+            coverage: vec![],
+            pending: vec![],
+        };
+        let permits = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut selected = BTreeMap::new();
+        for (&chain, adapter) in &self.adapters {
+            if !scope.matches_network(&format!("ethereum:{chain}")) {
+                continue;
+            }
+            let local_scope = self.network_scope(chain, scope);
+            if !scope.resources.is_empty() && local_scope.resources.is_empty() {
+                continue;
+            }
+            selected.insert(chain, local_scope.resources.clone());
+            let adapter = adapter.clone();
+            let permits = permits.clone();
+            tasks.spawn(async move {
+                // Queueing, retries and network capture share one deadline,
+                // shorter than CompositeObserver's enclosing read deadline.
+                let result = tokio::time::timeout(deadline, async {
+                    let _permit = permits.acquire().await.map_err(|_| internal_error())?;
+                    adapter.snapshot_scoped(&local_scope).await
+                }).await.unwrap_or_else(|_| Err(FinError::new(
+                    "SNAPSHOT_READ_TIMEOUT", "snapshot",
+                    format!("Ethereum network {chain} snapshot exceeded its read deadline."),
+                    "Inspect the network RPC and retry this read; incomplete evidence cannot authorize a write.",
+                )));
+                (chain, result)
+            });
+        }
+        let mut results = BTreeMap::new();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((chain, result)) => {
+                    results.insert(chain, result);
+                }
+                Err(_) => {
+                    combined.complete = false;
+                    combined
+                        .pending
+                        .push("evm:network-snapshot-task-failed".into());
+                }
+            }
+        }
+        let mut complete_resources = BTreeSet::new();
+        for &chain in selected.keys() {
+            match results.remove(&chain) {
+                Some(Ok(snapshot)) => {
+                    if snapshot.complete {
+                        complete_resources.extend(snapshot.coverage.iter().cloned());
+                    }
+                    combined.complete &= snapshot.complete;
+                    combined.coverage.extend(snapshot.coverage);
+                    combined.pending.extend(
+                        snapshot
+                            .pending
+                            .into_iter()
+                            .map(|reason| format!("ethereum:{chain}:{reason}")),
+                    );
+                    combined.state.holdings.extend(snapshot.state.holdings);
+                    combined.state.positions.extend(snapshot.state.positions);
+                    combined
+                        .state
+                        .authorities
+                        .extend(snapshot.state.authorities);
+                    combined.state.in_flight.extend(snapshot.state.in_flight);
+                }
+                failure => {
+                    combined.complete = false;
+                    let code = match failure {
+                        Some(Err(error)) => error.code,
+                        _ => "SNAPSHOT_TASK_FAILED".into(),
+                    };
+                    combined
+                        .pending
+                        .push(format!("observer:ethereum:{chain}:{code}"));
+                }
+            }
+        }
+        if selected.is_empty() {
+            combined.complete = false;
+            combined
+                .pending
+                .push("evm:scope-no-matching-network-wallet".into());
+        }
+        // Public reusable-wallet IDs denote the selected physical network
+        // resources. Never claim that alias covered if one capture is missing.
+        for connection in self.connections() {
+            let physical = self
+                .authorization_identities()
+                .into_iter()
+                .filter(|identity| {
+                    identity.address == connection.address
+                        && identity
+                            .network
+                            .as_ref()
+                            .is_some_and(|network| scope.matches_network(network))
+                        && (scope.resources.is_empty()
+                            || scope.matches_resource(&identity.resource)
+                            || scope.resources.iter().any(|resource| {
+                                resource.0.eq_ignore_ascii_case(&connection.resource.0)
+                            }))
+                })
+                .map(|identity| identity.resource.0)
+                .collect::<Vec<_>>();
+            if !physical.is_empty()
+                && physical
+                    .iter()
+                    .all(|resource| complete_resources.contains(resource))
+            {
+                let aliases = scope
+                    .resources
+                    .iter()
+                    .filter(|resource| resource.0.eq_ignore_ascii_case(&connection.resource.0))
+                    .map(|resource| resource.0.clone())
+                    .collect::<Vec<_>>();
+                if aliases.is_empty() {
+                    combined.coverage.push(connection.resource.0);
+                } else {
+                    combined.coverage.extend(aliases);
+                }
+            }
+        }
+        for resource in &scope.resources {
+            if !combined.coverage.contains(&resource.0) {
+                combined.complete = false;
+                combined
+                    .pending
+                    .push(format!("evm:scope-resource-not-covered:{}", resource.0));
+            }
+        }
+        for network in &scope.networks {
+            if !selected
+                .keys()
+                .any(|chain| network == &format!("ethereum:{chain}"))
+            {
+                combined.complete = false;
+                combined
+                    .pending
+                    .push(format!("evm:scope-network-not-covered:{network}"));
+            }
+        }
+        for asset in &scope.assets {
+            if !combined
+                .state
+                .holdings
+                .iter()
+                .any(|holding| holding.amount.asset == *asset)
+            {
+                combined.complete = false;
+                combined.pending.push(format!(
+                    "evm:scope-asset-not-covered:{}:{}:{}",
+                    asset.network, asset.reference, asset.decimals
+                ));
+            }
+        }
+        combined.coverage.sort();
+        combined.coverage.dedup();
+        combined.pending.sort();
+        combined.pending.dedup();
+        Ok(combined)
+    }
     fn route(&self, input: &Value) -> fin_domain::Result<&Arc<fin_ethereum::EthereumAdapter>> {
         input["chain_id"]
             .as_u64()
@@ -87,27 +281,11 @@ impl Adapter for EvmNetworkRouter {
             .collect()
     }
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
-        let mut combined = StateSnapshot {
-            state: FinancialState::default(),
-            observed_at: now(),
-            complete: true,
-            coverage: vec![],
-            pending: vec![],
-        };
-        for adapter in self.adapters.values() {
-            let snapshot = adapter.snapshot().await?;
-            combined.complete &= snapshot.complete;
-            combined.coverage.extend(snapshot.coverage);
-            combined.pending.extend(snapshot.pending);
-            combined.state.holdings.extend(snapshot.state.holdings);
-            combined.state.positions.extend(snapshot.state.positions);
-            combined
-                .state
-                .authorities
-                .extend(snapshot.state.authorities);
-            combined.state.in_flight.extend(snapshot.state.in_flight);
-        }
-        Ok(combined)
+        self.observe(&SnapshotScope::default(), Duration::from_secs(8))
+            .await
+    }
+    async fn snapshot_scoped(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
+        self.observe(scope, Duration::from_secs(8)).await
     }
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
         self.route(input)?.read(operation, input).await
@@ -193,6 +371,7 @@ impl Adapter for EvmNetworkRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     struct ReadRpc(u64);
     struct NoCredentialAccess;
     impl fin_exchange::ccxt::CredentialProvider for NoCredentialAccess {
@@ -435,5 +614,228 @@ mod tests {
         );
         prepared.input["chain_id"] = json!(4663);
         assert_eq!(router.prepared(&prepared).unwrap().config.chain_id, 4663);
+    }
+    struct SnapshotRpc {
+        chain: u64,
+        stalled: bool,
+        calls: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+    }
+    struct ActiveRead(Arc<AtomicUsize>);
+    impl Drop for ActiveRead {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    #[async_trait]
+    impl fin_evm::EvmRpc for SnapshotRpc {
+        async fn request(&self, method: &str, _: Value) -> fin_domain::Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.active.fetch_add(1, Ordering::SeqCst);
+            let _read = ActiveRead(self.active.clone());
+            if self.stalled {
+                return std::future::pending().await;
+            }
+            match method {
+                "eth_chainId" => Ok(json!(format!("{:#x}", self.chain))),
+                "eth_blockNumber" => Ok(json!("0x16")),
+                "eth_getBlockByNumber" => {
+                    Ok(json!({"number":"0x16","hash":format!("0x{:064x}", self.chain)}))
+                }
+                "eth_getBalance" => Ok(json!("0x7")),
+                "eth_getTransactionCount" => Ok(json!("0x0")),
+                _ => panic!("Unreviewed method in isolated router snapshot fixture: {method}"),
+            }
+        }
+    }
+    fn snapshot_router() -> (Arc<EvmNetworkRouter>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let slow_calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let adapters = [42161, 4663]
+            .into_iter()
+            .map(|chain| {
+                let rpc = SnapshotRpc {
+                    chain,
+                    stalled: chain == 4663,
+                    calls: if chain == 4663 {
+                        slow_calls.clone()
+                    } else {
+                        Arc::new(AtomicUsize::new(0))
+                    },
+                    active: active.clone(),
+                };
+                let adapter = fin_ethereum::EthereumAdapter::new(
+                    fin_ethereum::EthereumConfig::wallet_only(chain, 1, vec![]),
+                    vec![fin_ethereum::WalletConnection {
+                        name: "synthetic".into(),
+                        address: "0x1111111111111111111111111111111111111111".into(),
+                        signing_enabled: false,
+                    }],
+                    Arc::new(fin_evm::EvmRuntime::new(Arc::new(rpc), chain, None)),
+                )
+                .unwrap();
+                (chain, Arc::new(adapter))
+            })
+            .collect();
+        (
+            Arc::new(EvmNetworkRouter::new(adapters)),
+            slow_calls,
+            active,
+        )
+    }
+    struct NoApproval;
+    #[async_trait]
+    impl Authorizer for NoApproval {
+        async fn authorize(
+            &self,
+            _: &fin_domain::AuthorizationChallenge,
+        ) -> fin_domain::Result<fin_domain::ApprovalAudit> {
+            panic!("Snapshot tests must not request approval")
+        }
+    }
+    #[tokio::test]
+    async fn production_composed_router_scoped_snapshot_expands_grouped_wallet_without_unrelated_rpc()
+     {
+        let config = shared_config();
+        // Keep the protected composition's actual global bridge observer and
+        // public exchange profile. Inject only isolated RPC child adapters in
+        // the same concrete router registered by production composition.
+        let mut applications =
+            build_protected_applications(&config, Arc::new(NoCredentialAccess)).unwrap();
+        let (router, slow_calls, _) = snapshot_router();
+        for adapter in &mut applications.adapters {
+            if adapter
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == "wallet.balances")
+            {
+                *adapter = router.clone();
+            }
+        }
+        let runtime = compose_runtime(
+            config,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: applications.adapters,
+                authorizer: Arc::new(NoApproval),
+                valuator: applications.valuator,
+                bridge: applications.bridge,
+            },
+        )
+        .unwrap();
+        let grouped = router.connections()[0].resource.clone();
+        for resource in [
+            grouped.clone(),
+            ResourceId("ethereum:42161:0x1111111111111111111111111111111111111111".into()),
+        ] {
+            let before = std::time::Instant::now();
+            let result = runtime
+                .handle(BrokerRequest::Read {
+                    operation: "fin.snapshot".into(),
+                    input: json!({"resources":[resource],"networks":["ethereum:42161"]}),
+                })
+                .await;
+            assert!(result.ok, "{:?}", result.error);
+            let result = result.result.unwrap();
+            let snapshot: StateSnapshot = serde_json::from_value(result).unwrap();
+            assert!(snapshot.complete, "{:?}", snapshot.pending);
+            assert_eq!(snapshot.state.holdings.len(), 1);
+            assert_eq!(
+                snapshot.state.holdings[0].amount.asset.network,
+                "ethereum:42161"
+            );
+            assert!(snapshot.coverage.contains(&resource.0));
+            assert!(before.elapsed() < Duration::from_secs(1));
+        }
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
+        let unknown = router
+            .snapshot_scoped(&SnapshotScope {
+                resources: vec![ResourceId(
+                    "evm:0x9999999999999999999999999999999999999999".into(),
+                )],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!unknown.complete && unknown.state.holdings.is_empty());
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn router_partial_timeout_preserves_fast_network_and_aborts_stalled_network() {
+        let (router, slow_calls, active) = snapshot_router();
+        let started = std::time::Instant::now();
+        let snapshot = router
+            .observe(&SnapshotScope::default(), Duration::from_millis(30))
+            .await
+            .unwrap();
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.state.holdings.len(), 1);
+        assert_eq!(
+            snapshot.state.holdings[0].amount.asset.network,
+            "ethereum:42161"
+        );
+        assert!(
+            snapshot
+                .pending
+                .iter()
+                .any(|pending| pending == "observer:ethereum:4663:SNAPSHOT_READ_TIMEOUT")
+        );
+        assert!(
+            !snapshot
+                .coverage
+                .iter()
+                .any(|coverage| coverage.starts_with("evm:")),
+            "grouped coverage requires every selected physical network"
+        );
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Cancellation drops the router JoinSet, which aborts child readers.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), router.snapshot())
+                .await
+                .is_err()
+        );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn protected_composition_unknown_scope_is_partial_without_network_access() {
+        let config = shared_config();
+        let applications =
+            build_protected_applications(&config, Arc::new(NoCredentialAccess)).unwrap();
+        let runtime = compose_runtime(
+            config,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: applications.adapters,
+                authorizer: Arc::new(NoApproval),
+                valuator: applications.valuator,
+                bridge: applications.bridge,
+            },
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.handle(BrokerRequest::Read {
+                operation: "fin.snapshot".into(),
+                input: json!({"networks":["ethereum:999999"]}),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(result.ok, "{:?}", result.error);
+        let result = result.result.unwrap();
+        let snapshot: StateSnapshot = serde_json::from_value(result).unwrap();
+        assert!(!snapshot.complete);
+        assert!(
+            snapshot
+                .pending
+                .iter()
+                .any(|pending| pending.contains("network-not-covered"))
+        );
+        assert!(snapshot.state.holdings.is_empty());
     }
 }

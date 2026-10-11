@@ -404,25 +404,6 @@ fn v4_swap_fee_ppm(packed_protocol_fee: u32, lp_fee_ppm: u32, zero_for_one: bool
 }
 
 impl EthereumAdapter {
-    pub(crate) async fn v3_weth(&self, block: Option<u64>) -> Result<Address> {
-        let router = if let Some(uniswap) = &self.config.uniswap {
-            address(&uniswap.router)?
-        } else {
-            address(&self.ramses()?.router)?
-        };
-        self.runtime.code_at(router, block).await?;
-        let weth = self
-            .runtime
-            .call(router, &V3RouterInfo::WETH9Call {}, block)
-            .await?;
-        require(
-            weth != Address::ZERO,
-            "WETH_DEPLOYMENT_INVALID",
-            "Configured v3 router returned a zero WETH9 address.",
-        )?;
-        self.runtime.code_at(weth, block).await?;
-        Ok(weth)
-    }
     pub async fn token(&self, reference: &str, block: Option<u64>) -> Result<Token> {
         if reference == "native" {
             return Ok(Token {

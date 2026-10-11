@@ -402,13 +402,14 @@ impl Engine {
         let preview_attempt_id = Uuid::new_v4().to_string();
         let execution_input =
             plan_attempt_input(&record.revision, step_id, input, &preview_attempt_id)?;
-        let prepared = adapter
-            .prepare_with_context(
-                operation,
-                &execution_input,
-                &self.preparation_context(None)?,
-            )
-            .await?;
+        let context = self.preparation_context(None)?;
+        let prepared = bounded_evidence(
+            operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare_with_context(operation, &execution_input, &context),
+        )
+        .await?;
         self.validate_plan_candidate(
             &*adapter,
             &record.revision,
@@ -586,13 +587,14 @@ impl Engine {
         let execution_input = plan_attempt_input(&plan.revision, step_id, &request.input, &id)?;
         let mut execution_request = request.clone();
         execution_request.input = execution_input.clone();
-        let mut prepared = adapter
-            .prepare_with_context(
-                &request.operation,
-                &execution_input,
-                &self.preparation_context(None)?,
-            )
-            .await?;
+        let context = self.preparation_context(None)?;
+        let mut prepared = bounded_evidence(
+            &request.operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare_with_context(&request.operation, &execution_input, &context),
+        )
+        .await?;
         let required_origins = self.cost_origin_assets(&prepared, None)?;
         self.complete_cost_origin_prices(&mut prepared, &required_origins)
             .await?;
@@ -1174,13 +1176,17 @@ impl Engine {
                         "Set permitted_variations.mode to exact and declare step caps.",
                     ));
                 }
-                let permission = adapter
-                    .prepare_plan_permission(
+                let permission = bounded_evidence(
+                    &step.operation,
+                    "plan_review",
+                    PREFLIGHT_TIMEOUT,
+                    adapter.prepare_plan_permission(
                         &step.operation,
                         &step.input,
                         &step.permitted_variations,
-                    )
-                    .await?;
+                    ),
+                )
+                .await?;
                 if permission.spec.summary.trim().is_empty()
                     || permission.spec.fixed.is_null()
                     || permission.spec.parameters.is_null()

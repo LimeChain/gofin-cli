@@ -398,6 +398,7 @@ pub struct HttpRpc {
     expected_chain_id: u64,
     client: reqwest::Client,
     verified: Mutex<BTreeSet<String>>,
+    read_timeout: Duration,
 }
 
 struct RpcAttemptFailure {
@@ -405,6 +406,7 @@ struct RpcAttemptFailure {
     retryable: bool,
 }
 
+const RPC_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
 const READ_RETRY_DELAYS_MS: [u64; MAX_READ_RETRIES_PER_ENDPOINT] = [100, 250];
 const MAX_REVERT_DIAGNOSTIC_BYTES: usize = 4096;
@@ -607,7 +609,12 @@ impl HttpRpc {
             expected_chain_id,
             client,
             verified: Mutex::new(BTreeSet::new()),
+            read_timeout: RPC_READ_TIMEOUT,
         })
+    }
+    fn read_timeout_error(&self, method: &str) -> FinError {
+        error("RPC_READ_TIMEOUT", "rpc", "The selected network read exceeded its deadline; no evidence was accepted.")
+            .with_details(json!({"chain_id": self.expected_chain_id, "method": method, "timeout_ms": self.read_timeout.as_millis()}))
     }
     async fn at_once(
         &self,
@@ -818,48 +825,63 @@ impl EvmRpc for HttpRpc {
                 "This RPC method is outside the reviewed runtime.",
             ));
         }
-        let urls = if method == "eth_sendRawTransaction" {
-            &self.urls[..1]
-        } else {
-            &self.urls[..]
-        };
-        let historical_state_fallback = is_historical_state_read(method, &params);
-        let mut failure = error(
-            "RPC_UNAVAILABLE",
-            "rpc",
-            "No configured RPC returned a usable response.",
-        );
-        for url in urls {
-            match self.ensure_endpoint(url).await {
-                Ok(()) => (),
-                Err(e) if e.retryable => {
-                    failure = e.error;
-                    continue;
-                }
-                Err(e) => return Err(e.error),
-            }
-            let retries = if method == "eth_sendRawTransaction" {
-                0
+        // One deadline covers identity checks, retries and endpoint fallback.
+        // Never cancel financial dispatch: its original identity must survive
+        // an uncertain transport result.
+        let attempt = async {
+            let urls = if method == "eth_sendRawTransaction" {
+                &self.urls[..1]
             } else {
-                MAX_READ_RETRIES_PER_ENDPOINT
+                &self.urls[..]
             };
-            match self
-                .at(
-                    url,
-                    method,
-                    params.clone(),
-                    retries,
-                    historical_state_fallback,
-                )
-                .await
-            {
-                Ok(value) => return Ok(value),
-                Err(e) if e.retryable => failure = e.error,
-                Err(e) => return Err(e.error),
+            let historical_state_fallback = is_historical_state_read(method, &params);
+            let mut failure = error(
+                "RPC_UNAVAILABLE",
+                "rpc",
+                "No configured RPC returned a usable response.",
+            );
+            for url in urls {
+                match tokio::time::timeout(self.read_timeout, self.ensure_endpoint(url))
+                    .await
+                    .map_err(|_| self.read_timeout_error("eth_chainId"))?
+                {
+                    Ok(()) => (),
+                    Err(e) if e.retryable => {
+                        failure = e.error;
+                        continue;
+                    }
+                    Err(e) => return Err(e.error),
+                }
+                let retries = if method == "eth_sendRawTransaction" {
+                    0
+                } else {
+                    MAX_READ_RETRIES_PER_ENDPOINT
+                };
+                match self
+                    .at(
+                        url,
+                        method,
+                        params.clone(),
+                        retries,
+                        historical_state_fallback,
+                    )
+                    .await
+                {
+                    Ok(value) => return Ok(value),
+                    Err(e) if e.retryable => failure = e.error,
+                    Err(e) => return Err(e.error),
+                }
             }
+            // Financial dispatch never advances to a second endpoint after an uncertain result.
+            Err(failure)
+        };
+        if method == "eth_sendRawTransaction" {
+            attempt.await
+        } else {
+            tokio::time::timeout(self.read_timeout, attempt)
+                .await
+                .map_err(|_| self.read_timeout_error(method))?
         }
-        // Financial dispatch never advances to a second endpoint after an uncertain result.
-        Err(failure)
     }
 }
 
@@ -2522,6 +2544,7 @@ mod http_rpc_tests {
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
             verified: rpc.verified,
+            read_timeout: rpc.read_timeout,
         };
         (rpc, first_worker, second_worker)
     }
@@ -2576,8 +2599,39 @@ mod http_rpc_tests {
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
             verified: rpc.verified,
+            read_timeout: rpc.read_timeout,
         };
         (rpc, first_worker, second_worker)
+    }
+
+    #[tokio::test]
+    async fn read_deadline_covers_identity_retries_and_identifies_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let request: Value = serde_json::from_slice(&request).unwrap();
+            assert_eq!(request["method"], "eth_chainId");
+            // Never respond: even initial endpoint identity is bounded.
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let mut rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
+        rpc.read_timeout = Duration::from_millis(25);
+        let started = std::time::Instant::now();
+        let failure = rpc
+            .request("eth_getBalance", json!(["0x0", "latest"]))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "RPC_READ_TIMEOUT");
+        assert_eq!(failure.details.as_deref().unwrap()["chain_id"], 1);
+        assert!(started.elapsed() < Duration::from_millis(90));
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains(&address.to_string())
+        );
+        worker.join().unwrap();
     }
 
     #[tokio::test]

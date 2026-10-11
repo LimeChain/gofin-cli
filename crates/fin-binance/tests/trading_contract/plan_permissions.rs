@@ -6,6 +6,67 @@ use fin_domain::financial_plans::{
 use fin_domain::{Adapter, Amount, AssetId, CostBound, CostTreatment, ResourceAmount};
 
 struct NoPriceProvider(AtomicUsize);
+struct SlowPlanVenue(Arc<Venue>);
+#[async_trait]
+impl BinanceTransport for SlowPlanVenue {
+    async fn request(
+        &self,
+        credential: &CredentialHandle,
+        request: BinanceRequest,
+    ) -> Result<Value, TransportError> {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        self.0.request(credential, request).await
+    }
+}
+
+#[tokio::test]
+async fn plan_permission_latency_fixture() {
+    let venue = Venue::new(vec![]);
+    let adapter = BinanceAdapter::new(
+        config(),
+        Arc::new(SlowPlanVenue(venue.clone())),
+        Some(prices()),
+        None,
+    )
+    .unwrap();
+    let start = std::time::Instant::now();
+    adapter
+        .prepare_plan_permission(
+            "binance.spot.order-place",
+            &input("SYNTHETIC-latency", "BUY", false),
+            &variations("BUY"),
+        )
+        .await
+        .unwrap();
+    eprintln!(
+        "synthetic plan permission dispatch: {} ms; {} external identity/state reads",
+        start.elapsed().as_millis(),
+        venue.seen.lock().unwrap().len()
+    );
+    assert_eq!(venue.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn plan_defers_live_commission_checks_but_execution_fails_closed() {
+    let venue = Venue::new(vec![]);
+    let adapter = adapter(venue.clone(), prices());
+    let mut raw = input("SYNTHETIC-deferred-commission", "BUY", false);
+    raw["maximum_fees"]["ETH"] = json!("0.000001");
+    adapter
+        .prepare_plan_permission("binance.spot.order-place", &raw, &variations("BUY"))
+        .await
+        .unwrap();
+    assert_eq!(venue.seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        adapter
+            .prepare("binance.spot.order-place", &raw)
+            .await
+            .unwrap_err()
+            .code,
+        "FEE_BOUND_TOO_LOW"
+    );
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+}
 #[async_trait]
 impl BinancePriceProvider for NoPriceProvider {
     async fn quote_usd(&self, _coin: &str) -> fin_domain::Result<PriceQuote> {
@@ -37,7 +98,7 @@ fn variations(side: &str) -> Value {
 }
 
 #[tokio::test]
-async fn spot_plan_permissions_validate_metadata_without_requiring_balances_or_quotes() {
+async fn spot_plan_permissions_validate_metadata_without_requiring_live_account_or_quotes() {
     for (side, expected_credit) in [("BUY", "ETH"), ("SELL", "USDT")] {
         let venue = Venue::new(vec![]);
         let no_prices = Arc::new(NoPriceProvider(AtomicUsize::new(0)));
@@ -82,22 +143,22 @@ async fn spot_plan_permissions_validate_metadata_without_requiring_balances_or_q
             .iter()
             .map(|request| request.endpoint)
             .collect();
-        assert!(endpoints.contains(&E::ApiRestrictions));
-        assert!(endpoints.contains(&E::Account)); // identity only; no free amount is checked
+        assert!(!endpoints.contains(&E::ApiRestrictions));
+        assert!(!endpoints.contains(&E::Account));
         assert!(endpoints.contains(&E::SpotExchangeInfo));
-        assert!(endpoints.contains(&E::SpotCommission));
+        assert!(!endpoints.contains(&E::SpotCommission));
         assert!(!endpoints.contains(&E::SpotPlaceOrder));
     }
 }
 
 #[tokio::test]
-async fn spot_plan_permission_rejects_seed_identity_variation_and_insufficient_fee_cap() {
+async fn spot_plan_permission_rejects_seed_identity_variation_and_out_of_scope_fee_cap() {
     let mut wrong_account = input("SYNTHETIC-plan-wrong-account", "BUY", false);
     wrong_account["account"] = json!("unknown-account");
     let mut wrong_time = input("SYNTHETIC-plan-wrong-time", "BUY", false);
     wrong_time["time_in_force"] = json!("FOK");
     let mut too_low_fee = input("SYNTHETIC-plan-too-low-fee", "BUY", false);
-    too_low_fee["maximum_fees"]["ETH"] = json!("0.000001");
+    too_low_fee["maximum_fees"]["ETH"] = json!("0.000051");
     let cases: Vec<(Value, Value)> = vec![
         (wrong_account, variations("BUY")),
         (

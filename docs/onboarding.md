@@ -469,3 +469,17 @@ reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
 Touch ID. Live-test $100 and restoration instructions remain in the testing guide.
 See [limit and reload behavior](../README.md#financial-limits).
+
+## Approval responsiveness
+
+Agents review the plan and selected account state before conversational consent,
+then invoke authorization with the unchanged review hash promptly. Full portfolio
+snapshots remain optional inspection. `snapshot --input` and `read fin.snapshot`
+accept intersecting resource, network and exact-asset selectors and report
+`complete`, `coverage` and `pending`. Partial observations cannot establish the
+required evidence for a write. Fin prepares and refreshes only the next selected
+step while enforcing installation-wide policy and reservations. Selected token
+or market metadata may be read during permission review; future-funded balances,
+fees, deployment checks and simulations remain deferred to execution.
+
+See [the latency and human verification recipe](testing/responsiveness.md).

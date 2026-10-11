@@ -415,7 +415,7 @@ identity and application-specific history still need verification before typed
 financial effects settle. A crash before receipt persistence leaves unknown
 authority; a matching amount/time alone cannot recover a lost transaction ID.
 
-Begin with one serialized broker write/settlement queue; bounded concurrent reads are useful. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
+The broker keeps one serialized mutation/settlement queue and bounded concurrent read requests. Snapshot observers run concurrently with a 10-second evidence deadline and report partial coverage. Required preparation/revalidation have 30-second deadlines; RPC reads share a 10-second budget across identity, retries and fallback. The financial submission future is never cancelled by an evidence timeout. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
 
 Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Keep a read-only migration/parity path for TS records where required by the implementation goal.
 

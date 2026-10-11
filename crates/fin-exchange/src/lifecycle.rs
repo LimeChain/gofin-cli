@@ -91,6 +91,20 @@ pub trait ExchangeProfile: Send + Sync {
             "This exchange profile has no complete financial observer.",
         ))
     }
+    async fn snapshot_scoped(
+        &self,
+        scope: &fin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot, FinError> {
+        if scope.is_full() {
+            self.snapshot().await
+        } else {
+            Err(error(
+                "SNAPSHOT_SCOPE_UNSUPPORTED",
+                "snapshot",
+                "This exchange profile has no scoped financial observer.",
+            ))
+        }
+    }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value, FinError>;
     async fn prepare(
         &self,
@@ -305,8 +319,19 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<(), FinError> {
         self.profile.validate_boundary_candidate(spec, prepared)
     }
+    fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
+        // Routing destinations belong to authorization, not venue observation.
+        self.profile.connections()
+    }
+
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         self.profile.snapshot().await
+    }
+    async fn snapshot_scoped(
+        &self,
+        scope: &fin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot, FinError> {
+        self.profile.snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value, FinError> {
         self.require_kind(operation, OperationKind::Read, "read")?;

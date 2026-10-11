@@ -91,6 +91,86 @@ impl EthereumAdapter {
     pub async fn read_snapshot(&self) -> Result<StateSnapshot> {
         self.capture_snapshot(SNAPSHOT_CONCURRENCY).await
     }
+    pub async fn read_snapshot_scoped(
+        &self,
+        scope: &fin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot> {
+        if scope.is_full() {
+            return self.read_snapshot().await;
+        }
+        let network = format!("ethereum:{}", self.config.chain_id);
+        let mut wallets = Vec::new();
+        for wallet in &self.wallets {
+            if scope.matches_network(&network)
+                && scope
+                    .matches_resource(&resource(self.config.chain_id, address(&wallet.address)?))
+            {
+                wallets.push(wallet.clone());
+            }
+        }
+        if wallets.is_empty() {
+            return Ok(StateSnapshot {
+                state: FinancialState::default(),
+                observed_at: now(),
+                complete: false,
+                coverage: Vec::new(),
+                pending: vec![format!(
+                    "{network}: no wallet matches the requested snapshot scope"
+                )],
+            });
+        }
+        let mut config = self.config.clone();
+        if !scope.assets.is_empty() {
+            config.snapshot_tokens = scope
+                .assets
+                .iter()
+                .filter(|asset| asset.network == network && asset.reference != "native")
+                .map(|asset| asset.reference.clone())
+                .collect();
+            config.snapshot_tokens.sort();
+            config.snapshot_tokens.dedup();
+        }
+        let scoped = Self {
+            config,
+            wallets,
+            runtime: self.runtime.clone(),
+            oracle_clock: self.oracle_clock.clone(),
+            wallet_valuation: self.wallet_valuation.clone(),
+            token_discovery: self.token_discovery.clone(),
+        };
+        let mut snapshot = scoped.read_snapshot().await?;
+        // Keep every Aave reserve for the selected wallet: collateral and debt
+        // outside the requested token can determine the safety of an action.
+        for wallet in &scoped.wallets {
+            snapshot.coverage.push(format!(
+                "scoped-assets:{}:native{};related-aave-exposure={}",
+                resource(self.config.chain_id, address(&wallet.address)?).0,
+                scoped
+                    .config
+                    .snapshot_tokens
+                    .iter()
+                    .map(|token| format!(",{token}"))
+                    .collect::<String>(),
+                scoped.config.aave.is_some()
+            ));
+        }
+        for asset in &scope.assets {
+            if asset.network == network
+                && !snapshot
+                    .state
+                    .holdings
+                    .iter()
+                    .any(|holding| holding.amount.asset == *asset)
+            {
+                snapshot.complete = false;
+                snapshot.pending.push(format!(
+                    "{network}: requested asset identity was not observed: {} ({} decimals)",
+                    asset.reference, asset.decimals
+                ));
+            }
+        }
+        Ok(snapshot)
+    }
     // Limit is private and fixed in production; one-worker tests compare the
     // exact same complete capture with the concurrent implementation.
     pub(crate) async fn capture_snapshot(&self, limit: usize) -> Result<StateSnapshot> {

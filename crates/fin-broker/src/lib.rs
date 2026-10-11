@@ -29,7 +29,7 @@ use fin_authorization::{MacOsAuthorizer, validate_installation, validate_metadat
 use fin_domain::{
     Adapter, Amount, AssetId, AssetPrice, Authorizer, Definition, ExecutionActor, FinError,
     FinancialState, OperationKind, OperationRecord, PreparedOperation, Reconciliation, ResourceId,
-    StateSnapshot, Submission, SubmissionJournal, now,
+    SnapshotScope, StateSnapshot, Submission, SubmissionJournal, now,
 };
 use fin_engine::{Engine, EngineOptions};
 #[cfg(test)]
@@ -56,6 +56,8 @@ use std::{
 use tokio::{
     io::{AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
+    sync::{Mutex as AsyncMutex, RwLock, Semaphore},
+    task::JoinSet,
 };
 
 pub const CONFIG_PATH: &str = "/Library/Fin/private/config.json";
@@ -66,6 +68,10 @@ pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_READ_OBSERVERS: usize = 4;
+pub const MAX_BROKER_CONNECTIONS: usize = 16;
 
 fn error(code: &str, stage: &str, message: &str, action: &str) -> FinError {
     FinError::new(code, stage, message, action)
@@ -599,16 +605,16 @@ pub fn operation_definitions() -> Vec<Definition> {
 fn snapshot_definition() -> Definition {
     Definition {
         name: "fin.snapshot".into(),
-        description: "Capture a broker-combined financial snapshot for every configured resource and unresolved journal identity.".into(),
+        description: "Capture a scoped or full broker-combined financial snapshot and installation-wide unresolved journal identities.".into(),
         kind: OperationKind::Read,
         execution_actor: ExecutionActor::AgentReadable,
-        input_schema: json!({"type":"object","additionalProperties":false}),
-        output_schema: json!({"type":"object","required":["state","observed_at","complete","coverage","pending"]}),
+        input_schema: serde_json::to_value(schemars::schema_for!(SnapshotScope)).expect("snapshot scope schema"),
+        output_schema: serde_json::to_value(schemars::schema_for!(StateSnapshot)).expect("snapshot output schema"),
         error_schema: json!({"$ref":"FinError"}),
         examples: vec![json!({"input":{}})],
-        coverage: "Combined snapshots from all configured reviewed adapters and nonterminal durable operations.".into(),
-        completion: "complete is true only when all observers completed and the operation journal has no unresolved records.".into(),
-        semantics: json!({"clientSuppliedState":false,"scope":"all-configured-resources","pendingJournalIncluded":true}),
+        coverage: "Selected tracked resources and related exposure from reviewed adapters, plus installation-wide nonterminal financial operations.".into(),
+        completion: "complete covers only the selected tracked scope, and is false for failed/timed-out observers, unsupported scope, missing coverage or unresolved financial journal records.".into(),
+        semantics: json!({"clientSuppliedState":false,"scope":"optional-intersecting-resources-networks-assets","emptyScope":"all-configured-resources","relatedExposureIncluded":true,"pendingJournalIncluded":"installation-wide","observerTimeoutSeconds":10,"observerConcurrency":4}),
     }
 }
 
@@ -1479,6 +1485,18 @@ pub struct RuntimeDependencies {
     pub bridge: Option<Arc<BridgeAdapter>>,
 }
 
+fn concurrent_read_request(request: &BrokerRequest) -> bool {
+    matches!(
+        request,
+        BrokerRequest::Capabilities
+            | BrokerRequest::Connections
+            | BrokerRequest::PolicyShow
+            | BrokerRequest::Doctor
+            | BrokerRequest::Operations
+            | BrokerRequest::Snapshot
+    ) || matches!(request, BrokerRequest::Read { operation, .. } if !matches!(operation.as_str(), "bridge.quotes" | "bridge.status" | "bridge.recovery"))
+}
+
 pub struct BrokerRuntime {
     pub engine: Arc<Engine>,
     config: Arc<BrokerConfigV2>,
@@ -1491,6 +1509,9 @@ pub struct BrokerRuntime {
     account_identity_check_pending: AtomicBool,
     daemon_marker_path: Mutex<PathBuf>,
     daemon_marker_owner_uid: u32,
+    mutation_gate: AsyncMutex<()>,
+    verified_account_names: Mutex<BTreeSet<String>>,
+    account_identity_gates: BTreeMap<String, AsyncMutex<()>>,
 }
 
 struct ValuatorPriceProvider {
@@ -1556,6 +1577,17 @@ pub fn compose_runtime(
         bridge.attach_engine(Arc::downgrade(&engine))?;
     }
     observer.attach(Arc::downgrade(&engine));
+    let account_identity_gates = config
+        .connections
+        .iter()
+        .filter_map(|connection| {
+            if let ConnectionConfig::Binance { name, .. } = connection {
+                Some((name.clone(), AsyncMutex::new(())))
+            } else {
+                None
+            }
+        })
+        .collect();
     Ok(Arc::new(BrokerRuntime {
         engine,
         config: Arc::new(config),
@@ -1568,6 +1600,9 @@ pub fn compose_runtime(
         account_identity_check_pending: AtomicBool::new(false),
         daemon_marker_path: Mutex::new(PathBuf::from(fin_protocol::daemon::STOP_MARKER_PATH)),
         daemon_marker_owner_uid: unsafe { libc::geteuid() },
+        mutation_gate: AsyncMutex::new(()),
+        verified_account_names: Mutex::new(BTreeSet::new()),
+        account_identity_gates,
     }))
 }
 
@@ -1606,18 +1641,91 @@ impl BrokerRuntime {
     /// Gate account operations on verified venue identity. Local discovery and
     /// recovery inventory remain available while a venue is unavailable.
     pub fn require_account_identity_verification(&self) {
+        if let Ok(mut verified) = self.verified_account_names.lock() {
+            verified.clear();
+        }
         self.account_identity_check_pending
             .store(true, Ordering::SeqCst);
     }
 
-    async fn verify_account_identities(&self) -> fin_domain::Result<()> {
+    async fn verify_account_identities(&self, request: &BrokerRequest) -> fin_domain::Result<()> {
         if !self.account_identity_check_pending.load(Ordering::SeqCst) {
             return Ok(());
         }
-        for connection in &self.config.connections {
-            let ConnectionConfig::Binance { name, .. } = connection else {
+        use BrokerRequest as R;
+        let (operation, input) = match request {
+            R::Read { operation, input }
+            | R::Preview { operation, input }
+            | R::PreviewBoundary {
+                operation, input, ..
+            }
+            | R::PreviewPlanStep {
+                operation, input, ..
+            } => (operation, input),
+            R::Execute { request }
+            | R::ExecuteBoundary { request, .. }
+            | R::ExecutePlanStep { request, .. }
+            | R::ReplacePlanCandidate { request, .. }
+            | R::ReplaceBoundaryCandidate { request, .. } => (&request.operation, &request.input),
+            R::AuthorizeBoundary { request } | R::PreviewBoundaryAuthorization { request } => {
+                (&request.operation, &request.input)
+            }
+            // Snapshot observers verify their own identities and report partial
+            // evidence. Static plan review binds protected identities without IO.
+            _ => return Ok(()),
+        };
+        if !operation.starts_with("binance.") {
+            return Ok(());
+        }
+        fn contains_identity(value: &Value, name: &str, resource: &str) -> bool {
+            match value {
+                Value::String(value) => value == name || value == resource,
+                Value::Array(values) => values.iter().any(|v| contains_identity(v, name, resource)),
+                Value::Object(values) => values
+                    .values()
+                    .any(|v| contains_identity(v, name, resource)),
+                _ => false,
+            }
+        }
+        let accounts = self
+            .config
+            .connections
+            .iter()
+            .filter_map(|connection| {
+                if let ConnectionConfig::Binance { name, resource, .. } = connection {
+                    Some((name, resource))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let selected = accounts
+            .iter()
+            .filter(|(name, resource)| contains_identity(input, name, &resource.0))
+            .copied()
+            .collect::<Vec<_>>();
+        // Malformed/unknown Binance input remains fail-closed until normal
+        // schema/account resolution rejects it; never infer another account.
+        let selected = if selected.is_empty() {
+            &accounts
+        } else {
+            &selected
+        };
+        for (name, _) in selected {
+            let _identity_guard = self
+                .account_identity_gates
+                .get(*name)
+                .ok_or_else(internal_error)?
+                .lock()
+                .await;
+            if self
+                .verified_account_names
+                .lock()
+                .map_err(|_| internal_error())?
+                .contains(*name)
+            {
                 continue;
-            };
+            }
             let adapter = self
                 .adapters
                 .iter()
@@ -1635,12 +1743,34 @@ impl BrokerRuntime {
                         "Upgrade the protected adapter and restart.",
                     )
                 })?;
-            adapter
-                .read("binance.account-identity", &json!({"account":name}))
-                .await?;
+            tokio::time::timeout(
+                OBSERVER_READ_TIMEOUT,
+                adapter.read("binance.account-identity", &json!({"account":name})),
+            )
+            .await
+            .map_err(|_| {
+                error(
+                    "ACCOUNT_IDENTITY_TIMEOUT",
+                    "read",
+                    "The selected Binance account identity check exceeded its deadline.",
+                    "Retry after account connectivity recovers; no financial action was submitted.",
+                )
+            })??;
+            self.verified_account_names
+                .lock()
+                .map_err(|_| internal_error())?
+                .insert((*name).clone());
         }
-        self.account_identity_check_pending
-            .store(false, Ordering::SeqCst);
+        // Cache only this immutable runtime's identities. Reload creates a new
+        // cache, and every requested account is checked before its first use.
+        let verified = self
+            .verified_account_names
+            .lock()
+            .map_err(|_| internal_error())?;
+        if accounts.iter().all(|(name, _)| verified.contains(*name)) {
+            self.account_identity_check_pending
+                .store(false, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -1649,7 +1779,25 @@ impl BrokerRuntime {
     }
 
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
-        match self.handle_result(request).await {
+        // Read concurrency grants no execution authority. Reconciliation,
+        // grants, revocation, previews and submission remain globally ordered.
+        let _mutation_guard = if concurrent_read_request(&request) {
+            None
+        } else {
+            Some(self.mutation_gate.lock().await)
+        };
+        let result = if concurrent_read_request(&request) {
+            tokio::time::timeout(BROKER_READ_TIMEOUT, self.handle_result(request))
+                .await
+                .unwrap_or_else(|_| Err(error(
+                    "BROKER_READ_TIMEOUT", "read", "The read exceeded its bounded deadline.",
+                    "Retry a narrower read; incomplete or timed-out evidence cannot authorize a write.",
+                )))
+        } else {
+            // Never cancel a financial dispatch or reconciliation on a read deadline.
+            self.handle_result(request).await
+        };
+        match result {
             Ok(mut value) => {
                 public_submission::redact_public_payload(&mut value);
                 BrokerResponse::success(value)
@@ -1676,6 +1824,14 @@ impl BrokerRuntime {
                 ));
             }
         }
+        if !self.accepting.load(Ordering::SeqCst) && !lifecycle_request {
+            return Err(error(
+                "DAEMON_STOPPED",
+                "daemon",
+                "The broker is stopping.",
+                "Start Fin before dispatching another request; inspect durable operations before retrying writes.",
+            ));
+        }
         // Local management stays available during venue outages. All account
         // operations retain the identity gate that previously blocked startup.
         let local_management = matches!(
@@ -1696,7 +1852,7 @@ impl BrokerRuntime {
         let public_market_read = matches!(&request, R::Read { operation, .. }
             if matches!(operation.as_str(), "exchange.order-book" | "exchange.markets" | "exchange.ticker"));
         if !local_management && !public_market_read {
-            self.verify_account_identities().await?;
+            self.verify_account_identities(&request).await?;
         }
         match request {
             R::Capabilities => Ok(
@@ -2238,27 +2394,61 @@ impl CompositeObserver {
     }
 }
 
-#[async_trait]
-impl Adapter for CompositeObserver {
-    fn definitions(&self) -> Vec<Definition> {
-        vec![snapshot_definition()]
-    }
-
-    fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
-        self.adapters
+fn snapshot_connection_matches(
+    scope: &SnapshotScope,
+    connection: &fin_domain::ConnectionMetadata,
+) -> bool {
+    let related_binance = connection.provider == "binance"
+        && scope
+            .resources
             .iter()
-            .flat_map(|adapter| adapter.connections())
-            .collect()
-    }
+            .any(|resource| resource.0 == format!("{}:USD_M", connection.resource.0));
+    let grouped_evm = matches!(connection.provider.as_str(), "evm" | "ethereum")
+        && connection
+            .network
+            .as_deref()
+            .is_some_and(|network| scope.matches_network(network))
+        && connection.address.as_deref().is_some_and(|address| {
+            scope
+                .resources
+                .iter()
+                .any(|resource| resource.0.eq_ignore_ascii_case(&format!("evm:{address}")))
+        });
+    (scope.matches_connection(connection) || related_binance || grouped_evm)
+        && (connection.provider != "binance" || scope.matches_network("binance"))
+}
 
-    fn authorization_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
-        self.adapters
-            .iter()
-            .flat_map(|adapter| adapter.authorization_identities())
-            .collect()
+fn observer_label(adapter: &dyn Adapter, scope: &SnapshotScope) -> String {
+    let mut identities = adapter
+        .snapshot_identities()
+        .into_iter()
+        .filter(|connection| scope.is_full() || snapshot_connection_matches(scope, connection))
+        .map(|connection| {
+            format!(
+                "{}@{}",
+                connection.resource.0,
+                connection.network.unwrap_or(connection.provider)
+            )
+        })
+        .collect::<Vec<_>>();
+    identities.sort();
+    identities.dedup();
+    if identities.is_empty() {
+        identities = adapter
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
     }
+    identities.join(",")
+}
 
-    async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+impl CompositeObserver {
+    async fn observe(
+        &self,
+        scope: &SnapshotScope,
+        timeout: Duration,
+    ) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
             observed_at: now(),
@@ -2266,8 +2456,81 @@ impl Adapter for CompositeObserver {
             coverage: vec![],
             pending: vec![],
         };
-        for adapter in &self.adapters {
-            match adapter.snapshot().await {
+        let selected = self
+            .adapters
+            .iter()
+            .filter(|adapter| {
+                scope.is_full()
+                    || adapter.snapshot_is_global()
+                    || adapter
+                        .snapshot_identities()
+                        .iter()
+                        .any(|connection| snapshot_connection_matches(scope, connection))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !scope.is_full() {
+            combined.coverage.push(format!(
+                "requested-scope:{}",
+                serde_json::to_string(scope).map_err(|_| internal_error())?
+            ));
+            if selected.is_empty() {
+                combined.complete = false;
+                combined.pending.push("scope:no-matching-observer".into());
+            }
+        }
+        let selected_networks = selected
+            .iter()
+            .flat_map(|adapter| adapter.snapshot_identities())
+            .filter(|connection| snapshot_connection_matches(scope, connection))
+            .filter_map(|connection| {
+                connection
+                    .network
+                    .or_else(|| (connection.provider == "binance").then_some("binance".into()))
+            })
+            .collect::<BTreeSet<_>>();
+        for network in scope
+            .networks
+            .iter()
+            .chain(scope.assets.iter().map(|asset| &asset.network))
+        {
+            if !selected_networks.contains(network) {
+                combined.complete = false;
+                combined
+                    .pending
+                    .push(format!("scope:network-not-covered:{network}"));
+            }
+        }
+        let slots = Arc::new(Semaphore::new(MAX_READ_OBSERVERS));
+        let mut observers = JoinSet::new();
+        for (index, adapter) in selected.into_iter().enumerate() {
+            let scope = scope.clone();
+            let slots = slots.clone();
+            observers.spawn(async move {
+                let label = observer_label(adapter.as_ref(), &scope);
+                let result = tokio::time::timeout(timeout, async {
+                    let _slot = slots.acquire_owned().await.expect("observer slots stay open");
+                    adapter.snapshot_scoped(&scope).await
+                }).await.unwrap_or_else(|_| Err(error("OBSERVER_READ_TIMEOUT", "snapshot",
+                        "The selected snapshot observer exceeded its read deadline.",
+                        "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.")));
+                (index, label, result)
+            });
+        }
+        let mut results = Vec::new();
+        while let Some(result) = observers.join_next().await {
+            match result {
+                Ok(result) => results.push(result),
+                Err(_) => {
+                    combined.complete = false;
+                    combined.pending.push("observer:task-failed".into());
+                }
+            }
+        }
+        // Preserve stable state ordering independently of RPC completion order.
+        results.sort_by_key(|(index, _, _)| *index);
+        for (_, label, result) in results {
+            match result {
                 Ok(snapshot) => {
                     combined.complete &= snapshot.complete;
                     combined.coverage.extend(snapshot.coverage);
@@ -2282,8 +2545,32 @@ impl Adapter for CompositeObserver {
                 }
                 Err(error) => {
                     combined.complete = false;
-                    combined.pending.push(format!("observer:{}", error.code));
+                    combined
+                        .pending
+                        .push(format!("observer:{label}:{}", error.code));
                 }
+            }
+        }
+        for resource in &scope.resources {
+            if !combined.coverage.contains(&resource.0) {
+                combined.complete = false;
+                combined
+                    .pending
+                    .push(format!("scope:resource-not-covered:{}", resource.0));
+            }
+        }
+        for asset in &scope.assets {
+            if !combined
+                .state
+                .holdings
+                .iter()
+                .any(|holding| holding.amount.asset == *asset)
+            {
+                combined.complete = false;
+                combined.pending.push(format!(
+                    "scope:asset-not-covered:{}:{}:{}",
+                    asset.network, asset.reference, asset.decimals
+                ));
             }
         }
         if let Some(engine) = self
@@ -2328,14 +2615,47 @@ impl Adapter for CompositeObserver {
         combined.pending.dedup();
         Ok(combined)
     }
+}
 
-    async fn read(&self, operation: &str, _input: &Value) -> fin_domain::Result<Value> {
+#[async_trait]
+impl Adapter for CompositeObserver {
+    fn definitions(&self) -> Vec<Definition> {
+        vec![snapshot_definition()]
+    }
+
+    fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        self.adapters
+            .iter()
+            .flat_map(|adapter| adapter.connections())
+            .collect()
+    }
+
+    fn authorization_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+        self.adapters
+            .iter()
+            .flat_map(|adapter| adapter.authorization_identities())
+            .collect()
+    }
+
+    async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+        self.observe(&SnapshotScope::default(), OBSERVER_READ_TIMEOUT)
+            .await
+    }
+
+    async fn snapshot_scoped(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
+        self.observe(scope, OBSERVER_READ_TIMEOUT).await
+    }
+
+    async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
         if operation != "fin.snapshot" {
             return Err(FinError::validation(
                 "Unknown composite observer operation.",
             ));
         }
-        serde_json::to_value(self.snapshot().await?).map_err(|_| internal_error())
+        let scope: SnapshotScope = serde_json::from_value(input.clone()).map_err(|_| {
+            FinError::validation("Invalid snapshot scope; inspect fin schema fin.snapshot --json.")
+        })?;
+        serde_json::to_value(self.snapshot_scoped(&scope).await?).map_err(|_| internal_error())
     }
     async fn prepare(
         &self,
@@ -2782,7 +3102,7 @@ pub async fn serve_connection(
 ) -> fin_domain::Result<()> {
     serve_connection_with_timeouts(
         stream,
-        &mut runtime.clone(),
+        &RwLock::new(runtime.clone()),
         expected_uid,
         IpcTimeouts::PRODUCTION,
     )
@@ -2844,7 +3164,7 @@ impl IpcTimeouts {
 
 async fn serve_connection_with_timeouts(
     mut stream: UnixStream,
-    runtime: &mut Arc<BrokerRuntime>,
+    shared_runtime: &RwLock<Arc<BrokerRuntime>>,
     expected_uid: u32,
     timeouts: IpcTimeouts,
 ) -> fin_domain::Result<()> {
@@ -2881,7 +3201,12 @@ async fn serve_connection_with_timeouts(
     // Read the bounded frame before locking so a connected peer cannot hold
     // configuration maintenance open without sending a request. Enrollment
     // takes LOCK_EX; LOCK_SH now protects comparison and full dispatch.
-    let _configuration_guard = if runtime.protected_config_check.load(Ordering::SeqCst) {
+    let protected = shared_runtime
+        .read()
+        .await
+        .protected_config_check
+        .load(Ordering::SeqCst);
+    let _configuration_guard = if protected {
         let guard = match acquire_request_configuration_lock(timeouts.configuration_lock).await {
             Ok(guard) => guard,
             Err(error) if error.code == "CONFIGURATION_BUSY" => {
@@ -2895,21 +3220,35 @@ async fn serve_connection_with_timeouts(
             }
             Err(error) => return Err(error),
         };
-        let refreshed = match load_protected_config() {
-            Ok(current) => {
-                refresh_runtime(runtime, current, expected_uid, &ProtectedRuntimeLoader).await
+        let refreshed = async {
+            let current = load_protected_config()?;
+            let unchanged = serde_json::to_value(shared_runtime.read().await.configuration())
+                .map_err(|_| internal_error())?
+                == serde_json::to_value(&current).map_err(|_| internal_error())?;
+            if !unchanged {
+                let mut runtime = shared_runtime.write().await;
+                refresh_runtime(&mut runtime, current, expected_uid, &ProtectedRuntimeLoader)
+                    .await?;
             }
-            Err(error) => Err(error),
-        };
+            Ok::<_, FinError>(())
+        }
+        .await;
         if let Err(error) = refreshed {
-            let failure = BrokerResponse::failure(error);
-            write_ipc_response(&mut stream, &failure, timeouts.response_write).await?;
+            write_ipc_response(
+                &mut stream,
+                &BrokerResponse::failure(error),
+                timeouts.response_write,
+            )
+            .await?;
             return Ok(());
         }
         Some(guard)
     } else {
         None
     };
+    // Keep this runtime revision pinned throughout dispatch. A reload waits for
+    // active reads/writes and swaps only after protected composition succeeds.
+    let runtime = shared_runtime.read().await;
     let response = runtime.handle(request).await;
     write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
     Ok(())
@@ -2989,40 +3328,74 @@ pub async fn serve_listener(
     serve_listener_with_timeouts(listener, runtime, expected_uid, IpcTimeouts::PRODUCTION).await
 }
 
+// Dropping a caller's listener future must not abort an already started
+// financial dispatch. Normal stop drains; cancellation detaches tasks so their
+// immutable journaled identity can finish safely while the runtime remains alive.
+struct RequestTasks(JoinSet<fin_domain::Result<()>>);
+impl Drop for RequestTasks {
+    fn drop(&mut self) {
+        self.0.detach_all();
+    }
+}
+
+fn peer_local_error(error: &FinError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "IPC_PEER_DENIED"
+            | "INVALID_PROTOCOL_FRAME"
+            | "IPC_READ_TIMEOUT"
+            | "IPC_WRITE_FAILED"
+            | "IPC_WRITE_TIMEOUT"
+    )
+}
+
 async fn serve_listener_with_timeouts(
     listener: UnixListener,
-    mut runtime: Arc<BrokerRuntime>,
+    runtime: Arc<BrokerRuntime>,
     expected_uid: u32,
     timeouts: IpcTimeouts,
 ) -> fin_domain::Result<()> {
-    while runtime.accepting.load(Ordering::SeqCst) {
-        let (stream, _) = listener.accept().await.map_err(|_| {
-            error(
-                "IPC_ACCEPT_FAILED",
-                "startup",
-                "The protected broker socket stopped accepting connections.",
-                "Restart through launchd after checking the durable journal.",
-            )
-        })?;
-        if let Err(error) =
-            serve_connection_with_timeouts(stream, &mut runtime, expected_uid, timeouts).await
-        {
-            // Do not echo peer-controlled data or allow malformed frames to
-            // terminate the broker; safe protocol errors are per connection.
-            if matches!(
-                error.code.as_str(),
-                "IPC_PEER_DENIED"
-                    | "INVALID_PROTOCOL_FRAME"
-                    | "IPC_READ_TIMEOUT"
-                    | "IPC_WRITE_FAILED"
-                    | "IPC_WRITE_TIMEOUT"
-            ) {
-                continue;
+    let runtime = Arc::new(RwLock::new(runtime));
+    let mut tasks = RequestTasks(JoinSet::new());
+    let mut failure = None;
+    while runtime.read().await.accepting.load(Ordering::SeqCst) {
+        tokio::select! {
+            finished = tasks.0.join_next(), if !tasks.0.is_empty() => {
+                match finished {
+                    Some(Ok(Err(error))) if !peer_local_error(&error) => { failure = Some(error); break; }
+                    Some(Err(_)) => { failure = Some(internal_error()); break; }
+                    _ => {}
+                }
             }
-            return Err(error);
+            accepted = listener.accept(), if tasks.0.len() < MAX_BROKER_CONNECTIONS => {
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        failure = Some(error("IPC_ACCEPT_FAILED", "startup",
+                            "The protected broker socket stopped accepting connections.",
+                            "Restart through launchd after checking the durable journal."));
+                        break;
+                    }
+                };
+                let runtime = runtime.clone();
+                tasks.0.spawn(async move {
+                    serve_connection_with_timeouts(stream, &runtime, expected_uid, timeouts).await
+                });
+            }
         }
     }
-    Ok(())
+    // No new peers are accepted during drain, but submitted writes are allowed
+    // to finish recording their result. Socket cancellation never resubmits.
+    while let Some(finished) = tasks.0.join_next().await {
+        match finished {
+            Ok(Err(error)) if !peer_local_error(&error) && failure.is_none() => {
+                failure = Some(error)
+            }
+            Err(_) if failure.is_none() => failure = Some(internal_error()),
+            _ => {}
+        }
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 pub async fn serve_protected(runtime: Arc<BrokerRuntime>) -> fin_domain::Result<()> {
@@ -3334,6 +3707,23 @@ mod tests {
     impl Adapter for ReadAdapter {
         fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
             self.connection_metadata.clone()
+        }
+        fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            if !self.connection_metadata.is_empty() {
+                return self.connection_metadata.clone();
+            }
+            vec![fin_domain::ConnectionMetadata {
+                name: "synthetic-observer".into(),
+                provider: "fixture".into(),
+                resource: ResourceId("fixture:account".into()),
+                role: None,
+                parent: None,
+                network: Some("fixture".into()),
+                address: None,
+                credential_ref: None,
+                signing_enabled: false,
+                details: json!({}),
+            }]
         }
         fn definitions(&self) -> Vec<Definition> {
             let mut definitions = vec![
@@ -4442,17 +4832,14 @@ mod tests {
         ] {
             assert!(runtime.handle(request).await.ok);
         }
-        for request in [
-            BrokerRequest::Snapshot,
-            BrokerRequest::Execute {
-                request: fin_domain::OperationRequest {
-                    request_id: "synthetic-blocked".into(),
-                    operation: "binance.transfer".into(),
-                    input: json!({}),
-                    run_id: None,
-                },
+        for request in [BrokerRequest::Execute {
+            request: fin_domain::OperationRequest {
+                request_id: "synthetic-blocked".into(),
+                operation: "binance.transfer".into(),
+                input: json!({}),
+                run_id: None,
             },
-        ] {
+        }] {
             let response = runtime.handle(request).await;
             assert!(!response.ok);
             assert_eq!(
@@ -4500,8 +4887,22 @@ mod tests {
             assert!(runtime.handle(request).await.ok);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let response = runtime.handle(BrokerRequest::Snapshot).await;
-        assert_eq!(response.error.unwrap().code, "VENUE_PERMISSION");
+        let identity_request = BrokerRequest::Execute {
+            request: OperationRequest {
+                request_id: "synthetic-identity-check".into(),
+                operation: "binance.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            },
+        };
+        assert_eq!(
+            runtime
+                .verify_account_identities(&identity_request)
+                .await
+                .unwrap_err()
+                .code,
+            "VENUE_PERMISSION"
+        );
         assert_eq!(captures.load(Ordering::SeqCst), 0);
         assert!(
             runtime
@@ -4510,6 +4911,10 @@ mod tests {
         );
         assert!(runtime.handle(BrokerRequest::DaemonStart).await.ok);
         fail.store(false, Ordering::SeqCst);
+        runtime
+            .verify_account_identities(&identity_request)
+            .await
+            .unwrap();
         assert!(runtime.handle(BrokerRequest::Snapshot).await.ok);
         assert!(
             !runtime
@@ -4520,6 +4925,79 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(captures.load(Ordering::SeqCst), 2);
         assert!(runtime.engine.operations().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn selected_identity_checks_cache_only_requested_accounts_and_skip_other_venues() {
+        let mut configuration = binance_only_config();
+        let mut second = configuration.connections[0].clone();
+        if let ConnectionConfig::Binance {
+            name,
+            resource,
+            physical_identity,
+            ..
+        } = &mut second
+        {
+            *name = "synthetic-second".into();
+            *physical_identity = "202".into();
+            *resource = ResourceId("binance:uid:202:SPOT".into());
+        }
+        configuration.connections.push(second);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = compose_runtime(
+            configuration,
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters: vec![Arc::new(ReadAdapter {
+                    captures: Arc::new(AtomicUsize::new(0)),
+                    pricing_snapshot: None,
+                    pricing_preflight: None,
+                    identity_probe: Some((Arc::new(AtomicBool::new(false)), calls.clone())),
+                    connection_metadata: vec![],
+                })],
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap();
+        runtime.require_account_identity_verification();
+        let selected = |account: &str| BrokerRequest::Read {
+            operation: "binance.balances".into(),
+            input: json!({"account":account}),
+        };
+        runtime
+            .verify_account_identities(&selected("synthetic-master"))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            runtime
+                .account_identity_check_pending
+                .load(Ordering::SeqCst)
+        );
+        runtime
+            .verify_account_identities(&selected("synthetic-master"))
+            .await
+            .unwrap();
+        runtime
+            .verify_account_identities(&BrokerRequest::Read {
+                operation: "wallet.balances".into(),
+                input: json!({"wallet":"synthetic-wallet"}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        runtime
+            .verify_account_identities(&selected("synthetic-second"))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            !runtime
+                .account_identity_check_pending
+                .load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
@@ -5553,6 +6031,607 @@ mod tests {
         let response: BrokerResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(response.ok);
         assert_eq!(response.result.unwrap()["version"], 2);
+    }
+
+    struct DelayedObserver {
+        name: &'static str,
+        delay: Duration,
+        fail: bool,
+        started: Arc<tokio::sync::Notify>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Adapter for DelayedObserver {
+        fn definitions(&self) -> Vec<Definition> {
+            vec![Definition {
+                name: self.name.into(),
+                description: "Synthetic delayed observer".into(),
+                kind: OperationKind::Read,
+                execution_actor: ExecutionActor::AgentReadable,
+                input_schema: json!({"type":"object","additionalProperties":false}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"$ref":"FinError"}),
+                examples: vec![],
+                coverage: self.name.into(),
+                completion: "Read only".into(),
+                semantics: json!({}),
+            }]
+        }
+        fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            vec![fin_domain::ConnectionMetadata {
+                name: self.name.into(),
+                provider: if self.name.starts_with("binance:") {
+                    "binance"
+                } else {
+                    "synthetic"
+                }
+                .into(),
+                resource: ResourceId(self.name.into()),
+                role: None,
+                parent: None,
+                network: Some(
+                    if self.name.starts_with("binance:") {
+                        "binance"
+                    } else {
+                        self.name
+                    }
+                    .into(),
+                ),
+                address: None,
+                credential_ref: None,
+                signing_enabled: false,
+                details: json!({}),
+            }]
+        }
+        fn snapshot_identities(&self) -> Vec<fin_domain::ConnectionMetadata> {
+            if self.name.starts_with("global.") || self.name.starts_with("sidecar.") {
+                vec![]
+            } else {
+                self.connections()
+            }
+        }
+        fn snapshot_is_global(&self) -> bool {
+            self.name.starts_with("global.")
+        }
+        async fn snapshot_scoped(
+            &self,
+            scope: &SnapshotScope,
+        ) -> fin_domain::Result<StateSnapshot> {
+            assert!(
+                scope.is_full()
+                    || self.snapshot_is_global()
+                    || snapshot_connection_matches(scope, &self.connections()[0])
+            );
+            self.snapshot().await
+        }
+        async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+            self.read(self.name, &json!({})).await?;
+            Ok(StateSnapshot {
+                state: FinancialState::default(),
+                observed_at: now(),
+                complete: true,
+                coverage: if self.name.starts_with("binance:") {
+                    vec![self.name.into(), format!("{}:USD_M", self.name)]
+                } else {
+                    vec![self.name.into()]
+                },
+                pending: vec![],
+            })
+        }
+        async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            tokio::time::sleep(self.delay).await;
+            if self.fail {
+                return Err(error(
+                    "SYNTHETIC_RPC_FAILED",
+                    "read",
+                    "Synthetic RPC failed.",
+                    "Retry the synthetic observer.",
+                ));
+            }
+            Ok(json!({"synthetic":true}))
+        }
+        async fn prepare(&self, _: &str, _: &Value) -> fin_domain::Result<PreparedOperation> {
+            Err(FinError::validation("Read only"))
+        }
+        async fn revalidate(&self, _: &PreparedOperation) -> fin_domain::Result<PreparedOperation> {
+            Err(FinError::validation("Read only"))
+        }
+        async fn submit(
+            &self,
+            _: &PreparedOperation,
+            _: Arc<dyn SubmissionJournal>,
+        ) -> fin_domain::Result<Submission> {
+            panic!("Read observer cannot submit")
+        }
+        async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
+            Err(FinError::validation("Read only"))
+        }
+    }
+
+    fn delayed_runtime(adapters: Vec<Arc<dyn Adapter>>) -> Arc<BrokerRuntime> {
+        compose_runtime(
+            config(),
+            RuntimeDependencies {
+                store: Store::in_memory().unwrap(),
+                adapters,
+                authorizer: Arc::new(ReadOnlyAuthorizer),
+                valuator: Arc::new(FixtureValuator),
+                bridge: None,
+            },
+        )
+        .unwrap()
+    }
+
+    async fn socket_request(path: &Path, request: BrokerRequest) -> BrokerResponse {
+        let mut client = UnixStream::connect(path).await.unwrap();
+        let mut bytes = serde_json::to_vec(&request).unwrap();
+        bytes.push(b'\n');
+        client.write_all(&bytes).await.unwrap();
+        let mut response = vec![];
+        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut response)
+            .await
+            .unwrap();
+        serde_json::from_slice(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn latency_slow_snapshot_and_unrelated_read() {
+        let path = PathBuf::from(format!("/tmp/fin-latency-{}.sock", uuid::Uuid::new_v4()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let runtime = delayed_runtime(vec![Arc::new(DelayedObserver {
+            name: "slow.rpc",
+            delay: Duration::from_millis(180),
+            fail: true,
+            started: started.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        })]);
+        let serving = tokio::spawn(serve_listener(listener, runtime, unsafe {
+            libc::geteuid()
+        }));
+        let slow_path = path.clone();
+        let slow =
+            tokio::spawn(async move { socket_request(&slow_path, BrokerRequest::Snapshot).await });
+        started.notified().await;
+        let fast_started = std::time::Instant::now();
+        let fast = socket_request(&path, BrokerRequest::Capabilities).await;
+        let elapsed = fast_started.elapsed();
+        println!(
+            "unrelated read behind 180ms failing observer: {:?}",
+            elapsed
+        );
+        assert!(fast.ok);
+        let snapshot = slow.await.unwrap().result.unwrap();
+        assert_eq!(snapshot["complete"], false);
+        assert!(socket_request(&path, BrokerRequest::DaemonStop).await.ok);
+        serving.await.unwrap().unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn latency_independent_snapshot_observers_sequential_control_and_concurrent() {
+        let runtime = delayed_runtime(
+            ["first.rpc", "second.rpc"]
+                .into_iter()
+                .map(|name| {
+                    Arc::new(DelayedObserver {
+                        name,
+                        delay: Duration::from_millis(90),
+                        fail: false,
+                        started: Arc::new(tokio::sync::Notify::new()),
+                        calls: Arc::new(AtomicUsize::new(0)),
+                    }) as Arc<dyn Adapter>
+                })
+                .collect(),
+        );
+        let before_start = std::time::Instant::now();
+        for adapter in &runtime.adapters {
+            adapter.snapshot().await.unwrap();
+        }
+        let sequential = before_start.elapsed();
+        let after_start = std::time::Instant::now();
+        assert!(runtime.snapshot().await.unwrap().complete);
+        let concurrent = after_start.elapsed();
+        println!(
+            "independent observers sequential control: {sequential:?}; concurrent: {concurrent:?}"
+        );
+        assert!(concurrent < sequential.saturating_sub(Duration::from_millis(40)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_observers_run_concurrently_and_timeout_with_named_partial_coverage() {
+        let adapters = ["fast.rpc", "slow.rpc"]
+            .into_iter()
+            .map(|name| {
+                Arc::new(DelayedObserver {
+                    name,
+                    delay: Duration::from_millis(if name == "fast.rpc" { 10 } else { 180 }),
+                    fail: false,
+                    started: Arc::new(tokio::sync::Notify::new()),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }) as Arc<dyn Adapter>
+            })
+            .collect();
+        let runtime = delayed_runtime(adapters);
+        let start = std::time::Instant::now();
+        let snapshot = runtime
+            .observer
+            .observe(&SnapshotScope::default(), Duration::from_millis(40))
+            .await
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_millis(130));
+        assert!(!snapshot.complete);
+        assert!(snapshot.coverage.contains(&"fast.rpc".into()));
+        assert!(
+            snapshot
+                .pending
+                .iter()
+                .any(|pending| pending.contains("slow.rpc@slow.rpc:OBSERVER_READ_TIMEOUT"))
+        );
+        assert!(!snapshot.coverage.contains(&"slow.rpc".into()));
+        // Machine partial results retain the normal stable response shape.
+        let json = serde_json::to_value(BrokerResponse::success(
+            serde_json::to_value(snapshot).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(json["result"]["complete"], false);
+        assert!(json["result"]["pending"].is_array());
+    }
+
+    #[tokio::test]
+    async fn scoped_snapshot_avoids_unrelated_rpc_and_fails_closed_for_missing_selectors() {
+        let slow_calls = Arc::new(AtomicUsize::new(0));
+        let fast_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = delayed_runtime(vec![
+            Arc::new(DelayedObserver {
+                name: "fast.rpc",
+                delay: Duration::ZERO,
+                fail: false,
+                started: Arc::new(tokio::sync::Notify::new()),
+                calls: fast_calls.clone(),
+            }),
+            Arc::new(DelayedObserver {
+                name: "slow.rpc",
+                delay: Duration::from_millis(180),
+                fail: true,
+                started: Arc::new(tokio::sync::Notify::new()),
+                calls: slow_calls.clone(),
+            }),
+        ]);
+        let request = |resources: Value| BrokerRequest::Read {
+            operation: "fin.snapshot".into(),
+            input: json!({"resources":resources}),
+        };
+        let good = runtime
+            .handle(request(json!(["fast.rpc"])))
+            .await
+            .result
+            .unwrap();
+        assert_eq!(good["complete"], true);
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
+        let mixed = runtime
+            .handle(request(json!(["fast.rpc", "missing.rpc"])))
+            .await
+            .result
+            .unwrap();
+        assert_eq!(mixed["complete"], false);
+        assert!(
+            mixed["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap().contains("missing.rpc"))
+        );
+        let mixed_networks = runtime
+            .handle(BrokerRequest::Read {
+                operation: "fin.snapshot".into(),
+                input: json!({"networks":["fast.rpc","missing.rpc"]}),
+            })
+            .await
+            .result
+            .unwrap();
+        assert_eq!(mixed_networks["complete"], false);
+        assert_eq!(slow_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fast_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn grouped_evm_snapshot_selects_only_matching_protected_address_and_enabled_network() {
+        let address = "0x1111111111111111111111111111111111111111";
+        let connection = fin_domain::ConnectionMetadata {
+            name: "synthetic-wallet".into(),
+            provider: "evm".into(),
+            resource: ResourceId(format!("ethereum:42161:{address}")),
+            role: None,
+            parent: None,
+            network: Some("ethereum:42161".into()),
+            address: Some(address.into()),
+            credential_ref: None,
+            signing_enabled: false,
+            details: json!({}),
+        };
+        let mut scope = SnapshotScope {
+            resources: vec![ResourceId(format!("evm:{address}"))],
+            networks: vec!["ethereum:42161".into()],
+            assets: vec![],
+        };
+        assert!(snapshot_connection_matches(&scope, &connection));
+        scope.networks = vec!["ethereum:1".into()];
+        assert!(!snapshot_connection_matches(&scope, &connection));
+        scope.networks.clear();
+        scope.resources = vec![ResourceId(
+            "evm:0x2222222222222222222222222222222222222222".into(),
+        )];
+        assert!(!snapshot_connection_matches(&scope, &connection));
+        scope.resources = vec![ResourceId(format!("evm:{address}"))];
+        scope.assets = vec![AssetId {
+            network: "ethereum:1".into(),
+            reference: "native".into(),
+            decimals: 18,
+        }];
+        assert!(!snapshot_connection_matches(&scope, &connection));
+        // A grouped address without an enabled physical network cannot be used
+        // as financial observer coverage merely because its label matches.
+        let mut no_network = connection;
+        no_network.network = None;
+        scope.assets.clear();
+        assert!(!snapshot_connection_matches(&scope, &no_network));
+    }
+
+    #[tokio::test]
+    async fn futures_resource_scope_selects_its_binance_parent_observer() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = delayed_runtime(vec![Arc::new(DelayedObserver {
+            name: "binance:uid:synthetic:SPOT",
+            delay: Duration::ZERO,
+            fail: false,
+            started: Arc::new(tokio::sync::Notify::new()),
+            calls: calls.clone(),
+        })]);
+        let snapshot = runtime.handle(BrokerRequest::Read {
+            operation: "fin.snapshot".into(),
+            input: json!({"resources":["binance:uid:synthetic:SPOT:USD_M"],"networks":["binance"]}),
+        }).await.result.unwrap();
+        assert_eq!(snapshot["complete"], true);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            snapshot["coverage"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("binance:uid:synthetic:SPOT:USD_M"))
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshots_include_global_evidence_and_scope_skips_unrelated_routing_sidecars() {
+        let global_calls = Arc::new(AtomicUsize::new(0));
+        let sidecar_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = delayed_runtime(vec![
+            Arc::new(DelayedObserver {
+                name: "fast.rpc",
+                delay: Duration::ZERO,
+                fail: false,
+                started: Arc::new(tokio::sync::Notify::new()),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            Arc::new(DelayedObserver {
+                name: "global.pending",
+                delay: Duration::ZERO,
+                fail: false,
+                started: Arc::new(tokio::sync::Notify::new()),
+                calls: global_calls.clone(),
+            }),
+            Arc::new(DelayedObserver {
+                name: "sidecar.routing",
+                delay: Duration::ZERO,
+                fail: false,
+                started: Arc::new(tokio::sync::Notify::new()),
+                calls: sidecar_calls.clone(),
+            }),
+        ]);
+        // Routing sidecars still contribute protected authorization bindings;
+        // absence of snapshot identities excludes them only from scoped reads.
+        assert!(!runtime.adapters[2].authorization_identities().is_empty());
+        assert!(runtime.adapters[2].snapshot_identities().is_empty());
+        let scoped = runtime
+            .handle(BrokerRequest::Read {
+                operation: "fin.snapshot".into(),
+                input: json!({"resources":["fast.rpc"]}),
+            })
+            .await
+            .result
+            .unwrap();
+        assert_eq!(scoped["complete"], true);
+        assert!(
+            scoped["coverage"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("global.pending"))
+        );
+        assert_eq!(sidecar_calls.load(Ordering::SeqCst), 0);
+        let full = runtime.snapshot().await.unwrap();
+        assert!(full.complete);
+        assert!(full.coverage.contains(&"global.pending".into()));
+        assert_eq!(global_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(sidecar_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn metadata_less_failed_observer_keeps_full_snapshot_incomplete() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = delayed_runtime(vec![Arc::new(DelayedObserver {
+            name: "sidecar.failed",
+            delay: Duration::ZERO,
+            fail: true,
+            started: Arc::new(tokio::sync::Notify::new()),
+            calls: calls.clone(),
+        })]);
+        assert!(runtime.adapters[0].snapshot_identities().is_empty());
+        let full = runtime.snapshot().await.unwrap();
+        assert!(!full.complete);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            full.pending
+                .iter()
+                .any(|pending| pending.contains("sidecar.failed:SYNTHETIC_RPC_FAILED"))
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_deadline_includes_waiting_for_bounded_slots() {
+        let runtime = delayed_runtime(
+            [
+                "slow0.rpc",
+                "slow1.rpc",
+                "slow2.rpc",
+                "slow3.rpc",
+                "slow4.rpc",
+                "slow5.rpc",
+                "slow6.rpc",
+                "slow7.rpc",
+            ]
+            .into_iter()
+            .map(|name| {
+                Arc::new(DelayedObserver {
+                    name,
+                    delay: Duration::from_secs(1),
+                    fail: false,
+                    started: Arc::new(tokio::sync::Notify::new()),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                }) as Arc<dyn Adapter>
+            })
+            .collect(),
+        );
+        let start = std::time::Instant::now();
+        let snapshot = runtime
+            .observer
+            .observe(&SnapshotScope::default(), Duration::from_millis(30))
+            .await
+            .unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(!snapshot.complete);
+        assert!(
+            snapshot
+                .pending
+                .iter()
+                .all(|pending| pending.contains("OBSERVER_READ_TIMEOUT"))
+        );
+    }
+
+    #[test]
+    fn reconciliation_and_quote_reads_do_not_join_the_read_concurrency_lane() {
+        for operation in ["bridge.quotes", "bridge.status", "bridge.recovery"] {
+            assert!(!concurrent_read_request(&BrokerRequest::Read {
+                operation: operation.into(),
+                input: json!({})
+            }));
+        }
+        assert!(!concurrent_read_request(&BrokerRequest::PlanStatus {
+            plan_id: "synthetic".into()
+        }));
+        assert!(!concurrent_read_request(&BrokerRequest::RevokeBoundary {
+            id: "synthetic".into()
+        }));
+        assert!(concurrent_read_request(&BrokerRequest::Read {
+            operation: "wallet.balances".into(),
+            input: json!({})
+        }));
+    }
+
+    #[tokio::test]
+    async fn queued_mutations_and_revocation_are_serialized_while_reads_continue() {
+        let runtime = runtime();
+        let held_dispatch = runtime.mutation_gate.lock().await;
+        let mutators = [
+            BrokerRequest::RevokeBoundary {
+                id: "synthetic-missing".into(),
+            },
+            BrokerRequest::DaemonStop,
+        ];
+        let mut tasks = Vec::new();
+        for request in mutators {
+            let runtime = runtime.clone();
+            tasks.push(tokio::spawn(async move { runtime.handle(request).await }));
+            tokio::task::yield_now().await;
+        }
+        assert!(runtime.handle(BrokerRequest::Capabilities).await.ok);
+        assert!(tasks.iter().all(|task| !task.is_finished()));
+        drop(held_dispatch);
+        let revoke = tasks.remove(0).await.unwrap();
+        assert!(!revoke.ok); // Missing synthetic grant; no dispatch escaped the gate.
+        assert!(tasks.remove(0).await.unwrap().ok);
+    }
+
+    #[tokio::test]
+    async fn active_read_pins_runtime_revision_and_daemon_stop_drains_it() {
+        let path = PathBuf::from(format!("/tmp/fin-drain-{}.sock", uuid::Uuid::new_v4()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let runtime = delayed_runtime(vec![Arc::new(DelayedObserver {
+            name: "slow.rpc",
+            delay: Duration::from_millis(100),
+            fail: false,
+            started: started.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        })]);
+        let listener = UnixListener::bind(&path).unwrap();
+        let serving = tokio::spawn(serve_listener(listener, runtime, unsafe {
+            libc::geteuid()
+        }));
+        let read_path = path.clone();
+        let read =
+            tokio::spawn(async move { socket_request(&read_path, BrokerRequest::Snapshot).await });
+        started.notified().await;
+        assert!(socket_request(&path, BrokerRequest::DaemonStop).await.ok);
+        assert!(
+            !serving.is_finished(),
+            "stop must drain the active observer"
+        );
+        assert!(read.await.unwrap().ok);
+        serving.await.unwrap().unwrap();
+        fs::remove_file(path).unwrap();
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let shared = Arc::new(RwLock::new(delayed_runtime(vec![Arc::new(
+            DelayedObserver {
+                name: "slow.rpc",
+                delay: Duration::from_millis(70),
+                fail: false,
+                started: started.clone(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+        )])));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let shared_dispatch = shared.clone();
+        let dispatch = tokio::spawn(async move {
+            serve_connection_with_timeouts(
+                server,
+                &shared_dispatch,
+                unsafe { libc::geteuid() },
+                IpcTimeouts::PRODUCTION,
+            )
+            .await
+            .unwrap();
+        });
+        client
+            .write_all(b"{\"method\":\"snapshot\"}\n")
+            .await
+            .unwrap();
+        started.notified().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), shared.write())
+                .await
+                .is_err(),
+            "configuration reload must wait for the active runtime revision"
+        );
+        let mut bytes = vec![];
+        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut bytes)
+            .await
+            .unwrap();
+        dispatch.await.unwrap();
+        *shared.write().await = delayed_runtime(vec![]);
     }
 
     #[tokio::test]

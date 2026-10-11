@@ -180,9 +180,13 @@ fn typed_amount(asset: &AssetId, decimal: &str) -> Result<Amount> {
         atoms: atoms(decimal, asset.decimals)?,
     })
 }
-async fn token_asset_at(adapter: &EthereumAdapter, reference: &str, block: u64) -> Result<AssetId> {
+async fn token_identity_at(
+    adapter: &EthereumAdapter,
+    reference: &str,
+    block: u64,
+) -> Result<(AssetId, String)> {
     if reference == "native" {
-        return Ok(adapter.native_asset());
+        return Ok((adapter.native_asset(), "ETH".into()));
     }
     let token = address(reference)?;
     require(
@@ -196,7 +200,30 @@ async fn token_asset_at(adapter: &EthereumAdapter, reference: &str, block: u64) 
         .call(token, &abi::Erc20::decimalsCall {}, Some(block))
         .await?;
     pow10(decimals)?;
-    Ok(adapter.asset(&lower_address(token), decimals))
+    // Reuse the pinned identity reads. Presentation metadata is optional and
+    // never requires another token code/decimals lookup or a balance/quote.
+    let symbol = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        match adapter
+            .runtime
+            .call(token, &abi::Erc20::symbolCall {}, Some(block))
+            .await
+        {
+            Ok(symbol) => Some(symbol),
+            Err(_) => adapter
+                .runtime
+                .call(token, &abi::Bytes32Symbol::symbolCall {}, Some(block))
+                .await
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes.as_slice().to_vec()).ok())
+                .map(|text| text.trim_end_matches('\0').to_owned()),
+        }
+    })
+    .await
+    .unwrap_or(None);
+    Ok((
+        adapter.asset(&lower_address(token), decimals),
+        safe_display_label(symbol.as_deref()),
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,18 +247,6 @@ fn safe_display_label(symbol: Option<&str>) -> String {
         }
         _ => "token".to_owned(),
     }
-}
-
-async fn display_label_at(adapter: &EthereumAdapter, reference: &str, block: u64) -> String {
-    // The financial identity and decimals have already been validated at this
-    // block. Symbol metadata is presentation-only: unavailable or unsafe
-    // metadata must never invalidate an otherwise valid operation.
-    let symbol = adapter
-        .token(reference, Some(block))
-        .await
-        .ok()
-        .map(|token| token.symbol);
-    safe_display_label(symbol.as_deref())
 }
 
 fn display_labels_from_prepared(summary: &str) -> DisplayLabels {
@@ -314,6 +329,7 @@ async fn request_identity(
             "Swap authorization requires output to the signing wallet.",
         ));
     }
+    adapter.runtime.assert_chain().await?;
     let block = fin_evm::rpc_u64(
         &adapter
             .runtime
@@ -321,101 +337,20 @@ async fn request_identity(
             .request("eth_blockNumber", json!([]))
             .await?,
     )?;
-    let token_in =
-        token_asset_at(adapter, request.token_in.as_deref().expect("parsed"), block).await?;
-    let token_out = token_asset_at(
-        adapter,
-        request.token_out.as_deref().expect("parsed"),
-        block,
-    )
-    .await?;
-    let labels = DisplayLabels {
-        input: display_label_at(adapter, request.token_in.as_deref().expect("parsed"), block).await,
-        output: display_label_at(
+    let ((token_in, input_label), (token_out, output_label)) = tokio::try_join!(
+        token_identity_at(adapter, request.token_in.as_deref().expect("parsed"), block),
+        token_identity_at(
             adapter,
             request.token_out.as_deref().expect("parsed"),
-            block,
-        )
-        .await,
+            block
+        ),
+    )?;
+    let labels = DisplayLabels {
+        input: input_label,
+        output: output_label,
     };
-    let input_router = if protocol == "v3" || protocol == "ramses" {
-        address(v3_profile.router)?
-    } else {
-        address(
-            &config
-                .expect("configured above")
-                .v4
-                .as_ref()
-                .expect("configured above")
-                .router,
-        )?
-    };
-    adapter.runtime.code_at(input_router, Some(block)).await?;
-    if protocol == "v3" || protocol == "ramses" {
-        adapter
-            .runtime
-            .code_at(address(v3_profile.factory)?, Some(block))
-            .await?;
-        adapter
-            .runtime
-            .code_at(address(v3_profile.quoter)?, Some(block))
-            .await?;
-        if protocol == "ramses" {
-            let config = adapter.ramses()?;
-            let expected_deployer = address(&config.pool_deployer)?;
-            let observed = adapter
-                .runtime
-                .call(
-                    address(&config.factory)?,
-                    &abi::RamsesFactory::ramsesV3PoolDeployerCall {},
-                    Some(block),
-                )
-                .await?;
-            if observed != expected_deployer {
-                return Err(FinError::validation(
-                    "Ramses factory deployer differs from reviewed config.",
-                ));
-            }
-            let router_deployer = adapter
-                .runtime
-                .call(
-                    address(&config.router)?,
-                    &abi::RamsesRouter::deployerCall {},
-                    Some(block),
-                )
-                .await?;
-            let quoter_deployer = adapter
-                .runtime
-                .call(
-                    address(&config.quoter)?,
-                    &abi::RamsesQuoter::deployerCall {},
-                    Some(block),
-                )
-                .await?;
-            if router_deployer != expected_deployer || quoter_deployer != expected_deployer {
-                return Err(FinError::validation(
-                    "Ramses router and quoter do not share the reviewed pool-deployer identity.",
-                ));
-            }
-        }
-        if request.token_in.as_deref() == Some("native")
-            || request.token_out.as_deref() == Some("native")
-        {
-            adapter.v3_weth(Some(block)).await?;
-        }
-    } else {
-        let v4 = config
-            .and_then(|config| config.v4.as_ref())
-            .expect("configured above");
-        adapter
-            .runtime
-            .code_at(address(&v4.quoter)?, Some(block))
-            .await?;
-        adapter
-            .runtime
-            .code_at(address(&v4.pool_manager)?, Some(block))
-            .await?;
-    }
+    // Deployment availability, router capabilities, liquidity, quotes,
+    // permissions and simulation are live execution checks, not plan scope.
     let v4_key = request.v4_pool_key.clone();
     if protocol == "v4" {
         super::uniswap::v4::pool_key(v4_key.as_ref().expect("parser enforces v4 pool key"))?;
@@ -429,30 +364,71 @@ async fn request_identity(
         "v4_pool_key":v4_key,
     });
     if is_ramses {
-        let amount_text = if request.amount.as_deref() == Some("all") {
-            request.max_amount.as_deref().expect("validated all cap")
+        let profile = adapter.ramses()?;
+        let wrapped_native = if token_in.reference == "native" || token_out.reference == "native" {
+            let token = adapter
+                .runtime
+                .call(
+                    address(&profile.router)?,
+                    &abi::V3RouterInfo::WETH9Call {},
+                    Some(block),
+                )
+                .await?;
+            require(
+                token != Address::ZERO,
+                "WETH_DEPLOYMENT_INVALID",
+                "Selected Ramses router returned a zero wrapped-native address.",
+            )?;
+            Some(token)
         } else {
-            request.amount.as_deref().expect("validated amount")
+            None
         };
-        let quote = adapter
-            .quote_protocol(crate::reads::ProtocolQuoteRequest {
-                dex: "ramses",
-                input: request.token_in.as_deref().expect("parsed"),
-                output: request.token_out.as_deref().expect("parsed"),
-                amount: amount_text,
-                fee_tier: None,
-                tick_spacing: request.tick_spacing,
-                protocol: None,
-                v4_key: None,
-                block: Some(block),
-            })
+        let input = if token_in.reference == "native" {
+            wrapped_native.expect("native pool identity")
+        } else {
+            address(&token_in.reference)?
+        };
+        let output = if token_out.reference == "native" {
+            wrapped_native.expect("native pool identity")
+        } else {
+            address(&token_out.reference)?
+        };
+        let pool = adapter
+            .runtime
+            .call(
+                address(&profile.factory)?,
+                &abi::RamsesFactory::getPoolCall {
+                    tokenA: input,
+                    tokenB: output,
+                    tickSpacing: fin_evm::alloy::primitives::aliases::I24::try_from(i64::from(
+                        request.tick_spacing.expect("parsed Ramses spacing"),
+                    ))
+                    .map_err(|_| FinError::validation("Ramses tick spacing is invalid."))?,
+                },
+                Some(block),
+            )
             .await?;
+        require(
+            pool != Address::ZERO,
+            "POOL_UNAVAILABLE",
+            "Selected Ramses pool is unavailable.",
+        )?;
+        let fee = adapter
+            .runtime
+            .call(pool, &abi::RamsesPool::feeCall {}, Some(block))
+            .await?
+            .to::<u32>();
+        require(
+            fee < 1_000_000,
+            "POOL_FEE_INVALID",
+            "Selected Ramses pool fee is invalid.",
+        )?;
         fixed["dex"] = json!("ramses");
         fixed["tick_spacing"] = json!(request.tick_spacing);
-        fixed["pool"] = json!(quote.pool);
+        fixed["pool"] = json!(lower_address(pool));
         fixed["factory"] = json!(adapter.ramses()?.factory);
         fixed["pool_deployer"] = json!(adapter.ramses()?.pool_deployer);
-        fixed["initial_pool_fee_ppm"] = json!(quote.swap_fee_ppm);
+        fixed["initial_pool_fee_ppm"] = json!(fee);
     }
     Ok((request, fixed, token_in, token_out, labels))
 }
@@ -655,9 +631,18 @@ impl EthereumAdapter {
                 "Choose a supported swap step.",
             ));
         }
-        self.runtime.assert_chain().await?;
         let (request, fixed, input_asset, output_asset, labels) =
-            request_identity(self, input, operation).await?;
+            tokio::time::timeout(std::time::Duration::from_secs(10), request_identity(self, input, operation))
+                .await
+                .map_err(|_| {
+                    let mut error = FinError::new(
+                        "PLAN_IDENTITY_TIMEOUT", "authorization",
+                        "Selected AMM asset or pool identity observation timed out before approval.",
+                        "Retry plan review after the selected network responds; no approval was requested.",
+                    );
+                    error.details = Some(Box::new(json!({"network":format!("ethereum:{}", self.config.chain_id), "timeout_seconds":10})));
+                    error
+                })??;
         let protocol = fixed["protocol"].as_str().unwrap_or("v3").to_owned();
         let bounds_protocol = fixed["dex"].as_str().unwrap_or(&protocol).to_owned();
         let mut bounds = parse_bounds(
@@ -1105,6 +1090,165 @@ fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fin_evm::alloy::sol_types::SolCall;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct SlowIdentityRpc {
+        fixture: Arc<super::super::tests::Fixture>,
+        active: AtomicUsize,
+        maximum_active: AtomicUsize,
+    }
+    #[async_trait]
+    impl fin_evm::EvmRpc for SlowIdentityRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            assert!(
+                matches!(
+                    method,
+                    "eth_chainId" | "eth_blockNumber" | "eth_getCode" | "eth_call"
+                ),
+                "plan review unexpectedly requested {method}"
+            );
+            if method == "eth_getCode" {
+                assert!(
+                    params[0] == json!(lower_address(super::super::tests::addr(100)))
+                        || params[0] == json!(lower_address(super::super::tests::addr(101))),
+                    "plan review must not query unrelated deployment code"
+                );
+            }
+            if method == "eth_call" {
+                let data = params[0]["data"].as_str().unwrap();
+                assert!(
+                    data == format!("0x{}", hex::encode(abi::Erc20::decimalsCall::SELECTOR))
+                        || data == format!("0x{}", hex::encode(abi::Erc20::symbolCall::SELECTOR)),
+                    "plan review must not query balances, quote, or simulation"
+                );
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.maximum_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let result = fin_evm::EvmRpc::request(self.fixture.as_ref(), method, params).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_permission_latency_fixture() {
+        let rpc = Arc::new(super::super::tests::Fixture::new());
+        let mut adapter = super::super::tests::adapter(rpc.clone());
+        let slow_rpc = Arc::new(SlowIdentityRpc {
+            fixture: rpc.clone(),
+            active: AtomicUsize::new(0),
+            maximum_active: AtomicUsize::new(0),
+        });
+        adapter.runtime = Arc::new(EvmRuntime::new(slow_rpc.clone(), 1, None));
+        let bounds = json!({
+            "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
+            "max_price_impact_bps":10000,
+            "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":[500], "max_deadline_seconds":600
+        });
+        let start = std::time::Instant::now();
+        adapter
+            .swap_plan_permission("uniswap.swap", &super::super::tests::swap_input(), &bounds)
+            .await
+            .unwrap();
+        eprintln!(
+            "synthetic AMM permission dispatch: {} ms; {} external identity/state reads",
+            start.elapsed().as_millis(),
+            rpc.calls.lock().unwrap().len()
+        );
+        assert_eq!(rpc.calls.lock().unwrap().len(), 8);
+        assert_eq!(slow_rpc.maximum_active.load(Ordering::SeqCst), 2);
+    }
+
+    struct FailingSelectorRpc {
+        fixture: Arc<super::super::tests::Fixture>,
+        selector: [u8; 4],
+        failures: AtomicUsize,
+    }
+    #[async_trait]
+    impl fin_evm::EvmRpc for FailingSelectorRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            if method == "eth_call"
+                && params[0]["data"].as_str().is_some_and(|data| {
+                    data.starts_with(&format!("0x{}", hex::encode(self.selector)))
+                })
+            {
+                self.failures.fetch_add(1, Ordering::SeqCst);
+                return Err(FinError::validation("Synthetic selected observer failure."));
+            }
+            fin_evm::EvmRpc::request(self.fixture.as_ref(), method, params).await
+        }
+    }
+
+    fn plan_bounds(ramses: bool) -> Value {
+        json!({
+            "max_input":"0.002", "max_fee_eth":"0.001", "max_slippage_bps":100,
+            "max_price_impact_bps":10000,
+            "minimum_rate":{"output_atoms":"2970000","input_atoms":"1000000000000000"},
+            "absolute_minimum_output":"2.97", "allowed_fee_tiers":if ramses {vec![]} else {vec![500]}, "max_deadline_seconds":600
+        })
+    }
+
+    #[tokio::test]
+    async fn missing_selected_token_identity_blocks_plan_permission() {
+        let fixture = Arc::new(super::super::tests::Fixture::new());
+        let mut adapter = super::super::tests::adapter(fixture.clone());
+        let rpc = Arc::new(FailingSelectorRpc {
+            fixture,
+            selector: abi::Erc20::decimalsCall::SELECTOR,
+            failures: AtomicUsize::new(0),
+        });
+        adapter.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, None));
+        assert!(
+            adapter
+                .swap_plan_permission(
+                    "uniswap.swap",
+                    &super::super::tests::swap_input(),
+                    &plan_bounds(false)
+                )
+                .await
+                .is_err()
+        );
+        assert!(rpc.failures.load(Ordering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn ramses_scope_pins_pool_and_fee_without_quote_and_execution_requires_quote() {
+        let fixture = Arc::new(super::super::tests::Fixture::new());
+        let mut adapter = super::super::tests::adapter(fixture.clone());
+        adapter.config.ramses = Some(RamsesConfig {
+            factory: lower_address(super::super::tests::addr(450)),
+            quoter: lower_address(super::super::tests::addr(460)),
+            router: lower_address(super::super::tests::addr(470)),
+            pool_deployer: lower_address(super::super::tests::addr(480)),
+        });
+        let rpc = Arc::new(FailingSelectorRpc {
+            fixture,
+            selector: abi::RamsesQuoter::quoteExactInputSingleCall::SELECTOR,
+            failures: AtomicUsize::new(0),
+        });
+        adapter.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, None));
+        let mut input = super::super::tests::swap_input();
+        input["tick_spacing"] = json!(1);
+        let permission = adapter
+            .swap_plan_permission("ramses.swap", &input, &plan_bounds(true))
+            .await
+            .unwrap();
+        assert_eq!(
+            permission.spec.fixed["pool"],
+            json!(lower_address(super::super::tests::addr(500)))
+        );
+        assert!(
+            permission.spec.parameters["max_pool_fee_ppm"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(rpc.failures.load(Ordering::SeqCst), 0);
+        assert!(adapter.prepare("ramses.swap", &input).await.is_err());
+        assert!(rpc.failures.load(Ordering::SeqCst) > 0);
+    }
 
     fn input(deadline: u64) -> Value {
         json!({

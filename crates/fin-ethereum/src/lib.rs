@@ -829,6 +829,9 @@ impl Adapter for EthereumAdapter {
     async fn snapshot(&self) -> Result<StateSnapshot> {
         self.read_snapshot().await
     }
+    async fn snapshot_scoped(&self, scope: &fin_domain::SnapshotScope) -> Result<StateSnapshot> {
+        self.read_snapshot_scoped(scope).await
+    }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
         self.read_operation(operation, input).await
     }

@@ -40,6 +40,22 @@ lists do not replace the plan name in Touch ID. The comprehensive plan is
 reviewed in conversation before Fin authorization and remains available in the
 terminal; the canonical approval still binds all scopes, amounts and fees.
 
+## Approval responsiveness
+
+Keep ordinary preparation on adapter-selected state and installation-wide journal
+policy. Additive `SnapshotScope` selectors use physical resources, network IDs
+and exact assets; empty selectors retain the full view. Observer coverage remains
+explicit and incomplete evidence never substitutes for required write preflight.
+Read-only connections and snapshot observers run concurrently with finite bounds;
+mutations, reconciliation and runtime replacement retain a single ordering gate.
+Configuration locks span dispatch so old policy cannot race protected maintenance.
+
+Bound external evidence collection, including RPC retries/fallback, while leaving
+financial dispatch and durable reconciliation under their original identities.
+Plan review performs schema/scope and selected identity metadata checks; deployment,
+current balances, execution pricing/fees and simulations stay at step execution.
+This additive API needs no journal migration and grants no new financial authority.
+
 ## Extending an integration
 
 1. Define the operation's exact asset, network, account and unit identities.

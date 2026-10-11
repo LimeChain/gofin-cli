@@ -244,8 +244,18 @@ impl Adapter for BinanceAdapter {
     ) -> Result<(), FinError> {
         self.0.validate_boundary_candidate(spec, prepared)
     }
+    fn snapshot_identities(&self) -> Vec<ConnectionMetadata> {
+        self.0.snapshot_identities()
+    }
+
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
         self.0.snapshot().await
+    }
+    async fn snapshot_scoped(
+        &self,
+        scope: &fin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot, FinError> {
+        self.0.snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value, FinError> {
         self.0.read(operation, input).await
@@ -2320,6 +2330,13 @@ impl ExchangeProfile for BinanceProfile {
     }
 
     async fn snapshot(&self) -> Result<StateSnapshot, FinError> {
+        self.snapshot_scoped(&fin_domain::SnapshotScope::default())
+            .await
+    }
+    async fn snapshot_scoped(
+        &self,
+        scope: &fin_domain::SnapshotScope,
+    ) -> Result<StateSnapshot, FinError> {
         let end = Utc::now().timestamp_millis().max(0) as u64;
         let start_90d = end.saturating_sub(90 * 86_400_000).saturating_add(1);
         let start_7d = end.saturating_sub(7 * 86_400_000).saturating_add(1);
@@ -2327,7 +2344,12 @@ impl ExchangeProfile for BinanceProfile {
         let mut observer_complete = true;
         let mut coverage = Vec::new();
         let mut pending = Vec::new();
-        for account in &self.config.accounts {
+        for account in self
+            .config
+            .accounts
+            .iter()
+            .filter(|account| self.snapshot_account_selected(account, scope))
+        {
             let mut identity_verified = false;
             match self.account_identity(account).await {
                 Ok((uid, _)) => {
@@ -2464,13 +2486,22 @@ impl ExchangeProfile for BinanceProfile {
             .accounts
             .iter()
             .filter(|a| matches!(a.role, AccountRole::Main))
+            .filter(|main| {
+                self.config.accounts.iter().any(|account| {
+                    self.snapshot_account_selected(account, scope)
+                        && (account.name == main.name
+                            || account.parent.as_deref() == Some(main.name.as_str()))
+                })
+            })
         {
             let sources = self
                 .config
                 .accounts
                 .iter()
                 .filter(|source| {
-                    source.name == main.name || source.parent.as_deref() == Some(main.name.as_str())
+                    self.snapshot_account_selected(source, scope)
+                        && (source.name == main.name
+                            || source.parent.as_deref() == Some(main.name.as_str()))
                 })
                 .collect::<Vec<_>>();
             let mut seen = BTreeSet::new();
@@ -2536,11 +2567,51 @@ impl ExchangeProfile for BinanceProfile {
             }
         }
         if let Err(error) = self
-            .trading_snapshot(&mut state, &mut coverage, &mut pending)
+            .trading_snapshot(&mut state, &mut coverage, &mut pending, scope)
             .await
         {
             observer_complete = false;
             pending.push(format!("Trading observation unavailable ({})", error.code));
+        }
+        if !scope.is_full()
+            && !self
+                .config
+                .accounts
+                .iter()
+                .any(|account| self.snapshot_account_selected(account, scope))
+        {
+            observer_complete = false;
+            pending.push("binance: no account matches the requested snapshot scope".into());
+        }
+        for asset in &scope.assets {
+            if asset.network == "binance"
+                && !state
+                    .holdings
+                    .iter()
+                    .any(|holding| holding.amount.asset == *asset)
+            {
+                observer_complete = false;
+                pending.push(format!(
+                    "binance: requested asset identity was not observed: {} ({} decimals)",
+                    asset.reference, asset.decimals
+                ));
+            }
+        }
+        if !scope.is_full() {
+            // Venue balance endpoints report an account, not an exact token.
+            // Retain all holdings, open orders and futures exposure for the
+            // selected account so asset selectors cannot hide related risk.
+            for account in self
+                .config
+                .accounts
+                .iter()
+                .filter(|a| self.snapshot_account_selected(a, scope))
+            {
+                coverage.push(format!(
+                    "scoped-account:{}:all-assets-and-related-exposure",
+                    account.resource.0
+                ));
+            }
         }
         Ok(StateSnapshot {
             state,
@@ -4906,4 +4977,19 @@ fn make_verified(
     };
     bundle.proof_digest = fin_domain::verified_effect_digest(&bundle)?;
     Ok(bundle)
+}
+
+impl BinanceProfile {
+    fn snapshot_account_selected(
+        &self,
+        account: &BinanceAccount,
+        scope: &fin_domain::SnapshotScope,
+    ) -> bool {
+        scope.matches_network("binance")
+            && (scope.matches_resource(&account.resource)
+                || scope
+                    .resources
+                    .iter()
+                    .any(|r| r.0 == format!("{}:USD_M", account.resource.0)))
+    }
 }

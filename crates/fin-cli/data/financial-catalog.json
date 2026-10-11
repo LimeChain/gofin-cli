@@ -12215,14 +12215,331 @@
   },
   {
     "name": "fin.snapshot",
-    "description": "Capture a broker-combined financial snapshot for every configured resource and unresolved journal identity.",
+    "description": "Capture a scoped or full broker-combined financial snapshot and installation-wide unresolved journal identities.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
+      "$defs": {
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "ResourceId": {
+          "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
+      "description": "Optional financial read scope. Empty selectors preserve the full snapshot.\nSelectors intersect; asset selection never excludes related account exposure\n(for example collateral/debt or the native asset required for execution fees).",
+      "properties": {
+        "assets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AssetId"
+          },
+          "type": "array"
+        },
+        "networks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResourceId"
+          },
+          "type": "array"
+        }
+      },
+      "title": "SnapshotScope",
       "type": "object"
     },
     "output_schema": {
+      "$defs": {
+        "Amount": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetId"
+            },
+            "atoms": {
+              "$ref": "#/$defs/Quantity"
+            }
+          },
+          "required": [
+            "asset",
+            "atoms"
+          ],
+          "type": "object"
+        },
+        "AssetId": {
+          "additionalProperties": false,
+          "properties": {
+            "decimals": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "network": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "network",
+            "reference",
+            "decimals"
+          ],
+          "type": "object"
+        },
+        "AuthorityState": {
+          "additionalProperties": false,
+          "properties": {
+            "authority": {
+              "type": "string"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "resource",
+            "authority",
+            "value"
+          ],
+          "type": "object"
+        },
+        "FinancialState": {
+          "additionalProperties": false,
+          "properties": {
+            "authorities": {
+              "items": {
+                "$ref": "#/$defs/AuthorityState"
+              },
+              "type": "array"
+            },
+            "holdings": {
+              "items": {
+                "$ref": "#/$defs/ResourceAmount"
+              },
+              "type": "array"
+            },
+            "in_flight": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "positions": {
+              "items": {
+                "$ref": "#/$defs/PositionState"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "holdings",
+            "positions",
+            "authorities",
+            "in_flight"
+          ],
+          "type": "object"
+        },
+        "PositionAnchor": {
+          "additionalProperties": false,
+          "description": "Broker-owned previously proved backing. JSON evidence is interpreted by the reviewed application.",
+          "properties": {
+            "evidence": true,
+            "evidence_version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "position": {
+              "type": "string"
+            },
+            "position_kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "principal": {
+              "$ref": "#/$defs/Amount"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "scaled_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "position_kind",
+            "principal",
+            "evidence_version",
+            "evidence",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        "PositionKind": {
+          "oneOf": [
+            {
+              "enum": [
+                "supply",
+                "stable_debt",
+                "variable_debt",
+                "derivative_long",
+                "derivative_short"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "investment",
+              "description": "Application-reported investment equity, with units and redemption\nrestrictions retained in its verified anchor evidence.",
+              "type": "string"
+            },
+            {
+              "const": "locked_collateral",
+              "description": "Cash committed to a position's margin, distinct from exposure units.",
+              "type": "string"
+            }
+          ]
+        },
+        "PositionState": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "anchor": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PositionAnchor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/PositionKind"
+            },
+            "position": {
+              "type": "string"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "scaled_receipt": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Quantity"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "resource",
+            "position",
+            "kind",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "Quantity": {
+          "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
+          "type": "string"
+        },
+        "ResourceAmount": {
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/Amount"
+            },
+            "resource": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "required": [
+            "resource",
+            "amount"
+          ],
+          "type": "object"
+        },
+        "ResourceId": {
+          "description": "Resolved physical custody/signer identity, never merely a user-provided alias.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Created by reviewed observers, never proof merely because a client sets `complete`.",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "coverage": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "observed_at": {
+          "type": "string"
+        },
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/FinancialState"
+        }
+      },
       "required": [
         "state",
         "observed_at",
@@ -12230,6 +12547,7 @@
         "coverage",
         "pending"
       ],
+      "title": "StateSnapshot",
       "type": "object"
     },
     "error_schema": {
@@ -12240,11 +12558,14 @@
         "input": {}
       }
     ],
-    "coverage": "Combined snapshots from all configured reviewed adapters and nonterminal durable operations.",
-    "completion": "complete is true only when all observers completed and the operation journal has no unresolved records.",
+    "coverage": "Selected tracked resources and related exposure from reviewed adapters, plus installation-wide nonterminal financial operations.",
+    "completion": "complete covers only the selected tracked scope, and is false for failed/timed-out observers, unsupported scope, missing coverage or unresolved financial journal records.",
     "semantics": {
       "clientSuppliedState": false,
-      "pendingJournalIncluded": true,
+      "emptyScope": "all-configured-resources",
+      "observerConcurrency": 4,
+      "observerTimeoutSeconds": 10,
+      "pendingJournalIncluded": "installation-wide",
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -12265,7 +12586,8 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "scope": "all-configured-resources"
+      "relatedExposureIncluded": true,
+      "scope": "optional-intersecting-resources-networks-assets"
     }
   },
   {

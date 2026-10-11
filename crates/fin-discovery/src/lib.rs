@@ -780,13 +780,13 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({}),
             json!({"secret_input":"none","financial_movement":false,"verification_scope":"Read-only readiness diagnostics, not proof of credential isolation or actual biometric approval. Those require their separate human verification scenarios."}),
         ),
-        definition::<EmptyArgs>(
+        definition::<fin_domain::SnapshotScope>(
             "snapshot",
-            "Capture the broker-observed financial state and completeness metadata.",
+            "Capture selected broker-observed resources, networks and assets with explicit coverage and incomplete observations.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({}),
-            json!({"client_supplied_state":false,"service_required":true}),
+            json!({"client_supplied_state":false,"service_required":true,"scope":"Optional resources, networks and exact assets intersect. Empty selectors request the full portfolio. Related exposure and native fees remain included.","completeness":"Complete is relative to declared coverage, never an exhaustive portfolio claim. Observer failures and timeouts return partial state with complete=false and identify missing coverage; incomplete evidence cannot authorize financial execution.","command_line_examples":["fin snapshot --input '{\"networks\":[\"ethereum:8453\"]}' --json"]}),
         ),
         definition::<EmptyArgs>(
             "setup",
@@ -978,6 +978,8 @@ pub fn operation_definitions() -> Vec<Definition> {
             item.output_schema = schema::<enrollment_contract::EnrollmentOutcome>();
             item.semantics["financial_movement"] = json!(false);
             item.semantics["future_financial_authority"] = json!(false);
+        } else if item.name == "snapshot" {
+            item.output_schema = schema::<fin_domain::StateSnapshot>();
         } else if item.name == "plans.preview" {
             item.output_schema = schema::<fin_domain::financial_plans::FinancialPlanReview>();
         } else if matches!(
@@ -1696,5 +1698,36 @@ mod tests {
         let parsed = RemoveCli::try_parse_from(["fin", "--name", "main"]).unwrap();
         assert_eq!(parsed.connection.name, "main");
         assert!(RemoveCli::try_parse_from(["fin", "--secret", "SYNTHETIC"]).is_err());
+    }
+    #[test]
+    fn snapshot_schema_exposes_typed_scope_and_honest_coverage() {
+        let definition = operation_definitions()
+            .into_iter()
+            .find(|d| d.name == "snapshot")
+            .unwrap();
+        assert_eq!(
+            definition.input_schema,
+            schema::<fin_domain::SnapshotScope>()
+        );
+        assert_eq!(
+            definition.output_schema,
+            schema::<fin_domain::StateSnapshot>()
+        );
+        let empty: fin_domain::SnapshotScope = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.is_full());
+        let scope: fin_domain::SnapshotScope = serde_json::from_value(json!({
+            "resources":["ethereum:8453:0x0000000000000000000000000000000000000001"],
+            "networks":["ethereum:8453"],
+            "assets":[{"network":"ethereum:8453","reference":"native","decimals":18}]
+        }))
+        .unwrap();
+        assert!(!scope.is_full());
+        assert!(scope.matches_network("ethereum:8453"));
+        assert!(!scope.matches_network("ethereum:1"));
+        assert!(
+            serde_json::from_value::<fin_domain::SnapshotScope>(json!({"complete":true})).is_err()
+        );
+        let contract = definition.semantics["completeness"].as_str().unwrap();
+        assert!(contract.contains("partial state") && contract.contains("incomplete evidence"));
     }
 }

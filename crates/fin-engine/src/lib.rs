@@ -56,6 +56,24 @@ fn legacy_movement_limit() -> String {
     fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
 }
 const MAX_OBSERVATION_AGE_SECONDS: i64 = 120;
+const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+// Bound evidence collection only. Financial dispatch and reconciliation keep
+// their durable identity even after the caller stops waiting.
+async fn bounded_evidence<T>(
+    operation: &str,
+    stage: &str,
+    timeout: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(timeout, future).await.map_err(|_| {
+        FinError::new("EVIDENCE_TIMEOUT", stage,
+            "Required evidence did not arrive before the deadline; no financial submission was authorized by this evidence.",
+            "Inspect the selected account/network and retry preparation. If an operation already exists, inspect its original status before any new action.")
+            .with_details(json!({"operation": operation, "timeout_seconds": timeout.as_secs()}))
+    })?
+}
 
 #[derive(Clone, Debug)]
 pub struct EngineOptions {
@@ -407,7 +425,22 @@ impl Engine {
                 "Prepare and execute it through the approval path.",
             ));
         }
-        adapter.read(operation, input).await
+        // Composite snapshots return bounded partial coverage; bridge recovery
+        // reconciles immutable identities and is never cancelled as a read.
+        if matches!(
+            operation,
+            "fin.snapshot" | "bridge.status" | "bridge.recovery"
+        ) {
+            adapter.read(operation, input).await
+        } else {
+            bounded_evidence(
+                operation,
+                "read",
+                EXTERNAL_READ_TIMEOUT,
+                adapter.read(operation, input),
+            )
+            .await
+        }
     }
 
     pub async fn preview(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
@@ -451,9 +484,13 @@ impl Engine {
             ));
         }
         let context = self.preparation_context(run_id)?;
-        let mut preview = adapter
-            .prepare_with_context(operation, input, &context)
-            .await?;
+        let mut preview = bounded_evidence(
+            operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare_with_context(operation, input, &context),
+        )
+        .await?;
         let required_origins = self.cost_origin_assets(&preview, run_id)?;
         self.complete_cost_origin_prices(&mut preview, &required_origins)
             .await?;
@@ -554,10 +591,20 @@ impl Engine {
                 )
             })?;
             for asset in required_assets {
-                let price = provider
-                    .asset_price(asset)
-                    .await
-                    .map_err(|_| cost_origin_price_unavailable())?;
+                let price = bounded_evidence(
+                    &prepared.operation,
+                    "pricing",
+                    EXTERNAL_READ_TIMEOUT,
+                    provider.asset_price(asset),
+                )
+                .await
+                .map_err(|error| {
+                    if error.code == "EVIDENCE_TIMEOUT" {
+                        error
+                    } else {
+                        cost_origin_price_unavailable()
+                    }
+                })?;
                 if price.asset != *asset {
                     return Err(FinError::new(
                         "COST_ORIGIN_PRICE_INVALID",
@@ -1475,9 +1522,13 @@ impl Engine {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
-                    adapter
-                        .prepare_with_context(&request.operation, &request.input, &context)
-                        .await?
+                    bounded_evidence(
+                        &request.operation,
+                        "preflight",
+                        PREFLIGHT_TIMEOUT,
+                        adapter.prepare_with_context(&request.operation, &request.input, &context),
+                    )
+                    .await?
                 }
                 ExecutionRoute::Configuration(_) => {
                     adapter
@@ -1670,12 +1721,20 @@ impl Engine {
         self.update_record(record)?;
 
         let adapter_candidate = strip_plan_metadata(&prepared);
-        let mut refreshed = match &route {
-            ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await?,
-            ExecutionRoute::Configuration(_) => {
-                adapter.revalidate_configuration(&adapter_candidate).await?
-            }
-        };
+        let mut refreshed = bounded_evidence(
+            &request.operation,
+            "revalidation",
+            PREFLIGHT_TIMEOUT,
+            async {
+                match &route {
+                    ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
+                    ExecutionRoute::Configuration(_) => {
+                        adapter.revalidate_configuration(&adapter_candidate).await
+                    }
+                }
+            },
+        )
+        .await?;
         self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
             .await?;
         validate_prepared(&refreshed, &request.operation, Utc::now())?;
@@ -13026,6 +13085,213 @@ mod tests {
 
         async fn reconcile(&self, _record: &OperationRecord) -> Result<Reconciliation> {
             Ok(self.response.lock().unwrap().clone())
+        }
+    }
+
+    struct LatencyAdapter {
+        inner: SyntheticAdapter,
+        stall_preflight: bool,
+        stall_refresh: bool,
+        submitted_at: Mutex<Option<std::time::Instant>>,
+    }
+    #[async_trait]
+    impl Adapter for LatencyAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn snapshot(&self) -> Result<StateSnapshot> {
+            panic!("financial preparation must not take a portfolio snapshot")
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            if self.stall_preflight {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            if let Some(account) = input["synthetic_account"].as_str() {
+                let from = resource(&format!("synthetic-source-{account}"));
+                let to = resource(&format!("synthetic-target-{account}"));
+                prepared.binding["source"] = json!(from.0);
+                prepared.binding["target"] = json!(to.0);
+                prepared.intent.debits[0].resource = from.clone();
+                if let EffectConstraint::Transfer {
+                    from: source,
+                    to: target,
+                    ..
+                } = &mut prepared.intent.expected[0]
+                {
+                    *source = from;
+                    *target = to;
+                }
+            }
+            Ok(prepared)
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            if self.stall_refresh {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            self.inner.revalidate(prepared).await
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            *self.submitted_at.lock().unwrap() = Some(std::time::Instant::now());
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    struct LatencyAuthorizer(Mutex<Option<std::time::Instant>>);
+    #[async_trait]
+    impl Authorizer for LatencyAuthorizer {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            *self.0.lock().unwrap() = Some(std::time::Instant::now());
+            tokio::time::sleep(std::time::Duration::from_millis(9)).await;
+            SyntheticAuthorizer.authorize(challenge).await
+        }
+    }
+    #[tokio::test]
+    async fn latency_necessary_preflight_authorization_dispatch_and_submission() {
+        let adapter = Arc::new(LatencyAdapter {
+            inner: SyntheticAdapter::new(),
+            stall_preflight: false,
+            stall_refresh: false,
+            submitted_at: Mutex::new(None),
+        });
+        let authorizer = Arc::new(LatencyAuthorizer(Mutex::new(None)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            authorizer.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let preflight = std::time::Instant::now();
+        engine
+            .preview("synthetic.transfer", &json!({}))
+            .await
+            .unwrap();
+        let preflight_ms = preflight.elapsed().as_secs_f64() * 1000.;
+        let started = std::time::Instant::now();
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "latency-necessary".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let dispatch = authorizer.0.lock().unwrap().unwrap();
+        let submitted = adapter.submitted_at.lock().unwrap().unwrap();
+        eprintln!(
+            "necessary stage latency: preflight={preflight_ms:.3}ms authorization_dispatch={:.3}ms submission_after_dispatch={:.3}ms (includes 9ms synthetic approval response)",
+            (dispatch - started).as_secs_f64() * 1000.,
+            (submitted - dispatch).as_secs_f64() * 1000.
+        );
+        assert_eq!(result.status, Status::Pending);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_required_preflight_and_refresh_fail_closed_and_release_reservations() {
+        for stall_preflight in [true, false] {
+            let adapter = Arc::new(LatencyAdapter {
+                inner: SyntheticAdapter::new(),
+                stall_preflight,
+                stall_refresh: !stall_preflight,
+                submitted_at: Mutex::new(None),
+            });
+            let authorizer = Arc::new(LatencyAuthorizer(Mutex::new(None)));
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer.clone(),
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let request = OperationRequest {
+                request_id: format!("timeout-{stall_preflight}"),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            };
+            let result = engine.execute(request.clone()).await.unwrap();
+            assert!(result.status.terminal());
+            assert_eq!(result.error.as_ref().unwrap().code, "EVIDENCE_TIMEOUT");
+            assert_eq!(
+                result.error.as_ref().unwrap().stage,
+                if stall_preflight {
+                    "preflight"
+                } else {
+                    "revalidation"
+                }
+            );
+            assert_eq!(authorizer.0.lock().unwrap().is_some(), !stall_preflight);
+            assert!(result.submission.is_none());
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+            let retried = engine.execute(request).await.unwrap();
+            assert_eq!(result.id, retried.id);
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicate_writes_and_allocation_limit_allow_one_submission() {
+        for duplicate in [true, false] {
+            let adapter = Arc::new(LatencyAdapter {
+                inner: SyntheticAdapter::new(),
+                stall_preflight: false,
+                stall_refresh: false,
+                submitted_at: Mutex::new(None),
+            });
+            let authorizer = Arc::new(LatencyAuthorizer(Mutex::new(None)));
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions {
+                    max_run_allocation_usd_micros: "1000000".into(),
+                    ..EngineOptions::default()
+                },
+            )
+            .unwrap();
+            let mut first = ordinary_request("concurrent-first");
+            first.input = json!({"synthetic_account":"first"});
+            let mut second = first.clone();
+            if !duplicate {
+                second.request_id = "concurrent-second".into();
+                // Independent resources share only the installation budget;
+                // a resource lock cannot mask non-atomic allocation accounting.
+                second.input = json!({"synthetic_account":"second"});
+            }
+            let (first, second) = tokio::join!(engine.execute(first), engine.execute(second));
+            let first = first.unwrap();
+            let second = second.unwrap();
+            assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+            assert_eq!(engine.allocation_used_usd_micros().unwrap(), "1000000");
+            if duplicate {
+                assert_eq!(first.id, second.id);
+                assert_eq!(engine.operations().unwrap().len(), 1);
+            } else {
+                assert_ne!(first.id, second.id);
+                let rejected = if first.submission.is_none() {
+                    first
+                } else {
+                    second
+                };
+                assert_eq!(rejected.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
+                assert!(rejected.approval.is_none());
+                assert!(rejected.submission.is_none());
+            }
         }
     }
 

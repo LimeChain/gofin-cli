@@ -6414,3 +6414,156 @@ mod base_aave_tests;
 
 #[path = "base_fee_tests.rs"]
 mod base_fee_tests;
+
+/// Isolated stalled token and wallet fixture; never makes an external request.
+struct ScopedSnapshotRpc {
+    inner: Arc<Fixture>,
+    requests: Mutex<Vec<(String, Value)>>,
+}
+#[async_trait]
+impl EvmRpc for ScopedSnapshotRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .push((method.into(), params.clone()));
+        let target = params[0].as_str().or_else(|| params[0]["to"].as_str());
+        if target == Some(lower_address(addr(100)).as_str())
+            || target == Some(lower_address(addr(2)).as_str())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            return Err(error(
+                "SYNTHETIC_SLOW_RPC_FAILED",
+                "rpc",
+                "Unrelated synthetic observer read failed.",
+            ));
+        }
+        self.inner.request(method, params).await
+    }
+}
+#[tokio::test]
+async fn scoped_snapshot_skips_unrelated_wallet_and_tokens_and_reports_exact_asset_coverage() {
+    let rpc = Arc::new(ScopedSnapshotRpc {
+        inner: Arc::new(Fixture::new()),
+        requests: Mutex::new(Vec::new()),
+    });
+    let adapter = EthereumAdapter::new(
+        EthereumConfig::wallet_only(
+            1,
+            2,
+            vec![lower_address(addr(100)), lower_address(addr(101))],
+        ),
+        vec![
+            WalletConnection {
+                name: "selected".into(),
+                address: lower_address(addr(1)),
+                signing_enabled: false,
+            },
+            WalletConnection {
+                name: "unrelated".into(),
+                address: lower_address(addr(2)),
+                signing_enabled: false,
+            },
+        ],
+        Arc::new(EvmRuntime::new(rpc.clone(), 1, None)),
+    )
+    .unwrap();
+    let before = std::time::Instant::now();
+    assert_eq!(
+        adapter.snapshot().await.unwrap_err().code,
+        "SYNTHETIC_SLOW_RPC_FAILED"
+    );
+    let full_elapsed = before.elapsed();
+    rpc.requests.lock().unwrap().clear();
+    let scope = fin_domain::SnapshotScope {
+        resources: vec![resource(1, addr(1))],
+        networks: vec!["ethereum:1".into()],
+        assets: vec![adapter.asset(&lower_address(addr(101)), 6)],
+    };
+    let after = std::time::Instant::now();
+    let result = adapter.snapshot_scoped(&scope).await.unwrap();
+    let scoped_elapsed = after.elapsed();
+    eprintln!(
+        "synthetic snapshot full failing preflight={}ms, scoped preflight={}ms",
+        full_elapsed.as_millis(),
+        scoped_elapsed.as_millis()
+    );
+    assert!(result.complete, "{:?}", result.pending);
+    assert_eq!(result.state.holdings.len(), 2); // selected asset plus native fees
+    assert!(
+        result
+            .state
+            .holdings
+            .iter()
+            .all(|holding| holding.resource == resource(1, addr(1)))
+    );
+    assert!(
+        result
+            .coverage
+            .iter()
+            .any(|entry| entry.starts_with("scoped-assets:"))
+    );
+    for (_, params) in rpc.requests.lock().unwrap().iter() {
+        let target = params[0].as_str().or_else(|| params[0]["to"].as_str());
+        assert_ne!(target, Some(lower_address(addr(100)).as_str()));
+        assert_ne!(target, Some(lower_address(addr(2)).as_str()));
+    }
+    assert!(scoped_elapsed < full_elapsed);
+    let mut wrong_identity = scope.clone();
+    wrong_identity.assets[0].decimals = 18;
+    let incomplete = adapter.snapshot_scoped(&wrong_identity).await.unwrap();
+    assert!(!incomplete.complete);
+    assert!(
+        incomplete
+            .pending
+            .iter()
+            .any(|pending| pending.contains("requested asset identity"))
+    );
+    let unknown = fin_domain::SnapshotScope {
+        resources: vec![resource(1, addr(99))],
+        ..Default::default()
+    };
+    let incomplete = adapter.snapshot_scoped(&unknown).await.unwrap();
+    assert!(!incomplete.complete && incomplete.coverage.is_empty());
+}
+
+#[tokio::test]
+async fn scoped_snapshot_retains_related_collateral_and_debt_outside_requested_asset() {
+    let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(1000);
+        state.scaled_debt = U256::from(2000);
+        state.collateral = true;
+    }
+    let adapter = adapter(rpc);
+    let scope = fin_domain::SnapshotScope {
+        resources: vec![resource(1, addr(1))],
+        assets: vec![adapter.native_asset()],
+        ..Default::default()
+    };
+    let snapshot = adapter.snapshot_scoped(&scope).await.unwrap();
+    assert!(snapshot.complete, "{:?}", snapshot.pending);
+    assert_eq!(snapshot.state.holdings.len(), 1);
+    assert!(
+        snapshot
+            .state
+            .positions
+            .iter()
+            .any(|position| position.kind == PositionKind::Supply)
+    );
+    assert!(
+        snapshot
+            .state
+            .positions
+            .iter()
+            .any(|position| position.kind == PositionKind::VariableDebt)
+    );
+    assert!(
+        snapshot
+            .coverage
+            .iter()
+            .any(|coverage| coverage.contains("related-aave-exposure=true"))
+    );
+}
