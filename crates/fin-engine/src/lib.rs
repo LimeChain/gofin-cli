@@ -16,16 +16,17 @@ use fin_domain::financial_plans::{
 };
 use fin_domain::{
     AccountingLocation, Adapter, Amount, ApprovalAudit, AssetPrice, AuthorizationChallenge,
-    CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, FinError,
-    FinancialEffect, FinancialIntent, OperationKind, OperationRecord, OperationRequest, PlanStep,
-    PositionAnchor, PositionKind, PreparationContext, PreparedOperation, ProjectedCash,
+    CheckStatus, CostBound, CostTreatment, Definition, Direction, EffectConstraint, ExecutionActor,
+    FinError, FinancialEffect, FinancialIntent, OperationKind, OperationRecord, OperationRequest,
+    PlanStep, PositionAnchor, PositionKind, PreparationContext, PreparedOperation, ProjectedCash,
     ProjectedEffect, ProjectedPosition, ProjectedRequirement, ProjectedState, QuantityInterval,
-    Reconciliation, ResourceAmount, ResourceId, Result, ReturnRouteContext, ReturnRouteProof,
-    StateSnapshot, Status, Submission, SubmissionJournal, VerifiedEffects, authorization_binding,
-    binding_hash, now, request_fingerprint, verified_effect_digest,
+    Reconciliation, RecoveryBinding, ResourceAmount, ResourceId, Result, ReturnRouteContext,
+    ReturnRouteProof, StateSnapshot, Status, Submission, SubmissionJournal, VerifiedEffects,
+    authorization_binding, binding_hash, now, request_fingerprint, verified_effect_digest,
 };
 use fin_store::{
-    RecoveryReport, ReservationRow, Settlement, SharedStore, Store, StoreError, SubmissionRow,
+    ProgressSettlement, RecoveryReport, ReservationRow, Settlement, SharedStore, Store, StoreError,
+    SubmissionRow,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::Zero;
@@ -272,6 +273,24 @@ pub trait TrustedAssetPriceProvider: Send + Sync {
     async fn asset_price(&self, asset: &fin_domain::AssetId) -> Result<AssetPrice>;
 }
 
+/// Separate approval capability for human-reviewed configuration writes.
+/// Broker implementations must only expose this to the protected human
+/// terminal path; it is intentionally distinct from ordinary financial
+/// authorization so an agent approval provider cannot be reused by accident.
+#[async_trait]
+pub trait ConfigurationAuthorizer: Send + Sync {
+    async fn authorize_configuration(
+        &self,
+        challenge: &AuthorizationChallenge,
+    ) -> Result<ApprovalAudit>;
+}
+
+#[derive(Clone)]
+enum ExecutionRoute {
+    Financial,
+    Configuration(Arc<dyn ConfigurationAuthorizer>),
+}
+
 impl Engine {
     pub fn new(
         store: Store,
@@ -393,6 +412,27 @@ impl Engine {
 
     pub async fn preview(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
         self.preview_with_context(operation, input, None).await
+    }
+
+    /// Prepare a candidate only for a definition explicitly marked as a
+    /// human-interactive configuration operation.
+    pub async fn preview_configuration(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<PreparedOperation> {
+        let (adapter, definition) = self.resolve_definition(operation)?;
+        if definition.kind != OperationKind::Configuration
+            || definition.execution_actor != ExecutionActor::HumanInteractive
+        {
+            return Err(configuration_route_error());
+        }
+        let mut prepared = adapter.prepare_configuration(operation, input).await?;
+        let required_origins = self.cost_origin_assets(&prepared, None)?;
+        self.complete_cost_origin_prices(&mut prepared, &required_origins)
+            .await?;
+        validate_prepared(&prepared, operation, Utc::now())?;
+        Ok(prepared)
     }
 
     pub async fn preview_with_context(
@@ -1007,10 +1047,29 @@ impl Engine {
 
     pub async fn execute(&self, request: OperationRequest) -> Result<OperationRecord> {
         let _guard = self.write_queue.lock().await;
-        self.execute_serial(request).await
+        self.execute_serial(request, ExecutionRoute::Financial)
+            .await
     }
 
-    async fn execute_serial(&self, request: OperationRequest) -> Result<OperationRecord> {
+    /// Execute a reviewed human-only configuration candidate with its
+    /// dedicated approval capability. It shares durable operation identity,
+    /// reservation, journal and reconciliation semantics with financial
+    /// writes, but cannot use named plans or standing boundaries.
+    pub async fn execute_configuration(
+        &self,
+        request: OperationRequest,
+        authorizer: Arc<dyn ConfigurationAuthorizer>,
+    ) -> Result<OperationRecord> {
+        let _guard = self.write_queue.lock().await;
+        self.execute_serial(request, ExecutionRoute::Configuration(authorizer))
+            .await
+    }
+
+    async fn execute_serial(
+        &self,
+        request: OperationRequest,
+        route: ExecutionRoute,
+    ) -> Result<OperationRecord> {
         if request.request_id.trim().is_empty() {
             return Err(FinError::new(
                 "REQUEST_ID_REQUIRED",
@@ -1019,14 +1078,27 @@ impl Engine {
                 "Use one identity for this logical financial action.",
             ));
         }
-        let (adapter, kind) = self.resolve(&request.operation)?;
-        if kind != OperationKind::Write {
-            return Err(FinError::new(
-                "READ_OPERATION",
-                "validation",
-                "This operation is not a financial write.",
-                "Use the read command.",
-            ));
+        let (adapter, definition) = self.resolve_definition(&request.operation)?;
+        match &route {
+            ExecutionRoute::Financial
+                if definition.kind == OperationKind::Write
+                    && definition.execution_actor == ExecutionActor::AgentInvocable => {}
+            ExecutionRoute::Configuration(_)
+                if definition.kind == OperationKind::Configuration
+                    && definition.execution_actor == ExecutionActor::HumanInteractive
+                    && request.run_id.is_none() => {}
+            ExecutionRoute::Configuration(_) => return Err(configuration_route_error()),
+            ExecutionRoute::Financial if definition.kind == OperationKind::Configuration => {
+                return Err(configuration_route_error());
+            }
+            ExecutionRoute::Financial => {
+                return Err(FinError::new(
+                    "READ_OPERATION",
+                    "validation",
+                    "This operation is not an agent-invocable financial write.",
+                    "Use the read command or the protected human configuration route.",
+                ));
+            }
         }
         let fingerprint = request_fingerprint(&request)?;
         // Resolve an existing logical request before inspecting or claiming a
@@ -1139,11 +1211,28 @@ impl Engine {
             return Ok(record);
         }
         let result = self
-            .execute_new(adapter, &request, &mut record, None, None, None)
+            .execute_new(adapter, &request, &mut record, None, None, None, route)
             .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
+                if let Some(preview) = record.preview.as_mut()
+                    && let Some(link) = preview.binding.get(fin_domain::RECOVERY_METADATA_KEY)
+                {
+                    let persisted_link = self
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|store| store.get_record(&record.id).ok().flatten())
+                        .and_then(|value| {
+                            value.pointer("/preview/binding/__fin_recovery").cloned()
+                        });
+                    if persisted_link.as_ref() != Some(link)
+                        && let Some(binding) = preview.binding.as_object_mut()
+                    {
+                        binding.remove(fin_domain::RECOVERY_METADATA_KEY);
+                    }
+                }
                 if !record.status.terminal() {
                     record.status = if record.submission.is_some() {
                         Status::Unknown
@@ -1154,7 +1243,13 @@ impl Engine {
                     record.updated_at = now();
                     if record.status.terminal() {
                         let run = self.release_unsubmitted_reservation(&record)?;
-                        self.commit_terminal(record.clone(), json!(null), json!([]), run.as_ref())?;
+                        self.commit_terminal(
+                            record.clone(),
+                            json!(null),
+                            json!([]),
+                            run.as_ref(),
+                            None,
+                        )?;
                     } else {
                         self.update_record(&record)?;
                     }
@@ -1209,6 +1304,144 @@ impl Engine {
         Ok(true)
     }
 
+    fn validate_replacement_binding(
+        &self,
+        prepared: &PreparedOperation,
+        child: &OperationRecord,
+        run_id: Option<&str>,
+        replacement_enabled: bool,
+    ) -> Result<Option<fin_domain::ReplacementBinding>> {
+        let replacement = fin_domain::ReplacementBinding::from_prepared_binding(&prepared.binding)?;
+        let Some(replacement) = replacement else {
+            return Ok(None);
+        };
+        if !replacement_enabled
+            || replacement.parent_operation_id == child.id
+            || prepared.intent.locks.is_empty()
+        {
+            return Err(replacement_error());
+        }
+        let parent = self.load_record(&replacement.parent_operation_id)?;
+        if !matches!(
+            parent.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) || parent.submission.as_ref() != Some(&replacement.parent_submission)
+            || parent.run_id.as_deref() != run_id
+            || parent
+                .preview
+                .as_ref()
+                .is_none_or(|preview| preview.intent.locks != prepared.intent.locks)
+        {
+            return Err(replacement_error());
+        }
+        // A still-live child owns the unique replacement lease. A failed,
+        // unsubmitted child has no venue order and cannot overlap the parent.
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        for value in store.list_records().map_err(map_store)? {
+            let other: OperationRecord = from_value(value)?;
+            if other.id == child.id || other.id == parent.id {
+                continue;
+            }
+            let Some(other_preview) = &other.preview else {
+                continue;
+            };
+            let Some(other_replacement) =
+                fin_domain::ReplacementBinding::from_prepared_binding(&other_preview.binding)?
+            else {
+                continue;
+            };
+            if other_replacement.parent_operation_id == parent.id
+                && !replacement_attempt_releases_lease(&other)
+            {
+                return Err(replacement_error());
+            }
+        }
+        Ok(Some(replacement))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Recovery validation binds adapter capability, immutable operation state, and the execution route before reservation."
+    )]
+    fn validate_recovery_binding(
+        &self,
+        adapter: &dyn Adapter,
+        prepared: &PreparedOperation,
+        child: &OperationRecord,
+        run_id: Option<&str>,
+        recovery_enabled: bool,
+        ordinary_financial_route: bool,
+        standalone: bool,
+    ) -> Result<Option<RecoveryBinding>> {
+        let recovery = RecoveryBinding::from_prepared_binding(&prepared.binding)?;
+        let Some(recovery) = recovery else {
+            return Ok(None);
+        };
+        let invalid = || recovery_error();
+        if !recovery_enabled
+            || !ordinary_financial_route
+            || !standalone
+            || run_id.is_some()
+            || recovery.parent_operation_id == child.id
+            || !prepared.intent.debits.is_empty()
+            || !prepared.intent.maximum_costs.is_empty()
+            || !prepared.intent.expected.is_empty()
+            || prepared.intent.locks.len() != 1
+            || prepared.intent.locks[0].0.trim().is_empty()
+            || prepared.intent.locks.iter().collect::<BTreeSet<_>>().len()
+                != prepared.intent.locks.len()
+            || prepared.valuation.as_ref().is_none_or(|valuation| {
+                !valuation.movement_usd_micros.is_zero()
+                    || !valuation.maximum_fee_usd_micros.is_zero()
+                    || !valuation.additional_allocation_usd_micros.is_zero()
+            })
+            || fin_domain::ReplacementBinding::from_prepared_binding(&prepared.binding)?.is_some()
+        {
+            return Err(invalid());
+        }
+        let parent = self.load_record(&recovery.parent_operation_id)?;
+        if !matches!(
+            parent.status,
+            Status::Submitted | Status::Pending | Status::Unknown
+        ) || parent.submission.as_ref() != Some(&recovery.parent_submission)
+            || parent.run_id.as_deref() != run_id
+            || parent.preview.as_ref().is_none_or(|preview| {
+                preview.intent.locks.is_empty()
+                    || !prepared
+                        .intent
+                        .locks
+                        .iter()
+                        .all(|lock| !preview.intent.locks.contains(lock))
+            })
+        {
+            return Err(invalid());
+        }
+        let binding = adapter
+            .validate_recovery_child(prepared, &parent)?
+            .ok_or_else(invalid)?;
+        if binding != recovery {
+            return Err(invalid());
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        if let Some(existing) = store.recovery_child(&parent.id).map_err(map_store)? {
+            let existing: OperationRecord = from_value(existing)?;
+            if existing.id != child.id && !recovery_attempt_releases_lease(&existing) {
+                return Err(invalid());
+            }
+        }
+        Ok(Some(recovery))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The durable request and each independently validated execution capability are passed explicitly."
+    )]
     async fn execute_new(
         &self,
         adapter: Arc<dyn Adapter>,
@@ -1217,15 +1450,41 @@ impl Engine {
         boundary: Option<BoundaryAuthorizationRecord>,
         plan: Option<FinancialPlanAuthorizationRecord>,
         preprepared: Option<PreparedOperation>,
+        route: ExecutionRoute,
     ) -> Result<OperationRecord> {
+        let definition = adapter
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == request.operation);
+        let replacement_enabled = definition.as_ref().is_some_and(|definition| {
+            definition
+                .semantics
+                .pointer("/replacement/version")
+                .and_then(Value::as_u64)
+                == Some(1)
+        });
+        let recovery_enabled = definition.as_ref().is_some_and(|definition| {
+            definition
+                .semantics
+                .pointer("/recovery_child/version")
+                .and_then(Value::as_u64)
+                == Some(1)
+        });
         let context = self.preparation_context(request.run_id.as_deref())?;
         let mut prepared = match preprepared {
             Some(prepared) => prepared,
-            None => {
-                adapter
-                    .prepare_with_context(&request.operation, &request.input, &context)
-                    .await?
-            }
+            None => match &route {
+                ExecutionRoute::Financial => {
+                    adapter
+                        .prepare_with_context(&request.operation, &request.input, &context)
+                        .await?
+                }
+                ExecutionRoute::Configuration(_) => {
+                    adapter
+                        .prepare_configuration(&request.operation, &request.input)
+                        .await?
+                }
+            },
         };
         let plan_attempt_hash = if let Some(plan) = &plan {
             let linkage = plan
@@ -1300,11 +1559,26 @@ impl Engine {
         self.complete_cost_origin_prices(&mut prepared, &required_cost_origins)
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
-        record.preview = Some(prepared.clone());
-        record.updated_at = now();
 
         let cancellation =
             self.validate_submission_cancellation(&prepared, request.run_id.as_deref())?;
+        let replacement = self.validate_replacement_binding(
+            &prepared,
+            record,
+            request.run_id.as_deref(),
+            replacement_enabled,
+        )?;
+        let recovery = self.validate_recovery_binding(
+            adapter.as_ref(),
+            &prepared,
+            record,
+            request.run_id.as_deref(),
+            recovery_enabled,
+            matches!(&route, ExecutionRoute::Financial),
+            plan.is_none() && boundary.is_none(),
+        )?;
+        record.preview = Some(prepared.clone());
+        record.updated_at = now();
         let mut run_state = if cancellation {
             None
         } else if let Some(run_id) = &request.run_id {
@@ -1332,7 +1606,16 @@ impl Engine {
             // acquire a conflicting financial reservation for a new movement.
             self.update_record(record)?;
         } else {
-            self.reserve_ordinary_operation(record, &prepared)?;
+            self.reserve_ordinary_operation(
+                record,
+                &prepared,
+                replacement
+                    .as_ref()
+                    .map(|link| link.parent_operation_id.as_str()),
+                recovery
+                    .as_ref()
+                    .map(|link| link.parent_operation_id.as_str()),
+            )?;
         }
 
         let approved_binding = authorization_binding(&prepared);
@@ -1361,7 +1644,11 @@ impl Engine {
                 parse_time(&now())? + chrono::Duration::seconds(90),
             );
             let challenge = AuthorizationChallenge {
-                purpose: "financial_write".into(),
+                purpose: match &route {
+                    ExecutionRoute::Financial => "financial_write",
+                    ExecutionRoute::Configuration(_) => "configuration_write",
+                }
+                .into(),
                 operation_id: record.id.clone(),
                 binding: approved_binding,
                 binding_hash: approved_binding_hash.clone(),
@@ -1369,7 +1656,12 @@ impl Engine {
                 nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
                 expires_at: challenge_expiry.to_rfc3339(),
             };
-            let audit = self.authorizer.authorize(&challenge).await?;
+            let audit = match &route {
+                ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
+                ExecutionRoute::Configuration(authorizer) => {
+                    authorizer.authorize_configuration(&challenge).await?
+                }
+            };
             validate_approval(&audit, &challenge, Utc::now())?;
             (audit, Some(challenge))
         };
@@ -1378,7 +1670,12 @@ impl Engine {
         self.update_record(record)?;
 
         let adapter_candidate = strip_plan_metadata(&prepared);
-        let mut refreshed = adapter.revalidate(&adapter_candidate).await?;
+        let mut refreshed = match &route {
+            ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await?,
+            ExecutionRoute::Configuration(_) => {
+                adapter.revalidate_configuration(&adapter_candidate).await?
+            }
+        };
         self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
             .await?;
         validate_prepared(&refreshed, &request.operation, Utc::now())?;
@@ -1534,6 +1831,21 @@ impl Engine {
         if cancellation {
             self.validate_submission_cancellation(&refreshed, request.run_id.as_deref())?;
         }
+        let replacement = self.validate_replacement_binding(
+            &refreshed,
+            record,
+            request.run_id.as_deref(),
+            replacement_enabled,
+        )?;
+        let recovery = self.validate_recovery_binding(
+            adapter.as_ref(),
+            &refreshed,
+            record,
+            request.run_id.as_deref(),
+            recovery_enabled,
+            matches!(&route, ExecutionRoute::Financial),
+            plan.is_none() && boundary.is_none(),
+        )?;
 
         if let (Some(run_id), Some(run)) = (&request.run_id, run_state.as_mut()) {
             self.recheck_run_reservation(run_id, &record.id, &refreshed)?;
@@ -1554,7 +1866,16 @@ impl Engine {
                 .map_err(map_store)?;
         }
         if request.run_id.is_none() && !cancellation {
-            self.reserve_ordinary_operation(record, &refreshed)?;
+            self.reserve_ordinary_operation(
+                record,
+                &refreshed,
+                replacement
+                    .as_ref()
+                    .map(|link| link.parent_operation_id.as_str()),
+                recovery
+                    .as_ref()
+                    .map(|link| link.parent_operation_id.as_str()),
+            )?;
         }
         record.preview = Some(refreshed.clone());
         let journal = Arc::new(OperationSubmissionJournal {
@@ -1575,9 +1896,18 @@ impl Engine {
             record: Mutex::new(record.clone()),
         });
         let adapter_submission_candidate = strip_plan_metadata(&refreshed);
-        let submission = adapter
-            .submit(&adapter_submission_candidate, journal.clone())
-            .await;
+        let submission = match &route {
+            ExecutionRoute::Financial => {
+                adapter
+                    .submit(&adapter_submission_candidate, journal.clone())
+                    .await
+            }
+            ExecutionRoute::Configuration(_) => {
+                adapter
+                    .submit_configuration(&adapter_submission_candidate, journal.clone())
+                    .await
+            }
+        };
         if let Err(error) = submission {
             let durable = journal
                 .record
@@ -1646,6 +1976,11 @@ impl Engine {
                     "Restore the same adapter version and reconcile; do not resubmit.",
                 )
             })?;
+        let definition = adapter
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == record.operation)
+            .ok_or_else(|| internal("registry definition disappeared during reconciliation"))?;
         let mut adapter_record = record.clone();
         if let Some(prepared) = &record.preview {
             adapter_record.preview = Some(strip_plan_metadata(prepared));
@@ -1708,7 +2043,13 @@ impl Engine {
                 adapter_record.input = execution_input;
             }
         }
-        let reconciliation = match adapter.reconcile(&adapter_record).await {
+        let reconciliation = match if definition.kind == OperationKind::Configuration
+            && definition.execution_actor == ExecutionActor::HumanInteractive
+        {
+            adapter.reconcile_configuration(&adapter_record).await
+        } else {
+            adapter.reconcile(&adapter_record).await
+        } {
             Ok(reconciliation) => reconciliation,
             Err(error) => {
                 let mut retained = record;
@@ -1768,6 +2109,11 @@ impl Engine {
     ) -> Result<OperationRecord> {
         match reconciliation.status.clone() {
             Status::Pending | Status::Submitted | Status::Unknown => {
+                if let Some(verified) = reconciliation.verified.clone()
+                    && fin_domain::SettlementProgress::from_evidence(&verified.evidence)?.is_some()
+                {
+                    return self.apply_progress_reconciliation(record, reconciliation, verified);
+                }
                 if !cost_attention_pending(&record) {
                     record.status = reconciliation.status;
                     record.last_reconciliation_evidence = Some(reconciliation.evidence);
@@ -1786,7 +2132,50 @@ impl Engine {
                     "Terminal venue status has no verified typed effects.",
                     "Reconcile this original submission until its proof and effects are available.",
                 ))?;
-                validate_effects(&record, &verified, &reconciliation.status)?;
+                let prior_progress = record
+                    .effects
+                    .as_ref()
+                    .map(|previous| {
+                        fin_domain::SettlementProgress::from_evidence(&previous.evidence)
+                    })
+                    .transpose()?
+                    .flatten();
+                if let Some(previous) = prior_progress.as_ref() {
+                    let final_progress = fin_domain::SettlementProgress::from_evidence(
+                        &verified.evidence,
+                    )?
+                    .ok_or_else(|| {
+                        reconciliation_error(
+                            "Terminal proof omitted the previously accepted cumulative progress identity.",
+                        )
+                    })?;
+                    if final_progress.sequence < previous.sequence
+                        || (final_progress.sequence == previous.sequence
+                            && record.effects.as_ref() != Some(&verified))
+                        || previous.event_digests.iter().any(|(identity, digest)| {
+                            final_progress.event_digests.get(identity) != Some(digest)
+                        })
+                    {
+                        return Err(reconciliation_error(
+                            "Terminal proof regressed or changed a previously proved event.",
+                        ));
+                    }
+                    validate_cumulative_settlement_components(
+                        record
+                            .effects
+                            .as_ref()
+                            .map(|effects| effects.effects.as_slice()),
+                        &verified.effects,
+                    )?;
+                }
+                validate_effects_mode(
+                    &record,
+                    &verified,
+                    &reconciliation.status,
+                    reconciliation.status == Status::Failed && prior_progress.is_some(),
+                )?;
+                let accounting_delta =
+                    cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
                 if reconciliation.status == Status::Completed {
                     let prior = self.preparation_context(record.run_id.as_deref())?;
                     validate_anchor_transitions(&verified, &prior)?;
@@ -1814,6 +2203,7 @@ impl Engine {
                     to_value(&verified)?,
                     to_value(&verified.effects)?,
                     run.as_ref(),
+                    Some(&accounting_delta),
                 )?;
                 Ok(record)
             }
@@ -1835,6 +2225,7 @@ impl Engine {
                     reconciliation.evidence,
                     json!([]),
                     run.as_ref(),
+                    None,
                 )?;
                 Ok(record)
             }
@@ -1845,6 +2236,101 @@ impl Engine {
                 "Inspect the original operation and preserve its submission identity.",
             )),
         }
+    }
+
+    fn apply_progress_reconciliation(
+        &self,
+        mut record: OperationRecord,
+        reconciliation: Reconciliation,
+        verified: VerifiedEffects,
+    ) -> Result<OperationRecord> {
+        let progress = fin_domain::SettlementProgress::from_evidence(&verified.evidence)?
+            .ok_or_else(|| reconciliation_error("Progress metadata is missing."))?;
+        if let Some(previous) = record.effects.as_ref() {
+            let previous_progress =
+                fin_domain::SettlementProgress::from_evidence(&previous.evidence)?;
+            if let Some(previous_progress) = previous_progress {
+                if progress.sequence == previous_progress.sequence && verified == *previous {
+                    return Ok(record);
+                }
+                if progress.sequence <= previous_progress.sequence {
+                    return Err(reconciliation_error(
+                        "A stale progress sequence was returned with different proof content.",
+                    ));
+                }
+                if previous_progress
+                    .event_digests
+                    .iter()
+                    .any(|(identity, digest)| progress.event_digests.get(identity) != Some(digest))
+                {
+                    return Err(reconciliation_error(
+                        "Cumulative progress changed previously proved event content.",
+                    ));
+                }
+                validate_cumulative_settlement_components(
+                    Some(&previous.effects),
+                    &verified.effects,
+                )?;
+            }
+        }
+        validate_effects_mode(&record, &verified, &reconciliation.status, true)?;
+        record.status = reconciliation.status;
+        record.last_reconciliation_evidence = Some(reconciliation.evidence);
+        record.effects = Some(verified.clone());
+        record.error = None;
+        record.updated_at = now();
+
+        let prepared = record
+            .preview
+            .as_ref()
+            .ok_or_else(|| reconciliation_error("The durable prepared operation is missing."))?;
+        let reservations = if record.run_id.is_some() {
+            // Run provenance remains reserved in full until the terminal proof
+            // settles it; the run ledger owns a second source-specific hold.
+            store_reservations_for_intent(prepared)?
+        } else {
+            remaining_store_reservations(prepared, &verified.effects)?
+        };
+        let boundary_id = prepared
+            .binding
+            .get(boundaries::BOUNDARY_METADATA_KEY)
+            .and_then(|metadata| metadata.get("authorization_id"))
+            .and_then(Value::as_str);
+        let mut expected_boundary = None;
+        let mut boundary_record = None;
+        if let Some(boundary_id) = boundary_id {
+            let mut boundary = self.load_boundary_record(boundary_id)?;
+            if boundary.active_attempt.as_deref() != Some(record.id.as_str()) {
+                return Err(boundary_error(
+                    "Cumulative progress is not owned by the active boundary attempt.",
+                ));
+            }
+            expected_boundary = Some(to_value(&boundary)?);
+            let delta = cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
+            account_boundary_effects(&mut boundary.authorization, Some(&delta))?;
+            boundary_record = Some(to_value(&boundary)?);
+        }
+        let progress_settlement = ProgressSettlement {
+            operation_id: record.id.clone(),
+            record: to_value(&record)?,
+            proof: to_value(&verified)?,
+            effects: to_value(&verified.effects)?,
+            reservations,
+            run_id: None,
+            run_record: None,
+            boundary_id: boundary_id.map(str::to_owned),
+            expected_boundary,
+            boundary_record,
+            plan_id: None,
+            expected_plan: None,
+            plan_record: None,
+        };
+        self.store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?
+            .commit_progress_settlement(&progress_settlement, &record.updated_at)
+            .map_err(map_store)?;
+        Ok(record)
     }
 
     /// Read the original historical document without rewriting its reservations or proofs.
@@ -2636,6 +3122,11 @@ impl Engine {
     }
 
     fn resolve(&self, operation: &str) -> Result<(Arc<dyn Adapter>, OperationKind)> {
+        let (adapter, definition) = self.resolve_definition(operation)?;
+        Ok((adapter, definition.kind))
+    }
+
+    fn resolve_definition(&self, operation: &str) -> Result<(Arc<dyn Adapter>, Definition)> {
         let registry = self
             .adapters
             .read()
@@ -2653,7 +3144,7 @@ impl Engine {
             .into_iter()
             .find(|d| d.name == operation)
             .ok_or_else(|| internal("registry definition disappeared"))?;
-        Ok((adapter, definition.kind))
+        Ok((adapter, definition))
     }
 
     fn load_record(&self, id: &str) -> Result<OperationRecord> {
@@ -2751,6 +3242,7 @@ impl Engine {
         proof: Value,
         effects: Value,
         run: Option<&RunLedger>,
+        accounting_effects: Option<&VerifiedEffects>,
     ) -> Result<()> {
         let settlement = Settlement {
             operation_id: record.id.clone(),
@@ -2771,7 +3263,10 @@ impl Engine {
             let expected = boundary.clone();
             if boundary.active_attempt.as_deref() == Some(record.id.as_str()) {
                 boundary.active_attempt = None;
-                account_boundary_effects(&mut boundary.authorization, record.effects.as_ref())?;
+                account_boundary_effects(
+                    &mut boundary.authorization,
+                    accounting_effects.or(record.effects.as_ref()),
+                )?;
             }
             let handoff = transfer_principal(&record)?;
             let mut store = self
@@ -4227,6 +4722,40 @@ fn cancellation_error() -> FinError {
     )
 }
 
+fn replacement_error() -> FinError {
+    FinError::new(
+        "REPLACEMENT_TARGET_MISMATCH",
+        "validation",
+        "The replacement does not match one unresolved durable submission and custody scope.",
+        "Reconcile the original operation and prepare a replacement against its exact current submission.",
+    )
+}
+
+fn recovery_error() -> FinError {
+    FinError::new(
+        "INVALID_RECOVERY_CHILD",
+        "validation",
+        "The recovery action does not match one unresolved durable submission or its zero-financial-effect scope.",
+        "Prepare one recovery action from the exact unresolved parent submission, using a distinct nonce lock and fresh approval.",
+    )
+}
+
+fn replacement_attempt_releases_lease(record: &OperationRecord) -> bool {
+    matches!(
+        record.status,
+        Status::Failed | Status::Rejected | Status::Expired
+    )
+}
+
+fn recovery_attempt_releases_lease(record: &OperationRecord) -> bool {
+    matches!(
+        record.status,
+        Status::Failed | Status::Rejected | Status::Expired
+    ) && record.submission.is_none()
+        && record.dispatch_evidence.is_none()
+        && record.effects.is_none()
+}
+
 fn transfer_principal(record: &OperationRecord) -> Result<Option<fin_domain::TransitResource>> {
     let Some(verified) = &record.effects else {
         return Ok(None);
@@ -4509,10 +5038,99 @@ fn partial_failed_transfer_matches(
     })
 }
 
+/// A canonical source receipt may prove that a reviewed transfer's principal
+/// left its source before the destination credit is available. The cash debit
+/// is accepted only alongside a separately validated nonspendable transit
+/// principal bound to the same finite transfer expectation.
+fn in_transit_source_debit_matches(
+    constraint: &EffectConstraint,
+    effect: &FinancialEffect,
+    verified: &VerifiedEffects,
+) -> bool {
+    let (
+        EffectConstraint::Transfer {
+            from,
+            to,
+            debit_asset,
+            maximum_debit,
+            minimum_credit,
+            ..
+        },
+        FinancialEffect::CashDebit {
+            resource: actual_resource,
+            amount: actual_amount,
+        },
+    ) = (constraint, effect)
+    else {
+        return false;
+    };
+    let mut transit = verified.effects.iter().filter_map(|effect| match effect {
+        FinancialEffect::TransitPrincipal {
+            transfer_id,
+            amount,
+        } => Some((transfer_id, amount)),
+        _ => None,
+    });
+    let Some((transfer_id, principal)) = transit.next() else {
+        return false;
+    };
+    if transit.next().is_some()
+        || transfer_id != &verified.submission.reference
+        || actual_resource != from
+        || actual_amount.asset != *debit_asset
+        || actual_amount != principal
+        || actual_amount.atoms.is_zero()
+        || actual_amount.atoms > *maximum_debit
+        || minimum_credit.is_zero()
+    {
+        return false;
+    }
+    let Some(metadata) = verified.evidence.get("transit") else {
+        return false;
+    };
+    metadata.get("transfer_id").and_then(Value::as_str) == Some(transfer_id)
+        && metadata.get("source_submission").and_then(Value::as_str)
+            == Some(verified.submission.reference.as_str())
+        && metadata
+            .get("evidence_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        && metadata.get("resource").and_then(Value::as_str) == Some(from.0.as_str())
+        && metadata.get("recipient_resource").and_then(Value::as_str) == Some(to.0.as_str())
+        && metadata.get("amount_atoms").and_then(Value::as_str)
+            == Some(actual_amount.atoms.as_str())
+        && metadata.get("asset") == serde_json::to_value(debit_asset).ok().as_ref()
+        && fin_domain::SettlementProgress::from_evidence(&verified.evidence)
+            .ok()
+            .flatten()
+            .is_some_and(|progress| {
+                progress.version == 1
+                    && progress.sequence == 1
+                    && !progress.snapshot_id.is_empty()
+                    && progress
+                        .event_digests
+                        .get(&format!("source:{}", verified.submission.reference))
+                        .is_some_and(|digest| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+            })
+}
+
+#[cfg(test)]
 fn validate_effects(
     record: &OperationRecord,
     verified: &VerifiedEffects,
     outcome: &Status,
+) -> Result<()> {
+    validate_effects_mode(record, verified, outcome, false)
+}
+
+fn validate_effects_mode(
+    record: &OperationRecord,
+    verified: &VerifiedEffects,
+    outcome: &Status,
+    allow_incomplete: bool,
 ) -> Result<()> {
     if verified.evidence_version == 0 || verified.evidence.is_null() {
         return Err(FinError::new(
@@ -4598,6 +5216,13 @@ fn validate_effects(
         ));
     }
     let confirmed_failure = matches!(outcome, Status::Failed);
+    let prior_progress = record
+        .effects
+        .as_ref()
+        .map(|previous| fin_domain::SettlementProgress::from_evidence(&previous.evidence))
+        .transpose()?
+        .flatten()
+        .is_some();
     let transit_effects = verified
         .effects
         .iter()
@@ -4610,22 +5235,7 @@ fn validate_effects(
         })
         .collect::<Vec<_>>();
     if !transit_effects.is_empty() {
-        let marker = prepared
-            .binding
-            .get(fin_domain::BRIDGE_STEP_METADATA_KEY)
-            .ok_or_else(|| {
-                FinError::new(
-                    "INVALID_TRANSIT_EFFECT",
-                    "reconciliation",
-                    "Transit principal proof is not bound to a reviewed finite transfer step.",
-                    "Keep the operation unresolved and reconcile its original submission.",
-                )
-            })?;
-        let grant_id = prepared
-            .binding
-            .get(boundaries::BOUNDARY_METADATA_KEY)
-            .and_then(|value| value.get("authorization_id"))
-            .and_then(Value::as_str);
+        let marker = prepared.binding.get(fin_domain::BRIDGE_STEP_METADATA_KEY);
         let matching_debits =
             transit_effects
                 .first()
@@ -4643,57 +5253,119 @@ fn validate_effects(
                         })
                         .collect::<Vec<_>>()
                 });
-        let event_resource = verified
-            .evidence
-            .get("resource")
-            .or_else(|| verified.evidence.get("recipient_resource"));
-        let event_amount = verified.evidence.get("amount_atoms");
-        let event_asset = verified.evidence.get("asset");
-        let expected_asset = matching_debits
-            .first()
-            .and_then(|(_, amount)| to_value(&amount.asset).ok());
-        let event_identity_valid = transit_effects.first().is_some_and(|(transfer_id, _)| {
-            let evidence_id = verified
+        let bridge_valid = if let Some(marker) = marker {
+            let grant_id = prepared
+                .binding
+                .get(boundaries::BOUNDARY_METADATA_KEY)
+                .and_then(|value| value.get("authorization_id"))
+                .and_then(Value::as_str);
+            let event_resource = verified
                 .evidence
-                .get("evidence_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            bridge_event_identity_matches(&verified.evidence, transfer_id, evidence_id)
-                && matching_debits.first().is_some_and(|(resource, _)| {
-                    bridge_evidence_matches_resource(&verified.evidence, resource)
+                .get("resource")
+                .or_else(|| verified.evidence.get("recipient_resource"));
+            let event_amount = verified.evidence.get("amount_atoms");
+            let event_asset = verified.evidence.get("asset");
+            let expected_asset = matching_debits
+                .first()
+                .and_then(|(_, amount)| to_value(&amount.asset).ok());
+            let event_identity_valid = transit_effects.first().is_some_and(|(transfer_id, _)| {
+                let evidence_id = verified
+                    .evidence
+                    .get("evidence_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                bridge_event_identity_matches(&verified.evidence, transfer_id, evidence_id)
+                    && matching_debits.first().is_some_and(|(resource, _)| {
+                        bridge_evidence_matches_resource(&verified.evidence, resource)
+                    })
+            });
+            transit_effects.len() == 1
+                && marker.get("kind").and_then(Value::as_str) == Some("deposit")
+                && marker.get("transfer_id").and_then(Value::as_str)
+                    == transit_effects.first().map(|entry| entry.0.as_str())
+                && marker.get("grant_id").and_then(Value::as_str) == grant_id
+                && matching_debits.len() == 1
+                && event_resource.and_then(Value::as_str)
+                    == matching_debits
+                        .first()
+                        .map(|(resource, _)| resource.0.as_str())
+                && event_amount.and_then(Value::as_str)
+                    == matching_debits
+                        .first()
+                        .map(|(_, amount)| amount.atoms.as_str())
+                && event_asset == expected_asset.as_ref()
+                && event_identity_valid
+                && !confirmed_failure
+        } else {
+            let Some((transfer_id, principal)) = transit_effects.first() else {
+                return Err(reconciliation_error("Transit principal is missing."));
+            };
+            let Some((source, debit)) = matching_debits.first() else {
+                return Err(reconciliation_error(
+                    "Transit principal has no source debit.",
+                ));
+            };
+            let pending_outcome = matches!(outcome, Status::Pending | Status::Unknown);
+            let matching_transfers = prepared
+                .intent
+                .expected
+                .iter()
+                .filter(|constraint| {
+                    matches!(constraint, EffectConstraint::Transfer { .. })
+                        && in_transit_source_debit_matches(
+                            constraint,
+                            &FinancialEffect::CashDebit {
+                                resource: (*source).clone(),
+                                amount: (*debit).clone(),
+                            },
+                            verified,
+                        )
                 })
-        });
-        if transit_effects.len() != 1
-            || marker.get("kind").and_then(Value::as_str) != Some("deposit")
-            || marker.get("transfer_id").and_then(Value::as_str)
-                != transit_effects.first().map(|entry| entry.0.as_str())
-            || marker.get("grant_id").and_then(Value::as_str) != grant_id
-            || matching_debits.len() != 1
-            || event_resource.and_then(Value::as_str)
-                != matching_debits
-                    .first()
-                    .map(|(resource, _)| resource.0.as_str())
-            || event_amount.and_then(Value::as_str)
-                != matching_debits
-                    .first()
-                    .map(|(_, amount)| amount.atoms.as_str())
-            || event_asset != expected_asset.as_ref()
-            || !event_identity_valid
-            || confirmed_failure
-        {
+                .count();
+            let transfer_constraints = prepared
+                .intent
+                .expected
+                .iter()
+                .filter(|constraint| matches!(constraint, EffectConstraint::Transfer { .. }))
+                .count();
+            pending_outcome
+                && transit_effects.len() == 1
+                && transfer_id.as_str() == verified.submission.reference
+                && *principal == *debit
+                && matching_debits.len() == 1
+                && matching_transfers == 1
+                && transfer_constraints == 1
+                && !prepared.intent.expected.is_empty()
+        };
+        if !bridge_valid {
             return Err(FinError::new(
                 "INVALID_TRANSIT_EFFECT",
                 "reconciliation",
-                "Transit principal must exactly match one proved source debit under the approved deposit step.",
+                "Transit principal must exactly match one source debit under a reviewed finite transfer or deposit step.",
                 "Keep the operation unresolved and reconcile its original submission.",
             ));
         }
     }
     let mut matched = vec![false; prepared.intent.expected.len()];
-    for effect in &verified.effects {
+    let expectation_effects =
+        aggregate_settlement_effects(&verified.effects, &prepared.intent.expected)?;
+    for effect in &expectation_effects {
+        let progressive_partial_match = if confirmed_failure && prior_progress {
+            let mut found = false;
+            for constraint in &prepared.intent.expected {
+                if progress_constraint_matches(constraint, effect)? {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        } else {
+            false
+        };
         if confirmed_failure
             && !matches!(effect, FinancialEffect::Cost { .. })
             && !partial_failed_transfer_matches(&prepared.intent.expected, effect)
+            && !progressive_partial_match
         {
             return Err(FinError::new(
                 "FAILED_EFFECT_MISMATCH",
@@ -4708,7 +5380,12 @@ fn validate_effects(
         }
         let mut found = false;
         for (index, constraint) in prepared.intent.expected.iter().enumerate() {
-            if constraint_matches(constraint, effect)? {
+            if if allow_incomplete {
+                progress_constraint_matches(constraint, effect)?
+                    || in_transit_source_debit_matches(constraint, effect, verified)
+            } else {
+                constraint_matches(constraint, effect)?
+            } {
                 if matched[index] {
                     continue;
                 }
@@ -4729,7 +5406,7 @@ fn validate_effects(
             ));
         }
     }
-    if !confirmed_failure && matched.iter().any(|value| !value) {
+    if !confirmed_failure && !allow_incomplete && matched.iter().any(|value| !value) {
         return Err(FinError::new(
             "EXPECTED_EFFECT_MISSING",
             "reconciliation",
@@ -5063,6 +5740,132 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 amount,
             },
         ) => actual_to == to && amount.asset == *asset && amount.atoms >= *minimum_credit,
+        _ => false,
+    })
+}
+
+/// Match a cumulative in-flight snapshot against the approved identity and
+/// upper bound while allowing terminal-only minima to remain unmet.
+fn progress_constraint_matches(
+    constraint: &EffectConstraint,
+    effect: &FinancialEffect,
+) -> Result<bool> {
+    if constraint_matches(constraint, effect)? {
+        return Ok(true);
+    }
+    Ok(match (constraint, effect) {
+        (
+            EffectConstraint::OriginMovement {
+                from,
+                to,
+                debit_asset,
+                credit_asset,
+                maximum_debit,
+                ..
+            },
+            FinancialEffect::OriginMovement {
+                from: actual_from,
+                to: actual_to,
+                debit,
+                credit,
+            },
+        ) => {
+            from == actual_from
+                && to == actual_to
+                && debit.asset == *debit_asset
+                && credit.asset == *credit_asset
+                && !debit.atoms.is_zero()
+                && !credit.atoms.is_zero()
+                && debit.atoms <= *maximum_debit
+        }
+        (
+            EffectConstraint::Transfer {
+                from,
+                to,
+                debit_asset,
+                credit_asset,
+                maximum_debit,
+                ..
+            },
+            FinancialEffect::Transfer {
+                from: actual_from,
+                to: actual_to,
+                debit,
+                credit,
+            },
+        ) => {
+            from == actual_from
+                && to == actual_to
+                && debit.asset == *debit_asset
+                && credit.asset == *credit_asset
+                && debit.atoms <= *maximum_debit
+        }
+        (
+            EffectConstraint::Conversion {
+                resource,
+                input,
+                maximum_input,
+                output,
+                ..
+            },
+            FinancialEffect::Conversion {
+                resource: actual_resource,
+                spent,
+                received,
+            },
+        ) => {
+            resource == actual_resource
+                && spent.asset == *input
+                && spent.atoms <= *maximum_input
+                && received.asset == *output
+        }
+        (
+            EffectConstraint::DerivativePosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+            },
+            FinancialEffect::PositionChange {
+                resource: actual_resource,
+                position: actual_position,
+                asset: actual_asset,
+                delta,
+                anchor: Some(anchor),
+                ..
+            },
+        ) => {
+            position_kind.is_derivative()
+                && resource == actual_resource
+                && position == actual_position
+                && asset == actual_asset
+                && anchor.position_kind == *position_kind
+                && minimum_delta.integer().min(BigInt::zero()) <= delta.integer()
+                && delta.integer() <= maximum_delta.integer().max(BigInt::zero())
+        }
+        (
+            EffectConstraint::Settlement {
+                resource,
+                asset,
+                category,
+                minimum_delta,
+                maximum_delta,
+            },
+            FinancialEffect::Settlement {
+                resource: actual_resource,
+                asset: actual_asset,
+                category: actual_category,
+                delta,
+            },
+        ) => {
+            resource == actual_resource
+                && asset == actual_asset
+                && category == actual_category
+                && minimum_delta.integer().min(BigInt::zero()) <= delta.integer()
+                && delta.integer() <= maximum_delta.integer().max(BigInt::zero())
+        }
         _ => false,
     })
 }
@@ -6897,8 +7700,14 @@ fn validate_position_leg(
         return Err(route_proof_error());
     }
     let expected_direction = match (&key.3, source_endpoint) {
-        (PositionKind::Supply, true) => Direction::Decrease,
-        (PositionKind::Supply, false) => Direction::Increase,
+        (
+            PositionKind::Supply | PositionKind::Investment | PositionKind::LockedCollateral,
+            true,
+        ) => Direction::Decrease,
+        (
+            PositionKind::Supply | PositionKind::Investment | PositionKind::LockedCollateral,
+            false,
+        ) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, true) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, false) => Direction::Decrease,
         (PositionKind::DerivativeLong | PositionKind::DerivativeShort, _) => {
@@ -8182,6 +8991,207 @@ fn aggregate_costs(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUi
     Ok(map)
 }
 
+/// Cumulative realized PnL is represented as separate gross loss and profit
+/// settlement legs. Their net is the actual collateral movement, while each
+/// side remains append-only as new fills arrive.
+fn aggregate_settlement_effects(
+    effects: &[FinancialEffect],
+    expected: &[EffectConstraint],
+) -> Result<Vec<FinancialEffect>> {
+    let mut constraint_counts = BTreeMap::<String, usize>::new();
+    for constraint in expected {
+        if let EffectConstraint::Settlement {
+            resource,
+            asset,
+            category,
+            ..
+        } = constraint
+        {
+            let key = serde_json::to_string(&(resource, asset, category))
+                .map_err(|_| reconciliation_error("Invalid settlement expectation identity."))?;
+            *constraint_counts.entry(key).or_default() += 1;
+        }
+    }
+    let mut totals = BTreeMap::<
+        String,
+        (
+            ResourceId,
+            fin_domain::AssetId,
+            fin_domain::SettlementCategory,
+            BigInt,
+        ),
+    >::new();
+    for effect in effects {
+        if let FinancialEffect::Settlement {
+            resource,
+            asset,
+            category,
+            delta,
+        } = effect
+        {
+            let key = serde_json::to_string(&(resource, asset, category))
+                .map_err(|_| reconciliation_error("Invalid settlement identity."))?;
+            totals
+                .entry(key)
+                .or_insert_with(|| {
+                    (
+                        resource.clone(),
+                        asset.clone(),
+                        category.clone(),
+                        BigInt::zero(),
+                    )
+                })
+                .3 += delta.integer();
+        }
+    }
+
+    let mut emitted = BTreeSet::new();
+    effects
+        .iter()
+        .map(|effect| {
+            let FinancialEffect::Settlement {
+                resource,
+                asset,
+                category,
+                ..
+            } = effect
+            else {
+                return Ok(Some(effect.clone()));
+            };
+            let key = serde_json::to_string(&(resource, asset, category))
+                .map_err(|_| reconciliation_error("Invalid settlement identity."))?;
+            // Multiple explicit constraints express separate gross legs (for
+            // example, one bounded loss and one bounded profit). Preserve
+            // those legs so each can match its own approved range.
+            if constraint_counts.get(&key).copied().unwrap_or_default() > 1 {
+                return Ok(Some(effect.clone()));
+            }
+            if !emitted.insert(key.clone()) {
+                return Ok(None);
+            }
+            let (resource, asset, category, total) = totals
+                .get(&key)
+                .ok_or_else(|| reconciliation_error("Settlement aggregate is missing."))?;
+            Ok(Some(FinancialEffect::Settlement {
+                resource: resource.clone(),
+                asset: asset.clone(),
+                category: category.clone(),
+                delta: fin_domain::SignedQuantity::new(total.to_string())?,
+            }))
+        })
+        .try_fold(Vec::new(), |mut output, result| -> Result<_> {
+            if let Some(effect) = result? {
+                output.push(effect);
+            }
+            Ok(output)
+        })
+}
+
+fn validate_cumulative_settlement_components(
+    previous: Option<&[FinancialEffect]>,
+    current: &[FinancialEffect],
+) -> Result<()> {
+    fn components(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+        let mut totals = BTreeMap::new();
+        for effect in effects {
+            let FinancialEffect::Settlement {
+                resource,
+                asset,
+                category,
+                delta,
+            } = effect
+            else {
+                continue;
+            };
+            if delta.is_zero() {
+                continue;
+            }
+            let direction = if delta.is_negative() {
+                "loss"
+            } else {
+                "profit"
+            };
+            let identity = serde_json::to_string(&(resource, asset, category, direction))
+                .map_err(|_| reconciliation_error("Invalid cumulative settlement identity."))?;
+            *totals.entry(identity).or_insert_with(BigUint::zero) += delta.magnitude().integer();
+        }
+        Ok(totals)
+    }
+
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let previous_totals = components(previous)?;
+    let current_totals = components(current)?;
+    if previous_totals.iter().any(|(identity, amount)| {
+        current_totals
+            .get(identity)
+            .is_none_or(|current| current < amount)
+    }) {
+        return Err(reconciliation_error(
+            "Cumulative gross settlement loss or profit regressed.",
+        ));
+    }
+    let previous_costs = cumulative_cost_components(previous)?;
+    let current_costs = cumulative_cost_components(current)?;
+    if previous_costs.iter().any(|(identity, amount)| {
+        current_costs
+            .get(identity)
+            .is_none_or(|current| current < amount)
+    }) {
+        return Err(reconciliation_error(
+            "Cumulative financial costs regressed.",
+        ));
+    }
+    let previous_credits = cumulative_credit_components(previous)?;
+    let current_credits = cumulative_credit_components(current)?;
+    if previous_credits.iter().any(|(identity, amount)| {
+        current_credits
+            .get(identity)
+            .is_none_or(|current| current < amount)
+    }) {
+        return Err(reconciliation_error("Cumulative usable credits regressed."));
+    }
+    Ok(())
+}
+
+fn cumulative_cost_components(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let mut totals = BTreeMap::new();
+    for effect in effects {
+        if let FinancialEffect::Cost {
+            location,
+            amount,
+            category,
+            treatment,
+        } = effect
+        {
+            if amount.atoms.is_zero() {
+                continue;
+            }
+            let identity =
+                serde_json::to_string(&(location, &amount.asset, treatment, category))
+                    .map_err(|_| reconciliation_error("Invalid cumulative cost identity."))?;
+            *totals.entry(identity).or_insert_with(BigUint::zero) += amount.atoms.integer();
+        }
+    }
+    Ok(totals)
+}
+
+fn cumulative_credit_components(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let mut totals = BTreeMap::new();
+    for effect in effects {
+        if let FinancialEffect::UsableCredit { to, amount } = effect {
+            if amount.atoms.is_zero() {
+                continue;
+            }
+            let identity = serde_json::to_string(&(to, &amount.asset))
+                .map_err(|_| reconciliation_error("Invalid cumulative credit identity."))?;
+            *totals.entry(identity).or_insert_with(BigUint::zero) += amount.atoms.integer();
+        }
+    }
+    Ok(totals)
+}
+
 fn cash_reservation_amounts(
     debits: &[ResourceAmount],
     costs: &[CostBound],
@@ -9011,7 +10021,10 @@ fn apply_effect_provenance(
                         &debit.atoms.integer(),
                     )?,
                     AccountingLocation::Position {
-                        position_kind: PositionKind::Supply,
+                        position_kind:
+                            PositionKind::Supply
+                            | PositionKind::Investment
+                            | PositionKind::LockedCollateral,
                         ..
                     } => take_provenance(
                         &mut run.provenance,
@@ -9038,7 +10051,10 @@ fn apply_effect_provenance(
                         project_lots(&origins, to, &credit.asset, &credit.atoms.integer())?
                     }
                     AccountingLocation::Position {
-                        position_kind: PositionKind::Supply,
+                        position_kind:
+                            PositionKind::Supply
+                            | PositionKind::Investment
+                            | PositionKind::LockedCollateral,
                         ..
                     } => project_lots(&origins, to, &credit.asset, &credit.atoms.integer())?,
                     AccountingLocation::Position {
@@ -9589,6 +10605,80 @@ fn store_reservations(
             }
         })
         .collect())
+}
+
+fn remaining_store_reservations(
+    prepared: &PreparedOperation,
+    effects: &[FinancialEffect],
+) -> Result<Vec<ReservationRow>> {
+    let mut rows = BTreeMap::<String, (BigUint, BigUint)>::new();
+    let maximum_debits = aggregate_resource_amounts(&prepared.intent.debits)?;
+    let actual_debits = actual_cash_debits(effects, false)?;
+    for (key, maximum) in maximum_debits {
+        let consumed = actual_debits.get(&key).cloned().unwrap_or_default();
+        if consumed > maximum {
+            return Err(reconciliation_error(
+                "Cumulative debit exceeds its approved reservation.",
+            ));
+        }
+        let remaining = maximum - consumed;
+        if !remaining.is_zero() {
+            rows.entry(key).or_default().0 = remaining;
+        }
+    }
+    let maximum_costs = aggregate_cost_bounds(&prepared.intent.maximum_costs)?;
+    let actual_costs = aggregate_costs(effects)?;
+    for (key, maximum) in maximum_costs {
+        let consumed = actual_costs.get(&key).cloned().unwrap_or_default();
+        if consumed > maximum {
+            return Err(reconciliation_error(
+                "Cumulative cost exceeds its approved reservation.",
+            ));
+        }
+        let remaining = maximum - consumed;
+        if !remaining.is_zero() {
+            rows.entry(key).or_default().1 = remaining;
+        }
+    }
+    Ok(rows
+        .into_iter()
+        .filter_map(|(resource, (units, fee))| {
+            (!units.is_zero() || !fee.is_zero()).then_some(ReservationRow {
+                resource,
+                units: units.to_string(),
+                fee_units: fee.to_string(),
+            })
+        })
+        .collect())
+}
+
+fn store_reservations_for_intent(prepared: &PreparedOperation) -> Result<Vec<ReservationRow>> {
+    let mut rows = BTreeMap::<String, (BigUint, BigUint)>::new();
+    for debit in &prepared.intent.debits {
+        let key = resource_asset_key(debit)?;
+        rows.entry(key).or_default().0 += debit.amount.atoms.integer();
+    }
+    for cost in &prepared.intent.maximum_costs {
+        let key = cost_key(&cost.location, &cost.amount.asset, &cost.treatment)?;
+        rows.entry(key).or_default().1 += cost.amount.atoms.integer();
+    }
+    Ok(rows
+        .into_iter()
+        .map(|(resource, (units, fee))| ReservationRow {
+            resource,
+            units: units.to_string(),
+            fee_units: fee.to_string(),
+        })
+        .collect())
+}
+
+fn reconciliation_error(message: &str) -> FinError {
+    FinError::new(
+        "INVALID_PROGRESS_PROOF",
+        "reconciliation",
+        message,
+        "Keep the original submission unresolved and reconcile it with a fresh cumulative proof.",
+    )
 }
 
 fn parse_uint(value: &str) -> Result<BigUint> {
@@ -10206,6 +11296,13 @@ fn validate_candidate_caps(
         }
     }
     for cost in &prepared.intent.maximum_costs {
+        // A zero maximum is an empty cost requirement, not authority to incur
+        // a fee. In particular, adapters may report a typed zero fee for
+        // fee-free operations; requiring a matching authorization identity
+        // would force callers to add a positive fee cap they did not intend.
+        if cost.amount.atoms.is_zero() {
+            continue;
+        }
         let Some(cap) = authorization.remaining_costs.iter().find(|cap| {
             cap.location == cost.location
                 && cap.amount.asset == cost.amount.asset
@@ -10444,6 +11541,139 @@ fn account_boundary_effects(
     Ok(())
 }
 
+/// Convert two cumulative snapshots into only the newly proved spend/cost
+/// amounts. The returned bundle is used for boundary consumption, while the
+/// durable operation record continues to hold the full cumulative effects.
+fn cumulative_boundary_delta(
+    previous: Option<&VerifiedEffects>,
+    current: &VerifiedEffects,
+) -> Result<VerifiedEffects> {
+    let mut debit_totals = BTreeMap::<String, (ResourceId, fin_domain::AssetId, BigUint)>::new();
+    let mut cost_totals = BTreeMap::<
+        String,
+        (
+            AccountingLocation,
+            fin_domain::AssetId,
+            CostTreatment,
+            BigUint,
+        ),
+    >::new();
+    let collect = |effects: &[FinancialEffect],
+                   debits: &mut BTreeMap<String, (ResourceId, fin_domain::AssetId, BigUint)>,
+                   costs: &mut BTreeMap<
+        String,
+        (
+            AccountingLocation,
+            fin_domain::AssetId,
+            CostTreatment,
+            BigUint,
+        ),
+    >|
+     -> Result<()> {
+        for effect in effects {
+            let debit = match effect {
+                FinancialEffect::CashDebit { resource, amount } => Some((resource, amount)),
+                FinancialEffect::Transfer { from, debit, .. } => Some((from, debit)),
+                FinancialEffect::Conversion {
+                    resource, spent, ..
+                } => Some((resource, spent)),
+                FinancialEffect::OriginMovement { from, debit, .. } => {
+                    Some((from.resource(), debit))
+                }
+                _ => None,
+            };
+            if let Some((resource, amount)) = debit {
+                let item = ResourceAmount {
+                    resource: resource.clone(),
+                    amount: amount.clone(),
+                };
+                let key = resource_asset_key(&item)?;
+                let entry = debits.entry(key).or_insert((
+                    resource.clone(),
+                    amount.asset.clone(),
+                    BigUint::zero(),
+                ));
+                entry.2 += amount.atoms.integer();
+            }
+            if let FinancialEffect::Cost {
+                location,
+                amount,
+                treatment,
+                ..
+            } = effect
+            {
+                let key = cost_key(location, &amount.asset, treatment)?;
+                let entry = costs.entry(key).or_insert((
+                    location.clone(),
+                    amount.asset.clone(),
+                    treatment.clone(),
+                    BigUint::zero(),
+                ));
+                entry.3 += amount.atoms.integer();
+            }
+        }
+        Ok(())
+    };
+    collect(&current.effects, &mut debit_totals, &mut cost_totals)?;
+    let mut previous_debits = BTreeMap::new();
+    let mut previous_costs = BTreeMap::new();
+    if let Some(previous) = previous {
+        collect(&previous.effects, &mut previous_debits, &mut previous_costs)?;
+    }
+    let mut effects = Vec::new();
+    for (key, (resource, asset, amount)) in debit_totals {
+        let consumed = previous_debits
+            .get(&key)
+            .map(|(_, _, amount)| amount)
+            .cloned()
+            .unwrap_or_default();
+        if consumed > amount {
+            return Err(reconciliation_error(
+                "Cumulative boundary debit regressed between proofs.",
+            ));
+        }
+        let delta = amount - consumed;
+        if !delta.is_zero() {
+            effects.push(FinancialEffect::CashDebit {
+                resource,
+                amount: Amount {
+                    asset,
+                    atoms: fin_domain::Quantity::new(delta.to_string())?,
+                },
+            });
+        }
+    }
+    for (key, (location, asset, treatment, amount)) in cost_totals {
+        let consumed = previous_costs
+            .get(&key)
+            .map(|(_, _, _, amount)| amount)
+            .cloned()
+            .unwrap_or_default();
+        if consumed > amount {
+            return Err(reconciliation_error(
+                "Cumulative boundary cost regressed between proofs.",
+            ));
+        }
+        let delta = amount - consumed;
+        if !delta.is_zero() {
+            effects.push(FinancialEffect::Cost {
+                location,
+                amount: Amount {
+                    asset,
+                    atoms: fin_domain::Quantity::new(delta.to_string())?,
+                },
+                category: "cumulative-progress".into(),
+                treatment,
+            });
+        }
+    }
+    let mut delta = current.clone();
+    delta.effects = effects;
+    delta.proof_digest.clear();
+    delta.proof_digest = verified_effect_digest(&delta)?;
+    Ok(delta)
+}
+
 fn add_resource_amount(
     rows: &mut Vec<ResourceAmount>,
     resource: &ResourceId,
@@ -10558,6 +11788,15 @@ fn validate_authority_expiry_for_adapter(
     fin_domain::authority_expiry::validate_authority_expiry(&definition, prepared, expires_at)
 }
 
+fn configuration_route_error() -> FinError {
+    FinError::new(
+        "CONFIGURATION_ROUTE_REQUIRED",
+        "configuration",
+        "This operation is not a human-interactive configuration definition.",
+        "Use the protected human configuration route for configuration changes.",
+    )
+}
+
 fn cost_origin_price_unavailable() -> FinError {
     FinError::new(
         "COST_ORIGIN_PRICE_UNAVAILABLE",
@@ -10578,6 +11817,9 @@ mod cost_origin_price_tests;
 
 #[cfg(test)]
 mod frozen_valuation_tests;
+
+#[cfg(test)]
+mod configuration_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -10604,6 +11846,74 @@ mod tests {
 
     fn quantity(value: &str) -> Quantity {
         Quantity::new(value).unwrap()
+    }
+
+    #[test]
+    fn zero_candidate_cost_needs_no_fee_scope_but_positive_cost_does() {
+        let cash = resource("hyperliquid:spot:primary");
+        let usdc = asset("hyperliquid", "USDC", 6);
+        let debit = ResourceAmount {
+            resource: cash.clone(),
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: quantity("11000000"),
+            },
+        };
+        let zero_cost = CostBound {
+            location: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: Quantity::zero(),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let mut operation = record(vec![], vec![zero_cost.clone()]);
+        let prepared = operation.preview.as_mut().unwrap();
+        prepared.intent.debits = vec![debit.clone()];
+
+        let authorization = BoundaryAuthorization {
+            id: "exact-plan-step".into(),
+            intent_id: "exact-plan-step".into(),
+            operation: prepared.operation.clone(),
+            bounds: Value::Null,
+            spec: BoundarySpec {
+                fixed: json!({"mode":"exact"}),
+                parameters: json!({}),
+                maximum_debits: vec![debit.clone()],
+                maximum_costs: vec![],
+                summary: "exact debit with no fee authority".into(),
+            },
+            approved_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2026-01-01T00:01:00Z".into(),
+            valid_for_seconds: 60,
+            status: BoundaryAuthorizationStatus::Active,
+            remaining_debits: vec![debit],
+            remaining_costs: vec![],
+            spent_debits: vec![],
+            spent_costs: vec![],
+            replaces: None,
+        };
+
+        // An exact plan with no cost cap accepts the zero-cost candidate and
+        // carries no positive fee authority or cost reservation.
+        validate_candidate_caps(&authorization, prepared).unwrap();
+        assert!(authorization.spec.maximum_costs.is_empty());
+        assert!(authorization.remaining_costs.is_empty());
+        assert!(prepared.intent.maximum_costs[0].amount.atoms.is_zero());
+        let reserved = aggregate_resource_amounts(
+            &cash_reservation_amounts(&prepared.intent.debits, &prepared.intent.maximum_costs)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(reserved.values().next().unwrap().to_string(), "11000000");
+
+        prepared.intent.maximum_costs[0].amount.atoms = quantity("1");
+        let error = validate_candidate_caps(&authorization, prepared).unwrap_err();
+        assert_eq!(error.code, "BOUNDARY_VIOLATION");
+        assert!(error.message.contains("fee"));
     }
 
     fn record(expected: Vec<EffectConstraint>, maximum_costs: Vec<CostBound>) -> OperationRecord {
@@ -10746,6 +12056,699 @@ mod tests {
         };
         verified.proof_digest = verified_effect_digest(&verified).unwrap();
         verified
+    }
+
+    fn progress_proof(
+        record: &OperationRecord,
+        sequence: u64,
+        snapshot_id: &str,
+        event_digests: &[(&str, &str)],
+        effects: Vec<FinancialEffect>,
+    ) -> VerifiedEffects {
+        let mut verified = proof(record, effects);
+        let event_digests = event_digests
+            .iter()
+            .map(|(identity, digest)| ((*identity).to_owned(), (*digest).to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        verified.evidence = json!({
+            "fixture":"synthetic cumulative fill proof",
+            "settlement_progress": {
+                "version":1,
+                "sequence":sequence,
+                "snapshot_id":snapshot_id,
+                "event_digests":event_digests,
+            }
+        });
+        verified.proof_digest = verified_effect_digest(&verified).unwrap();
+        verified
+    }
+
+    fn reservation_units(engine: &Engine, operation_id: &str) -> Vec<String> {
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .reservations(operation_id)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.units)
+            .collect()
+    }
+
+    #[test]
+    fn cumulative_progress_survives_restart_and_terminal_settles_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cumulative-progress.sqlite");
+        let source = resource("binance-account");
+        let eth = asset("binance", "ETH", 18);
+        let expected = EffectConstraint::Debit {
+            resource: source.clone(),
+            asset: eth.clone(),
+            maximum_debit: quantity("1000000000000000000"),
+        };
+        let mut operation = record(vec![expected], vec![]);
+        operation.status = Status::AwaitingApproval;
+        let submission = operation.submission.clone().unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "awaiting_approval",
+                &to_value(&operation).unwrap(),
+                &operation.created_at,
+            )
+            .unwrap();
+        store
+            .persist_submission(
+                &operation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                "2026-01-01T00:00:01Z",
+            )
+            .unwrap();
+        store
+            .reserve(
+                &operation.id,
+                &[ReservationRow {
+                    resource: resource_asset_key(&ResourceAmount {
+                        resource: source.clone(),
+                        amount: Amount {
+                            asset: eth.clone(),
+                            atoms: quantity("1000000000000000000"),
+                        },
+                    })
+                    .unwrap(),
+                    units: "1000000000000000000".into(),
+                    fee_units: "0".into(),
+                }],
+            )
+            .unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        operation.status = Status::Submitted;
+        let cash_debit = |atoms: &str| FinancialEffect::CashDebit {
+            resource: source.clone(),
+            amount: Amount {
+                asset: eth.clone(),
+                atoms: quantity(atoms),
+            },
+        };
+        let first = progress_proof(
+            &operation,
+            1,
+            "snapshot-1",
+            &[("trade-1", "hash-1")],
+            vec![cash_debit("400")],
+        );
+        let first_record = engine
+            .apply_reconciliation(
+                operation.clone(),
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: first.evidence.clone(),
+                    verified: Some(first.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(first_record.status, Status::Pending);
+        assert_eq!(
+            reservation_units(&engine, &operation.id),
+            vec!["999999999999999600"]
+        );
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&operation.id)
+                .unwrap()
+                .unwrap()["effects"]["effects"][0]["amount"]["atoms"],
+            "400"
+        );
+        drop(engine);
+
+        let engine = Engine::new(
+            Store::open(&path).unwrap(),
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let mut persisted: OperationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&operation.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.effects.as_ref(), Some(&first));
+        assert_eq!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: first.evidence.clone(),
+                        verified: Some(first.clone()),
+                    },
+                )
+                .unwrap(),
+            persisted
+        );
+        let tampered = progress_proof(
+            &persisted,
+            1,
+            "snapshot-1",
+            &[("trade-1", "changed-content")],
+            vec![cash_debit("450")],
+        );
+        assert!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: tampered.evidence.clone(),
+                        verified: Some(tampered),
+                    },
+                )
+                .is_err()
+        );
+        let second = progress_proof(
+            &persisted,
+            3,
+            "snapshot-3",
+            &[("trade-1", "hash-1"), ("trade-2", "hash-2")],
+            vec![cash_debit("650")],
+        );
+        let second_delta = cumulative_boundary_delta(Some(&first), &second).unwrap();
+        assert_eq!(second_delta.effects.len(), 1);
+        assert!(matches!(
+            &second_delta.effects[0],
+            FinancialEffect::CashDebit { amount, .. } if amount.atoms == quantity("250")
+        ));
+        persisted = engine
+            .apply_reconciliation(
+                persisted,
+                Reconciliation {
+                    status: Status::Unknown,
+                    evidence: second.evidence.clone(),
+                    verified: Some(second.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.status, Status::Unknown);
+        assert_eq!(
+            reservation_units(&engine, &operation.id),
+            vec!["999999999999999350"]
+        );
+
+        let terminal = progress_proof(
+            &persisted,
+            4,
+            "snapshot-4",
+            &[("trade-1", "hash-1"), ("trade-2", "hash-2")],
+            vec![cash_debit("800")],
+        );
+        let terminal_delta = cumulative_boundary_delta(Some(&second), &terminal).unwrap();
+        assert_eq!(terminal_delta.effects.len(), 1);
+        assert!(matches!(
+            &terminal_delta.effects[0],
+            FinancialEffect::CashDebit { amount, .. } if amount.atoms == quantity("150")
+        ));
+        let settled = engine
+            .apply_reconciliation(
+                persisted,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: terminal.evidence.clone(),
+                    verified: Some(terminal),
+                },
+            )
+            .unwrap();
+        assert_eq!(settled.status, Status::Completed);
+        assert!(reservation_units(&engine, &operation.id).is_empty());
+    }
+
+    #[test]
+    fn cumulative_realized_pnl_keeps_gross_loss_and_profit_monotonic() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cumulative-realized-pnl.sqlite");
+        let cash = resource("synthetic-margin");
+        let usdc = asset("hyperliquid", "USDC", 6);
+        let maximum = quantity("1000000");
+        let expected = EffectConstraint::Settlement {
+            resource: cash.clone(),
+            asset: usdc.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            minimum_delta: SignedQuantity::new("-1000000").unwrap(),
+            maximum_delta: SignedQuantity::new("1000000").unwrap(),
+        };
+        let rebate_expected = EffectConstraint::Credit {
+            to: cash.clone(),
+            asset: usdc.clone(),
+            minimum_credit: quantity("1"),
+        };
+        let cost_bound = CostBound {
+            location: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: maximum.clone(),
+            },
+            treatment: CostTreatment::IncludedInDebit,
+        };
+        let fee_bound = CostBound {
+            location: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: maximum.clone(),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let mut operation = record(vec![expected, rebate_expected], vec![cost_bound, fee_bound]);
+        operation.status = Status::AwaitingApproval;
+        let prepared = operation.preview.as_mut().unwrap();
+        prepared.intent.debits = vec![ResourceAmount {
+            resource: cash.clone(),
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: maximum.clone(),
+            },
+        }];
+        trading_rebind(&mut operation);
+        let submission = operation.submission.clone().unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "awaiting_approval",
+                &to_value(&operation).unwrap(),
+                &operation.created_at,
+            )
+            .unwrap();
+        store
+            .persist_submission(
+                &operation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                "2026-01-01T00:00:01Z",
+            )
+            .unwrap();
+        store
+            .reserve(
+                &operation.id,
+                &[ReservationRow {
+                    resource: resource_asset_key(&ResourceAmount {
+                        resource: cash.clone(),
+                        amount: Amount {
+                            asset: usdc.clone(),
+                            atoms: maximum,
+                        },
+                    })
+                    .unwrap(),
+                    units: "1000000".into(),
+                    fee_units: "0".into(),
+                }],
+            )
+            .unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        operation.status = Status::Submitted;
+        let loss = || FinancialEffect::Settlement {
+            resource: cash.clone(),
+            asset: usdc.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            delta: SignedQuantity::new("-100000").unwrap(),
+        };
+        let profit = |atoms: &str| FinancialEffect::Settlement {
+            resource: cash.clone(),
+            asset: usdc.clone(),
+            category: fin_domain::SettlementCategory::RealizedPnl,
+            delta: SignedQuantity::new(atoms).unwrap(),
+        };
+        let loss_cost = || FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: quantity("100000"),
+            },
+            category: "realized_loss".into(),
+            treatment: CostTreatment::IncludedInDebit,
+        };
+        let paid_fee_cost = |atoms: &str| FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: cash.clone(),
+            },
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: quantity(atoms),
+            },
+            category: "trading_fee".into(),
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let rebate = |atoms: &str| FinancialEffect::UsableCredit {
+            to: cash.clone(),
+            amount: Amount {
+                asset: usdc.clone(),
+                atoms: quantity(atoms),
+            },
+        };
+        let first = progress_proof(
+            &operation,
+            1,
+            "twap-slice-1",
+            &[("fill-1", "digest-1")],
+            vec![loss(), loss_cost(), paid_fee_cost("10000")],
+        );
+        let mut persisted = engine
+            .apply_reconciliation(
+                operation.clone(),
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: first.evidence.clone(),
+                    verified: Some(first.clone()),
+                },
+            )
+            .unwrap();
+
+        // Cumulative gross loss remains 0.1 while gross profit rises to 0.2;
+        // the two settlement legs net to +0.1, without losing historical cost.
+        let second = progress_proof(
+            &persisted,
+            2,
+            "twap-slice-2",
+            &[("fill-1", "digest-1"), ("fill-2", "digest-2")],
+            vec![
+                loss(),
+                profit("200000"),
+                loss_cost(),
+                paid_fee_cost("20000"),
+                rebate("5000"),
+            ],
+        );
+        persisted = engine
+            .apply_reconciliation(
+                persisted,
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: second.evidence.clone(),
+                    verified: Some(second.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.effects.as_ref(), Some(&second));
+        assert!(validate_effects_mode(&persisted, &second, &Status::Pending, true).is_ok());
+        let second_boundary_delta = cumulative_boundary_delta(Some(&first), &second).unwrap();
+        assert_eq!(second_boundary_delta.effects.len(), 1);
+        assert!(matches!(
+            &second_boundary_delta.effects[0],
+            FinancialEffect::Cost { amount, .. } if amount.atoms == quantity("10000")
+        ));
+
+        let third = progress_proof(
+            &persisted,
+            3,
+            "twap-slice-3",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+            ],
+            vec![
+                FinancialEffect::Settlement {
+                    resource: cash.clone(),
+                    asset: usdc.clone(),
+                    category: fin_domain::SettlementCategory::RealizedPnl,
+                    delta: SignedQuantity::new("-150000").unwrap(),
+                },
+                profit("250000"),
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: cash.clone(),
+                    },
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("150000"),
+                    },
+                    category: "realized_loss".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+                paid_fee_cost("30000"),
+                rebate("7000"),
+            ],
+        );
+        let third_boundary_delta = cumulative_boundary_delta(Some(&second), &third).unwrap();
+        assert_eq!(third_boundary_delta.effects.len(), 2);
+        assert!(matches!(
+            third_boundary_delta.effects.iter().find(|effect| matches!(effect, FinancialEffect::Cost { treatment: CostTreatment::IncludedInDebit, .. })).unwrap(),
+            FinancialEffect::Cost { amount, .. } if amount.atoms == quantity("50000")
+        ));
+        assert!(matches!(
+            third_boundary_delta.effects.iter().find(|effect| matches!(effect, FinancialEffect::Cost { treatment: CostTreatment::AdditionalDebit, .. })).unwrap(),
+            FinancialEffect::Cost { amount, .. } if amount.atoms == quantity("10000")
+        ));
+        persisted = engine
+            .apply_reconciliation(
+                persisted,
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: third.evidence.clone(),
+                    verified: Some(third.clone()),
+                },
+            )
+            .unwrap();
+
+        let regressed_loss = progress_proof(
+            &persisted,
+            4,
+            "tampered-loss-regression",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+            ],
+            vec![
+                profit("250000"),
+                rebate("7000"),
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: cash.clone(),
+                    },
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("150000"),
+                    },
+                    category: "realized_loss".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+                paid_fee_cost("30000"),
+            ],
+        );
+        assert!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: regressed_loss.evidence.clone(),
+                        verified: Some(regressed_loss),
+                    },
+                )
+                .is_err()
+        );
+
+        let regressed_fee = progress_proof(
+            &persisted,
+            4,
+            "tampered-fee-regression",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+                ("fill-4", "digest-4"),
+            ],
+            vec![
+                FinancialEffect::Settlement {
+                    resource: cash.clone(),
+                    asset: usdc.clone(),
+                    category: fin_domain::SettlementCategory::RealizedPnl,
+                    delta: SignedQuantity::new("-150000").unwrap(),
+                },
+                profit("250000"),
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: cash.clone(),
+                    },
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("150000"),
+                    },
+                    category: "realized_loss".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+                paid_fee_cost("20000"),
+                rebate("7000"),
+            ],
+        );
+        assert!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: regressed_fee.evidence.clone(),
+                        verified: Some(regressed_fee),
+                    },
+                )
+                .is_err()
+        );
+
+        let regressed_rebate = progress_proof(
+            &persisted,
+            4,
+            "tampered-rebate-regression",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+                ("fill-4", "digest-4"),
+            ],
+            vec![
+                FinancialEffect::Settlement {
+                    resource: cash.clone(),
+                    asset: usdc.clone(),
+                    category: fin_domain::SettlementCategory::RealizedPnl,
+                    delta: SignedQuantity::new("-150000").unwrap(),
+                },
+                profit("250000"),
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: cash.clone(),
+                    },
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("150000"),
+                    },
+                    category: "realized_loss".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+                paid_fee_cost("30000"),
+            ],
+        );
+        assert!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: regressed_rebate.evidence.clone(),
+                        verified: Some(regressed_rebate),
+                    },
+                )
+                .is_err()
+        );
+
+        let over_ceiling = progress_proof(
+            &persisted,
+            4,
+            "over-cost-ceiling",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+            ],
+            vec![
+                FinancialEffect::Settlement {
+                    resource: cash.clone(),
+                    asset: usdc.clone(),
+                    category: fin_domain::SettlementCategory::RealizedPnl,
+                    delta: SignedQuantity::new("-150000").unwrap(),
+                },
+                profit("250000"),
+                FinancialEffect::Cost {
+                    location: AccountingLocation::Cash {
+                        resource: cash.clone(),
+                    },
+                    amount: Amount {
+                        asset: usdc.clone(),
+                        atoms: quantity("1000001"),
+                    },
+                    category: "realized_loss".into(),
+                    treatment: CostTreatment::IncludedInDebit,
+                },
+                paid_fee_cost("30000"),
+                rebate("7000"),
+            ],
+        );
+        assert!(
+            engine
+                .apply_reconciliation(
+                    persisted.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: over_ceiling.evidence.clone(),
+                        verified: Some(over_ceiling),
+                    },
+                )
+                .is_err()
+        );
+
+        let terminal = progress_proof(
+            &persisted,
+            4,
+            "twap-terminal",
+            &[
+                ("fill-1", "digest-1"),
+                ("fill-2", "digest-2"),
+                ("fill-3", "digest-3"),
+            ],
+            third.effects.clone(),
+        );
+        let settled = engine
+            .apply_reconciliation(
+                persisted,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: terminal.evidence.clone(),
+                    verified: Some(terminal),
+                },
+            )
+            .unwrap();
+        assert_eq!(settled.status, Status::Completed);
+        assert!(reservation_units(&engine, &operation.id).is_empty());
     }
 
     fn synthetic_route_plan() -> (Vec<PlanStep>, Vec<PlanStep>, Vec<ReturnRouteProof>) {
@@ -10919,7 +12922,7 @@ mod tests {
                 name: "synthetic.transfer".into(),
                 description: "Synthetic local transfer for engine tests.".into(),
                 kind: OperationKind::Write,
-                execution_actor: ExecutionActor::HumanInteractive,
+                execution_actor: ExecutionActor::AgentInvocable,
                 input_schema: json!({"type":"object"}),
                 output_schema: json!({"type":"object"}),
                 error_schema: json!({"type":"object"}),
@@ -15943,6 +17946,1045 @@ mod tests {
         }
     }
 
+    struct ReplacementAdapter {
+        submissions: AtomicUsize,
+        responses: Mutex<BTreeMap<String, Reconciliation>>,
+    }
+
+    impl ReplacementAdapter {
+        fn new() -> Self {
+            Self {
+                submissions: AtomicUsize::new(0),
+                responses: Mutex::new(BTreeMap::new()),
+            }
+        }
+
+        fn definition(name: &str, replacement: bool) -> Definition {
+            Definition {
+                name: name.into(),
+                description: "Synthetic order replacement fixture.".into(),
+                kind: OperationKind::Write,
+                execution_actor: ExecutionActor::AgentInvocable,
+                input_schema: json!({"type":"object"}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"type":"object"}),
+                examples: vec![],
+                coverage: "synthetic fixture".into(),
+                completion: "venue receipt verified".into(),
+                semantics: if replacement {
+                    json!({"replacement":{"version":1}})
+                } else {
+                    json!({})
+                },
+            }
+        }
+
+        fn set_response(&self, operation: &str, response: Reconciliation) {
+            self.responses
+                .lock()
+                .unwrap()
+                .insert(operation.into(), response);
+        }
+
+        fn transfer_effect(debit_atoms: &str, credit_atoms: &str) -> FinancialEffect {
+            FinancialEffect::Transfer {
+                from: resource("synthetic-order-source"),
+                to: resource("synthetic-order-destination"),
+                debit: Amount {
+                    asset: asset("synthetic", "USD", 6),
+                    atoms: quantity(debit_atoms),
+                },
+                credit: Amount {
+                    asset: asset("synthetic", "BASE", 6),
+                    atoms: quantity(credit_atoms),
+                },
+            }
+        }
+
+        fn progress_proof(
+            submission: Submission,
+            debit_atoms: &str,
+            credit_atoms: &str,
+            sequence: u64,
+            snapshot: &str,
+            event_id: &str,
+        ) -> VerifiedEffects {
+            let mut verified = VerifiedEffects {
+                evidence_version: 1,
+                submission,
+                effects: vec![Self::transfer_effect(debit_atoms, credit_atoms)],
+                evidence: json!({
+                    "settlement_progress": {
+                        "version": 1,
+                        "sequence": sequence,
+                        "snapshot_id": snapshot,
+                        "event_digests": {event_id: format!("digest-{event_id}")}
+                    }
+                }),
+                observed_at: now(),
+                proof_digest: String::new(),
+            };
+            verified.proof_digest = verified_effect_digest(&verified).unwrap();
+            verified
+        }
+    }
+
+    #[async_trait]
+    impl Adapter for ReplacementAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            vec![
+                Self::definition("synthetic.order", false),
+                Self::definition("synthetic.order_replace", true),
+            ]
+        }
+
+        async fn read(&self, _operation: &str, _input: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let at = chrono::Utc::now();
+            let mut binding =
+                json!({"operation":operation,"client_order_id":input["client_order_id"]});
+            if operation == "synthetic.order_replace" {
+                binding[fin_domain::REPLACEMENT_METADATA_KEY] = json!({
+                    "version": 1,
+                    "parent_operation_id": input["parent_operation_id"],
+                    "parent_submission": input["parent_submission"]
+                });
+            }
+            Ok(PreparedOperation {
+                operation: operation.into(),
+                input: input.clone(),
+                binding,
+                summary: "synthetic order replacement".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: at.to_rfc3339(),
+                expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: quantity("1000000"),
+                    maximum_fee_usd_micros: quantity("0"),
+                    additional_allocation_usd_micros: quantity("0"),
+                    observed_at: at.to_rfc3339(),
+                    source: "synthetic fixed-price fixture".into(),
+                    prices: vec![],
+                }),
+                intent: FinancialIntent {
+                    debits: vec![ResourceAmount {
+                        resource: resource("synthetic-order-source"),
+                        amount: Amount {
+                            asset: asset("synthetic", "USD", 6),
+                            atoms: quantity("1000000"),
+                        },
+                    }],
+                    maximum_costs: vec![],
+                    expected: vec![EffectConstraint::Transfer {
+                        from: resource("synthetic-order-source"),
+                        to: resource("synthetic-order-destination"),
+                        debit_asset: asset("synthetic", "USD", 6),
+                        credit_asset: asset("synthetic", "BASE", 6),
+                        maximum_debit: quantity("1000000"),
+                        minimum_credit: quantity("100000"),
+                    }],
+                    locks: vec![
+                        resource("synthetic-order-source"),
+                        resource("synthetic-order-destination"),
+                    ],
+                },
+                operation_version: 1,
+            })
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            journal.assert_authorized()?;
+            let submission = Submission {
+                kind: "synthetic_order".into(),
+                reference: if prepared.operation == "synthetic.order" {
+                    "parent-oid".into()
+                } else {
+                    prepared.input["client_order_id"].as_str().unwrap().into()
+                },
+                data: json!({"cloid":prepared.input["client_order_id"]}),
+            };
+            journal.persist_submission(&submission)?;
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(submission)
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            Ok(self
+                .responses
+                .lock()
+                .unwrap()
+                .get(&record.operation)
+                .cloned()
+                .unwrap_or(Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"fixture":"order remains open"}),
+                    verified: None,
+                }))
+        }
+    }
+
+    fn replacement_request(
+        identity: &str,
+        parent: &OperationRecord,
+        client_order_id: &str,
+    ) -> OperationRequest {
+        OperationRequest {
+            request_id: identity.into(),
+            operation: "synthetic.order_replace".into(),
+            input: json!({
+                "parent_operation_id": parent.id,
+                "parent_submission": parent.submission,
+                "client_order_id": client_order_id
+            }),
+            run_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn replacement_restart_keeps_both_holds_and_late_parent_fills_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replacement.sqlite3");
+        let adapter = Arc::new(ReplacementAdapter::new());
+        let engine = synthetic_engine(&path, adapter.clone());
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-order-parent".into(),
+                operation: "synthetic.order".into(),
+                input: json!({"client_order_id":"parent-cloid"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(parent.status, Status::Pending);
+        let child = engine
+            .execute(replacement_request(
+                "synthetic-order-replace",
+                &parent,
+                "replacement-cloid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(child.status, Status::Pending);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        let parent_hold = engine
+            .store
+            .lock()
+            .unwrap()
+            .reservations(&parent.id)
+            .unwrap();
+        let child_hold = engine
+            .store
+            .lock()
+            .unwrap()
+            .reservations(&child.id)
+            .unwrap();
+        assert_eq!(parent_hold, child_hold);
+        assert!(
+            parent_hold
+                .iter()
+                .any(|row| row.resource.starts_with("lock:"))
+        );
+
+        let restarted = synthetic_engine(&path, adapter.clone());
+        let parent_progress = ReplacementAdapter::progress_proof(
+            parent.submission.clone().unwrap(),
+            "400000",
+            "390000",
+            1,
+            "parent-partial",
+            "parent-fill-1",
+        );
+        adapter.set_response(
+            "synthetic.order",
+            Reconciliation {
+                status: Status::Pending,
+                evidence: parent_progress.evidence.clone(),
+                verified: Some(parent_progress.clone()),
+            },
+        );
+        let observed_parent = restarted.status(&parent.id, true).await.unwrap();
+        assert_eq!(observed_parent.effects, Some(parent_progress.clone()));
+        let parent_after_progress = restarted
+            .store
+            .lock()
+            .unwrap()
+            .reservations(&parent.id)
+            .unwrap();
+        assert_eq!(
+            parent_after_progress
+                .iter()
+                .find(|row| row.units == "600000")
+                .unwrap()
+                .units,
+            "600000"
+        );
+
+        let parent_final = ReplacementAdapter::progress_proof(
+            parent.submission.clone().unwrap(),
+            "400000",
+            "390000",
+            2,
+            "parent-cancelled-after-fill",
+            "parent-fill-1",
+        );
+        adapter.set_response(
+            "synthetic.order",
+            Reconciliation {
+                status: Status::Failed,
+                evidence: parent_final.evidence.clone(),
+                verified: Some(parent_final.clone()),
+            },
+        );
+        let settled_parent = restarted.status(&parent.id, true).await.unwrap();
+        assert_eq!(settled_parent.status, Status::Failed);
+        assert_eq!(settled_parent.effects, Some(parent_final));
+        assert!(
+            restarted
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !restarted
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&child.id)
+                .unwrap()
+                .is_empty()
+        );
+
+        let child_final = ReplacementAdapter::progress_proof(
+            child.submission.clone().unwrap(),
+            "600000",
+            "590000",
+            1,
+            "replacement-filled",
+            "replacement-fill-1",
+        );
+        adapter.set_response(
+            "synthetic.order_replace",
+            Reconciliation {
+                status: Status::Completed,
+                evidence: child_final.evidence.clone(),
+                verified: Some(child_final.clone()),
+            },
+        );
+        let settled_child = restarted.status(&child.id, true).await.unwrap();
+        assert_eq!(settled_child.status, Status::Completed);
+        assert_eq!(settled_child.effects, Some(child_final));
+        assert_eq!(
+            settled_parent.effects.unwrap().submission,
+            parent.submission.unwrap()
+        );
+        assert_eq!(
+            settled_child.effects.unwrap().submission,
+            child.submission.unwrap()
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn replacement_rejects_wrong_parent_and_blocks_siblings_and_other_conflicts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replacement-guards.sqlite3");
+        let adapter = Arc::new(ReplacementAdapter::new());
+        let engine = synthetic_engine(&path, adapter.clone());
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-guard-parent".into(),
+                operation: "synthetic.order".into(),
+                input: json!({"client_order_id":"parent-cloid"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mut forged = replacement_request("synthetic-guard-forged", &parent, "bad-cloid");
+        forged.input["parent_submission"]["reference"] = json!("other-oid");
+        let rejected = engine.execute(forged).await.unwrap();
+        assert_eq!(
+            rejected.error.as_ref().unwrap().code,
+            "REPLACEMENT_TARGET_MISMATCH"
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+
+        let first = engine
+            .execute(replacement_request(
+                "synthetic-guard-first",
+                &parent,
+                "first-cloid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(first.status, Status::Pending);
+        let sibling = engine
+            .execute(replacement_request(
+                "synthetic-guard-sibling",
+                &parent,
+                "sibling-cloid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            sibling.error.as_ref().unwrap().code,
+            "REPLACEMENT_TARGET_MISMATCH"
+        );
+        let unrelated = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-guard-unrelated".into(),
+                operation: "synthetic.order".into(),
+                input: json!({"client_order_id":"unrelated-cloid"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(unrelated.error.as_ref().unwrap().code, "RESOURCE_RESERVED");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        {
+            let held = engine.store.lock().unwrap();
+            assert_eq!(
+                held.reservations(&parent.id).unwrap(),
+                held.reservations(&first.id).unwrap()
+            );
+        }
+        let failed_child_progress = ReplacementAdapter::progress_proof(
+            first.submission.clone().unwrap(),
+            "300000",
+            "290000",
+            1,
+            "replace-failed-after-partial-fill",
+            "replacement-fill-1",
+        );
+        adapter.set_response(
+            "synthetic.order_replace",
+            Reconciliation {
+                status: Status::Pending,
+                evidence: failed_child_progress.evidence.clone(),
+                verified: Some(failed_child_progress.clone()),
+            },
+        );
+        let observed_child = engine.status(&first.id, true).await.unwrap();
+        assert_eq!(observed_child.effects, Some(failed_child_progress.clone()));
+        let failed_child_proof = ReplacementAdapter::progress_proof(
+            first.submission.clone().unwrap(),
+            "300000",
+            "290000",
+            2,
+            "replace-terminal-failure",
+            "replacement-fill-1",
+        );
+        adapter.set_response(
+            "synthetic.order_replace",
+            Reconciliation {
+                status: Status::Failed,
+                evidence: failed_child_proof.evidence.clone(),
+                verified: Some(failed_child_proof.clone()),
+            },
+        );
+        let failed_child = engine.status(&first.id, true).await.unwrap();
+        assert_eq!(failed_child.status, Status::Failed, "{failed_child:?}");
+        assert_eq!(failed_child.effects, Some(failed_child_proof));
+        assert!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&first.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap()
+                .is_empty()
+        );
+        adapter.set_response(
+            "synthetic.order_replace",
+            Reconciliation {
+                status: Status::Pending,
+                evidence: json!({"fixture":"replacement awaiting venue"}),
+                verified: None,
+            },
+        );
+        let next_replacement = engine
+            .execute(replacement_request(
+                "synthetic-guard-after-failed-child",
+                &parent,
+                "retry-cloid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next_replacement.status, Status::Pending);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn replacement_lease_is_atomic_across_engine_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replacement-concurrent.sqlite3");
+        let adapter = Arc::new(ReplacementAdapter::new());
+        let first_engine = synthetic_engine(&path, adapter.clone());
+        let second_engine = synthetic_engine(&path, adapter.clone());
+        let parent = first_engine
+            .execute(OperationRequest {
+                request_id: "synthetic-concurrent-parent".into(),
+                operation: "synthetic.order".into(),
+                input: json!({"client_order_id":"parent-cloid"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let (first, second) = tokio::join!(
+            first_engine.execute(replacement_request(
+                "synthetic-concurrent-replace-a",
+                &parent,
+                "replace-a"
+            )),
+            second_engine.execute(replacement_request(
+                "synthetic-concurrent-replace-b",
+                &parent,
+                "replace-b"
+            ))
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(
+            [first.status, second.status]
+                .iter()
+                .filter(|status| **status == Status::Pending)
+                .count(),
+            1
+        );
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        let held = first_engine.store.lock().unwrap();
+        let records = held.list_records().unwrap();
+        let live_children = records
+            .iter()
+            .filter(|value| {
+                value
+                    .pointer("/preview/binding/__fin_replacement/parent_operation_id")
+                    .and_then(Value::as_str)
+                    == Some(parent.id.as_str())
+                    && value.get("status").and_then(Value::as_str) == Some("pending")
+            })
+            .count();
+        assert_eq!(live_children, 1);
+    }
+
+    struct RecoveryAdapter {
+        submissions: AtomicUsize,
+        fail_next_child: AtomicBool,
+    }
+
+    impl RecoveryAdapter {
+        fn definition(name: &str, recovery: bool) -> Definition {
+            Definition {
+                name: name.into(),
+                description: "Synthetic recovery-link fixture.".into(),
+                kind: OperationKind::Write,
+                execution_actor: ExecutionActor::AgentInvocable,
+                input_schema: json!({"type":"object"}),
+                output_schema: json!({"type":"object"}),
+                error_schema: json!({"type":"object"}),
+                examples: vec![],
+                coverage: "synthetic fixture".into(),
+                completion: "exact synthetic receipt".into(),
+                semantics: if recovery {
+                    json!({"recovery_child":{"version":1}})
+                } else {
+                    json!({})
+                },
+            }
+        }
+
+        fn parent_prepared(input: &Value) -> PreparedOperation {
+            let at = Utc::now();
+            PreparedOperation {
+                operation: "synthetic.parent".into(),
+                input: input.clone(),
+                binding: json!({"parent":"exact"}),
+                summary: "synthetic parent transfer".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: at.to_rfc3339(),
+                expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: quantity("1000000"),
+                    maximum_fee_usd_micros: quantity("0"),
+                    additional_allocation_usd_micros: quantity("0"),
+                    observed_at: at.to_rfc3339(),
+                    source: "synthetic fixed price".into(),
+                    prices: vec![],
+                }),
+                intent: FinancialIntent {
+                    debits: vec![ResourceAmount {
+                        resource: resource("synthetic-parent-cash"),
+                        amount: Amount {
+                            asset: asset("synthetic", "USD", 6),
+                            atoms: quantity("1000000"),
+                        },
+                    }],
+                    maximum_costs: vec![],
+                    expected: vec![EffectConstraint::Transfer {
+                        from: resource("synthetic-parent-cash"),
+                        to: resource("synthetic-parent-destination"),
+                        debit_asset: asset("synthetic", "USD", 6),
+                        credit_asset: asset("synthetic", "BASE", 6),
+                        maximum_debit: quantity("1000000"),
+                        minimum_credit: quantity("1"),
+                    }],
+                    locks: vec![resource("synthetic-parent-cash")],
+                },
+                operation_version: 1,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Adapter for RecoveryAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            vec![
+                Self::definition("synthetic.parent", false),
+                Self::definition("synthetic.recover", true),
+            ]
+        }
+
+        async fn read(&self, _operation: &str, _input: &Value) -> Result<Value> {
+            Ok(json!({}))
+        }
+
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            if operation == "synthetic.parent" {
+                return Ok(Self::parent_prepared(input));
+            }
+            let at = Utc::now();
+            let mut binding = json!({"recovery":"nonce-only"});
+            binding[fin_domain::RECOVERY_METADATA_KEY] = json!({
+                "version": 1,
+                "parent_operation_id": input["parent_operation_id"],
+                "parent_submission": input["parent_submission"]
+            });
+            let mut intent = FinancialIntent {
+                debits: vec![],
+                maximum_costs: vec![],
+                expected: vec![],
+                locks: vec![resource("synthetic-signer-nonce-2")],
+            };
+            if input.get("nonzero").and_then(Value::as_bool) == Some(true) {
+                intent.debits.push(ResourceAmount {
+                    resource: resource("synthetic-parent-cash"),
+                    amount: Amount {
+                        asset: asset("synthetic", "USD", 6),
+                        atoms: quantity("1"),
+                    },
+                });
+            }
+            Ok(PreparedOperation {
+                operation: operation.into(),
+                input: input.clone(),
+                binding,
+                summary: "synthetic nonce-only recovery".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: at.to_rfc3339(),
+                expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
+                valuation: Some(fin_domain::Valuation {
+                    movement_usd_micros: quantity("0"),
+                    maximum_fee_usd_micros: quantity("0"),
+                    additional_allocation_usd_micros: quantity("0"),
+                    observed_at: at.to_rfc3339(),
+                    source: "synthetic no-cost proof".into(),
+                    prices: vec![],
+                }),
+                intent,
+                operation_version: 1,
+            })
+        }
+
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            Ok(prepared.clone())
+        }
+
+        fn validate_recovery_child(
+            &self,
+            prepared: &PreparedOperation,
+            parent: &OperationRecord,
+        ) -> Result<Option<RecoveryBinding>> {
+            let binding = RecoveryBinding::from_prepared_binding(&prepared.binding)?;
+            Ok(binding.filter(|binding| {
+                prepared.operation == "synthetic.recover"
+                    && parent.operation == "synthetic.parent"
+                    && binding.parent_operation_id == parent.id
+                    && Some(&binding.parent_submission) == parent.submission.as_ref()
+            }))
+        }
+
+        async fn submit(
+            &self,
+            _prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            journal.assert_authorized()?;
+            let submission = Submission {
+                kind: "synthetic_nonce_action".into(),
+                reference: format!(
+                    "synthetic-child-{}",
+                    self.submissions.load(Ordering::SeqCst)
+                ),
+                data: json!({"nonce":"synthetic-only"}),
+            };
+            journal.persist_submission(&submission)?;
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(submission)
+        }
+
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            if record.operation == "synthetic.recover"
+                && self.fail_next_child.swap(false, Ordering::SeqCst)
+            {
+                let mut verified = VerifiedEffects {
+                    evidence_version: 1,
+                    submission: record.submission.clone().ok_or_else(|| {
+                        FinError::new(
+                            "SYNTHETIC_SUBMISSION_MISSING",
+                            "test",
+                            "Recovery child submission was not persisted.",
+                            "Inspect the synthetic test fixture.",
+                        )
+                    })?,
+                    effects: vec![],
+                    evidence: json!({"synthetic":"native rejection with exact child identity"}),
+                    observed_at: now(),
+                    proof_digest: String::new(),
+                };
+                verified.proof_digest = verified_effect_digest(&verified)?;
+                return Ok(Reconciliation {
+                    status: Status::Failed,
+                    evidence: verified.evidence.clone(),
+                    verified: Some(verified),
+                });
+            }
+            Ok(Reconciliation {
+                status: Status::Pending,
+                evidence: json!({"synthetic":"awaiting exact proof"}),
+                verified: None,
+            })
+        }
+    }
+
+    struct FailSecondAuthorizer {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Authorizer for FailSecondAuthorizer {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(FinError::new(
+                    "SYNTHETIC_APPROVAL_REFUSED",
+                    "authorization",
+                    "The synthetic child approval was refused before dispatch.",
+                    "Retry only after a fresh approval challenge.",
+                ));
+            }
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-test-approval".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_child_releases_only_a_proven_unsubmitted_terminal_attempt() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recovery-unsubmitted-retry.sqlite3");
+        let adapter = Arc::new(RecoveryAdapter {
+            submissions: AtomicUsize::new(0),
+            fail_next_child: AtomicBool::new(false),
+        });
+        let engine = Engine::new(
+            Store::open(&path).unwrap(),
+            vec![adapter.clone()],
+            Arc::new(FailSecondAuthorizer {
+                calls: AtomicUsize::new(0),
+            }),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-unsubmitted-parent".into(),
+                operation: "synthetic.parent".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let failed_child = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-unsubmitted-first".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            failed_child.status,
+            Status::Rejected | Status::Failed
+        ));
+        assert!(failed_child.submission.is_none());
+        assert!(failed_child.dispatch_evidence.is_none());
+        assert!(failed_child.effects.is_none());
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+
+        let child = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-unsubmitted-retry".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(child.status, Status::Pending);
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        assert!(
+            !engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_child_is_linked_atomically_and_parent_reservation_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recovery-link.sqlite3");
+        let adapter = Arc::new(RecoveryAdapter {
+            submissions: AtomicUsize::new(0),
+            fail_next_child: AtomicBool::new(false),
+        });
+        let engine = synthetic_engine(&path, adapter.clone());
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-parent".into(),
+                operation: "synthetic.parent".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(parent.status, Status::Pending));
+        let parent_holds = engine
+            .store
+            .lock()
+            .unwrap()
+            .reservations(&parent.id)
+            .unwrap();
+        assert!(!parent_holds.is_empty());
+
+        let child = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-child".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(child.status, Status::Pending));
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        let linked = engine
+            .store
+            .lock()
+            .unwrap()
+            .recovery_child(&parent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(linked["id"], child.id);
+        assert_eq!(
+            linked["submission"],
+            to_value(child.submission.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap(),
+            parent_holds,
+            "the recovery attempt must not consume or release the parent's hold"
+        );
+
+        drop(engine);
+        let restarted = synthetic_engine(&path, adapter.clone());
+        let persisted = restarted
+            .store
+            .lock()
+            .unwrap()
+            .recovery_child(&parent.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted["id"], child.id);
+        assert_eq!(
+            restarted
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap(),
+            parent_holds
+        );
+        let mut wrong_parent_submission = parent.submission.clone().unwrap();
+        wrong_parent_submission.reference.push_str("-tampered");
+        let wrong_parent = restarted
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-wrong-parent".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": wrong_parent_submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(wrong_parent.status.terminal());
+        assert!(wrong_parent.submission.is_none());
+        let nonzero = restarted
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-nonzero".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission,
+                    "nonzero": true
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(nonzero.status.terminal());
+        assert!(nonzero.submission.is_none());
+        let duplicate = restarted
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-sibling".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await;
+        let duplicate = duplicate.unwrap();
+        assert!(duplicate.status.terminal());
+        assert!(duplicate.submission.is_none());
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+        adapter.fail_next_child.store(true, Ordering::SeqCst);
+        let rejected_after_dispatch = restarted.status(&child.id, true).await.unwrap();
+        assert_eq!(rejected_after_dispatch.status, Status::Failed);
+        assert!(rejected_after_dispatch.submission.is_some());
+        let retry_after_submitted_failure = restarted
+            .execute(OperationRequest {
+                request_id: "synthetic-recovery-after-native-rejection".into(),
+                operation: "synthetic.recover".into(),
+                input: json!({
+                    "parent_operation_id": parent.id,
+                    "parent_submission": parent.submission
+                }),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(retry_after_submitted_failure.status.terminal());
+        assert!(retry_after_submitted_failure.submission.is_none());
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn replacement_requires_budget_for_both_full_order_obligations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replacement-budget.sqlite3");
+        let adapter = Arc::new(ReplacementAdapter::new());
+        let mut engine = synthetic_engine(&path, adapter.clone());
+        engine.options.max_run_allocation_usd_micros = "1500000".into();
+        let parent = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-budget-parent".into(),
+                operation: "synthetic.order".into(),
+                input: json!({"client_order_id":"parent-cloid"}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let child = engine
+            .execute(replacement_request(
+                "synthetic-budget-replacement",
+                &parent,
+                "replacement-cloid",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(child.error.as_ref().unwrap().code, "ALLOCATION_LIMIT");
+        assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+        assert!(
+            !engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&parent.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservations(&child.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn ordinary_completed_holdings_need_no_run_or_restoration_and_keep_gross_allocation() {
         let directory = tempfile::tempdir().unwrap();
@@ -17333,6 +20375,281 @@ mod tests {
         assert_eq!(
             reject_unpriced_run(&prepared).unwrap_err().code,
             "UNPRICED_ASSET"
+        );
+    }
+
+    #[test]
+    fn ordinary_transfer_source_progress_is_bounded_nonspendable_and_settles_only_delta() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ordinary-transfer-progress.sqlite");
+        let source = resource("ethereum:42161:synthetic-owner");
+        let target = resource("hyperliquid:synthetic-owner:perpetual");
+        let usdc = asset(
+            "ethereum:42161",
+            "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+            6,
+        );
+        let hl_usdc = asset("hyperliquid:mainnet", "USDC", 6);
+        let native = asset("ethereum:42161", "native", 18);
+        let principal = Amount {
+            asset: usdc.clone(),
+            atoms: quantity("5000000"),
+        };
+        let gas = FinancialEffect::Cost {
+            location: AccountingLocation::Cash {
+                resource: source.clone(),
+            },
+            amount: Amount {
+                asset: native.clone(),
+                atoms: quantity("7"),
+            },
+            category: "ethereum_gas".into(),
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let expected = EffectConstraint::Transfer {
+            from: source.clone(),
+            to: target.clone(),
+            debit_asset: usdc.clone(),
+            credit_asset: hl_usdc.clone(),
+            maximum_debit: quantity("5000000"),
+            minimum_credit: quantity("4999999"),
+        };
+        let mut operation = record(
+            vec![expected],
+            vec![CostBound {
+                location: AccountingLocation::Cash {
+                    resource: source.clone(),
+                },
+                amount: Amount {
+                    asset: native.clone(),
+                    atoms: quantity("10"),
+                },
+                treatment: CostTreatment::AdditionalDebit,
+            }],
+        );
+        operation.submission = Some(Submission {
+            kind: "ethereum_tx".into(),
+            reference: format!("0x{}", "a".repeat(64)),
+            data: json!({"nonce":"synthetic-1"}),
+        });
+        let prepared = operation.preview.as_mut().unwrap();
+        prepared.intent.debits = vec![ResourceAmount {
+            resource: source.clone(),
+            amount: principal.clone(),
+        }];
+        prepared.intent.locks = vec![source.clone(), target.clone()];
+        operation.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(prepared)).unwrap();
+
+        let source_digest = "a".repeat(64);
+        let mut source_proof = proof(
+            &operation,
+            vec![
+                FinancialEffect::CashDebit {
+                    resource: source.clone(),
+                    amount: principal.clone(),
+                },
+                FinancialEffect::TransitPrincipal {
+                    transfer_id: operation.submission.as_ref().unwrap().reference.clone(),
+                    amount: principal.clone(),
+                },
+                gas.clone(),
+            ],
+        );
+        source_proof.evidence = json!({
+            "transit": {
+                "transfer_id":operation.submission.as_ref().unwrap().reference,
+                "source_submission":operation.submission.as_ref().unwrap().reference,
+                "evidence_id":"ethereum:42161:source-receipt",
+                "resource":source.0,
+                "recipient_resource":target.0,
+                "amount_atoms":"5000000",
+                "asset":usdc,
+            },
+            "settlement_progress": {
+                "version":1,
+                "sequence":1,
+                "snapshot_id":"source-receipt-1",
+                "event_digests":{format!("source:{}", operation.submission.as_ref().unwrap().reference):source_digest},
+            }
+        });
+        source_proof.proof_digest = verified_effect_digest(&source_proof).unwrap();
+        validate_effects_mode(&operation, &source_proof, &Status::Pending, true).unwrap();
+
+        let submission = operation.submission.clone().unwrap();
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "pending",
+                &to_value(&operation).unwrap(),
+                &operation.created_at,
+            )
+            .unwrap();
+        store
+            .persist_submission(
+                &operation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                &operation.updated_at,
+            )
+            .unwrap();
+        store
+            .reserve(
+                &operation.id,
+                &store_reservations_for_intent(operation.preview.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let persisted = engine
+            .apply_reconciliation(
+                operation.clone(),
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: source_proof.evidence.clone(),
+                    verified: Some(source_proof.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.effects.as_ref(), Some(&source_proof));
+        let retained = engine
+            .store
+            .lock()
+            .unwrap()
+            .reservations(&operation.id)
+            .unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].units, "0");
+        assert_eq!(retained[0].fee_units, "3");
+        drop(engine);
+
+        let mut mismatched_source = source_proof.clone();
+        mismatched_source.evidence["transit"]["recipient_resource"] =
+            json!("hyperliquid:other-owner:perpetual");
+        mismatched_source.proof_digest = verified_effect_digest(&mismatched_source).unwrap();
+        assert_eq!(
+            validate_effects_mode(&operation, &mismatched_source, &Status::Pending, true)
+                .unwrap_err()
+                .code,
+            "INVALID_TRANSIT_EFFECT"
+        );
+
+        let mut terminal = proof(
+            &operation,
+            vec![
+                FinancialEffect::Transfer {
+                    from: source.clone(),
+                    to: target.clone(),
+                    debit: principal.clone(),
+                    credit: Amount {
+                        asset: hl_usdc,
+                        atoms: quantity("5000000"),
+                    },
+                },
+                gas,
+            ],
+        );
+        terminal.evidence = json!({
+            "settlement_progress": {
+                "version":1,
+                "sequence":2,
+                "snapshot_id":"destination-credit-1",
+                "event_digests":{
+                    format!("source:{}", operation.submission.as_ref().unwrap().reference):source_digest,
+                    "destination:native-tx-1":"b".repeat(64),
+                },
+            }
+        });
+        terminal.proof_digest = verified_effect_digest(&terminal).unwrap();
+        validate_cumulative_settlement_components(Some(&source_proof.effects), &terminal.effects)
+            .unwrap();
+        validate_effects_mode(&operation, &terminal, &Status::Completed, false).unwrap();
+        assert!(
+            cumulative_boundary_delta(Some(&source_proof), &terminal)
+                .unwrap()
+                .effects
+                .is_empty()
+        );
+
+        let engine = Engine::new(
+            Store::open(&path).unwrap(),
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let reloaded: OperationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&operation.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reloaded.effects.as_ref(), Some(&source_proof));
+        let duplicate = engine
+            .apply_reconciliation(
+                reloaded.clone(),
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: source_proof.evidence.clone(),
+                    verified: Some(source_proof.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(duplicate.effects.as_ref(), Some(&source_proof));
+        let mut changed_source = terminal.clone();
+        changed_source.evidence["settlement_progress"]["event_digests"][format!(
+            "source:{}",
+            operation.submission.as_ref().unwrap().reference
+        )] = json!("c".repeat(64));
+        changed_source.proof_digest = verified_effect_digest(&changed_source).unwrap();
+        assert_eq!(
+            engine
+                .apply_reconciliation(
+                    duplicate.clone(),
+                    Reconciliation {
+                        status: Status::Completed,
+                        evidence: changed_source.evidence.clone(),
+                        verified: Some(changed_source),
+                    },
+                )
+                .unwrap_err()
+                .code,
+            "INVALID_PROGRESS_PROOF"
+        );
+        let completed = engine
+            .apply_reconciliation(
+                duplicate,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: terminal.evidence.clone(),
+                    verified: Some(terminal.clone()),
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.status, Status::Completed);
+        assert_eq!(completed.effects.as_ref(), Some(&terminal));
+        assert!(
+            !terminal
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, FinancialEffect::TransitPrincipal { .. }))
         );
     }
 }

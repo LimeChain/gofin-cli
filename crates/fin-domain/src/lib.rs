@@ -1,12 +1,16 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 pub mod authority_expiry;
 pub mod boundaries;
+pub mod execution_state;
 pub mod financial_plans;
 pub mod money;
 pub mod policy;
 pub mod price_freshness;
 pub mod unpriced;
 pub mod value_bounds;
+
+#[cfg(test)]
+mod settlement_progress_tests;
 
 use async_trait::async_trait;
 pub use money::{Quantity, SignedQuantity};
@@ -694,6 +698,83 @@ pub struct Submission {
     pub data: Value,
 }
 
+/// Prepared binding metadata for a trusted adapter-produced replacement
+/// attempt. The engine accepts this only for a definition whose semantics
+/// explicitly opt into replacement version 1.
+pub const REPLACEMENT_METADATA_KEY: &str = "__fin_replacement";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacementBinding {
+    pub version: u32,
+    pub parent_operation_id: String,
+    pub parent_submission: Submission,
+}
+
+impl ReplacementBinding {
+    pub fn from_prepared_binding(binding: &Value) -> Result<Option<Self>> {
+        let Some(value) = binding.get(REPLACEMENT_METADATA_KEY) else {
+            return Ok(None);
+        };
+        let replacement: Self = serde_json::from_value(value.clone()).map_err(|_| {
+            FinError::new(
+                "INVALID_REPLACEMENT_BINDING",
+                "validation",
+                "The prepared replacement link has an unsupported shape.",
+                "Prepare the replacement from the original durable submission identity.",
+            )
+        })?;
+        if replacement.version != 1 || replacement.parent_operation_id.trim().is_empty() {
+            return Err(FinError::new(
+                "INVALID_REPLACEMENT_BINDING",
+                "validation",
+                "The prepared replacement link is incomplete or unsupported.",
+                "Prepare the replacement from the original durable submission identity.",
+            ));
+        }
+        Ok(Some(replacement))
+    }
+}
+
+/// Durable link from a zero-financial-effect recovery action to the unresolved
+/// operation whose outcome it is intended to establish. The adapter creates
+/// this metadata; the engine and store independently validate it before
+/// persisting the child for approval or dispatch.
+pub const RECOVERY_METADATA_KEY: &str = "__fin_recovery";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryBinding {
+    pub version: u32,
+    pub parent_operation_id: String,
+    pub parent_submission: Submission,
+}
+
+impl RecoveryBinding {
+    pub fn from_prepared_binding(binding: &Value) -> Result<Option<Self>> {
+        let Some(value) = binding.get(RECOVERY_METADATA_KEY) else {
+            return Ok(None);
+        };
+        let recovery: Self = serde_json::from_value(value.clone()).map_err(|_| {
+            FinError::new(
+                "INVALID_RECOVERY_BINDING",
+                "validation",
+                "The prepared recovery link has an unsupported shape.",
+                "Prepare a recovery child from the exact durable parent submission.",
+            )
+        })?;
+        if recovery.version != 1 || recovery.parent_operation_id.trim().is_empty() {
+            return Err(FinError::new(
+                "INVALID_RECOVERY_BINDING",
+                "validation",
+                "The prepared recovery link is incomplete or unsupported.",
+                "Prepare a recovery child from the exact durable parent submission.",
+            ));
+        }
+        Ok(Some(recovery))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialEffect {
@@ -811,6 +892,64 @@ pub struct VerifiedEffects {
     pub evidence: Value,
     pub observed_at: String,
     pub proof_digest: String,
+}
+
+/// Versioned ordering metadata for adapter-produced cumulative reconciliation
+/// snapshots. The sequence is scoped to the immutable external submission;
+/// `snapshot_id` is stable for the same venue snapshot across retries.
+///
+/// Adapters encode this value at `VerifiedEffects.evidence.settlement_progress`.
+/// Effects in such a bundle are cumulative totals for the original submission,
+/// never deltas. Each later sequence must include all earlier proved effects.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SettlementProgress {
+    pub version: u32,
+    pub sequence: u64,
+    pub snapshot_id: String,
+    /// Stable adapter event identities mapped to canonical receipt digests.
+    /// Entries are append-only: a later snapshot may add events but may not
+    /// remove an identity or change its digest.
+    pub event_digests: std::collections::BTreeMap<String, String>,
+}
+
+impl SettlementProgress {
+    pub fn from_evidence(evidence: &Value) -> Result<Option<Self>> {
+        let Some(value) = evidence.get("settlement_progress") else {
+            return Ok(None);
+        };
+        let progress: Self = serde_json::from_value(value.clone()).map_err(|_| {
+            FinError::new(
+                "INVALID_SETTLEMENT_PROGRESS",
+                "reconciliation",
+                "Cumulative settlement progress metadata has an unsupported shape.",
+                "Reconcile the original submission with a versioned, ordered cumulative snapshot.",
+            )
+        })?;
+        if progress.version == 0
+            || progress.sequence == 0
+            || progress.sequence > i64::MAX as u64
+            || progress.snapshot_id.is_empty()
+            || progress
+                .event_digests
+                .iter()
+                .any(|(identity, digest)| identity.is_empty() || digest.is_empty())
+            || progress
+                .event_digests
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != progress.event_digests.len()
+        {
+            return Err(FinError::new(
+                "INVALID_SETTLEMENT_PROGRESS",
+                "reconciliation",
+                "Cumulative settlement progress metadata is incomplete.",
+                "Reconcile the original submission with a versioned, ordered cumulative snapshot.",
+            ));
+        }
+        Ok(Some(progress))
+    }
 }
 
 pub type VerifiedEffectBundle = VerifiedEffects;
@@ -941,6 +1080,12 @@ pub trait SubmissionJournal: Send + Sync {
 
 #[async_trait]
 pub trait Adapter: Send + Sync {
+    fn attach_execution_state(
+        &self,
+        _state: Arc<dyn execution_state::ExecutionState>,
+    ) -> Result<()> {
+        Ok(())
+    }
     fn definitions(&self) -> Vec<Definition>;
     /// Public, user-facing enrolled connections for discovery and snapshots.
     fn connections(&self) -> Vec<ConnectionMetadata> {
@@ -964,6 +1109,31 @@ pub trait Adapter: Send + Sync {
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value>;
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation>;
+    /// Validate an adapter-produced recovery child against the exact durable
+    /// parent. The default denies recovery links; ordinary requests cannot
+    /// create this authority by supplying metadata in their input.
+    fn validate_recovery_child(
+        &self,
+        _prepared: &PreparedOperation,
+        _parent: &OperationRecord,
+    ) -> Result<Option<RecoveryBinding>> {
+        Ok(None)
+    }
+    /// Human-only configuration operations use a separate engine entry point
+    /// and a distinct approval mechanism. The default fails closed so an
+    /// adapter cannot accidentally make financial writes available here.
+    async fn prepare_configuration(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<PreparedOperation> {
+        Err(FinError::new(
+            "CONFIGURATION_UNSUPPORTED",
+            "configuration",
+            "This integration has no supported human configuration operation.",
+            "Use a reviewed human-only configuration operation when available.",
+        ))
+    }
     /// Derive the enforceable, operation-specific scope for a bounded
     /// authorization. Adapters opt in explicitly; the default fails closed.
     fn prepare_boundaries(
@@ -1035,12 +1205,47 @@ pub trait Adapter: Send + Sync {
         ))
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
+    /// Revalidate a candidate through the explicit human configuration route.
+    async fn revalidate_configuration(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation> {
+        Err(FinError::new(
+            "CONFIGURATION_UNSUPPORTED",
+            "configuration",
+            "This integration has no supported human configuration operation.",
+            "Keep the request unresolved and use a reviewed human-only configuration operation.",
+        ))
+    }
     async fn submit(
         &self,
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission>;
+    /// Submit only through the explicit human configuration lifecycle.
+    async fn submit_configuration(
+        &self,
+        _prepared: &PreparedOperation,
+        _journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        Err(FinError::new(
+            "CONFIGURATION_UNSUPPORTED",
+            "configuration",
+            "This integration has no supported human configuration operation.",
+            "Keep the request unresolved and use a reviewed human-only configuration operation.",
+        ))
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation>;
+    /// Reconcile persisted human configuration submissions through the exact
+    /// submission identity. This is a read/recovery operation, not authority
+    /// to dispatch another configuration write.
+    async fn reconcile_configuration(&self, _record: &OperationRecord) -> Result<Reconciliation> {
+        Ok(Reconciliation {
+            status: Status::Unknown,
+            evidence: serde_json::json!({"reason":"Human configuration reconciliation is unsupported."}),
+            verified: None,
+        })
+    }
 }
 
 #[derive(
@@ -1049,6 +1254,11 @@ pub trait Adapter: Send + Sync {
 #[serde(rename_all = "snake_case")]
 pub enum PositionKind {
     Supply,
+    /// Application-reported investment equity, with units and redemption
+    /// restrictions retained in its verified anchor evidence.
+    Investment,
+    /// Cash committed to a position's margin, distinct from exposure units.
+    LockedCollateral,
     StableDebt,
     VariableDebt,
     DerivativeLong,

@@ -1,6 +1,6 @@
 # Testing and verification
 
-These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), [EVM wallets](evm-wallets.md), and [Relay bridge](bridge.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
+These are acceptance specifications, not claims that every case passed. Start with the [implementation plan](../implementation-plan.md), [Rust architecture](../rust-architecture.md), and [onboarding contract](../onboarding.md), then use the [Binance](binance.md), [Ethereum dapps](ethereum.md), [EVM wallets](evm-wallets.md), [Hyperliquid](hyperliquid.md), and [Relay bridge](bridge.md) guides. Use the compiled Rust CLI's discovery for current schemas. Historical TypeScript results remain in Git history and do not establish Rust verification.
 
 ```sh
 cargo fmt --all -- --check

@@ -65,6 +65,7 @@ catalog:
 test-ui:
 	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
+	@python3 scripts/test-prepare-hyperliquid-human-plan.py
 
 test-dev-env:
 	@python3 scripts/test-fin-dev.py

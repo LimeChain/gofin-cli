@@ -173,6 +173,10 @@ fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
             ],
         )
         .unwrap();
+    store
+        .conn
+        .execute_batch("DROP TABLE settlement_progress; DROP TABLE signer_nonces;")
+        .unwrap();
     store.conn.pragma_update(None, "user_version", 8).unwrap();
     drop(store);
 
@@ -182,7 +186,7 @@ fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         reopened.bridge_transfer(&pending.id).unwrap(),
@@ -225,7 +229,7 @@ fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
     drop(reopened);
 
     let future = Connection::open(&path).unwrap();
-    future.pragma_update(None, "user_version", 10).unwrap();
+    future.pragma_update(None, "user_version", 11).unwrap();
     drop(future);
     assert!(
         Store::open(&path).is_err(),
@@ -236,7 +240,7 @@ fn v8_to_v9_marker_migration_preserves_bridge_and_uncertain_operation_rows() {
         readback
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        10
+        11
     );
     assert_eq!(
         readback
@@ -569,7 +573,7 @@ fn v3_upgrade_adds_bridge_tables_without_touching_pending_operation_or_submissio
         .execute("INSERT INTO submissions(operation_id,kind,reference,data_json) VALUES ('SYNTHETIC-pending','SYNTHETIC','SYNTHETIC-tx','{}')", [])
         .unwrap();
     store.conn.execute_batch(
-        "DROP TABLE bridge_evidence_ids; DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_transfers; PRAGMA user_version=3;",
+        "DROP TABLE bridge_evidence_ids; DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_transfers; DROP TABLE settlement_progress; DROP TABLE signer_nonces; PRAGMA user_version=3;",
     ).unwrap();
     drop(store);
     let reopened = Store::open(&path).unwrap();
@@ -578,7 +582,7 @@ fn v3_upgrade_adds_bridge_tables_without_touching_pending_operation_or_submissio
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-pending").unwrap(),

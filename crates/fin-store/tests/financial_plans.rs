@@ -293,6 +293,8 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
     drop(store);
     let sql = Connection::open(&path).unwrap();
     sql.execute_batch("INSERT INTO reservations(operation_id,resource,units,fee_units) VALUES ('legacy','SYNTHETIC:cash','1000000000000000000000001','3');
+        INSERT INTO settlement_progress(operation_id,sequence,snapshot_id,proof_digest,proof_json,effects_json,created_at) VALUES ('legacy',1,'legacy-progress','legacy-digest','{\"proof\":\"preserved\"}','[]','2026-01-01T00:00:00Z');
+        INSERT INTO signer_nonces(signer_scope,last_nonce) VALUES ('synthetic-signer',123);
         DROP TABLE financial_plan_attempts; DROP TABLE financial_plan_requests; DROP TABLE financial_plan_revisions; DROP TABLE financial_plans;
         DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_evidence_ids; DROP TABLE bridge_transfers;
         PRAGMA user_version=3;").unwrap();
@@ -301,7 +303,7 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
     assert_eq!(
         sql.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        9
+        10
     );
     let exact: String = sql
         .query_row(
@@ -311,6 +313,22 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
         )
         .unwrap();
     assert_eq!(exact, "1000000000000000000000001");
+    let progress_rows: i64 = sql
+        .query_row(
+            "SELECT COUNT(*) FROM settlement_progress WHERE operation_id='legacy' AND sequence=1 AND proof_digest='legacy-digest'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(progress_rows, 1);
+    let nonce: i64 = sql
+        .query_row(
+            "SELECT last_nonce FROM signer_nonces WHERE signer_scope='synthetic-signer'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(nonce, 123);
 }
 
 #[test]

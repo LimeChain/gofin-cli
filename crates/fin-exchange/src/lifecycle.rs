@@ -29,6 +29,12 @@ fn error(code: &str, stage: &str, message: &str) -> FinError {
 #[async_trait]
 pub trait ExchangeProfile: Send + Sync {
     type Request: Send + Sync;
+    fn attach_execution_state(
+        &self,
+        _state: Arc<dyn fin_domain::execution_state::ExecutionState>,
+    ) -> Result<(), FinError> {
+        Ok(())
+    }
 
     fn definitions(&self) -> Vec<Definition>;
     fn submission_kind(&self) -> &str;
@@ -96,6 +102,13 @@ pub trait ExchangeProfile: Send + Sync {
             "preview",
             "This profile supports public reads only.",
         ))
+    }
+    fn validate_recovery_child(
+        &self,
+        _prepared: &PreparedOperation,
+        _parent: &OperationRecord,
+    ) -> Result<Option<fin_domain::RecoveryBinding>, FinError> {
+        Ok(None)
     }
     async fn prepare_with_context(
         &self,
@@ -220,10 +233,43 @@ impl<P: ExchangeProfile> ExchangeAdapter<P> {
             )),
         }
     }
+
+    fn require_configuration(&self, operation: &str, stage: &str) -> Result<(), FinError> {
+        match self
+            .profile
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == operation)
+        {
+            Some(definition)
+                if definition.kind == OperationKind::Configuration
+                    && definition.execution_actor
+                        == fin_domain::ExecutionActor::HumanInteractive =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(error(
+                "WRONG_OPERATION_KIND",
+                stage,
+                "The operation is not a human-only configuration operation.",
+            )),
+            None => Err(error(
+                "UNSUPPORTED_OPERATION",
+                stage,
+                "The selected exchange operation is not implemented.",
+            )),
+        }
+    }
 }
 
 #[async_trait]
 impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
+    fn attach_execution_state(
+        &self,
+        state: Arc<dyn fin_domain::execution_state::ExecutionState>,
+    ) -> Result<(), FinError> {
+        self.profile.attach_execution_state(state)
+    }
     fn definitions(&self) -> Vec<Definition> {
         self.profile.definitions()
     }
@@ -268,6 +314,21 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation, FinError> {
         self.require_kind(operation, OperationKind::Write, "preview")?;
+        self.profile.prepare(operation, input).await
+    }
+    fn validate_recovery_child(
+        &self,
+        prepared: &PreparedOperation,
+        parent: &OperationRecord,
+    ) -> Result<Option<fin_domain::RecoveryBinding>, FinError> {
+        self.profile.validate_recovery_child(prepared, parent)
+    }
+    async fn prepare_configuration(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<PreparedOperation, FinError> {
+        self.require_configuration(operation, "configuration")?;
         self.profile.prepare(operation, input).await
     }
     async fn prepare_with_context(
@@ -349,6 +410,45 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         }
         Ok(current)
     }
+    async fn revalidate_configuration(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Result<PreparedOperation, FinError> {
+        self.require_configuration(&prepared.operation, "configuration")?;
+        if prepared.binding.get("preparationOnly") == Some(&json!(true)) {
+            return Err(error(
+                "PREPARATION_ONLY",
+                "configuration",
+                "A conditional funding preparation cannot be submitted as configuration.",
+            ));
+        }
+        let expires = DateTime::parse_from_rfc3339(&prepared.expires_at).map_err(|_| {
+            error(
+                "PREVIEW_INVALID",
+                "configuration",
+                "Prepared configuration expiry is invalid.",
+            )
+        })?;
+        if expires.with_timezone(&Utc) <= Utc::now() {
+            return Err(error(
+                "PREVIEW_EXPIRED",
+                "configuration",
+                "Prepared configuration expired; review a fresh candidate.",
+            ));
+        }
+        let current = self.profile.refresh_prepared(prepared).await?;
+        if current.operation != prepared.operation
+            || current.binding != prepared.binding
+            || !self.profile.valuation_matches(prepared, &current)
+        {
+            return Err(error(
+                "PREVIEW_CHANGED",
+                "configuration",
+                "Configuration parameters changed after human review.",
+            ));
+        }
+        Ok(current)
+    }
     async fn submit(
         &self,
         prepared: &PreparedOperation,
@@ -375,6 +475,31 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             .validate_response(&plan.submission, &response)?;
         Ok(plan.submission)
     }
+    async fn submit_configuration(
+        &self,
+        prepared: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        self.require_configuration(&prepared.operation, "configuration")?;
+        let current = self.revalidate_configuration(prepared).await?;
+        journal.assert_candidate(&current)?;
+        let plan = self.profile.plan_submission(&current).await?;
+        if plan.submission.kind != self.profile.submission_kind()
+            || plan.submission.reference.is_empty()
+        {
+            return Err(error(
+                "SUBMISSION_IDENTITY_INVALID",
+                "configuration",
+                "The exchange profile did not produce a durable configuration submission identity.",
+            ));
+        }
+        journal.assert_authorized()?;
+        journal.persist_submission(&plan.submission)?;
+        let response = self.profile.dispatch(&plan.request, journal).await?;
+        self.profile
+            .validate_response(&plan.submission, &response)?;
+        Ok(plan.submission)
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, FinError> {
         let Some(submission) = &record.submission else {
             return Ok(unknown("No persisted exchange submission identity exists."));
@@ -389,6 +514,23 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             .is_err()
         {
             return Ok(unknown("Unsupported exchange reconciliation operation."));
+        }
+        self.profile.reconcile_submission(record, submission).await
+    }
+    async fn reconcile_configuration(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Reconciliation, FinError> {
+        self.require_configuration(&record.operation, "configuration")?;
+        let Some(submission) = &record.submission else {
+            return Ok(unknown(
+                "No persisted configuration submission identity exists.",
+            ));
+        };
+        if submission.kind != self.profile.submission_kind() {
+            return Ok(unknown(
+                "Persisted submission kind does not match this exchange profile.",
+            ));
         }
         self.profile.reconcile_submission(record, submission).await
     }
@@ -431,19 +573,34 @@ mod tests {
             "fixture"
         }
         fn definitions(&self) -> Vec<Definition> {
-            vec![Definition {
-                name: "fixture.transfer".into(),
-                description: "Synthetic".into(),
-                kind: OperationKind::Write,
-                execution_actor: ExecutionActor::AgentInvocable,
-                input_schema: json!({}),
-                output_schema: json!({}),
-                error_schema: json!({}),
-                examples: vec![],
-                coverage: "synthetic".into(),
-                completion: "evidence".into(),
-                semantics: json!({}),
-            }]
+            vec![
+                Definition {
+                    name: "fixture.transfer".into(),
+                    description: "Synthetic".into(),
+                    kind: OperationKind::Write,
+                    execution_actor: ExecutionActor::AgentInvocable,
+                    input_schema: json!({}),
+                    output_schema: json!({}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "synthetic".into(),
+                    completion: "evidence".into(),
+                    semantics: json!({}),
+                },
+                Definition {
+                    name: "fixture.configure".into(),
+                    description: "Synthetic human configuration".into(),
+                    kind: OperationKind::Configuration,
+                    execution_actor: ExecutionActor::HumanInteractive,
+                    input_schema: json!({}),
+                    output_schema: json!({}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "synthetic".into(),
+                    completion: "verified synthetic configuration".into(),
+                    semantics: json!({}),
+                },
+            ]
         }
         fn connections(&self) -> Vec<ConnectionMetadata> {
             vec![ConnectionMetadata {
@@ -462,9 +619,10 @@ mod tests {
         async fn read(&self, _: &str, _: &Value) -> Result<Value, FinError> {
             panic!("write profile cannot be read")
         }
-        async fn prepare(&self, _: &str, _: &Value) -> Result<PreparedOperation, FinError> {
+        async fn prepare(&self, operation: &str, _: &Value) -> Result<PreparedOperation, FinError> {
             self.events.lock().unwrap().push("prepare");
             let mut prepared = preview();
+            prepared.operation = operation.into();
             if self.changed.load(Ordering::SeqCst) {
                 prepared.binding["amount"] = json!("2");
             }
@@ -621,6 +779,56 @@ mod tests {
             );
             assert!(!journal.events.lock().unwrap().contains(&"dispatch"));
         }
+    }
+
+    #[tokio::test]
+    async fn configuration_lifecycle_is_explicitly_kind_gated_and_journaled() {
+        let (adapter, journal) = fixture(false, false, false);
+        let mut candidate = preview();
+        candidate.operation = "fixture.configure".into();
+
+        assert_eq!(
+            adapter
+                .prepare("fixture.configure", &json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "WRONG_OPERATION_KIND"
+        );
+        assert_eq!(
+            adapter
+                .prepare_configuration("fixture.transfer", &json!({}))
+                .await
+                .unwrap_err()
+                .code,
+            "WRONG_OPERATION_KIND"
+        );
+
+        let prepared = adapter
+            .prepare_configuration("fixture.configure", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(prepared.operation, "fixture.configure");
+        let submitted = adapter
+            .submit_configuration(&candidate, journal.clone())
+            .await
+            .unwrap();
+        assert_eq!(submitted.reference, "legacy-request-id");
+        assert_eq!(journal.persisted.lock().unwrap().as_slice(), &[submitted]);
+        assert!(adapter.submit(&candidate, journal.clone()).await.is_err());
+        assert_eq!(
+            &*journal.events.lock().unwrap(),
+            &[
+                "prepare",
+                "prepare",
+                "authorize",
+                "plan",
+                "authorize",
+                "persist",
+                "authorize",
+                "dispatch"
+            ]
+        );
     }
     #[tokio::test]
     async fn authorization_expiring_after_persistence_blocks_dispatch_and_preserves_identity() {

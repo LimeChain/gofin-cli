@@ -589,9 +589,16 @@ impl EthereumAdapter {
             "SUBMISSION_IDENTITY_MISMATCH",
             "Durable submission differs from the original financial binding.",
         )?;
+        let sequencer_inclusion =
+            EthereumConfig::external_credit_uses_sequencer(self.config.chain_id);
+        let confirmations = if sequencer_inclusion {
+            1
+        } else {
+            self.config.confirmations
+        };
         let receipt = match self
             .runtime
-            .receipt(submission, &b.transaction, self.config.confirmations)
+            .receipt(submission, &b.transaction, confirmations)
             .await?
         {
             Some(r) => r,

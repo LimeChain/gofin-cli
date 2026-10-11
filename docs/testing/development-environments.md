@@ -61,6 +61,45 @@ make dev-env-stop DEV_ENV=live
 make dev-env-start DEV_ENV=live DEV_MODE=live
 ```
 
+For an isolated Hyperliquid live-development profile, limit the disposable
+broker to Arbitrum by setting `reviewed_chain_ids` to `[42161]` in that
+environment's `config.json`. This source-config option applies only to the
+development examples. Missing or `null` retains the existing all-reviewed
+network set; invalid, empty, duplicate, or unreviewed IDs fail startup. Network
+deployment configuration is filtered with the same selection, so Ethereum
+Mainnet deployments are omitted when chain 1 is not selected. The imported EVM
+credential reference remains shared by `dev-wallet` and `dev-hyperliquid`.
+
+Edit only while that named environment is stopped. From this worktree root:
+
+```sh
+make dev-env-stop DEV_ENV=hyperliquid-live
+python3 - <<'PY'
+import hashlib, json, os
+from pathlib import Path
+
+repo = Path.cwd().resolve()
+state = Path(os.environ.get("FIN_DEV_STATE_HOME", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "fin/dev")).expanduser()
+key = hashlib.sha256(str(repo).encode()).hexdigest()[:20]
+path = state / key / "hyperliquid-live" / "config.json"
+data = json.loads(path.read_text())
+if data.get("mode") != "live" or data.get("environment_id") != hashlib.sha256(f"{key}:hyperliquid-live".encode()).hexdigest():
+    raise SystemExit("selected config is not this worktree's live hyperliquid-live environment")
+data["reviewed_chain_ids"] = [42161]
+temporary = path.with_suffix(".json.tmp")
+temporary.write_text(json.dumps(data, indent=2) + "\n")
+temporary.chmod(0o600)
+temporary.replace(path)
+print(f"Updated only {path}")
+PY
+make dev-env-start DEV_ENV=hyperliquid-live DEV_MODE=live
+```
+
+This edit preserves the selected environment's credential references, key
+files, database and journal. Do not use `dev-env-reset` to change its scope.
+After rebuilding the selected environment, inspect its `connections` and
+capabilities before making any live request.
+
 Use the operation names and input schemas returned by discovery for actual
 requests. Import accepts these connections:
 

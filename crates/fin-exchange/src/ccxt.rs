@@ -13,6 +13,8 @@
 ))]
 use std::{cell::Cell, sync::Once};
 use std::{fmt, time::Duration};
+#[cfg(feature = "hyperliquid")]
+use zeroize::Zeroize;
 
 #[cfg(feature = "binance")]
 use ccxt::exchanges::binance::BinanceCore;
@@ -105,6 +107,9 @@ pub enum Method {
     KrakenOrderBook,
     HyperliquidMetaAndAssetContexts,
     HyperliquidOrderBook,
+    HyperliquidTypedInfo,
+    HyperliquidTypedExplorer,
+    HyperliquidTypedAction,
     OkxInstruments,
     OkxTicker,
     OkxOrderBook,
@@ -122,9 +127,11 @@ impl Method {
             Self::KrakenTicker | Self::KrakenAssetPairs | Self::KrakenOrderBook => {
                 ExchangeId::Kraken
             }
-            Self::HyperliquidMetaAndAssetContexts | Self::HyperliquidOrderBook => {
-                ExchangeId::Hyperliquid
-            }
+            Self::HyperliquidMetaAndAssetContexts
+            | Self::HyperliquidOrderBook
+            | Self::HyperliquidTypedInfo
+            | Self::HyperliquidTypedExplorer
+            | Self::HyperliquidTypedAction => ExchangeId::Hyperliquid,
             Self::OkxInstruments | Self::OkxTicker | Self::OkxOrderBook => ExchangeId::Okx,
             Self::CoinbaseProducts
             | Self::CoinbaseProduct
@@ -198,6 +205,9 @@ impl Method {
             Self::KrakenOrderBook => "public_get_depth",
             Self::HyperliquidMetaAndAssetContexts => "public_post_info",
             Self::HyperliquidOrderBook => "public_post_info",
+            Self::HyperliquidTypedInfo => "public_post_info",
+            Self::HyperliquidTypedExplorer => "public_post_explorer",
+            Self::HyperliquidTypedAction => "private_post_exchange",
             Self::OkxInstruments => "public_get_public_instruments",
             Self::OkxTicker => "public_get_market_ticker",
             Self::OkxOrderBook => "public_get_market_books",
@@ -242,6 +252,7 @@ impl Method {
                 | Self::BinanceFuturesPlaceOrder
                 | Self::BinanceFuturesCancelOrder
                 | Self::BinanceWalletTransfer
+                | Self::HyperliquidTypedAction
         )
     }
     fn private(self) -> bool {
@@ -258,6 +269,9 @@ impl Method {
                 | Self::KrakenOrderBook
                 | Self::HyperliquidMetaAndAssetContexts
                 | Self::HyperliquidOrderBook
+                | Self::HyperliquidTypedInfo
+                | Self::HyperliquidTypedExplorer
+                | Self::HyperliquidTypedAction
                 | Self::OkxInstruments
                 | Self::OkxTicker
                 | Self::OkxOrderBook
@@ -278,6 +292,1355 @@ pub struct Credentials {
     pub api_key: Zeroizing<String>,
     pub secret: Zeroizing<String>,
 }
+
+/// Protected Hyperliquid signer material. This type deliberately has no
+/// `Debug` or `Serialize` implementation and is consumed by the CCXT worker.
+pub struct HyperliquidSigner {
+    pub private_key: Zeroizing<String>,
+    pub wallet_address: String,
+}
+
+/// Fin's closed set of user-facing Hyperliquid `/info` queries.
+/// Values that identify a user are explicit and never inferred from a signer.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HyperliquidInfoRequest {
+    ServerTime,
+    ExchangeStatus,
+    MetaAndAssetCtxs,
+    MetaAndAssetCtxsForDex {
+        dex: String,
+    },
+    SpotMetaAndAssetCtxs,
+    PerpDexs,
+    AllMids,
+    L2Book {
+        coin: String,
+    },
+    CandleSnapshot {
+        coin: String,
+        interval: String,
+        start_time_ms: u64,
+        end_time_ms: u64,
+    },
+    RecentTrades {
+        coin: String,
+    },
+    FundingHistory {
+        coin: String,
+        start_time_ms: u64,
+        end_time_ms: u64,
+    },
+    ClearinghouseState {
+        owner: String,
+    },
+    ClearinghouseStateForDex {
+        owner: String,
+        dex: String,
+    },
+    SpotClearinghouseState {
+        owner: String,
+    },
+    OpenOrders {
+        owner: String,
+    },
+    FrontendOpenOrders {
+        owner: String,
+    },
+    FrontendOpenOrdersForDex {
+        owner: String,
+        dex: String,
+    },
+    OrderStatus {
+        owner: String,
+        order_id: u64,
+    },
+    OrderStatusByClientId {
+        owner: String,
+        client_order_id: String,
+    },
+    HistoricalOrders {
+        owner: String,
+    },
+    UserFills {
+        owner: String,
+    },
+    UserFillsByTime {
+        owner: String,
+        start_time_ms: u64,
+        end_time_ms: u64,
+    },
+    UserFunding {
+        owner: String,
+        start_time_ms: u64,
+        end_time_ms: Option<u64>,
+    },
+    UserNonFundingLedgerUpdates {
+        owner: String,
+        start_time_ms: u64,
+        end_time_ms: Option<u64>,
+    },
+    UserTwapSliceFills {
+        owner: String,
+    },
+    UserRateLimit {
+        owner: String,
+    },
+    UserFees {
+        owner: String,
+    },
+    ReferralState {
+        owner: String,
+    },
+    MaxBuilderFee {
+        owner: String,
+        builder: String,
+    },
+    UserRole {
+        owner: String,
+    },
+    UserVaultEquities {
+        owner: String,
+    },
+    VaultDetails {
+        vault_address: String,
+        user: Option<String>,
+    },
+    SubAccounts {
+        owner: String,
+    },
+    UserAbstractionState {
+        owner: String,
+    },
+    UserDexAbstractionState {
+        owner: String,
+    },
+    ActiveAssetData {
+        owner: String,
+        coin: String,
+    },
+}
+
+/// Read-only explorer lookup used internally to bind a native ledger hash to
+/// the exact signed L1 action. This is separate from the public `/info` API.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HyperliquidExplorerRequest {
+    TxDetails { hash: String },
+    UserDetails { user: String },
+}
+
+/// Canonical nonce/action pair supplied by the protected Fin adapter. The
+/// transport never creates or refreshes a nonce.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HyperliquidActionEnvelope {
+    pub nonce_ms: u64,
+    #[serde(default)]
+    pub vault_address: Option<String>,
+    pub action: HyperliquidAction,
+}
+
+/// Explicitly supported Hyperliquid exchange actions. Decimal quantities stay
+/// strings through canonicalization and signing.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HyperliquidAction {
+    Noop {},
+    Order {
+        orders: Vec<HyperliquidOrder>,
+        grouping: HyperliquidOrderGrouping,
+        #[serde(default)]
+        builder_fee: Option<HyperliquidBuilderFee>,
+    },
+    Cancel {
+        cancels: Vec<HyperliquidCancel>,
+    },
+    Amend {
+        modifies: Vec<HyperliquidAmend>,
+    },
+    UpdateLeverage {
+        asset: u32,
+        leverage: u32,
+        is_cross: bool,
+    },
+    UpdateIsolatedMargin {
+        asset: u32,
+        amount_usdc: String,
+    },
+    TwapOrder {
+        asset: u32,
+        is_buy: bool,
+        size: String,
+        reduce_only: bool,
+        duration_minutes: u32,
+        randomize: bool,
+    },
+    TwapCancel {
+        asset: u32,
+        twap_id: u64,
+    },
+    ScheduledCancel {
+        time_ms: Option<u64>,
+    },
+    VaultTransfer {
+        vault_address: String,
+        is_deposit: bool,
+        amount_usd_micro: i64,
+    },
+    CreateVault {
+        name: String,
+        description: String,
+        initial_usd_micro: u64,
+    },
+    SubAccountTransfer {
+        sub_account_user: String,
+        is_deposit: bool,
+        usd_micro: u64,
+    },
+    SubAccountSpotTransfer {
+        sub_account_user: String,
+        is_deposit: bool,
+        token: String,
+        amount: String,
+    },
+    CreateSubAccount {
+        name: String,
+        expires_after_ms: Option<u64>,
+    },
+    ReserveRequestWeight {
+        weight: u32,
+        destination: Option<String>,
+    },
+    SetRef {
+        code: String,
+    },
+    UserAbstraction {
+        user: String,
+        abstraction: HyperliquidAbstraction,
+        agent: bool,
+    },
+    UserDexAbstraction {
+        user: String,
+        enabled: bool,
+        agent: bool,
+    },
+    UsdSend {
+        destination: String,
+        amount_usdc: String,
+        time_ms: u64,
+    },
+    Withdraw {
+        destination: String,
+        amount_usdc: String,
+        time_ms: u64,
+    },
+    UsdClassTransfer {
+        amount_usdc: String,
+        to_perp: bool,
+        nonce: u64,
+    },
+    ApproveBuilderFee {
+        builder: String,
+        max_fee_rate: String,
+        nonce: u64,
+    },
+}
+
+/// Native action-level Hyperliquid builder metadata. The `f` wire value uses
+/// integer tenths of a basis point, unlike `approveBuilderFee.maxFeeRate`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HyperliquidBuilderFee {
+    pub address: String,
+    pub fee_tenths_bps: u16,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HyperliquidOrder {
+    pub asset: u32,
+    pub is_buy: bool,
+    pub price: String,
+    pub size: String,
+    pub reduce_only: bool,
+    pub order_type: HyperliquidOrderType,
+    pub client_order_id: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HyperliquidCancel {
+    pub asset: u32,
+    pub order_id: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HyperliquidAmend {
+    pub asset: u32,
+    pub order_id: u64,
+    pub order: HyperliquidOrder,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HyperliquidOrderType {
+    Limit {
+        time_in_force: HyperliquidTimeInForce,
+    },
+    Trigger {
+        trigger_price: String,
+        is_market: bool,
+        tpsl: HyperliquidTpsl,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperliquidTimeInForce {
+    Gtc,
+    Ioc,
+    Alo,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperliquidOrderGrouping {
+    Na,
+    NormalTpsl,
+    PositionTpsl,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperliquidTpsl {
+    TakeProfit,
+    StopLoss,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperliquidAbstraction {
+    Disabled,
+    UnifiedAccount,
+    PortfolioMargin,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    content = "request",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum HyperliquidRequest {
+    Info(HyperliquidInfoRequest),
+    Explorer(HyperliquidExplorerRequest),
+    Action(HyperliquidActionEnvelope),
+}
+
+impl HyperliquidActionEnvelope {
+    /// Exact unsigned wire binding covered by the Fin journal and approval.
+    #[cfg(feature = "hyperliquid")]
+    pub fn action_wire_json(&self) -> Result<serde_json::Value, CcxtError> {
+        if i64::try_from(self.nonce_ms).is_err()
+            || self
+                .vault_address
+                .as_ref()
+                .is_some_and(|address| !valid_hl_address(address))
+            || (self.vault_address.is_some()
+                && matches!(
+                    self.action,
+                    HyperliquidAction::UsdSend { .. }
+                        | HyperliquidAction::Withdraw { .. }
+                        | HyperliquidAction::UsdClassTransfer { .. }
+                        | HyperliquidAction::ApproveBuilderFee { .. }
+                        | HyperliquidAction::UserAbstraction { agent: false, .. }
+                        | HyperliquidAction::UserDexAbstraction { agent: false, .. }
+                ))
+        {
+            return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+        }
+        match &self.action {
+            HyperliquidAction::UsdSend { time_ms, .. }
+            | HyperliquidAction::Withdraw { time_ms, .. }
+                if *time_ms != self.nonce_ms =>
+            {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            HyperliquidAction::UsdClassTransfer { nonce, .. }
+            | HyperliquidAction::ApproveBuilderFee { nonce, .. }
+                if *nonce != self.nonce_ms =>
+            {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            _ => {}
+        }
+        let action = hl_action_value(&self.action, self.nonce_ms)?;
+        let mut fields = vec![
+            ("action", ccxt_value_to_json(action)?),
+            ("nonce", serde_json::Value::from(self.nonce_ms)),
+        ];
+        if let Some(address) = &self.vault_address {
+            fields.push((
+                "vaultAddress",
+                serde_json::Value::String(address.trim_start_matches("0x").to_owned()),
+            ));
+        } else if matches!(
+            self.action,
+            HyperliquidAction::UsdSend { .. }
+                | HyperliquidAction::Withdraw { .. }
+                | HyperliquidAction::UsdClassTransfer { .. }
+                | HyperliquidAction::ApproveBuilderFee { .. }
+                | HyperliquidAction::UserAbstraction { agent: false, .. }
+                | HyperliquidAction::UserDexAbstraction { agent: false, .. }
+        ) {
+            fields.push(("vaultAddress", serde_json::Value::Null));
+        }
+        if let HyperliquidAction::CreateSubAccount {
+            expires_after_ms: Some(time),
+            ..
+        } = &self.action
+        {
+            i64::try_from(*time).map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?;
+            fields.push(("expiresAfter", serde_json::Value::from(*time)));
+        }
+        Ok(serde_json::Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        ))
+    }
+}
+
+#[cfg(feature = "hyperliquid")]
+fn ccxt_value_to_json(value: ccxt::Value) -> Result<serde_json::Value, CcxtError> {
+    Ok(match value {
+        ccxt::Value::Null => serde_json::Value::Null,
+        ccxt::Value::Bool(value) => serde_json::Value::Bool(value),
+        ccxt::Value::Int(value) => serde_json::Value::from(value),
+        ccxt::Value::Float(value) if value.is_finite() => serde_json::Value::from(value),
+        ccxt::Value::Float(_) => return Err(CcxtError::new(CcxtErrorKind::InvalidRequest)),
+        ccxt::Value::Str(value) => serde_json::Value::String(value.into_owned()),
+        ccxt::Value::Arr(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .cloned()
+                .map(ccxt_value_to_json)
+                .collect::<Result<_, _>>()?,
+        ),
+        ccxt::Value::Dict(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), ccxt_value_to_json(value.clone())?)))
+                .collect::<Result<_, CcxtError>>()?,
+        ),
+    })
+}
+
+#[cfg(feature = "hyperliquid")]
+fn zeroize_ccxt_string(value: &mut ccxt::Value) {
+    if let ccxt::Value::Str(text) = value {
+        text.to_mut().zeroize();
+    }
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_map(entries: impl IntoIterator<Item = (String, ccxt::Value)>) -> ccxt::Value {
+    ccxt::Value::Map(entries.into_iter().collect::<indexmap::IndexMap<_, _>>())
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_object(entries: impl IntoIterator<Item = (&'static str, ccxt::Value)>) -> ccxt::Value {
+    hl_map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value)),
+    )
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_str(value: impl Into<String>) -> ccxt::Value {
+    ccxt::Value::str(value)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_info_value(request: &HyperliquidInfoRequest) -> Result<ccxt::Value, CcxtError> {
+    use HyperliquidInfoRequest as R;
+    let mut pairs: Vec<(&'static str, ccxt::Value)> = Vec::new();
+    macro_rules! owner {
+        ($owner:expr) => {{
+            if !valid_hl_address($owner) {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("user", hl_str($owner.clone())));
+        }};
+    }
+    macro_rules! times {
+        ($start:expr, $end:expr) => {{
+            pairs.push((
+                "startTime",
+                ccxt::Value::Int(
+                    i64::try_from(*$start)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ));
+            pairs.push((
+                "endTime",
+                ccxt::Value::Int(
+                    i64::try_from(*$end)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ));
+        }};
+    }
+    let query = match request {
+        R::ServerTime => "exchangeStatus",
+        R::ExchangeStatus => "exchangeStatus",
+        R::MetaAndAssetCtxs => "metaAndAssetCtxs",
+        R::MetaAndAssetCtxsForDex { dex } => {
+            if dex.trim().is_empty() {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("dex", hl_str(dex.clone())));
+            "metaAndAssetCtxs"
+        }
+        R::SpotMetaAndAssetCtxs => "spotMetaAndAssetCtxs",
+        R::PerpDexs => "perpDexs",
+        R::AllMids => "allMids",
+        R::L2Book { coin } => {
+            if coin.is_empty() {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("coin", hl_str(coin.clone())));
+            "l2Book"
+        }
+        R::CandleSnapshot {
+            coin,
+            interval,
+            start_time_ms,
+            end_time_ms,
+        } => {
+            if coin.is_empty() || !valid_hl_interval(interval) || start_time_ms >= end_time_ms {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("coin", hl_str(coin.clone())));
+            pairs.push(("interval", hl_str(interval.clone())));
+            times!(start_time_ms, end_time_ms);
+            "candleSnapshot"
+        }
+        R::RecentTrades { coin } => {
+            if coin.is_empty() {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("coin", hl_str(coin.clone())));
+            "recentTrades"
+        }
+        R::FundingHistory {
+            coin,
+            start_time_ms,
+            end_time_ms,
+        } => {
+            if coin.is_empty() || start_time_ms >= end_time_ms {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("coin", hl_str(coin.clone())));
+            times!(start_time_ms, end_time_ms);
+            "fundingHistory"
+        }
+        R::ClearinghouseState { owner: address } => {
+            owner!(address);
+            "clearinghouseState"
+        }
+        R::ClearinghouseStateForDex {
+            owner: address,
+            dex,
+        } => {
+            owner!(address);
+            if dex.trim().is_empty() {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("dex", hl_str(dex.clone())));
+            "clearinghouseState"
+        }
+        R::SpotClearinghouseState { owner: address } => {
+            owner!(address);
+            "spotClearinghouseState"
+        }
+        R::OpenOrders { owner: address } => {
+            owner!(address);
+            "openOrders"
+        }
+        R::FrontendOpenOrders { owner: address } => {
+            owner!(address);
+            "frontendOpenOrders"
+        }
+        R::FrontendOpenOrdersForDex {
+            owner: address,
+            dex,
+        } => {
+            owner!(address);
+            if dex.trim().is_empty() || dex.trim() != dex {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("dex", hl_str(dex.clone())));
+            "frontendOpenOrders"
+        }
+        R::OrderStatus {
+            owner: address,
+            order_id,
+        } => {
+            owner!(address);
+            pairs.push((
+                "oid",
+                ccxt::Value::Int(
+                    i64::try_from(*order_id)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ));
+            "orderStatus"
+        }
+        R::OrderStatusByClientId {
+            owner: address,
+            client_order_id,
+        } => {
+            owner!(address);
+            if client_order_id.len() != 34
+                || !client_order_id.starts_with("0x")
+                || !client_order_id.as_bytes()[2..]
+                    .iter()
+                    .all(u8::is_ascii_hexdigit)
+            {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("oid", hl_str(client_order_id.clone())));
+            "orderStatus"
+        }
+        R::HistoricalOrders { owner: address } => {
+            owner!(address);
+            "historicalOrders"
+        }
+        R::UserFills { owner: address } => {
+            owner!(address);
+            "userFills"
+        }
+        R::UserFillsByTime {
+            owner: address,
+            start_time_ms,
+            end_time_ms,
+        } => {
+            owner!(address);
+            if start_time_ms >= end_time_ms {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            times!(start_time_ms, end_time_ms);
+            "userFillsByTime"
+        }
+        R::UserFunding {
+            owner: address,
+            start_time_ms,
+            end_time_ms,
+        } => {
+            owner!(address);
+            pairs.push((
+                "startTime",
+                ccxt::Value::Int(
+                    i64::try_from(*start_time_ms)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ));
+            if let Some(end) = end_time_ms {
+                if end < start_time_ms {
+                    return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+                }
+                pairs.push((
+                    "endTime",
+                    ccxt::Value::Int(
+                        i64::try_from(*end)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ));
+            }
+            "userFunding"
+        }
+        R::UserNonFundingLedgerUpdates {
+            owner: address,
+            start_time_ms,
+            end_time_ms,
+        } => {
+            owner!(address);
+            pairs.push((
+                "startTime",
+                ccxt::Value::Int(
+                    i64::try_from(*start_time_ms)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ));
+            if let Some(end) = end_time_ms {
+                if end < start_time_ms {
+                    return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+                }
+                pairs.push((
+                    "endTime",
+                    ccxt::Value::Int(
+                        i64::try_from(*end)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ));
+            }
+            "userNonFundingLedgerUpdates"
+        }
+        R::UserTwapSliceFills { owner: address } => {
+            owner!(address);
+            "userTwapSliceFills"
+        }
+        R::UserRateLimit { owner: address } => {
+            owner!(address);
+            "userRateLimit"
+        }
+        R::UserFees { owner: address } => {
+            owner!(address);
+            "userFees"
+        }
+        R::ReferralState { owner: address } => {
+            owner!(address);
+            "referral"
+        }
+        R::MaxBuilderFee {
+            owner: address,
+            builder,
+        } => {
+            owner!(address);
+            if !valid_hl_address(builder) {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("builder", hl_str(builder.clone())));
+            "maxBuilderFee"
+        }
+        R::UserRole { owner: address } => {
+            owner!(address);
+            "userRole"
+        }
+        R::UserVaultEquities { owner: address } => {
+            owner!(address);
+            "userVaultEquities"
+        }
+        R::VaultDetails {
+            vault_address,
+            user,
+        } => {
+            if !valid_hl_address(vault_address)
+                || user
+                    .as_deref()
+                    .is_some_and(|address| !valid_hl_address(address))
+            {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("vaultAddress", hl_str(vault_address.clone())));
+            if let Some(address) = user {
+                pairs.push(("user", hl_str(address.clone())));
+            }
+            "vaultDetails"
+        }
+        R::SubAccounts { owner: address } => {
+            owner!(address);
+            "subAccounts"
+        }
+        R::UserAbstractionState { owner: address } => {
+            owner!(address);
+            "userAbstraction"
+        }
+        R::ActiveAssetData {
+            owner: address,
+            coin,
+        } => {
+            owner!(address);
+            if coin.is_empty() {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            pairs.push(("coin", hl_str(coin.clone())));
+            "activeAssetData"
+        }
+        R::UserDexAbstractionState { owner: address } => {
+            owner!(address);
+            "userDexAbstraction"
+        }
+    };
+    pairs.insert(0, ("type", hl_str(query)));
+    Ok(hl_object(pairs))
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_explorer_value(request: &HyperliquidExplorerRequest) -> Result<ccxt::Value, CcxtError> {
+    match request {
+        HyperliquidExplorerRequest::TxDetails { hash }
+            if hash.len() == 66
+                && hash.starts_with("0x")
+                && hash.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit) =>
+        {
+            Ok(hl_object([
+                ("type", hl_str("txDetails")),
+                ("hash", hl_str(hash.clone())),
+            ]))
+        }
+        HyperliquidExplorerRequest::UserDetails { user } if valid_hl_address(user) => {
+            Ok(hl_object([
+                ("type", hl_str("userDetails")),
+                ("user", hl_str(user.clone())),
+            ]))
+        }
+        _ => Err(CcxtError::new(CcxtErrorKind::InvalidRequest)),
+    }
+}
+
+#[cfg(feature = "hyperliquid")]
+fn valid_hl_interval(interval: &str) -> bool {
+    matches!(
+        interval,
+        "1m" | "3m"
+            | "5m"
+            | "15m"
+            | "30m"
+            | "1h"
+            | "2h"
+            | "4h"
+            | "8h"
+            | "12h"
+            | "1d"
+            | "3d"
+            | "1w"
+            | "1M"
+    )
+}
+
+#[cfg(feature = "hyperliquid")]
+fn valid_hl_address(value: &str) -> bool {
+    value.len() == 42
+        && value.starts_with("0x")
+        && value.as_bytes()[2..].iter().all(u8::is_ascii_hexdigit)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_vault_address(value: Option<&str>) -> ccxt::Value {
+    value
+        .map(|address| hl_str(address.strip_prefix("0x").unwrap_or(address).to_owned()))
+        .unwrap_or(ccxt::Value::Null)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn valid_hl_decimal(value: &str, allow_zero: bool) -> bool {
+    if value.is_empty() || value.starts_with('+') || value.contains(['e', 'E']) {
+        return false;
+    }
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let mut parts = unsigned.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) || parts.next().is_some() {
+        return false;
+    }
+    if fraction.is_some_and(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit())) {
+        return false;
+    }
+    let zero =
+        whole.bytes().all(|b| b == b'0') && fraction.unwrap_or("").bytes().all(|b| b == b'0');
+    (allow_zero || !zero) && (!value.starts_with('-') || !zero)
+}
+
+#[cfg(feature = "hyperliquid")]
+fn is_positive_hl_decimal(value: &str) -> bool {
+    valid_hl_decimal(value, false) && !value.starts_with('-')
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_order_value(order: &HyperliquidOrder) -> Result<ccxt::Value, CcxtError> {
+    if !is_positive_hl_decimal(&order.price)
+        || !is_positive_hl_decimal(&order.size)
+        || order.client_order_id.as_ref().is_some_and(|id| {
+            id.len() != 34
+                || !id.starts_with("0x")
+                || !id[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+    }
+    let order_type = match &order.order_type {
+        HyperliquidOrderType::Limit { time_in_force } => {
+            let tif = match time_in_force {
+                HyperliquidTimeInForce::Gtc => "Gtc",
+                HyperliquidTimeInForce::Ioc => "Ioc",
+                HyperliquidTimeInForce::Alo => "Alo",
+            };
+            hl_object([("limit", hl_object([("tif", hl_str(tif))]))])
+        }
+        HyperliquidOrderType::Trigger {
+            trigger_price,
+            is_market,
+            tpsl,
+        } => {
+            if !is_positive_hl_decimal(trigger_price) {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            let tpsl = match tpsl {
+                HyperliquidTpsl::TakeProfit => "tp",
+                HyperliquidTpsl::StopLoss => "sl",
+            };
+            hl_object([(
+                "trigger",
+                hl_object([
+                    ("isMarket", ccxt::Value::Bool(*is_market)),
+                    ("triggerPx", hl_str(trigger_price.clone())),
+                    ("tpsl", hl_str(tpsl)),
+                ]),
+            )])
+        }
+    };
+    let mut entries = vec![
+        ("a", ccxt::Value::Int(order.asset as i64)),
+        ("b", ccxt::Value::Bool(order.is_buy)),
+        ("p", hl_str(order.price.clone())),
+        ("s", hl_str(order.size.clone())),
+        ("r", ccxt::Value::Bool(order.reduce_only)),
+        ("t", order_type),
+    ];
+    if let Some(cloid) = &order.client_order_id {
+        entries.push(("c", hl_str(cloid.clone())));
+    }
+    Ok(hl_object(entries))
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_action_value(action: &HyperliquidAction, nonce_ms: u64) -> Result<ccxt::Value, CcxtError> {
+    use HyperliquidAction as A;
+    Ok(match action {
+        A::Noop {} => hl_object([("type", hl_str("noop"))]),
+        A::Order {
+            orders,
+            grouping,
+            builder_fee,
+        } if !orders.is_empty() => {
+            let grouping = match grouping {
+                HyperliquidOrderGrouping::Na => "na",
+                HyperliquidOrderGrouping::NormalTpsl => "normalTpsl",
+                HyperliquidOrderGrouping::PositionTpsl => "positionTpsl",
+            };
+            let orders = orders
+                .iter()
+                .map(hl_order_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut entries = vec![
+                ("type", hl_str("order")),
+                ("orders", ccxt::Value::Array(orders)),
+                ("grouping", hl_str(grouping)),
+            ];
+            if let Some(builder) = builder_fee {
+                if !valid_hl_address(&builder.address)
+                    || builder.fee_tenths_bps == 0
+                    || builder.fee_tenths_bps > 1000
+                {
+                    return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+                }
+                entries.push((
+                    "builder",
+                    hl_object([
+                        ("b", hl_str(builder.address.clone())),
+                        ("f", ccxt::Value::Int(i64::from(builder.fee_tenths_bps))),
+                    ]),
+                ));
+            }
+            hl_object(entries)
+        }
+        A::Cancel { cancels } if !cancels.is_empty() => {
+            let cancels = cancels
+                .iter()
+                .map(|c| {
+                    Ok(hl_object([
+                        ("a", ccxt::Value::Int(c.asset as i64)),
+                        (
+                            "o",
+                            ccxt::Value::Int(
+                                i64::try_from(c.order_id)
+                                    .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                            ),
+                        ),
+                    ]))
+                })
+                .collect::<Result<Vec<_>, CcxtError>>()?;
+            hl_object([
+                ("type", hl_str("cancel")),
+                ("cancels", ccxt::Value::Array(cancels)),
+            ])
+        }
+        A::Amend { modifies } if !modifies.is_empty() => {
+            let modifies = modifies
+                .iter()
+                .map(|m| {
+                    if m.asset != m.order.asset {
+                        return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+                    }
+                    Ok(hl_object([
+                        (
+                            "oid",
+                            ccxt::Value::Int(
+                                i64::try_from(m.order_id)
+                                    .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                            ),
+                        ),
+                        ("order", hl_order_value(&m.order)?),
+                    ]))
+                })
+                .collect::<Result<Vec<_>, CcxtError>>()?;
+            hl_object([
+                ("type", hl_str("batchModify")),
+                ("modifies", ccxt::Value::Array(modifies)),
+            ])
+        }
+        A::UpdateLeverage {
+            asset,
+            leverage,
+            is_cross,
+        } if *leverage > 0 => hl_object([
+            ("type", hl_str("updateLeverage")),
+            ("asset", ccxt::Value::Int(*asset as i64)),
+            ("isCross", ccxt::Value::Bool(*is_cross)),
+            ("leverage", ccxt::Value::Int(*leverage as i64)),
+        ]),
+        A::UpdateIsolatedMargin { asset, amount_usdc } if valid_hl_decimal(amount_usdc, false) => {
+            // Hyperliquid's action expresses margin change in integer USD
+            // micro-units. isBuy is reserved for future hedge mode and stays true;
+            // the sign of ntli selects addition/removal.
+            if amount_usdc.split('.').nth(1).is_some_and(|f| f.len() > 6) {
+                return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+            }
+            let amount = decimal_usdc_to_micro(amount_usdc)?;
+            let amount = amount
+                .parse::<i64>()
+                .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?;
+            hl_object([
+                ("type", hl_str("updateIsolatedMargin")),
+                ("asset", ccxt::Value::Int(*asset as i64)),
+                ("isBuy", ccxt::Value::Bool(true)),
+                ("ntli", ccxt::Value::Int(amount)),
+            ])
+        }
+        A::TwapOrder {
+            asset,
+            is_buy,
+            size,
+            reduce_only,
+            duration_minutes,
+            randomize,
+        } if is_positive_hl_decimal(size) && *duration_minutes > 0 => hl_object([
+            ("type", hl_str("twapOrder")),
+            (
+                "twap",
+                hl_object([
+                    ("a", ccxt::Value::Int(*asset as i64)),
+                    ("b", ccxt::Value::Bool(*is_buy)),
+                    ("s", hl_str(size.clone())),
+                    ("r", ccxt::Value::Bool(*reduce_only)),
+                    ("m", ccxt::Value::Int(*duration_minutes as i64)),
+                    ("t", ccxt::Value::Bool(*randomize)),
+                ]),
+            ),
+        ]),
+        A::TwapCancel { asset, twap_id } => hl_object([
+            ("type", hl_str("twapCancel")),
+            ("a", ccxt::Value::Int(*asset as i64)),
+            (
+                "t",
+                ccxt::Value::Int(
+                    i64::try_from(*twap_id)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ),
+        ]),
+        A::ScheduledCancel { time_ms } => {
+            let mut fields = vec![("type", hl_str("scheduledCancel"))];
+            if let Some(time) = time_ms {
+                fields.push((
+                    "time",
+                    ccxt::Value::Int(
+                        i64::try_from(*time)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ));
+            }
+            hl_object(fields)
+        }
+        A::VaultTransfer {
+            vault_address,
+            is_deposit,
+            amount_usd_micro,
+        } if valid_hl_address(vault_address) && *amount_usd_micro > 0 => hl_object([
+            ("type", hl_str("vaultTransfer")),
+            ("vaultAddress", hl_str(vault_address.clone())),
+            ("isDeposit", ccxt::Value::Bool(*is_deposit)),
+            ("usd", ccxt::Value::Int(*amount_usd_micro)),
+        ]),
+        A::CreateVault {
+            name,
+            description,
+            initial_usd_micro,
+        } if !name.trim().is_empty()
+            && !description.trim().is_empty()
+            && *initial_usd_micro > 0 =>
+        {
+            hl_object([
+                ("type", hl_str("createVault")),
+                ("name", hl_str(name.clone())),
+                ("description", hl_str(description.clone())),
+                (
+                    "initialUsd",
+                    ccxt::Value::Int(
+                        i64::try_from(*initial_usd_micro)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+            ])
+        }
+        A::SubAccountTransfer {
+            sub_account_user,
+            is_deposit,
+            usd_micro,
+        } if valid_hl_address(sub_account_user) && *usd_micro > 0 => hl_object([
+            ("type", hl_str("subAccountTransfer")),
+            ("subAccountUser", hl_str(sub_account_user.clone())),
+            ("isDeposit", ccxt::Value::Bool(*is_deposit)),
+            (
+                "usd",
+                ccxt::Value::Int(
+                    i64::try_from(*usd_micro)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ),
+        ]),
+        A::SubAccountSpotTransfer {
+            sub_account_user,
+            is_deposit,
+            token,
+            amount,
+        } if valid_hl_address(sub_account_user)
+            && !token.is_empty()
+            && is_positive_hl_decimal(amount) =>
+        {
+            hl_object([
+                ("type", hl_str("subAccountSpotTransfer")),
+                ("subAccountUser", hl_str(sub_account_user.clone())),
+                ("isDeposit", ccxt::Value::Bool(*is_deposit)),
+                ("token", hl_str(token.clone())),
+                ("amount", hl_str(amount.clone())),
+            ])
+        }
+        A::CreateSubAccount { name, .. } if !name.trim().is_empty() => hl_object([
+            ("type", hl_str("createSubAccount")),
+            ("name", hl_str(name.clone())),
+        ]),
+        A::ReserveRequestWeight {
+            weight,
+            destination,
+        } if *weight > 0 => {
+            let mut fields = vec![
+                ("type", hl_str("reserveRequestWeight")),
+                ("weight", ccxt::Value::Int(*weight as i64)),
+            ];
+            if let Some(destination) = destination {
+                if !valid_hl_address(destination) {
+                    return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+                }
+                fields.push(("destination", hl_str(destination.clone())));
+            }
+            hl_object(fields)
+        }
+        A::SetRef { code } if !code.trim().is_empty() => hl_object([
+            ("type", hl_str("setReferrer")),
+            ("code", hl_str(code.clone())),
+        ]),
+        A::UserAbstraction {
+            user,
+            abstraction,
+            agent,
+        } if valid_hl_address(user) => {
+            let abstraction = hl_abstraction_value(*abstraction);
+            if *agent {
+                hl_object([
+                    ("type", hl_str("agentSetAbstraction")),
+                    (
+                        "abstraction",
+                        hl_str(match abstraction.as_str() {
+                            Some("disabled") => "i",
+                            Some("unifiedAccount") => "u",
+                            Some("portfolioMargin") => "p",
+                            _ => unreachable!("closed abstraction enum"),
+                        }),
+                    ),
+                ])
+            } else {
+                hl_object([
+                    ("hyperliquidChain", hl_str("Mainnet")),
+                    ("signatureChainId", hl_str("0x66eee")),
+                    ("abstraction", abstraction),
+                    ("user", hl_str(user.clone())),
+                    (
+                        "nonce",
+                        ccxt::Value::Int(
+                            i64::try_from(nonce_ms)
+                                .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                        ),
+                    ),
+                    ("type", hl_str("userSetAbstraction")),
+                ])
+            }
+        }
+        A::UserDexAbstraction {
+            user,
+            enabled: true,
+            agent: true,
+        } if valid_hl_address(user) => hl_object([("type", hl_str("agentEnableDexAbstraction"))]),
+        A::UserDexAbstraction {
+            user,
+            enabled,
+            agent: false,
+        } if valid_hl_address(user) => hl_object([
+            ("hyperliquidChain", hl_str("Mainnet")),
+            ("signatureChainId", hl_str("0x66eee")),
+            ("enabled", ccxt::Value::Bool(*enabled)),
+            ("user", hl_str(user.clone())),
+            (
+                "nonce",
+                ccxt::Value::Int(
+                    i64::try_from(nonce_ms)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ),
+            ("type", hl_str("userDexAbstraction")),
+        ]),
+        A::UsdSend {
+            destination,
+            amount_usdc,
+            time_ms,
+        } if valid_hl_address(destination)
+            && valid_hl_decimal(amount_usdc, false)
+            && !amount_usdc.starts_with('-') =>
+        {
+            hl_object([
+                ("hyperliquidChain", hl_str("Mainnet")),
+                ("signatureChainId", hl_str("0x66eee")),
+                ("destination", hl_str(destination.clone())),
+                ("amount", hl_str(amount_usdc.clone())),
+                (
+                    "time",
+                    ccxt::Value::Int(
+                        i64::try_from(*time_ms)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+                ("type", hl_str("usdSend")),
+            ])
+        }
+        A::Withdraw {
+            destination,
+            amount_usdc,
+            time_ms,
+        } if valid_hl_address(destination)
+            && valid_hl_decimal(amount_usdc, false)
+            && !amount_usdc.starts_with('-') =>
+        {
+            hl_object([
+                ("hyperliquidChain", hl_str("Mainnet")),
+                ("signatureChainId", hl_str("0x66eee")),
+                ("destination", hl_str(destination.clone())),
+                ("amount", hl_str(amount_usdc.clone())),
+                (
+                    "time",
+                    ccxt::Value::Int(
+                        i64::try_from(*time_ms)
+                            .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                    ),
+                ),
+                ("type", hl_str("withdraw3")),
+            ])
+        }
+        A::UsdClassTransfer {
+            amount_usdc,
+            to_perp,
+            nonce,
+        } if is_positive_hl_decimal(amount_usdc) => hl_object([
+            ("hyperliquidChain", hl_str("Mainnet")),
+            ("signatureChainId", hl_str("0x66eee")),
+            ("type", hl_str("usdClassTransfer")),
+            ("amount", hl_str(amount_usdc.clone())),
+            ("toPerp", ccxt::Value::Bool(*to_perp)),
+            (
+                "nonce",
+                ccxt::Value::Int(
+                    i64::try_from(*nonce)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ),
+        ]),
+        A::ApproveBuilderFee {
+            builder,
+            max_fee_rate,
+            nonce,
+        } if valid_hl_address(builder) && valid_hl_percent(max_fee_rate) => hl_object([
+            ("hyperliquidChain", hl_str("Mainnet")),
+            ("signatureChainId", hl_str("0x66eee")),
+            ("maxFeeRate", hl_str(max_fee_rate.clone())),
+            ("builder", hl_str(builder.clone())),
+            (
+                "nonce",
+                ccxt::Value::Int(
+                    i64::try_from(*nonce)
+                        .map_err(|_| CcxtError::new(CcxtErrorKind::InvalidRequest))?,
+                ),
+            ),
+            ("type", hl_str("approveBuilderFee")),
+        ]),
+        _ => return Err(CcxtError::new(CcxtErrorKind::InvalidRequest)),
+    })
+}
+
+#[cfg(feature = "hyperliquid")]
+fn hl_abstraction_value(value: HyperliquidAbstraction) -> ccxt::Value {
+    hl_str(match value {
+        HyperliquidAbstraction::Disabled => "disabled",
+        HyperliquidAbstraction::UnifiedAccount => "unifiedAccount",
+        HyperliquidAbstraction::PortfolioMargin => "portfolioMargin",
+    })
+}
+
+#[cfg(feature = "hyperliquid")]
+fn valid_hl_percent(value: &str) -> bool {
+    value.strip_suffix('%').map_or_else(
+        || valid_hl_decimal(value, true),
+        |number| valid_hl_decimal(number, true),
+    )
+}
+
+#[cfg(feature = "hyperliquid")]
+fn decimal_usdc_to_micro(value: &str) -> Result<String, CcxtError> {
+    let negative = value.starts_with('-');
+    let positive = value.trim_start_matches('-');
+    let (whole, fraction) = positive.split_once('.').unwrap_or((positive, ""));
+    if !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 6
+    {
+        return Err(CcxtError::new(CcxtErrorKind::InvalidRequest));
+    }
+    let digits = format!("{}{:0<6}", whole, fraction);
+    let micro = digits.trim_start_matches('0');
+    let micro = if micro.is_empty() { "0" } else { micro };
+    Ok(if negative {
+        format!("-{micro}")
+    } else {
+        micro.to_owned()
+    })
+}
+
 pub trait CredentialProvider: Send + Sync {
     fn credentials(&self, reference: &str) -> Result<Credentials, CcxtError>;
 }
@@ -299,6 +1662,18 @@ pub struct CcxtError {
     pub kind: CcxtErrorKind,
     pub http_status: Option<u16>,
     pub exchange_code: Option<i64>,
+}
+
+#[cfg(feature = "hyperliquid")]
+fn is_native_hyperliquid_action_rejection(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("status").and_then(Value::as_str) == Some("err")
+        && object
+            .get("response")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty())
 }
 impl CcxtError {
     pub fn new(kind: CcxtErrorKind) -> Self {
@@ -327,13 +1702,15 @@ impl std::error::Error for CcxtError {}
     )),
     allow(dead_code)
 )]
-type RequestGuard = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+pub type RequestGuard = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 struct Job {
     exchange: ExchangeId,
     method: Method,
     credentials: Option<Credentials>,
     params: Vec<(String, String)>,
+    hyperliquid: Option<HyperliquidRequest>,
+    hyperliquid_signer: Option<HyperliquidSigner>,
     reply: oneshot::Sender<Result<Value, CcxtError>>,
     guard: Option<RequestGuard>,
 }
@@ -626,6 +2003,10 @@ impl CcxtClient {
             .build()
             .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?;
         let (sender, mut receiver) = mpsc::channel::<Job>(32);
+        #[cfg(feature = "hyperliquid")]
+        let hyperliquid_explorer_endpoint = endpoint
+            .clone()
+            .unwrap_or_else(|| "https://rpc.hyperliquid.xyz".to_owned());
         std::thread::Builder::new().name("fin-ccxt".into()).spawn(move || runtime.block_on(async move {
             let _redaction = PanicRedaction::enter();
             let guard = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -651,6 +2032,8 @@ impl CcxtClient {
             let mut bybit = Observed { core:BybitCore::new(Some(config.clone())), response:response.clone(),guard:guard.clone() };
             #[cfg(feature="bybit")]
             { bybit.internals.http_client = Some(client.clone()); }
+            #[cfg(feature="hyperliquid")]
+            let mut last_explorer_request: Option<tokio::time::Instant> = None;
             #[cfg(feature="binance")]
             { binance.internals.http_client = Some(client.clone()); }
             #[cfg(feature="kraken")]
@@ -661,7 +2044,7 @@ impl CcxtClient {
                 #[cfg(feature="kraken")]
                 { kraken.urls = ccxt::Value::from(serde_json::json!({"api":{"public":base}})); }
                 #[cfg(feature="hyperliquid")]
-                { hyperliquid.urls = ccxt::Value::from(serde_json::json!({"api":{"public":base}})); }
+                { hyperliquid.urls = ccxt::Value::from(serde_json::json!({"api":{"public":base,"private":base}})); }
                 #[cfg(feature="okx")]
                 { okx.urls = ccxt::Value::from(serde_json::json!({"api":{"rest":base}})); }
                 #[cfg(feature="coinbase")]
@@ -684,9 +2067,120 @@ impl CcxtClient {
                 let exchange: &mut ccxt::Exchange = match job.exchange { #[cfg(feature="binance")] ExchangeId::Binance => &mut binance.core.exchange, #[cfg(feature="kraken")] ExchangeId::Kraken => &mut kraken.core.exchange, #[cfg(feature="hyperliquid")] ExchangeId::Hyperliquid => &mut hyperliquid.core.exchange, #[cfg(feature="okx")] ExchangeId::Okx => &mut okx.core.exchange, #[cfg(feature="coinbase")] ExchangeId::Coinbase => &mut coinbase.core.exchange, #[cfg(feature="bybit")] ExchangeId::Bybit => &mut bybit.core.exchange, #[allow(unreachable_patterns)] _ => { let _ = job.reply.send(Err(CcxtError::new(CcxtErrorKind::Unsupported))); continue; } };
                 exchange.apiKey = credentials.as_ref().map(|c| ccxt::Value::Str(c.api_key.to_string().into())).unwrap_or_default();
                 exchange.secret = credentials.as_ref().map(|c| ccxt::Value::Str(c.secret.to_string().into())).unwrap_or_default();
+                #[cfg(feature="hyperliquid")]
+                if let Some(signer) = job.hyperliquid_signer.as_ref() {
+                    hyperliquid.core.privateKey = ccxt::Value::str(signer.private_key.to_string());
+                    hyperliquid.core.walletAddress = ccxt::Value::str(signer.wallet_address.clone());
+                }
                 *response.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 *guard.lock().unwrap_or_else(|e|e.into_inner()) = job.guard;
+                #[cfg(feature="hyperliquid")]
+                let valid_response_shape = |value: &Value| match job.hyperliquid.as_ref() {
+                    Some(HyperliquidRequest::Info(
+                        HyperliquidInfoRequest::UserAbstractionState { .. },
+                    )) => value.is_string(),
+                    Some(HyperliquidRequest::Info(
+                        HyperliquidInfoRequest::UserDexAbstractionState { .. },
+                    )) => value.is_boolean() || value.is_null(),
+                    Some(HyperliquidRequest::Info(
+                        HyperliquidInfoRequest::MaxBuilderFee { .. },
+                    )) => value.as_u64().is_some(),
+                    _ => value.is_object() || value.is_array(),
+                };
+                #[cfg(not(feature="hyperliquid"))]
+                let valid_response_shape = |value: &Value| value.is_object() || value.is_array();
                 let request = async {
+                    #[cfg(feature="hyperliquid")]
+                    if let Some(typed_request) = job.hyperliquid.as_ref() {
+                        match typed_request {
+                            HyperliquidRequest::Info(info) => {
+                                let payload = hl_info_value(info).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid info request"))?;
+                                return ccxt::runtime::call_typed(hyperliquid.implicit_api_call("public_post_info", payload)).await;
+                            }
+                            HyperliquidRequest::Explorer(explorer) => {
+                                let payload = hl_explorer_value(explorer).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid explorer request"))?;
+                                let payload = ccxt_value_to_json(payload).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid explorer request"))?;
+                                if let Some(last) = last_explorer_request {
+                                    // Explorer calls cost 40 IP-rate-limit units; the
+                                    // documented aggregate budget is 1200/minute.
+                                    let remaining = Duration::from_secs(2).saturating_sub(last.elapsed());
+                                    if !remaining.is_zero() { tokio::time::sleep(remaining).await; }
+                                }
+                                last_explorer_request = Some(tokio::time::Instant::now());
+                                let http_response = client
+                                    .post(format!("{}/explorer", hyperliquid_explorer_endpoint.trim_end_matches('/')))
+                                    .json(&payload)
+                                    .send()
+                                    .await
+                                    .map_err(|error| ccxt::ExchangeError::new(if error.is_timeout() { "RequestTimeout" } else { "NetworkError" }, "Hyperliquid explorer request failed"))?;
+                                let status = http_response.status();
+                                let bytes = http_response.bytes().await.map_err(|_| ccxt::ExchangeError::new("NetworkError", "Hyperliquid explorer response was unavailable"))?;
+                                let text = String::from_utf8_lossy(&bytes).into_owned();
+                                *response.lock().unwrap_or_else(|e| e.into_inner()) = Some((status.as_u16(), text.clone()));
+                                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                                    return Err(ccxt::ExchangeError::new("RateLimitExceeded", "Hyperliquid explorer rate limit reached"));
+                                }
+                                if !status.is_success() {
+                                    return Err(ccxt::ExchangeError::new("ExchangeError", "Hyperliquid explorer rejected the typed read"));
+                                }
+                                let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| ccxt::ExchangeError::new("InvalidResponse", "Hyperliquid explorer returned invalid JSON"))?;
+                                return Ok(Ok(ccxt::Value::from(value)));
+                            }
+                            HyperliquidRequest::Action(envelope) => {
+                                let Some(signer) = job.hyperliquid_signer.as_ref() else { return Err(ccxt::ExchangeError::new("AuthenticationError", "missing Hyperliquid signer")); };
+                                let mut key = ccxt::Value::str(signer.private_key.to_string());
+                                let derived = hyperliquid.eth_get_address_from_private_key(key.clone(), &[]);
+                                zeroize_ccxt_string(&mut key);
+                                let derived = derived.as_str().unwrap_or_default();
+                                if !valid_hl_address(&signer.wallet_address) || !derived.eq_ignore_ascii_case(&signer.wallet_address) {
+                                    return Err(ccxt::ExchangeError::new("AuthenticationError", "Hyperliquid wallet and signer do not match"));
+                                }
+                                let nonce = i64::try_from(envelope.nonce_ms).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid nonce"))?;
+                                let _ = envelope.action_wire_json().map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid action"))?;
+                                let action = hl_action_value(&envelope.action, envelope.nonce_ms).map_err(|_| ccxt::ExchangeError::new("ArgumentsRequired", "invalid Hyperliquid action"))?;
+                                let (signature, include_vault) = match &envelope.action {
+                                    HyperliquidAction::UsdSend { destination, amount_usdc, time_ms } => {
+                                        if *time_ms != envelope.nonce_ms { return Err(ccxt::ExchangeError::new("ArgumentsRequired", "action nonce mismatch")); }
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("destination", hl_str(destination.clone())), ("amount", hl_str(amount_usdc.clone())), ("time", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_usd_send_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::Withdraw { destination, amount_usdc, time_ms } => {
+                                        if *time_ms != envelope.nonce_ms { return Err(ccxt::ExchangeError::new("ArgumentsRequired", "action nonce mismatch")); }
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("destination", hl_str(destination.clone())), ("amount", hl_str(amount_usdc.clone())), ("time", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_withdraw_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::UsdClassTransfer { amount_usdc, to_perp, nonce: action_nonce } => {
+                                        if *action_nonce != envelope.nonce_ms { return Err(ccxt::ExchangeError::new("ArgumentsRequired", "action nonce mismatch")); }
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("amount", hl_str(amount_usdc.clone())), ("toPerp", ccxt::Value::Bool(*to_perp)), ("nonce", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_usd_class_send_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::ApproveBuilderFee { builder, max_fee_rate, nonce: action_nonce } => {
+                                        if *action_nonce != envelope.nonce_ms { return Err(ccxt::ExchangeError::new("ArgumentsRequired", "action nonce mismatch")); }
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("maxFeeRate", hl_str(max_fee_rate.clone())), ("builder", hl_str(builder.clone())), ("nonce", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_approve_builder_fee_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::UserAbstraction { user, abstraction, agent: false } => {
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("user", hl_str(user.clone())), ("abstraction", hl_abstraction_value(*abstraction)), ("nonce", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_user_abstraction_sig", vec![payload])).await?, true)
+                                    }
+                                    HyperliquidAction::UserDexAbstraction { user, enabled, agent: false } => {
+                                        let payload = hl_object([("hyperliquidChain", hl_str("Mainnet")), ("user", hl_str(user.clone())), ("enabled", ccxt::Value::Bool(*enabled)), ("nonce", ccxt::Value::Int(nonce))]);
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("build_user_dex_abstraction_sig", vec![payload])).await?, true)
+                                    }
+                                    _ => {
+                                        let vault = hl_vault_address(envelope.vault_address.as_deref());
+                                        let expiry = match &envelope.action { HyperliquidAction::CreateSubAccount { expires_after_ms, .. } => expires_after_ms.map(|n| ccxt::Value::Int(n as i64)).unwrap_or(ccxt::Value::Null), _ => ccxt::Value::Null };
+                                        (ccxt::runtime::call_typed(hyperliquid.call_dynamic("sign_l1_action", vec![action.clone(), ccxt::Value::Int(nonce), vault, expiry])).await?, envelope.vault_address.is_some())
+                                    }
+                                };
+                                let mut fields = vec![("action", action), ("nonce", ccxt::Value::Int(nonce)), ("signature", signature)];
+                                if include_vault { fields.push(("vaultAddress", hl_vault_address(envelope.vault_address.as_deref()))); }
+                                if let HyperliquidAction::CreateSubAccount { expires_after_ms: Some(time), .. } = &envelope.action { fields.push(("expiresAfter", ccxt::Value::Int(*time as i64))); }
+                                let request_value = hl_object(fields);
+                                return ccxt::runtime::call_typed(hyperliquid.implicit_api_call("private_post_exchange", request_value)).await;
+                            }
+                        }
+                    }
                     match job.exchange {
                         #[cfg(feature="binance")]
                         ExchangeId::Binance => {
@@ -719,14 +2213,27 @@ impl CcxtClient {
                 };
                 if let Some((status, text)) = response.lock().unwrap_or_else(|e|e.into_inner()).take() {
                     let raw = serde_json::from_str::<Value>(&text).ok();
-                    if let Err(error) = &mut result {
+                    #[cfg(feature = "hyperliquid")]
+                    let native_action_rejection = status == 200
+                        && matches!(
+                            job.hyperliquid.as_ref(),
+                            Some(HyperliquidRequest::Action(_))
+                        )
+                        && raw
+                            .as_ref()
+                            .is_some_and(is_native_hyperliquid_action_rejection);
+                    #[cfg(not(feature = "hyperliquid"))]
+                    let native_action_rejection = false;
+                    if native_action_rejection {
+                        result = Ok(raw.expect("validated native rejection body"));
+                    } else if let Err(error) = &mut result {
                         error.http_status = Some(status);
                         error.exchange_code = raw.as_ref().and_then(|v| v.get("code")).and_then(Value::as_i64);
                         if matches!(status,418|429) { error.kind = CcxtErrorKind::RateLimited; }
                         else if matches!(status,401|403) { error.kind = CcxtErrorKind::PermissionDenied; }
                         else if status >= 400 { error.kind = CcxtErrorKind::Rejected; }
                     } else if (200..300).contains(&status) {
-                        result = raw.filter(|v| v.is_object() || v.is_array()).ok_or(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None});
+                        result = raw.filter(valid_response_shape).ok_or(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None});
                     } else { result = Err(CcxtError {kind:CcxtErrorKind::InvalidResponse,http_status:Some(status),exchange_code:None}); }
                 } else if result.is_ok() { result = Err(CcxtError::new(CcxtErrorKind::InvalidResponse)); }
                 // CCXT internally copies secrets into dynamic values. Do not retain
@@ -737,6 +2244,13 @@ impl CcxtClient {
                 exchange.last_request_url = ccxt::Value::Null;
                 exchange.last_request_headers = ccxt::Value::Null;
                 exchange.last_request_body = ccxt::Value::Null;
+                #[cfg(feature="hyperliquid")]
+                {
+                    zeroize_ccxt_string(&mut hyperliquid.core.privateKey);
+                    zeroize_ccxt_string(&mut hyperliquid.core.walletAddress);
+                    hyperliquid.core.privateKey = ccxt::Value::Null;
+                    hyperliquid.core.walletAddress = ccxt::Value::Null;
+                }
                 *guard.lock().unwrap_or_else(|e|e.into_inner()) = None;
                 let _ = job.reply.send(result);
             }
@@ -766,6 +2280,86 @@ impl CcxtClient {
         self.enqueue(exchange, method, credentials, params, Some(guard))
             .await
     }
+
+    /// Issue one explicitly allowlisted Hyperliquid `/info` read. The `owner`
+    /// for account-scoped variants is part of the request, not signer state.
+    #[cfg(feature = "hyperliquid")]
+    pub async fn hyperliquid_info(
+        &self,
+        request: HyperliquidInfoRequest,
+    ) -> Result<Value, CcxtError> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(Job {
+                exchange: ExchangeId::Hyperliquid,
+                method: Method::HyperliquidTypedInfo,
+                credentials: None,
+                params: Vec::new(),
+                hyperliquid: Some(HyperliquidRequest::Info(request)),
+                hyperliquid_signer: None,
+                reply,
+                guard: None,
+            })
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?;
+        result
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?
+    }
+
+    /// Issue one typed read-only Hyperliquid `/explorer` txDetails lookup.
+    /// This is reserved for correlation of a persisted native ledger hash.
+    #[cfg(feature = "hyperliquid")]
+    pub async fn hyperliquid_explorer(
+        &self,
+        request: HyperliquidExplorerRequest,
+    ) -> Result<Value, CcxtError> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(Job {
+                exchange: ExchangeId::Hyperliquid,
+                method: Method::HyperliquidTypedExplorer,
+                credentials: None,
+                params: Vec::new(),
+                hyperliquid: Some(HyperliquidRequest::Explorer(request)),
+                hyperliquid_signer: None,
+                reply,
+                guard: None,
+            })
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?;
+        result
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?
+    }
+
+    /// Sign and submit one typed Hyperliquid action. Authorization is checked
+    /// by the existing CCXT dispatch hook after rate-limit waiting.
+    #[cfg(feature = "hyperliquid")]
+    pub async fn hyperliquid_action(
+        &self,
+        action: HyperliquidActionEnvelope,
+        signer: HyperliquidSigner,
+        guard: RequestGuard,
+    ) -> Result<Value, CcxtError> {
+        let (reply, result) = oneshot::channel();
+        self.sender
+            .send(Job {
+                exchange: ExchangeId::Hyperliquid,
+                method: Method::HyperliquidTypedAction,
+                credentials: None,
+                params: Vec::new(),
+                hyperliquid: Some(HyperliquidRequest::Action(action)),
+                hyperliquid_signer: Some(signer),
+                reply,
+                guard: Some(guard),
+            })
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?;
+        result
+            .await
+            .map_err(|_| CcxtError::new(CcxtErrorKind::Unavailable))?
+    }
     async fn enqueue(
         &self,
         exchange: ExchangeId,
@@ -775,6 +2369,12 @@ impl CcxtClient {
         guard: Option<RequestGuard>,
     ) -> Result<Value, CcxtError> {
         if exchange != method.exchange()
+            || matches!(
+                method,
+                Method::HyperliquidTypedInfo
+                    | Method::HyperliquidTypedExplorer
+                    | Method::HyperliquidTypedAction
+            )
             || (method.private() && credentials.is_none())
             || (!method.private() && credentials.is_some())
             || (method == Method::HyperliquidMetaAndAssetContexts
@@ -796,6 +2396,8 @@ impl CcxtClient {
                 method,
                 credentials,
                 params,
+                hyperliquid: None,
+                hyperliquid_signer: None,
                 reply,
                 guard,
             })
@@ -912,3 +2514,7 @@ fn normalize_credentials(
 
 #[cfg(all(test, feature = "binance", feature = "kraken"))]
 mod tests;
+
+#[cfg(all(test, feature = "hyperliquid"))]
+#[path = "ccxt/hyperliquid_tests.rs"]
+mod hyperliquid_tests;

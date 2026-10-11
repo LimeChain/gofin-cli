@@ -1,8 +1,9 @@
 //! Protected human configuration path. Financial RPC cannot invoke this module.
 use crate::{
     BrokerConfigV2, BrokerPolicy, CONFIG_PATH, ConnectionConfig, DeploymentConfig, NetworkConfig,
-    ProtectedCredentialProvider, load_protected_config, lock_protected_configuration,
-    open_protected_store, resource_has_pending_operations, save_protected_config,
+    ProtectedCredentialProvider, hyperliquid_owner_has_pending_operations, load_protected_config,
+    load_stored_protected_config, lock_protected_configuration, open_protected_store,
+    resource_has_pending_operations, save_protected_config, strip_derived_hyperliquid_links,
 };
 use fin_authorization::{MacOsAuthorizer, validate_installation};
 use fin_binance::{BinanceEndpoint, BinanceRequest, BinanceTransport, CredentialHandle};
@@ -82,8 +83,12 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
     if action == "initialize" {
         return initialize(parse(request)?, ui).await;
     }
+    if action == "configure" {
+        return configure_human_operation(parse(request)?, ui).await;
+    }
     let _lock = lock_protected_configuration(true)?;
-    let mut config = load_protected_config()?;
+    let mut config = load_stored_protected_config()?;
+    let effective_config = enrollment_config_for_action(action, config.clone())?;
     let mut terminal = HumanTerminal::open(config.approver_uid)?;
     let journal = open_protected_store()?;
     if action == "policy_set" {
@@ -102,13 +107,23 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
         .await;
     }
 
-    for connection in &config.connections {
-        if connection_resources(connection, &config)
-            .iter()
-            .map(|resource| resource_has_pending_operations(&journal, resource))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .any(|pending| pending)
+    for connection in &effective_config.connections {
+        let pending_hyperliquid_signer = match connection {
+            ConnectionConfig::Evm { address, .. } => {
+                hyperliquid_owner_has_pending_operations(&journal, address)?
+            }
+            ConnectionConfig::Hyperliquid { owner, .. } => {
+                hyperliquid_owner_has_pending_operations(&journal, owner)?
+            }
+            _ => false,
+        };
+        if pending_hyperliquid_signer
+            || connection_resources(connection, &effective_config)
+                .iter()
+                .map(|resource| resource_has_pending_operations(&journal, resource))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .any(|pending| pending)
         {
             return Err(error(
                 "CONNECTION_HAS_PENDING_OPERATION",
@@ -147,7 +162,41 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 .map(|material| store.put(material))
                 .transpose()?;
             let result=async {
-                let (connection,checks,mut warnings)=validate_connection(&args,&config,store.clone(),staged.as_ref(),material.as_ref(),ui).await?;
+                let (connection, checks, mut warnings) = validate_connection(
+                    &args,
+                    &effective_config,
+                    store.clone(),
+                    staged.as_ref(),
+                    material.as_ref(),
+                    ui,
+                )
+                .await?;
+                if let ConnectionConfig::Evm {
+                    address,
+                    credential_ref: evm_reference,
+                    signing_enabled: true,
+                    ..
+                } = &connection
+                    && let Some(ConnectionConfig::Hyperliquid {
+                        credential_ref: hl_reference,
+                        signing_enabled: hl_signing,
+                        ..
+                    }) = effective_config.connections.iter().find(|candidate| matches!(
+                        candidate,
+                        ConnectionConfig::Hyperliquid {
+                            owner,
+                            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+                            ..
+                        } if owner.eq_ignore_ascii_case(address)
+                    ))
+                    && (!hl_signing || hl_reference != evm_reference)
+                {
+                    warnings.push(if !hl_signing {
+                        "A read-only Hyperliquid owner connection already uses this wallet. Fin preserved that enrollment and did not enable signing on it.".into()
+                    } else {
+                        "A separately enrolled Hyperliquid signer already uses this wallet. Fin preserved its credential mapping instead of rebinding it to the EVM credential.".into()
+                    });
+                }
                 warnings.extend(configuration_warnings.clone());
                 if let Some(index)=existing {
                     if immutable_identity(&config.connections[index])!=immutable_identity(&connection) {
@@ -156,11 +205,17 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     config.connections[index]=connection.clone();
                 } else { config.connections.push(connection.clone()); }
                 config.validate()?;
+                // Validate the runtime-only aliases before approval and save.
+                // Otherwise a newly enrolled wallet could persist successfully
+                // but make the next protected runtime load fail on a collision.
+                effective_protected_config(config.clone())?;
                 let binding=json!({"action":action,"connection":connection,"checks":checks,"warnings":warnings,
                     "configuration_hash":config_hash(&config)?,"financial_movement":false,"future_financial_authority":false});
                 approve_and_audit(config.approver_uid,&binding,&format!("{action} connection {}",args.name),ui).await?;
                 { let _progress=ui.progress("Saving connection"); save_protected_config(&config)?; }
+                let retained_references = referenced(&config);
                 let cleanup_warning=old.as_ref().and_then(credential).filter(|previous|Some(previous.as_str())!=staged.as_ref().map(CredentialRef::as_str))
+                    .filter(|previous| !retained_references.contains(previous.as_str()))
                     .and_then(|reference|store.remove(&reference).err()).map(|_|"Connection is active; an obsolete protected credential needs cleanup at the next human enrollment.");
                 Ok(outcome(action,Some(&connection),checks,warnings,cleanup_warning))
             }.await;
@@ -169,7 +224,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             if result.is_err()
                 && let Some(reference) = &staged
             {
-                match load_protected_config() {
+                match load_stored_protected_config() {
                     Ok(observed) if referenced(&observed).contains(reference.as_str()) => {
                         return Err(error(
                             "ENROLLMENT_OUTCOME_UNCERTAIN",
@@ -208,6 +263,9 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             }
             let removed = config.connections.remove(index);
             config.validate()?;
+            // Removing an explicit owner mapping may expose the derived EVM
+            // alias. Check that transition before requesting approval.
+            effective_protected_config(config.clone())?;
             let binding = json!({"action":"remove","connection":removed,"configuration_hash":config_hash(&config)?,
                 "warning":"Keep independent recovery credentials for any remaining external funds or positions.","financial_movement":false,"future_financial_authority":false});
             approve_and_audit(
@@ -218,7 +276,11 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             )
             .await?;
             save_protected_config(&config)?;
-            let cleanup_warning=credential(&removed).and_then(|reference|store.remove(&reference).err()).map(|_|"Connection removal is active; an obsolete protected credential needs cleanup at the next human enrollment.");
+            let retained_references = referenced(&config);
+            let cleanup_warning=credential(&removed)
+                .filter(|reference| !retained_references.contains(reference.as_str()))
+                .and_then(|reference|store.remove(&reference).err())
+                .map(|_|"Connection removal is active; an obsolete protected credential needs cleanup at the next human enrollment.");
             Ok(outcome(
                 "remove",
                 Some(&removed),
@@ -235,6 +297,80 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             ))
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HumanConfigurationRequest {
+    request_id: String,
+    operation: String,
+    input: Value,
+    run_id: Option<String>,
+}
+
+struct HumanConfigurationAuthorizer {
+    approver_uid: u32,
+    ui: Ui,
+}
+
+#[async_trait::async_trait]
+impl fin_engine::ConfigurationAuthorizer for HumanConfigurationAuthorizer {
+    async fn authorize_configuration(
+        &self,
+        challenge: &fin_domain::AuthorizationChallenge,
+    ) -> Result<fin_domain::ApprovalAudit> {
+        let proof = HumanTerminal::open(self.approver_uid)?
+            .review_configuration(challenge, &fin_presentation::safe_text(&challenge.summary))?;
+        let _progress = self.ui.progress("Waiting for Touch ID");
+        MacOsAuthorizer::protected(self.approver_uid)?
+            .authorize_reviewed_configuration(challenge, proof)
+            .await
+    }
+}
+
+async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) -> Result<Value> {
+    if request.run_id.is_some() {
+        return Err(error(
+            "CONFIGURATION_ROUTE_INVALID",
+            "Configuration actions cannot be attached to a financial run or plan.",
+        ));
+    }
+    let _configuration_lock = lock_protected_configuration(false)?;
+    let config = load_protected_config()?;
+    let credentials = Arc::new(ProtectedCredentialProvider::open()?);
+    let applications = crate::build_protected_applications(&config, credentials.clone())?;
+    let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
+    let runtime = crate::compose_runtime(
+        config.clone(),
+        crate::RuntimeDependencies {
+            store: open_protected_store()?,
+            adapters: applications.adapters,
+            authorizer,
+            valuator: applications.valuator,
+            bridge: applications.bridge,
+        },
+    )?;
+    let record = runtime
+        .engine
+        .execute_configuration(
+            fin_domain::OperationRequest {
+                request_id: request.request_id,
+                operation: request.operation,
+                input: request.input,
+                run_id: None,
+            },
+            Arc::new(HumanConfigurationAuthorizer {
+                approver_uid: config.approver_uid,
+                ui: Ui::new(false, ui.is_verbose()),
+            }),
+        )
+        .await?;
+    serde_json::to_value(record).map_err(|_| {
+        error(
+            "CONFIGURATION_RESULT_INVALID",
+            "The operation result could not be encoded.",
+        )
+    })
 }
 
 fn collect_setup_policy(mut read: impl FnMut(&str) -> Result<String>) -> Result<BrokerPolicy> {
@@ -308,6 +444,18 @@ fn collect_material(
     terminal: &mut HumanTerminal,
     args: &AddConnectionArgs,
 ) -> Result<Option<SecretMaterial>> {
+    if args.provider == Provider::Hyperliquid
+        && matches!(
+            args.hyperliquid_scope,
+            Some(
+                fin_discovery::HyperliquidScopeKind::Subaccount
+                    | fin_discovery::HyperliquidScopeKind::Vault
+            )
+        )
+    {
+        // A delegated alias reuses the master signer's existing protected key.
+        return Ok(None);
+    }
     let material = match args.provider {
         Provider::CoinGecko => SecretMaterial::CoinGeckoApiKey {
             api_key: terminal
@@ -355,6 +503,14 @@ fn collect_material(
         Provider::Evm => SecretMaterial::EvmPrivateKey {
             private_key: terminal
                 .read_secret("EVM private key", SecretInput::Line)?
+                .to_string(),
+        },
+        Provider::Hyperliquid if args.credential_type == Some(CredentialType::ReadOnly) => {
+            return Ok(None);
+        }
+        Provider::Hyperliquid => SecretMaterial::EvmPrivateKey {
+            private_key: terminal
+                .read_secret("Hyperliquid owner EVM private key", SecretInput::Line)?
                 .to_string(),
         },
     };
@@ -483,11 +639,33 @@ pub(crate) fn effective_protected_config(
     effective_protected_config_with(config, &reviewed_networks, &reviewed_amms)
 }
 
+fn enrollment_config_for_action(
+    action: &str,
+    stored: BrokerConfigV2,
+) -> fin_domain::Result<BrokerConfigV2> {
+    match effective_protected_config(stored.clone()) {
+        Ok(effective) => Ok(effective),
+        Err(error) if action == "remove" && error.code == "HYPERLIQUID_AUTO_LINK_COLLISION" => {
+            // A stale/conflicting alias must not prevent the human from
+            // removing the conflicting enrolled row. The caller still checks
+            // every raw connection's pending resources and validates the
+            // resulting effective config before approval.
+            stored.validate()?;
+            let mut recovery = stored;
+            expand_reviewed_evm_coverage(&mut recovery);
+            recovery.validate()?;
+            Ok(recovery)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn effective_protected_config_with(
     mut config: BrokerConfigV2,
     reviewed_networks: &[NetworkConfig],
     reviewed_amms: &[DeploymentConfig],
 ) -> fin_domain::Result<BrokerConfigV2> {
+    strip_derived_hyperliquid_links(&mut config);
     config.validate()?;
     let reusable_wallet_enrolled = config
         .connections
@@ -495,9 +673,98 @@ pub(crate) fn effective_protected_config_with(
         .any(|connection| matches!(connection, ConnectionConfig::Evm { .. }));
     if reusable_wallet_enrolled {
         expand_reviewed_evm_coverage_with(&mut config, reviewed_networks, reviewed_amms);
+        link_reusable_evm_wallets_to_hyperliquid(&mut config)?;
     }
     config.validate()?;
     Ok(config)
+}
+
+/// Derive one owner-scope Hyperliquid account view for each reusable EVM
+/// wallet. The aliases live only in effective runtime configuration: protected
+/// enrollment reads and writes the persisted config separately, so removing or
+/// replacing a wallet cannot leave an obsolete derived signer behind.
+fn link_reusable_evm_wallets_to_hyperliquid(config: &mut BrokerConfigV2) -> Result<()> {
+    let wallets = config
+        .connections
+        .iter()
+        .filter_map(|connection| match connection {
+            ConnectionConfig::Evm {
+                name,
+                address,
+                credential_ref,
+                signing_enabled,
+                ..
+            } => Some((
+                name.clone(),
+                address.to_ascii_lowercase(),
+                credential_ref.clone(),
+                *signing_enabled,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for (wallet_name, owner, credential_ref, signing_enabled) in wallets {
+        let owner_connection = config.connections.iter_mut().find(|connection| {
+            matches!(connection,
+                ConnectionConfig::Hyperliquid {
+                    owner: existing_owner,
+                    execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+                    ..
+                } if existing_owner.eq_ignore_ascii_case(&owner))
+        });
+        if owner_connection.is_some() {
+            // An explicit owner mapping is the canonical account view. Keep
+            // its human-enrolled capability exactly as configured: an EVM
+            // signer must never silently elevate a read-only Hyperliquid row.
+            continue;
+        }
+
+        let alias_name = hyperliquid_alias_name(&wallet_name, &owner);
+        let alias_resource = ResourceId(format!("hyperliquid:mainnet:{owner}:account:primary"));
+        if config.connections.iter().any(|connection| {
+            name(connection) == alias_name || resource(connection) == &alias_resource
+        }) {
+            return Err(error(
+                "HYPERLIQUID_AUTO_LINK_COLLISION",
+                &format!(
+                    "The automatic Hyperliquid link for EVM wallet {wallet_name} conflicts with an enrolled connection."
+                ),
+            ));
+        }
+        config.connections.push(ConnectionConfig::Hyperliquid {
+            name: alias_name,
+            resource: alias_resource,
+            owner,
+            credential_ref,
+            signing_enabled,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+            auto_derived: true,
+        });
+    }
+    Ok(())
+}
+
+fn hyperliquid_alias_name(wallet_name: &str, owner: &str) -> String {
+    let suffix = "-hyperliquid";
+    let full_name = format!("{wallet_name}{suffix}");
+    const MAX_ALIAS_LEN: usize = 64;
+    if full_name.len() <= MAX_ALIAS_LEN {
+        return full_name;
+    }
+
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{wallet_name}:{owner}").as_bytes());
+    let short_hash = hex::encode(&digest[..4]);
+    let keep = MAX_ALIAS_LEN - suffix.len() - short_hash.len() - 1;
+    let mut prefix = String::new();
+    for character in wallet_name.chars() {
+        if prefix.len() + character.len_utf8() > keep {
+            break;
+        }
+        prefix.push(character);
+    }
+    format!("{prefix}-{short_hash}{suffix}")
 }
 
 async fn validate_connection(
@@ -640,6 +907,147 @@ async fn validate_connection(
                     json!({"name":"native balance read","status":"passed","atoms":balance.to_string()}),
                 ],
                 vec![],
+            ))
+        }
+        Provider::Hyperliquid => {
+            let owner = args
+                .address
+                .as_deref()
+                .filter(|value| fin_hyperliquid::valid_address(value))
+                .ok_or_else(|| {
+                    error(
+                        "HYPERLIQUID_OWNER_REQUIRED",
+                        "A valid public Hyperliquid owner address is required.",
+                    )
+                })?
+                .to_ascii_lowercase();
+            let execution_scope = match (args.hyperliquid_scope, args.execution_address.as_deref())
+            {
+                (Some(fin_discovery::HyperliquidScopeKind::Subaccount), Some(address)) => {
+                    fin_hyperliquid::HyperliquidExecutionScope::Subaccount {
+                        address: address.to_ascii_lowercase(),
+                    }
+                }
+                (Some(fin_discovery::HyperliquidScopeKind::Vault), Some(address)) => {
+                    fin_hyperliquid::HyperliquidExecutionScope::Vault {
+                        address: address.to_ascii_lowercase(),
+                    }
+                }
+                _ => fin_hyperliquid::HyperliquidExecutionScope::Owner,
+            };
+            let delegated = !matches!(
+                execution_scope,
+                fin_hyperliquid::HyperliquidExecutionScope::Owner
+            );
+            let (credential_ref, signing_enabled, signer_derived, reused_master) = if delegated {
+                let master = config.connections.iter().find_map(|connection| match connection {
+                    ConnectionConfig::Hyperliquid { owner: configured_owner, credential_ref: Some(reference), signing_enabled: true, .. }
+                        if configured_owner.eq_ignore_ascii_case(&owner) => Some(reference.clone()),
+                    _ => None,
+                }).ok_or_else(|| error("HYPERLIQUID_MASTER_SIGNER_REQUIRED", "A delegated scope can only reuse an already enrolled signing master account."))?;
+                let target = execution_scope.address().ok_or_else(|| {
+                    error(
+                        "HYPERLIQUID_SCOPE_INVALID",
+                        "The delegated address is missing.",
+                    )
+                })?;
+                let ccxt = fin_exchange::ccxt::CcxtClient::new().map_err(|_| {
+                    error(
+                        "VENUE_UNAVAILABLE",
+                        "The trusted Hyperliquid runtime could not be initialized.",
+                    )
+                })?;
+                let verification = match &execution_scope {
+                    fin_hyperliquid::HyperliquidExecutionScope::Subaccount { .. } => {
+                        let rows = ccxt.hyperliquid_info(fin_exchange::ccxt::HyperliquidInfoRequest::SubAccounts { owner: owner.clone() }).await
+                            .map_err(|_| error("HYPERLIQUID_SCOPE_UNVERIFIED", "Hyperliquid did not return the requested master's subaccount relationships."))?;
+                        fin_hyperliquid::verify_execution_scope(
+                            &owner,
+                            &execution_scope,
+                            Some(&rows),
+                            None,
+                        )
+                    }
+                    fin_hyperliquid::HyperliquidExecutionScope::Vault { .. } => {
+                        let details = ccxt
+                            .hyperliquid_info(
+                                fin_exchange::ccxt::HyperliquidInfoRequest::VaultDetails {
+                                    vault_address: target.to_owned(),
+                                    user: Some(owner.clone()),
+                                },
+                            )
+                            .await
+                            .map_err(|_| {
+                                error(
+                                    "HYPERLIQUID_SCOPE_UNVERIFIED",
+                                    "Hyperliquid did not verify this vault leader.",
+                                )
+                            })?;
+                        fin_hyperliquid::verify_execution_scope(
+                            &owner,
+                            &execution_scope,
+                            None,
+                            Some(&details),
+                        )
+                    }
+                    fin_hyperliquid::HyperliquidExecutionScope::Owner => unreachable!(),
+                };
+                verification.map_err(|_| error("HYPERLIQUID_SCOPE_UNVERIFIED", "The selected subaccount or vault is not verified as belonging to the enrolled master signer."))?;
+                (Some(master), true, false, true)
+            } else {
+                let derived = match material {
+                    Some(SecretMaterial::EvmPrivateKey { private_key }) => Some(
+                        format!(
+                            "{:#x}",
+                            fin_evm::LocalEnvelopeSigner::from_private_key(private_key)?.address()
+                        )
+                        .to_ascii_lowercase(),
+                    ),
+                    None => None,
+                    _ => {
+                        return Err(error(
+                            "CREDENTIAL_TYPE_MISMATCH",
+                            "The selected protected credential is not an EVM signing key.",
+                        ));
+                    }
+                };
+                if derived.as_deref().is_some_and(|address| address != owner) {
+                    return Err(error(
+                        "SIGNER_ADDRESS_MISMATCH",
+                        "The protected signer does not match the requested Hyperliquid owner.",
+                    ));
+                }
+                (
+                    staged.map(|reference| reference.as_str().into()),
+                    derived.is_some(),
+                    derived.is_some(),
+                    false,
+                )
+            };
+            let execution_address = execution_scope.address().unwrap_or(&owner);
+            let connection = ConnectionConfig::Hyperliquid {
+                name: args.name.clone(),
+                resource: ResourceId(format!(
+                    "hyperliquid:mainnet:{execution_address}:account:primary"
+                )),
+                owner: owner.clone(),
+                credential_ref,
+                signing_enabled,
+                execution_scope: execution_scope.clone(),
+                auto_derived: false,
+            };
+            let checks = vec![
+                json!({"name":"master signer identity","status":"passed","signer_derived":signer_derived,"reused_protected_master":reused_master}),
+                json!({"name":"delegated account relationship","status":if delegated{"passed"}else{"not_applicable"},"scope":execution_scope.kind(),"verified":delegated}),
+            ];
+            Ok((
+                connection,
+                checks,
+                if delegated {
+                    vec!["The master signer can trade for the verified delegated account; account authority and transfers remain owner-only.".into()]
+                } else {
+                    vec!["Hyperliquid owner enrollment is offline and does not verify account access or venue permissions.".into()]
+                },
             ))
         }
         Provider::Binance => {
@@ -946,7 +1354,8 @@ fn name(connection: &ConnectionConfig) -> &str {
         ConnectionConfig::Binance { name, .. }
         | ConnectionConfig::Ethereum { name, .. }
         | ConnectionConfig::Evm { name, .. }
-        | ConnectionConfig::CoinGecko { name, .. } => name,
+        | ConnectionConfig::CoinGecko { name, .. }
+        | ConnectionConfig::Hyperliquid { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
@@ -954,7 +1363,8 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         ConnectionConfig::Binance { resource, .. }
         | ConnectionConfig::Ethereum { resource, .. }
         | ConnectionConfig::Evm { resource, .. }
-        | ConnectionConfig::CoinGecko { resource, .. } => resource,
+        | ConnectionConfig::CoinGecko { resource, .. }
+        | ConnectionConfig::Hyperliquid { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
@@ -964,7 +1374,8 @@ fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
             CredentialRef::new(credential_ref).ok()
         }
         ConnectionConfig::Ethereum { credential_ref, .. }
-        | ConnectionConfig::Evm { credential_ref, .. } => credential_ref
+        | ConnectionConfig::Evm { credential_ref, .. }
+        | ConnectionConfig::Hyperliquid { credential_ref, .. } => credential_ref
             .as_ref()
             .and_then(|reference| CredentialRef::new(reference).ok()),
     }
@@ -1028,6 +1439,16 @@ fn public_connection(connection: &ConnectionConfig) -> Value {
         } => {
             json!({"name":name,"provider":"ethereum","resource":resource,"network":network,"address":address,"signing_enabled":signing_enabled})
         }
+        ConnectionConfig::Hyperliquid {
+            name,
+            resource,
+            owner,
+            execution_scope,
+            signing_enabled,
+            ..
+        } => {
+            json!({"name":name,"provider":"hyperliquid","resource":resource,"owner":owner,"execution_address":execution_scope.address().unwrap_or(owner),"execution_scope":execution_scope.kind(),"signing_enabled":signing_enabled})
+        }
     }
 }
 fn immutable_identity(connection: &ConnectionConfig) -> Value {
@@ -1035,6 +1456,14 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
         ConnectionConfig::Evm { name, address, .. }
         | ConnectionConfig::Ethereum { name, address, .. } => {
             json!({"provider":"evm","name":name,"address":address.to_ascii_lowercase()})
+        }
+        ConnectionConfig::Hyperliquid {
+            name,
+            owner,
+            execution_scope,
+            ..
+        } => {
+            json!({"provider":"hyperliquid","name":name,"owner":owner.to_ascii_lowercase(),"execution_scope":execution_scope})
         }
         ConnectionConfig::Binance { .. } => public_connection(connection),
         ConnectionConfig::CoinGecko { name, resource, .. } => {
@@ -1055,6 +1484,10 @@ fn connection_resources(connection: &ConnectionConfig, config: &BrokerConfigV2) 
                     address.to_ascii_lowercase()
                 ))
             }));
+            resources.push(ResourceId(format!(
+                "hyperliquid:mainnet:{}:account:primary",
+                address.to_ascii_lowercase()
+            )));
             resources
         }
         _ => vec![resource(connection).clone()],
@@ -1426,7 +1859,37 @@ mod tests {
         let first =
             effective_protected_config_with(config, &reviewed_networks, &reviewed_amms).unwrap();
         first.validate().unwrap();
-        assert_eq!(first.connections, original_connections);
+        assert_eq!(
+            &first.connections[..original_connections.len()],
+            &original_connections
+        );
+        let derived = first.connections[original_connections.len()..]
+            .iter()
+            .filter_map(|connection| match connection {
+                ConnectionConfig::Hyperliquid {
+                    name,
+                    owner,
+                    credential_ref,
+                    signing_enabled,
+                    auto_derived,
+                    ..
+                } => Some((name, owner, credential_ref, signing_enabled, auto_derived)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(derived.len(), 2);
+        assert_eq!(derived[0].0, "wallet-hyperliquid");
+        assert_eq!(derived[0].1, "0x1111111111111111111111111111111111111111");
+        assert_eq!(derived[0].2, &None);
+        assert!(!derived[0].3);
+        assert!(*derived[0].4);
+        assert_eq!(derived[1].0, "synthetic-signer-hyperliquid");
+        assert_eq!(
+            derived[1].2.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(*derived[1].3);
+        assert!(*derived[1].4);
         assert_eq!(first.policy, original_policy);
         assert_eq!(first.extensions, original_extensions);
         assert_eq!(first.approver_uid, 501);
@@ -1484,6 +1947,12 @@ mod tests {
             serde_json::to_value(Some(&custom_ramses)).unwrap()
         );
 
+        let mut persisted = first.clone();
+        strip_derived_hyperliquid_links(&mut persisted);
+        assert_eq!(persisted.connections, original_connections);
+        let persisted_json = serde_json::to_value(&persisted).unwrap();
+        assert!(!persisted_json.to_string().contains("auto_derived"));
+
         let serialized = serde_json::to_value(&first).unwrap();
         let second =
             effective_protected_config_with(first, &reviewed_networks, &reviewed_amms).unwrap();
@@ -1522,12 +1991,167 @@ mod tests {
         mixed.connections.push(reusable_read_only_wallet());
         let expanded = effective_protected_config(mixed).unwrap();
         assert_eq!(expanded.connections[0], legacy);
+        assert!(expanded.connections.iter().any(|connection| matches!(
+            connection,
+            ConnectionConfig::Hyperliquid { name, signing_enabled: false, auto_derived: true, .. }
+                if name == "wallet-hyperliquid"
+        )));
         assert!(
             expanded
                 .networks
                 .iter()
                 .any(|network| network.chain_id == 4663)
         );
+    }
+
+    #[test]
+    fn evm_hyperliquid_link_is_rebuilt_from_current_wallet_and_never_elevates_explicit_read_only() {
+        let networks = NetworkConfig::reviewed_evm_networks();
+        let deployments = DeploymentConfig::reviewed_amm_networks();
+        let wallet = ConnectionConfig::Evm {
+            name: "george-dev".into(),
+            resource: ResourceId("evm:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            signing_enabled: true,
+        };
+        let owner = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let explicit = ConnectionConfig::Hyperliquid {
+            name: "manual-read-only".into(),
+            resource: ResourceId(format!("hyperliquid:mainnet:{owner}:account:primary")),
+            owner: owner.into(),
+            credential_ref: None,
+            signing_enabled: false,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+            auto_derived: false,
+        };
+        let mut config = empty_config(networks.clone(), deployments.clone());
+        config
+            .connections
+            .extend([wallet.clone(), explicit.clone()]);
+        let linked = effective_protected_config_with(config, &networks, &deployments).unwrap();
+        assert_eq!(linked.connections.len(), 2);
+        assert_eq!(linked.connections[1], explicit);
+        assert!(matches!(
+            &linked.connections[1],
+            ConnectionConfig::Hyperliquid {
+                signing_enabled: false,
+                credential_ref: None,
+                auto_derived: false,
+                ..
+            }
+        ));
+
+        let shared_reference = "550e8400-e29b-41d4-a716-446655440000";
+        let mut shared = empty_config(networks.clone(), deployments.clone());
+        let signed_wallet = ConnectionConfig::Evm {
+            name: "wallet".into(),
+            resource: ResourceId(format!("evm:{owner}")),
+            credential_ref: Some(shared_reference.into()),
+            address: owner.into(),
+            signing_enabled: true,
+        };
+        let signed_hl = ConnectionConfig::Hyperliquid {
+            name: "manual-hl".into(),
+            resource: ResourceId(format!("hyperliquid:mainnet:{owner}:account:primary")),
+            owner: owner.into(),
+            credential_ref: Some(shared_reference.into()),
+            signing_enabled: true,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+            auto_derived: false,
+        };
+        shared
+            .connections
+            .extend([signed_wallet.clone(), signed_hl]);
+        shared
+            .connections
+            .retain(|connection| name(connection) != "wallet");
+        assert!(referenced(&shared).contains(shared_reference));
+        assert!(matches!(
+            effective_protected_config_with(shared, &networks, &deployments)
+                .unwrap()
+                .connections
+                .as_slice(),
+            [_]
+        ));
+
+        let replaced_wallet = match wallet {
+            ConnectionConfig::Evm {
+                name,
+                resource,
+                address,
+                ..
+            } => ConnectionConfig::Evm {
+                name,
+                resource,
+                address,
+                credential_ref: Some("550e8400-e29b-41d4-a716-446655440001".into()),
+                signing_enabled: true,
+            },
+            _ => unreachable!(),
+        };
+        let mut no_explicit = empty_config(networks.clone(), deployments.clone());
+        no_explicit.connections.push(replaced_wallet);
+        let linked = effective_protected_config_with(no_explicit, &networks, &deployments).unwrap();
+        let generated = linked
+            .connections
+            .iter()
+            .find_map(|connection| match connection {
+                ConnectionConfig::Hyperliquid {
+                    auto_derived: true,
+                    credential_ref,
+                    ..
+                } => credential_ref.as_deref(),
+                _ => None,
+            });
+        assert_eq!(generated, Some("550e8400-e29b-41d4-a716-446655440001"));
+
+        let long_alias = hyperliquid_alias_name(&"wallet".repeat(20), owner);
+        assert_eq!(
+            long_alias,
+            hyperliquid_alias_name(&"wallet".repeat(20), owner)
+        );
+        assert!(long_alias.len() <= 64);
+        assert!(long_alias.ends_with("-hyperliquid"));
+        assert!(hyperliquid_alias_name(&"é".repeat(80), owner).len() <= 64);
+
+        let mut collision = empty_config(networks.clone(), deployments.clone());
+        collision.connections.push(ConnectionConfig::Evm {
+            name: "george-dev".into(),
+            resource: ResourceId("evm:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            signing_enabled: true,
+        });
+        collision.connections.push(ConnectionConfig::Hyperliquid {
+            name: "george-dev-hyperliquid".into(),
+            resource: ResourceId(
+                "hyperliquid:mainnet:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:account:primary"
+                    .into(),
+            ),
+            owner: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            credential_ref: None,
+            signing_enabled: false,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+            auto_derived: false,
+        });
+        assert_eq!(
+            effective_protected_config_with(collision.clone(), &networks, &deployments)
+                .unwrap_err()
+                .code,
+            "HYPERLIQUID_AUTO_LINK_COLLISION"
+        );
+        assert_eq!(
+            enrollment_config_for_action("add", collision.clone())
+                .unwrap_err()
+                .code,
+            "HYPERLIQUID_AUTO_LINK_COLLISION"
+        );
+        let mut removable = enrollment_config_for_action("remove", collision).unwrap();
+        removable
+            .connections
+            .retain(|connection| name(connection) != "george-dev-hyperliquid");
+        assert!(effective_protected_config_with(removable, &networks, &deployments).is_ok());
     }
 
     #[test]

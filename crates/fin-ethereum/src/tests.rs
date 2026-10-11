@@ -6247,8 +6247,7 @@ mod wallet_only_tests {
             let rpc = Arc::new(Fixture::new());
             let mut a = wallet_adapter(chain, rpc.clone())
                 .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
-            // Direct callers may retain an explicit stricter policy. The
-            // reviewed broker wallet defaults no longer enable this path.
+            // Ethereum mainnet retains explicitly configured finality.
             a.config.confirmations = 2;
             a.config.require_finalized = true;
             let finality = Arc::new(FinalityRpc {
@@ -6282,11 +6281,14 @@ mod wallet_only_tests {
     }
 
     #[tokio::test]
-    async fn reviewed_l2_wallet_default_settles_sequenced_receipt_without_finalized_rpc() {
+    async fn reviewed_l2_wallet_settles_sequenced_receipt_despite_legacy_finality_configuration() {
         for chain in [42161, 4663] {
             let rpc = Arc::new(Fixture::new());
             let mut a = wallet_adapter(chain, rpc.clone())
                 .with_wallet_valuation(Arc::new(Prices(AtomicU64::new(3_000_000_000))));
+            // Persisted legacy confirmation/finality settings must not delay rollup settlement.
+            a.config.confirmations = 11;
+            a.config.require_finalized = true;
             let finality = Arc::new(FinalityRpc {
                 inner: rpc.clone(),
                 mode: AtomicU64::new(1), // finalized tag unavailable
@@ -6355,7 +6357,9 @@ mod wallet_only_tests {
                 assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
                 finality.mode.store(1, Ordering::SeqCst);
                 a.config.confirmations = 2;
-                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);
+                // Reviewed rollups use the network's one-block sequencer
+                // inclusion minimum even when legacy config asks for more.
+                assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
                 a.config.confirmations = 1;
                 rpc.receipt.lock().unwrap()["blockHash"] = json!(blockhash(99));
                 assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Pending);

@@ -153,9 +153,10 @@ separate stable transfer identity and per-step operation identity. Wait for
 canonical source proof, then poll `bridge.status` until the exact destination
 credit reaches configured finality. Quotes and status show `settlement_policy`
 for source and destination (`chain_id`, `min_confirmations`, and
-`require_finalized`); both source and destination reflect network configuration.
-Arbitrum and Robinhood use one successful receipt in a canonical sequencer-produced
-block, including when the RPC finalized head is behind or unavailable. Provider arrival estimates do
+`require_finalized`); Ethereum mainnet retains network configuration, while
+Arbitrum, Robinhood and the observer-only Base path use one successful receipt
+in a canonical sequencer-produced block, overriding legacy finality settings.
+This also applies when the RPC finalized head is behind or unavailable. Provider arrival estimates do
 not substitute for those rules. Source confirmation is not destination
 completion; API status and candidate hashes are not proof.
 

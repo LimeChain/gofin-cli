@@ -48,6 +48,8 @@ fn guided_add_with(
         email: None,
         network: None,
         address: None,
+        hyperliquid_scope: None,
+        execution_address: None,
         credential_type: None,
         api_plan: None,
     };
@@ -107,6 +109,16 @@ fn guided_add_with(
             if !address.is_empty() {
                 args.address = Some(address);
             }
+        }
+        Provider::Hyperliquid => {
+            args.credential_type = Some(choice(
+                input,
+                output,
+                "Credential type",
+                &[CredentialType::PrivateKey, CredentialType::ReadOnly],
+                &CredentialType::PrivateKey,
+            )?);
+            args.address = Some(prompt(input, output, "Hyperliquid owner address", None)?);
         }
     }
     // The same validation serves flags, schemas, and this guided path.
@@ -258,7 +270,7 @@ mod tests {
         let (result, output) = run("evm\nwallet\n\n\n");
         let args = result.unwrap();
         assert!(args.network.is_none());
-        assert!(output.contains("Provider (binance/evm/coingecko)"));
+        assert!(output.contains("Provider (binance/evm/coingecko/hyperliquid)"));
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));
         assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));

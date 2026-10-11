@@ -868,6 +868,7 @@ impl Engine {
                 Some(authorization.clone()),
                 None,
                 None,
+                super::ExecutionRoute::Financial,
             )
             .await;
         let result_record = match result {
@@ -882,7 +883,7 @@ impl Engine {
                     record.error = Some(error);
                     record.updated_at = now();
                     if record.status.terminal() {
-                        self.commit_terminal(record.clone(), json!(null), json!([]), None)?;
+                        self.commit_terminal(record.clone(), json!(null), json!([]), None, None)?;
                     } else {
                         self.update_record(&record)?;
                     }

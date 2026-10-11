@@ -3211,14 +3211,13 @@ fn bridge_settlement_status_summary(transfer: &BridgeTransferRecord) -> Option<V
 }
 
 fn bridge_confirmation_rules(mut rules: BTreeMap<u64, (u64, bool)>) -> BTreeMap<u64, (u64, bool)> {
-    for (chain_id, rule) in [
-        (8453, (1, false)),
-        (537713, (2, true)),
-        (42161, (1, false)),
-        (4663, (1, false)),
-    ] {
-        rules.entry(chain_id).or_insert(rule);
+    // The human-selected rollup completion policy also applies to historical
+    // bridge records and observer-only Base transactions. Mainnet and the
+    // separately reviewed settlement hub retain their configured policies.
+    for chain_id in [42161, 4663, 8453] {
+        rules.insert(chain_id, (1, false));
     }
+    rules.entry(537713).or_insert((2, true));
     rules
 }
 
@@ -6211,7 +6210,13 @@ async fn reconcile_wallet_step(
         .runtime
         .clone();
     let config = &adapter.wallet_adapters[&transaction.chain_id].config;
-    let required_confirmations = config.confirmations.max(1);
+    let sequencer_inclusion =
+        fin_ethereum::EthereumConfig::external_credit_uses_sequencer(transaction.chain_id);
+    let required_confirmations = if sequencer_inclusion {
+        1
+    } else {
+        config.confirmations.max(1)
+    };
     let exact_receipt = match runtime
         .receipt(submission, &transaction, required_confirmations)
         .await?
@@ -6225,7 +6230,7 @@ async fn reconcile_wallet_step(
             });
         }
     };
-    let receipt = if config.require_finalized {
+    let receipt = if config.require_finalized && !sequencer_inclusion {
         let Some(observed) = runtime
             .observe_receipt(&submission.reference, required_confirmations, true)
             .await?
@@ -7106,9 +7111,13 @@ mod tests {
     }
 
     #[test]
-    fn bridge_observer_defaults_preserve_configured_wallet_finality() {
-        let configured =
-            bridge_confirmation_rules(BTreeMap::from([(1, (6, true)), (42161, (1, false))]));
+    fn bridge_observers_use_sequencer_policy_and_preserve_mainnet_and_hub_finality() {
+        let configured = bridge_confirmation_rules(BTreeMap::from([
+            (1, (6, true)),
+            (42161, (11, true)),
+            (4663, (7, true)),
+            (8453, (20, true)),
+        ]));
         assert_eq!(configured[&1], (6, true));
         assert_eq!(configured[&42161], (1, false));
         assert_eq!(configured[&4663], (1, false));
@@ -7125,7 +7134,7 @@ mod tests {
         assert_eq!(configured_policy["source"]["min_confirmations"], 6);
         assert_eq!(configured_policy["source"]["require_finalized"], false);
         assert_eq!(configured_policy["destination"]["chain_id"], 42161);
-        assert_eq!(configured_policy["destination"]["min_confirmations"], 4);
+        assert_eq!(configured_policy["destination"]["min_confirmations"], 1);
         assert_eq!(configured_policy["destination"]["require_finalized"], false);
         assert!(
             configured_policy["arrival_estimate_scope"]
@@ -7140,8 +7149,8 @@ mod tests {
 
         let stricter = bridge_confirmation_rules(BTreeMap::from([(42161, (12, true))]));
         let stricter_policy = settlement_policy_from_rules(&stricter, 1, 42161);
-        assert_eq!(stricter_policy["destination"]["min_confirmations"], 12);
-        assert_eq!(stricter_policy["destination"]["require_finalized"], true);
+        assert_eq!(stricter_policy["destination"]["min_confirmations"], 1);
+        assert_eq!(stricter_policy["destination"]["require_finalized"], false);
     }
 
     #[test]

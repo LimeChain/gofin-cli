@@ -111,6 +111,51 @@ network and AMM deployment coverage on startup and configuration reload. This
 also applies to read-only wallets; it does not collect or replace credentials,
 write the stored config, or grant financial authority.
 
+Reusable EVM wallets automatically expose a Hyperliquid owner account with the
+same address and protected signer. Existing wallets gain the link on broker
+startup/reload after an update, without another key prompt. Read-only wallets
+gain only read access. Linking itself grants no financial authority or venue
+permissions; each write still requires Fin approval. Use the existing wallet
+name as the Hyperliquid `account`; no additional owner connection appears in
+`fin connections list`. Internal links follow wallet rotation/removal and are
+never persisted as new
+credentials. Existing same-owner Hyperliquid aliases and their read-only/signing
+status take precedence without duplicates or elevation. A name collision fails
+closed with a configuration repair action. Legacy chain-scoped Ethereum
+connections retain their scope until explicitly migrated to reusable EVM.
+
+For independently managed owner accounts, choose `--provider hyperliquid`,
+supply the public owner address with `--address`, and select `private_key` or
+`read_only`:
+
+```sh
+fin connections add --provider hyperliquid --name hl-main --credential-type private_key --address 0x1111111111111111111111111111111111111111
+fin connections add --provider hyperliquid --name hl-watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
+```
+
+Attach a subaccount or vault only through a human-terminal enrollment that
+reuses an already enrolled signing master. Fin verifies the exact relationship
+with Hyperliquid's owner-scoped `subAccounts` or `vaultDetails` read and checks
+it again immediately before each write. No delegated private key is collected:
+
+```sh
+fin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222
+fin connections add --provider hyperliquid --name hl-vault --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope vault --execution-address 0x3333333333333333333333333333333333333333
+```
+
+The public owner address remains the signer and nonce identity. Trading reads,
+resources and signed `vaultAddress` use the reviewed execution address. These
+delegated connections support trading, isolated margin and TWAP; transfers,
+withdrawals, deposits, vault administration, abstraction and other account
+authority operations require the owner connection.
+
+For owner connections, the protected Terminal collects a signing key privately
+and verifies that it derives the stated owner. Owner enrollment makes no venue
+request and therefore does not establish account access or venue permissions.
+Read-only connections still name the owner explicitly because user-scoped
+information is never inferred from signer state. See the [Hyperliquid
+capability guide](hyperliquid-capabilities.md).
+
 The same enrolled wallet can quote and execute the supported Relay bridge
 transfers between Ethereum, Base, Arbitrum One and Robinhood Chain; no bridge-specific
 credential is collected. Quote discovery is a read. A selected finite bridge

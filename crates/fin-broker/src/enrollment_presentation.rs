@@ -125,6 +125,9 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             } | ConnectionConfig::Evm {
                 signing_enabled: false,
                 ..
+            } | ConnectionConfig::Hyperliquid {
+                signing_enabled: false,
+                ..
             }
         ) {
             "read-only connection"
@@ -150,6 +153,49 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 ));
                 lines.push("This key grants no exchange or wallet signing access.".into());
                 lines.push("Calls consume API plan quota and may incur billing.".into());
+            }
+            ConnectionConfig::Hyperliquid {
+                owner,
+                resource,
+                execution_scope,
+                signing_enabled,
+                ..
+            } => {
+                let execution_address = execution_scope.address().unwrap_or(owner);
+                if !fin_hyperliquid::valid_address(owner)
+                    || owner.bytes().any(|byte| byte.is_ascii_uppercase())
+                    || !fin_hyperliquid::valid_address(execution_address)
+                    || execution_address
+                        .bytes()
+                        .any(|byte| byte.is_ascii_uppercase())
+                    || resource.0
+                        != format!("hyperliquid:mainnet:{}:account:primary", execution_address)
+                {
+                    return Err(error(
+                        "INVALID_CHALLENGE",
+                        "The Hyperliquid owner identity is invalid.",
+                    ));
+                }
+                lines.push(format!(
+                    "Hyperliquid mainnet | master {} | {} {}",
+                    safe(owner),
+                    execution_scope.kind(),
+                    safe(execution_address)
+                ));
+                lines.push(if *signing_enabled {
+                    "Signing: enabled using the explicitly enrolled protected master key.".into()
+                } else {
+                    "Signing: disabled; this connection is read-only.".into()
+                });
+                if execution_scope.address().is_some() {
+                    lines.push("The target relationship was read from Hyperliquid during enrollment and is rechecked before each write.".into());
+                    lines.push("This delegated scope can trade only; account authority and transfers remain master-owner actions.".into());
+                } else {
+                    lines.push("Owner enrollment is offline; it does not verify venue account access or permissions.".into());
+                    lines.push(
+                        "An existing EVM connection does not implicitly enroll this owner.".into(),
+                    );
+                }
             }
             ConnectionConfig::Binance {
                 role,

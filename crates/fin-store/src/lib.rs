@@ -19,9 +19,10 @@ mod base_recovery_tests;
 mod boundary_migration_tests;
 #[cfg(test)]
 mod bridge_state_tests;
+pub mod execution_state;
 pub mod legacy;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -51,6 +52,10 @@ pub enum StoreError {
     OperationNotFound,
     #[error("operation is already settled")]
     AlreadySettled,
+    #[error("progress proof conflicts with the durable sequence or snapshot identity")]
+    ProgressConflict,
+    #[error("signer nonce sequence is exhausted")]
+    NonceExhausted,
     #[error("database schema version {found} is newer than supported version {supported}")]
     UnsupportedSchema { found: i64, supported: i64 },
     #[error("database is nonempty but is not a recognized Fin Rust journal; it was left unchanged")]
@@ -216,6 +221,25 @@ pub struct Settlement {
     pub effects: Value,
     pub run_id: Option<String>,
     pub run_record: Option<Value>,
+}
+
+/// An intermediate verified cumulative snapshot. The operation stays
+/// unresolved and its reservations remain live until a terminal settlement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProgressSettlement {
+    pub operation_id: String,
+    pub record: Value,
+    pub proof: Value,
+    pub effects: Value,
+    pub reservations: Vec<ReservationRow>,
+    pub run_id: Option<String>,
+    pub run_record: Option<Value>,
+    pub boundary_id: Option<String>,
+    pub expected_boundary: Option<Value>,
+    pub boundary_record: Option<Value>,
+    pub plan_id: Option<String>,
+    pub expected_plan: Option<Value>,
+    pub plan_record: Option<Value>,
 }
 
 pub struct Store {
@@ -701,6 +725,53 @@ impl Store {
                     ),
                 ]);
             }
+            if version >= 10 {
+                expected.extend([
+                    (
+                        "settlement_progress",
+                        [
+                            "operation_id",
+                            "sequence",
+                            "snapshot_id",
+                            "proof_digest",
+                            "proof_json",
+                            "effects_json",
+                            "created_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    ("signer_nonces", ["signer_scope", "last_nonce"].as_slice()),
+                ]);
+            } else if names
+                .iter()
+                .any(|name| name == "settlement_progress" || name == "signer_nonces")
+            {
+                // A known older schema can be temporarily downgraded for a
+                // migration fixture while retaining newer Fin-owned tables.
+                // Accept only the complete recognized extension pair and
+                // validate its exact columns; preserve its rows on upgrade.
+                if !names.iter().any(|name| name == "settlement_progress")
+                    || !names.iter().any(|name| name == "signer_nonces")
+                {
+                    return Err(StoreError::ForeignDatabase);
+                }
+                expected.extend([
+                    (
+                        "settlement_progress",
+                        [
+                            "operation_id",
+                            "sequence",
+                            "snapshot_id",
+                            "proof_digest",
+                            "proof_json",
+                            "effects_json",
+                            "created_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    ("signer_nonces", ["signer_scope", "last_nonce"].as_slice()),
+                ]);
+            }
             if names.len() != expected.len()
                 || expected.iter().any(|(table, columns)| {
                     if !names.iter().any(|name| name == table) {
@@ -1030,6 +1101,31 @@ impl Store {
             // from opening and ignoring those authorization semantics.
             conn.pragma_update(None, "user_version", 9)?;
         }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 9 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS settlement_progress (
+                    operation_id TEXT NOT NULL REFERENCES operations(id),
+                    sequence INTEGER NOT NULL,
+                    snapshot_id TEXT NOT NULL,
+                    proof_digest TEXT NOT NULL,
+                    proof_json TEXT NOT NULL,
+                    effects_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(operation_id, sequence),
+                    UNIQUE(operation_id, snapshot_id),
+                    UNIQUE(operation_id, proof_digest)
+                 );
+                 CREATE TABLE IF NOT EXISTS signer_nonces (
+                    signer_scope TEXT PRIMARY KEY NOT NULL,
+                    last_nonce INTEGER NOT NULL CHECK(last_nonce >= 0)
+                 );
+                 PRAGMA user_version = 10;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -1279,6 +1375,81 @@ impl Store {
         expected_records: &[Value],
         timestamp: &str,
     ) -> Result<()> {
+        self.persist_operation_reservation_with_parent(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            None,
+        )
+    }
+
+    /// Atomically reserve an operation while allowing a collision with the
+    /// one exact parent submission carried in trusted replacement metadata.
+    /// The parent keeps its complete reservation; this only serializes the
+    /// relationship and prevents unrelated reservation conflicts.
+    pub fn persist_operation_reservation_with_parent(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        replacement_parent: Option<&str>,
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            replacement_parent,
+            None,
+        )
+    }
+
+    /// Atomically persist a zero-principal recovery child with its exact
+    /// unresolved parent identity. Recovery links do not bypass ordinary
+    /// conflicts or budgets; this only commits the relationship and enforces
+    /// one child per parent.
+    pub fn persist_operation_reservation_with_recovery_parent(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        recovery_parent: &str,
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            None,
+            Some(recovery_parent),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "This private transaction helper carries the operation, CAS snapshot, and two mutually exclusive typed relationship targets."
+    )]
+    fn persist_operation_reservation_with_link(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        replacement_parent: Option<&str>,
+        recovery_parent: Option<&str>,
+    ) -> Result<()> {
+        if replacement_parent.is_some() && recovery_parent.is_some() {
+            return Err(StoreError::ReservationConflict);
+        }
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1315,6 +1486,12 @@ impl Store {
         if submitted {
             return Err(StoreError::SubmissionConflict);
         }
+        if let Some(parent_id) = replacement_parent {
+            validate_replacement_lease(&tx, operation_id, record, expected_records, parent_id)?;
+        }
+        if let Some(parent_id) = recovery_parent {
+            validate_recovery_child_link(&tx, operation_id, record, expected_records, parent_id)?;
+        }
         let mut requested = reservations.to_vec();
         requested.sort_by(|a, b| a.resource.cmp(&b.resource));
         if requested
@@ -1342,8 +1519,8 @@ impl Store {
         }
         for reservation in &requested {
             let held: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM reservations WHERE resource=?1 AND operation_id!=?2)",
-                params![reservation.resource, operation_id],
+                "SELECT EXISTS(SELECT 1 FROM reservations WHERE resource=?1 AND operation_id!=?2 AND (?3 IS NULL OR operation_id!=?3))",
+                params![reservation.resource, operation_id, replacement_parent],
                 |r| r.get(0),
             )?;
             if held {
@@ -1674,6 +1851,213 @@ impl Store {
         Ok(())
     }
 
+    /// Persist one adapter-independent cumulative progress snapshot and any
+    /// matching run, boundary, or named-plan accounting update atomically.
+    /// Returns `false` for an exact retry of the latest sequence and digest.
+    pub fn commit_progress_settlement(
+        &mut self,
+        progress: &ProgressSettlement,
+        timestamp: &str,
+    ) -> Result<bool> {
+        let evidence = progress
+            .proof
+            .get("evidence")
+            .and_then(|value| value.get("settlement_progress"))
+            .ok_or(StoreError::ProgressConflict)?;
+        let sequence = evidence
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .ok_or(StoreError::ProgressConflict)?;
+        let snapshot_id = evidence
+            .get("snapshot_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(StoreError::ProgressConflict)?;
+        let proof_digest = progress
+            .proof
+            .get("proof_digest")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::ProgressConflict)?;
+        let status = json_string(&progress.record, "status").unwrap_or("unknown");
+        if !matches!(status, "submitted" | "pending" | "unknown")
+            || json_string(&progress.record, "id") != Some(progress.operation_id.as_str())
+            || progress.record.get("effects") != Some(&progress.proof)
+        {
+            return Err(StoreError::ProgressConflict);
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<(String, String)> = tx
+            .query_row(
+                "SELECT status, record_json FROM operations WHERE id=?1",
+                [&progress.operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((current_status, current_json)) = current else {
+            return Err(StoreError::OperationNotFound);
+        };
+        if is_terminal(&current_status) {
+            return Err(StoreError::AlreadySettled);
+        }
+        let current_record: Value = serde_json::from_str(&current_json)?;
+        validate_dispatch_evidence_transition(&current_record, &progress.record)?;
+        let durable_submission: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT kind, reference, data_json FROM submissions WHERE operation_id=?1",
+                [&progress.operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((kind, reference, data_json)) = durable_submission else {
+            return Err(StoreError::SubmissionConflict);
+        };
+        let submission = progress
+            .proof
+            .get("submission")
+            .ok_or(StoreError::SubmissionConflict)?;
+        if json_string(submission, "kind") != Some(kind.as_str())
+            || json_string(submission, "reference") != Some(reference.as_str())
+            || submission.get("data") != Some(&serde_json::from_str::<Value>(&data_json)?)
+        {
+            return Err(StoreError::SubmissionConflict);
+        }
+
+        let latest: Option<(i64, String, String)> = tx
+            .query_row(
+                "SELECT sequence, proof_digest, proof_json FROM settlement_progress WHERE operation_id=?1 ORDER BY sequence DESC LIMIT 1",
+                [&progress.operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((latest_sequence, latest_digest, latest_proof)) = latest {
+            let latest_proof: Value = serde_json::from_str(&latest_proof)?;
+            if sequence == latest_sequence as u64
+                && proof_digest == latest_digest
+                && progress.proof == latest_proof
+            {
+                tx.commit()?;
+                return Ok(false);
+            }
+            if sequence <= latest_sequence as u64 {
+                return Err(StoreError::ProgressConflict);
+            }
+        }
+        let duplicate_identity: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM settlement_progress WHERE operation_id=?1 AND (snapshot_id=?2 OR proof_digest=?3))",
+            params![progress.operation_id, snapshot_id, proof_digest],
+            |row| row.get(0),
+        )?;
+        if duplicate_identity {
+            return Err(StoreError::ProgressConflict);
+        }
+
+        validate_progress_reservations(&tx, &progress.operation_id, &progress.reservations)?;
+        update_progress_cas_record(
+            &tx,
+            "boundary_authorizations",
+            "id",
+            progress.boundary_id.as_deref(),
+            progress.expected_boundary.as_ref(),
+            progress.boundary_record.as_ref(),
+        )?;
+        update_progress_cas_record(
+            &tx,
+            "financial_plans",
+            "plan_id",
+            progress.plan_id.as_deref(),
+            progress.expected_plan.as_ref(),
+            progress.plan_record.as_ref(),
+        )?;
+        tx.execute(
+            "UPDATE operations SET status=?1, record_json=?2, updated_at=?3 WHERE id=?4",
+            params![
+                status,
+                progress.record.to_string(),
+                timestamp,
+                progress.operation_id
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO settlement_progress(operation_id,sequence,snapshot_id,proof_digest,proof_json,effects_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![progress.operation_id, sequence as i64, snapshot_id, proof_digest, progress.proof.to_string(), progress.effects.to_string(), timestamp],
+        )?;
+        tx.execute(
+            "INSERT INTO proof_records(operation_id, proof_json) VALUES (?1, ?2) ON CONFLICT(operation_id) DO UPDATE SET proof_json=excluded.proof_json",
+            params![progress.operation_id, progress.proof.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM effect_ledger WHERE operation_id=?1",
+            [&progress.operation_id],
+        )?;
+        if let Some(effects) = progress.effects.as_array() {
+            for (index, effect) in effects.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO effect_ledger(operation_id, effect_index, effect_json) VALUES (?1, ?2, ?3)",
+                    params![progress.operation_id, index as i64, effect.to_string()],
+                )?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM reservations WHERE operation_id=?1",
+            [&progress.operation_id],
+        )?;
+        for row in &progress.reservations {
+            tx.execute(
+                "INSERT INTO reservations(operation_id,resource,units,fee_units) VALUES (?1,?2,?3,?4)",
+                params![progress.operation_id, row.resource, row.units, row.fee_units],
+            )?;
+        }
+        if let (Some(run_id), Some(run)) = (&progress.run_id, &progress.run_record) {
+            let changed = tx.execute(
+                "UPDATE runs SET status=?1,record_json=?2,updated_at=?3 WHERE id=?4",
+                params![
+                    json_string(run, "status").unwrap_or("active"),
+                    run.to_string(),
+                    timestamp,
+                    run_id
+                ],
+            )?;
+            if changed != 1 {
+                return Err(StoreError::OperationNotFound);
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Allocate a strictly increasing nonce for one signer scope. Wall-clock
+    /// milliseconds seed a new scope; later allocations use max(now,last+1).
+    pub fn allocate_signer_nonce(&mut self, signer_scope: &str, now_ms: u64) -> Result<u64> {
+        if signer_scope.is_empty() || now_ms > i64::MAX as u64 {
+            return Err(StoreError::RequestConflict);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT last_nonce FROM signer_nonces WHERE signer_scope=?1",
+                [signer_scope],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let next = match last {
+            Some(value) => {
+                (now_ms as i64).max(value.checked_add(1).ok_or(StoreError::NonceExhausted)?)
+            }
+            None => now_ms as i64,
+        };
+        tx.execute(
+            "INSERT INTO signer_nonces(signer_scope,last_nonce) VALUES (?1,?2) ON CONFLICT(signer_scope) DO UPDATE SET last_nonce=excluded.last_nonce",
+            params![signer_scope, next],
+        )?;
+        tx.commit()?;
+        Ok(next as u64)
+    }
+
     /// Commit an attempt's proof, terminal operation, released reservations,
     /// and updated boundary consumption in one SQLite transaction. The grant
     /// compare-and-swap prevents revocation or another update from being lost.
@@ -1745,6 +2129,52 @@ impl Store {
 
     pub fn list_records(&self) -> Result<Vec<Value>> {
         list_records_conn(&self.conn)
+    }
+
+    /// Find the unique durable recovery child for a parent operation. The
+    /// child remains queryable after terminal settlement so its adapter can
+    /// inspect the persisted receipt while reconciling the parent.
+    pub fn recovery_child(&self, parent_operation_id: &str) -> Result<Option<Value>> {
+        let mut matches: Vec<Value> = list_records_conn(&self.conn)?
+            .into_iter()
+            .filter(|record| {
+                record
+                    .pointer("/preview/binding/__fin_recovery/parent_operation_id")
+                    .and_then(Value::as_str)
+                    == Some(parent_operation_id)
+            })
+            .collect();
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        let mut live = Vec::new();
+        for record in &matches {
+            let operation_id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::OperationNotFound)?;
+            let durable_submission = has_durable_submission(&self.conn, operation_id)?;
+            if !recovery_attempt_releases_lease(record, durable_submission) {
+                live.push(record);
+            }
+        }
+        if live.len() > 1 {
+            return Err(StoreError::ConcurrentReservation);
+        }
+        if let Some(child) = live.first() {
+            return Ok(Some((*child).clone()));
+        }
+        matches.sort_by(|a, b| {
+            a.pointer("/updated_at")
+                .and_then(Value::as_str)
+                .cmp(&b.pointer("/updated_at").and_then(Value::as_str))
+                .then_with(|| {
+                    a.pointer("/id")
+                        .and_then(Value::as_str)
+                        .cmp(&b.pointer("/id").and_then(Value::as_str))
+                })
+        });
+        Ok(matches.pop())
     }
 
     /// Insert/update bridge-owned state using a monotonic transfer version.
@@ -5312,6 +5742,21 @@ impl Store {
         Ok(count as usize)
     }
 
+    pub fn reservations(&self, operation_id: &str) -> Result<Vec<ReservationRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT resource, units, fee_units FROM reservations WHERE operation_id=?1 ORDER BY resource",
+        )?;
+        let rows = statement.query_map([operation_id], |row| {
+            Ok(ReservationRow {
+                resource: row.get(0)?,
+                units: row.get(1)?,
+                fee_units: row.get(2)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn close(self) -> Result<()> {
         self.conn.close().map_err(|(_, e)| StoreError::from(e))
     }
@@ -5399,6 +5844,7 @@ fn commit_settlement_tx(
     }
     let current_record: Value = serde_json::from_str(&current_record)?;
     validate_dispatch_evidence_transition(&current_record, &settlement.terminal_record)?;
+    append_terminal_progress_tx(tx, settlement, &current_record, timestamp)?;
     let status = json_string(&settlement.terminal_record, "status").unwrap_or("unknown");
     if !is_terminal(status) {
         return Err(StoreError::AlreadySettled);
@@ -5440,6 +5886,212 @@ fn commit_settlement_tx(
              ON CONFLICT(id) DO UPDATE SET status=excluded.status, record_json=excluded.record_json, updated_at=excluded.updated_at",
             params![run_id, run_status, run.to_string(), timestamp],
         )?;
+    }
+    Ok(())
+}
+
+fn append_terminal_progress_tx(
+    tx: &Transaction<'_>,
+    settlement: &Settlement,
+    current_record: &Value,
+    timestamp: &str,
+) -> Result<()> {
+    let Some(progress) = settlement
+        .proof
+        .get("evidence")
+        .and_then(|evidence| evidence.get("settlement_progress"))
+    else {
+        return Ok(());
+    };
+    let sequence = progress
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .ok_or(StoreError::ProgressConflict)?;
+    let snapshot_id = progress
+        .get("snapshot_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(StoreError::ProgressConflict)?;
+    let proof_digest = settlement
+        .proof
+        .get("proof_digest")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::ProgressConflict)?;
+    let latest: Option<(i64, String, String)> = tx
+        .query_row(
+            "SELECT sequence,proof_digest,proof_json FROM settlement_progress WHERE operation_id=?1 ORDER BY sequence DESC LIMIT 1",
+            [&settlement.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((latest_sequence, latest_digest, latest_proof)) = latest {
+        let latest_proof: Value = serde_json::from_str(&latest_proof)?;
+        if sequence == latest_sequence as u64
+            && proof_digest == latest_digest
+            && settlement.proof == latest_proof
+        {
+            return Ok(());
+        }
+        if sequence <= latest_sequence as u64 {
+            return Err(StoreError::ProgressConflict);
+        }
+    }
+    let duplicate_identity: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM settlement_progress WHERE operation_id=?1 AND (snapshot_id=?2 OR proof_digest=?3))",
+        params![settlement.operation_id, snapshot_id, proof_digest],
+        |row| row.get(0),
+    )?;
+    if duplicate_identity {
+        return Err(StoreError::ProgressConflict);
+    }
+    if let Some(previous) = current_record
+        .get("effects")
+        .and_then(|effects| effects.get("evidence"))
+        .and_then(|evidence| evidence.get("settlement_progress"))
+    {
+        let prior: fin_domain::SettlementProgress = serde_json::from_value(previous.clone())?;
+        let next: fin_domain::SettlementProgress = serde_json::from_value(progress.clone())?;
+        if next.sequence <= prior.sequence
+            || prior
+                .event_digests
+                .iter()
+                .any(|(identity, digest)| next.event_digests.get(identity) != Some(digest))
+        {
+            return Err(StoreError::ProgressConflict);
+        }
+    }
+    tx.execute(
+        "INSERT INTO settlement_progress(operation_id,sequence,snapshot_id,proof_digest,proof_json,effects_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![settlement.operation_id, sequence as i64, snapshot_id, proof_digest, settlement.proof.to_string(), settlement.effects.to_string(), timestamp],
+    )?;
+    Ok(())
+}
+
+fn validate_progress_reservations(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    reservations: &[ReservationRow],
+) -> Result<()> {
+    let mut ordered = reservations.to_vec();
+    ordered.sort_by(|left, right| left.resource.cmp(&right.resource));
+    if ordered
+        .windows(2)
+        .any(|rows| rows[0].resource == rows[1].resource)
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    for row in &ordered {
+        let mut statement = tx.prepare(
+            "SELECT DISTINCT operation_id FROM reservations WHERE resource=?1 AND operation_id!=?2",
+        )?;
+        let held = statement
+            .query_map(params![row.resource, operation_id], |result| {
+                result.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for other_id in held {
+            if !valid_replacement_pair_tx(tx, operation_id, &other_id)? {
+                return Err(StoreError::ConcurrentReservation);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_replacement_pair_tx(
+    tx: &Transaction<'_>,
+    first_id: &str,
+    second_id: &str,
+) -> Result<bool> {
+    let load = |id: &str| -> Result<Option<Value>> {
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT record_json FROM operations WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value).map_err(StoreError::from))
+            .transpose()
+    };
+    let Some(first) = load(first_id)? else {
+        return Ok(false);
+    };
+    let Some(second) = load(second_id)? else {
+        return Ok(false);
+    };
+    let related = |child: &Value, parent: &Value| {
+        child
+            .pointer("/preview/binding/__fin_replacement/version")
+            .and_then(Value::as_u64)
+            == Some(1)
+            && child
+                .pointer("/preview/binding/__fin_replacement/parent_operation_id")
+                .and_then(Value::as_str)
+                == parent.get("id").and_then(Value::as_str)
+            && child.pointer("/preview/binding/__fin_replacement/parent_submission")
+                == parent.get("submission")
+            && child.get("run_id") == parent.get("run_id")
+            && child.pointer("/preview/intent/locks") == parent.pointer("/preview/intent/locks")
+    };
+    let first_status = first.get("status").and_then(Value::as_str);
+    let second_status = second.get("status").and_then(Value::as_str);
+    let first_child_of_second = related(&first, &second)
+        && matches!(second_status, Some("submitted" | "pending" | "unknown"))
+        && matches!(first_status, Some("submitted" | "pending" | "unknown"));
+    let second_child_of_first = related(&second, &first)
+        && matches!(first_status, Some("submitted" | "pending" | "unknown"))
+        && matches!(second_status, Some("submitted" | "pending" | "unknown"));
+    Ok(first_child_of_second || second_child_of_first)
+}
+
+fn update_progress_cas_record(
+    tx: &Transaction<'_>,
+    table: &str,
+    identity_column: &str,
+    identity: Option<&str>,
+    expected: Option<&Value>,
+    updated: Option<&Value>,
+) -> Result<()> {
+    let (Some(identity), Some(expected), Some(updated)) = (identity, expected, updated) else {
+        return if identity.is_none() && expected.is_none() && updated.is_none() {
+            Ok(())
+        } else {
+            Err(StoreError::RequestConflict)
+        };
+    };
+    let current: Option<String> = tx
+        .query_row(
+            &format!("SELECT record_json FROM {table} WHERE {identity_column}=?1"),
+            [identity],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if current
+        .as_deref()
+        .map(serde_json::from_str::<Value>)
+        .transpose()?
+        != Some(expected.clone())
+    {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    let expected_attempt = json_string(expected, "active_attempt")
+        .or_else(|| json_string(expected, "active_attempt_id"));
+    let updated_attempt = json_string(updated, "active_attempt")
+        .or_else(|| json_string(updated, "active_attempt_id"));
+    if expected_attempt != updated_attempt {
+        return Err(StoreError::ProgressConflict);
+    }
+    let changed = tx.execute(
+        &format!("UPDATE {table} SET record_json=?1,updated_at=?2 WHERE {identity_column}=?3"),
+        params![
+            updated.to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            identity
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StoreError::ConcurrentReservation);
     }
     Ok(())
 }
@@ -6045,11 +6697,201 @@ fn list_records_conn(conn: &Connection) -> Result<Vec<Value>> {
         .map_err(StoreError::from)
 }
 
+fn validate_replacement_lease(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    child: &Value,
+    expected_records: &[Value],
+    parent_id: &str,
+) -> Result<()> {
+    let binding = child
+        .pointer("/preview/binding/__fin_replacement")
+        .ok_or(StoreError::ReservationConflict)?;
+    if binding.get("version").and_then(Value::as_u64) != Some(1)
+        || binding.get("parent_operation_id").and_then(Value::as_str) != Some(parent_id)
+        || child.get("id").and_then(Value::as_str) != Some(operation_id)
+        || parent_id == operation_id
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent = expected_records
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some(parent_id))
+        .ok_or(StoreError::ReservationConflict)?;
+    let parent_status = parent.get("status").and_then(Value::as_str);
+    if !matches!(parent_status, Some("submitted" | "pending" | "unknown"))
+        || parent.get("submission") != binding.get("parent_submission")
+        || parent.get("run_id") != child.get("run_id")
+        || parent.pointer("/preview/intent/locks") != child.pointer("/preview/intent/locks")
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let has_sibling = expected_records.iter().any(|other| {
+        if other.get("id").and_then(Value::as_str) == Some(operation_id)
+            || other.get("id").and_then(Value::as_str) == Some(parent_id)
+            || other.pointer("/preview/binding/__fin_replacement/parent_operation_id")
+                != Some(&Value::String(parent_id.to_owned()))
+        {
+            return false;
+        }
+        !matches!(
+            other.get("status").and_then(Value::as_str),
+            Some("failed" | "rejected" | "expired")
+        )
+    });
+    if has_sibling {
+        return Err(StoreError::ReservationConflict);
+    }
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Err(StoreError::ReservationConflict);
+    };
+    let persisted: Value = serde_json::from_str(&persisted)?;
+    if persisted != *parent {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    Ok(())
+}
+
+fn validate_recovery_child_link(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    child: &Value,
+    expected_records: &[Value],
+    parent_id: &str,
+) -> Result<()> {
+    let binding = child
+        .pointer("/preview/binding/__fin_recovery")
+        .ok_or(StoreError::ReservationConflict)?;
+    if binding.as_object().is_none_or(|object| object.len() != 3)
+        || binding.get("version").and_then(Value::as_u64) != Some(1)
+        || binding.get("parent_operation_id").and_then(Value::as_str) != Some(parent_id)
+        || child.get("id").and_then(Value::as_str) != Some(operation_id)
+        || parent_id == operation_id
+        || child
+            .pointer("/preview/binding/__fin_replacement")
+            .is_some()
+        || !child
+            .pointer("/preview/intent/debits")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        || !child
+            .pointer("/preview/intent/maximum_costs")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        || !child
+            .pointer("/preview/intent/expected")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        || child
+            .pointer("/preview/intent/locks")
+            .and_then(Value::as_array)
+            .is_none_or(|locks| locks.len() != 1)
+        || child
+            .pointer("/preview/intent/locks/0")
+            .and_then(Value::as_str)
+            .is_none_or(|lock| lock.trim().is_empty())
+        || child
+            .pointer("/preview/valuation/movement_usd_micros")
+            .and_then(Value::as_str)
+            != Some("0")
+        || child
+            .pointer("/preview/valuation/maximum_fee_usd_micros")
+            .and_then(Value::as_str)
+            != Some("0")
+        || child
+            .pointer("/preview/valuation/additional_allocation_usd_micros")
+            .and_then(Value::as_str)
+            != Some("0")
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent = expected_records
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some(parent_id))
+        .ok_or(StoreError::ReservationConflict)?;
+    if !matches!(
+        parent.get("status").and_then(Value::as_str),
+        Some("submitted" | "pending" | "unknown")
+    ) || parent.get("submission") != binding.get("parent_submission")
+        || binding.get("parent_submission").is_none_or(Value::is_null)
+        || parent.get("run_id") != child.get("run_id")
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent_locks = parent
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let child_lock = child
+        .pointer("/preview/intent/locks/0")
+        .ok_or(StoreError::ReservationConflict)?;
+    if parent_locks.iter().any(|lock| lock == child_lock) {
+        return Err(StoreError::ReservationConflict);
+    }
+    for other in expected_records.iter().filter(|other| {
+        other.get("id").and_then(Value::as_str) != Some(operation_id)
+            && other
+                .pointer("/preview/binding/__fin_recovery/parent_operation_id")
+                .and_then(Value::as_str)
+                == Some(parent_id)
+    }) {
+        let other_id = other
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::OperationNotFound)?;
+        let durable_submission = has_durable_submission(tx, other_id)?;
+        if !recovery_attempt_releases_lease(other, durable_submission) {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Err(StoreError::ReservationConflict);
+    };
+    let persisted: Value = serde_json::from_str(&persisted)?;
+    if persisted != *parent {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    Ok(())
+}
+
 fn is_terminal(status: &str) -> bool {
     matches!(
         status,
         "completed" | "failed" | "rejected" | "cancelled" | "expired"
     )
+}
+
+fn recovery_attempt_releases_lease(record: &Value, durable_submission: bool) -> bool {
+    matches!(
+        record.pointer("/status").and_then(Value::as_str),
+        Some("failed" | "rejected" | "expired")
+    ) && !durable_submission
+        && record.get("submission").is_none_or(Value::is_null)
+        && record.get("dispatch_evidence").is_none_or(Value::is_null)
+        && record.get("effects").is_none_or(Value::is_null)
+}
+
+fn has_durable_submission(conn: &Connection, operation_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+        [operation_id],
+        |row| row.get(0),
+    )
+    .map_err(StoreError::from)
 }
 
 fn validate_dispatch_evidence_transition(current: &Value, updated: &Value) -> Result<()> {
@@ -6822,6 +7664,288 @@ mod tests {
             units: "1000000000000000001".into(),
             fee_units: "123".into(),
         }
+    }
+
+    #[test]
+    fn signer_nonce_is_atomic_monotonic_and_persistent() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("signer-nonce.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .allocate_signer_nonce("synthetic:wallet-a", 100)
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            store
+                .allocate_signer_nonce("synthetic:wallet-a", 90)
+                .unwrap(),
+            101
+        );
+        assert_eq!(
+            store
+                .allocate_signer_nonce("synthetic:wallet-b", 90)
+                .unwrap(),
+            90
+        );
+        store.close().unwrap();
+        let mut reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .allocate_signer_nonce("synthetic:wallet-a", 101)
+                .unwrap(),
+            102
+        );
+    }
+
+    #[test]
+    fn recovery_child_with_durable_submission_row_cannot_release_lease_if_record_omits_it() {
+        let mut store = Store::in_memory().unwrap();
+        let parent_submission = json!({
+            "kind":"synthetic",
+            "reference":"parent-native-id",
+            "data":{"nonce":"synthetic-1"}
+        });
+        let parent = json!({
+            "id":"recovery-parent",
+            "request_id":"request-recovery-parent",
+            "fingerprint":"fingerprint-recovery-parent",
+            "status":"pending",
+            "operation":"synthetic.parent",
+            "run_id":null,
+            "submission":parent_submission,
+            "dispatch_evidence":null,
+            "effects":null,
+            "preview":{
+                "intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":["cash:parent"]}
+            }
+        });
+        store
+            .create_request(
+                "recovery-parent",
+                "request-recovery-parent",
+                "fingerprint-recovery-parent",
+                "synthetic.parent",
+                None,
+                "pending",
+                &parent,
+                "t0",
+            )
+            .unwrap();
+
+        let old_binding = json!({
+            "__fin_recovery":{
+                "version":1,
+                "parent_operation_id":"recovery-parent",
+                "parent_submission":parent_submission
+            }
+        });
+        let old_child = json!({
+            "id":"recovery-child-submitted-then-failed",
+            "request_id":"request-old-child",
+            "fingerprint":"fingerprint-old-child",
+            "status":"failed",
+            "operation":"synthetic.recover",
+            "run_id":null,
+            // Deliberately inconsistent legacy/corruption fixture: the durable
+            // submissions table still proves that this child was submitted.
+            "submission":null,
+            "dispatch_evidence":null,
+            "effects":null,
+            "preview":{"binding":old_binding}
+        });
+        store
+            .create_request(
+                "recovery-child-submitted-then-failed",
+                "request-old-child",
+                "fingerprint-old-child",
+                "synthetic.recover",
+                None,
+                "failed",
+                &old_child,
+                "t1",
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO submissions(operation_id,kind,reference,data_json) VALUES (?1,?2,?3,?4)",
+                params![
+                    "recovery-child-submitted-then-failed",
+                    "synthetic",
+                    "old-child-native-id",
+                    json!({"nonce":"synthetic-2"}).to_string()
+                ],
+            )
+            .unwrap();
+
+        let linked = store.recovery_child("recovery-parent").unwrap().unwrap();
+        assert_eq!(linked["id"], "recovery-child-submitted-then-failed");
+
+        let next_binding = json!({
+            "__fin_recovery":{
+                "version":1,
+                "parent_operation_id":"recovery-parent",
+                "parent_submission":parent_submission
+            }
+        });
+        let next_child = json!({
+            "id":"recovery-child-retry",
+            "request_id":"request-retry-child",
+            "fingerprint":"fingerprint-retry-child",
+            "status":"awaiting_approval",
+            "operation":"synthetic.recover",
+            "run_id":null,
+            "submission":null,
+            "dispatch_evidence":null,
+            "effects":null,
+            "preview":{
+                "binding":next_binding,
+                "intent":{"debits":[],"maximum_costs":[],"expected":[],"locks":["nonce:recover-3"]},
+                "valuation":{"movement_usd_micros":"0","maximum_fee_usd_micros":"0","additional_allocation_usd_micros":"0"}
+            }
+        });
+        store
+            .create_request(
+                "recovery-child-retry",
+                "request-retry-child",
+                "fingerprint-retry-child",
+                "synthetic.recover",
+                None,
+                "awaiting_approval",
+                &next_child,
+                "t2",
+            )
+            .unwrap();
+        let expected_records = store.list_records().unwrap();
+        let claim = store.persist_operation_reservation_with_recovery_parent(
+            "recovery-child-retry",
+            &[ReservationRow {
+                resource: "lock:nonce:recover-3".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            }],
+            &next_child,
+            &expected_records,
+            "t3",
+            "recovery-parent",
+        );
+        assert!(matches!(claim, Err(StoreError::ReservationConflict)));
+        // The awaiting retry is itself linked in operations now, so querying
+        // for a unique child can correctly report a conflict. The failed old
+        // child was selected above before that retry existed, and the atomic
+        // claim rejected the retry based on its durable submissions row.
+    }
+
+    #[test]
+    fn progressive_snapshots_are_idempotent_ordered_and_keep_residual_reservations() {
+        let mut store = Store::in_memory().unwrap();
+        ordinary_request(&mut store, "progress-op");
+        let submission = SubmissionRow {
+            kind: "synthetic_tx".into(),
+            reference: "synthetic-progress-1".into(),
+            data: json!({"nonce":"synthetic-1"}),
+        };
+        store
+            .persist_submission("progress-op", &submission, "t1")
+            .unwrap();
+        store
+            .reserve("progress-op", &[ordinary_reservation("wallet-a:USDC")])
+            .unwrap();
+
+        let base_record = store.get_record("progress-op").unwrap().unwrap();
+        let make = |previous: Option<&ProgressSettlement>,
+                    sequence: u64,
+                    snapshot_id: &str,
+                    event_digest: &str,
+                    held: &str| {
+            let proof = json!({
+                "evidence_version": 1,
+                "submission": {
+                    "kind": "synthetic_tx",
+                    "reference": "synthetic-progress-1",
+                    "data": {"nonce":"synthetic-1"}
+                },
+                "effects": [],
+                "evidence": {"settlement_progress": {
+                    "version": 1,
+                    "sequence": sequence,
+                    "snapshot_id": snapshot_id,
+                    "event_digests": {"trade-1":event_digest}
+                }},
+                "observed_at": "2026-10-09T00:00:00Z",
+                "proof_digest": format!("digest-{sequence}-{event_digest}")
+            });
+            let mut record = previous
+                .map(|snapshot| snapshot.record.clone())
+                .unwrap_or_else(|| base_record.clone());
+            record["status"] = json!("pending");
+            record["effects"] = proof.clone();
+            ProgressSettlement {
+                operation_id: "progress-op".into(),
+                record,
+                proof,
+                effects: json!([]),
+                reservations: vec![ReservationRow {
+                    resource: "wallet-a:USDC".into(),
+                    units: held.into(),
+                    fee_units: "0".into(),
+                }],
+                run_id: None,
+                run_record: None,
+                boundary_id: None,
+                expected_boundary: None,
+                boundary_record: None,
+                plan_id: None,
+                expected_plan: None,
+                plan_record: None,
+            }
+        };
+
+        let first = make(None, 1, "snapshot-1", "receipt-hash-1", "600");
+        assert!(store.commit_progress_settlement(&first, "t2").unwrap());
+        assert!(!store.commit_progress_settlement(&first, "t3").unwrap());
+        assert!(matches!(
+            store.commit_progress_settlement(
+                &make(Some(&first), 1, "snapshot-1", "tampered-hash", "600"),
+                "t4"
+            ),
+            Err(StoreError::ProgressConflict)
+        ));
+        assert!(matches!(
+            store.commit_progress_settlement(
+                &make(Some(&first), 1, "snapshot-old", "receipt-hash-old", "600"),
+                "t4"
+            ),
+            Err(StoreError::ProgressConflict)
+        ));
+        assert!(
+            store
+                .commit_progress_settlement(
+                    &make(Some(&first), 3, "snapshot-3", "receipt-hash-1", "400"),
+                    "t5"
+                )
+                .unwrap()
+        );
+        let held: String = store
+            .conn
+            .query_row(
+                "SELECT units FROM reservations WHERE operation_id='progress-op'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(held, "400");
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM settlement_progress WHERE operation_id='progress-op'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]

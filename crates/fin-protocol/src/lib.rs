@@ -32,6 +32,13 @@ pub enum BrokerRequest {
         operation: String,
         input: Value,
     },
+    /// Read-only preparation for a human-interactive configuration write.
+    /// This method cannot execute the candidate; actual configuration writes
+    /// use the protected human-terminal broker entry point.
+    ConfigurationPreview {
+        operation: String,
+        input: Value,
+    },
     /// Read-only human review of the summary that a boundary grant would authorize.
     PreviewBoundaryAuthorization {
         request: BoundaryAuthorizationRequest,

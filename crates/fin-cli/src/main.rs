@@ -92,6 +92,8 @@ enum Command {
     Preview(OperationArgs),
     /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
     Execute(ExecuteArgs),
+    /// Configure a human-only venue setting; real requests require your Terminal and fresh Touch ID.
+    Configure(ConfigureArgs),
     /// Manage bounded financial authorizations.
     Authorizations {
         #[command(subcommand)]
@@ -172,6 +174,12 @@ struct ConnectionCommandArgs {
     /// Expected public wallet address; checked against the protected signer.
     #[arg(long, requires_all = ["provider_choice", "name"])]
     address: Option<String>,
+    /// Hyperliquid account scope (owner, subaccount or vault).
+    #[arg(long, value_enum, requires_all = ["provider_choice", "name"])]
+    hyperliquid_scope: Option<fin_discovery::HyperliquidScopeKind>,
+    /// Hyperliquid delegated subaccount or vault address.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    execution_address: Option<String>,
     /// Credential category only; keys are requested privately afterward.
     /// Binance requires an API key and signing secret/key. PEM input accepts real
     /// line breaks or literal \n separators; include BEGIN/END and press Enter.
@@ -195,6 +203,8 @@ impl ConnectionCommandArgs {
             email: self.email,
             network: self.network,
             address: self.address,
+            hyperliquid_scope: self.hyperliquid_scope,
+            execution_address: self.execution_address,
             credential_type: self.credential_type,
             api_plan: self.api_plan,
         })
@@ -206,6 +216,20 @@ struct OperationArgs {
     operation: String,
     #[arg(long)]
     input: String,
+}
+
+#[derive(Args, Debug)]
+struct ConfigureArgs {
+    /// Exact human-interactive configuration operation from `fin capabilities`.
+    operation: String,
+    #[arg(long)]
+    input: String,
+    /// Stable identity for this configuration action; retries must reuse it.
+    #[arg(long, required_unless_present = "dry_run")]
+    id: Option<String>,
+    /// Prepare a safe read-only configuration preview without authorization or dispatch.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -739,6 +763,7 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot
+        | BrokerRequest::Status { .. }
         | BrokerRequest::Read { .. }
         | BrokerRequest::PlanStatus { .. } => OBSERVER_TIMEOUT,
         BrokerRequest::Preview { .. }
@@ -757,6 +782,8 @@ fn broker_timeout(request: &BrokerRequest) -> FinError {
         BrokerRequest::AuthorizeBoundary { .. } | BrokerRequest::AuthorizePlan { .. }
     ) {
         "Repeat authorization with the same request ID and parameters to recover its result; do not create another grant."
+    } else if matches!(request, BrokerRequest::Status { .. }) {
+        "Retry status for the same operation; do not submit another financial request."
     } else if matches!(
         request,
         BrokerRequest::Execute { .. }
@@ -1212,6 +1239,28 @@ async fn dispatch_with_review_hash(
                     .await
             }
         }
+        Command::Configure(args) => {
+            let input = parse_input(&args.input)?;
+            if args.dry_run {
+                client
+                    .call(BrokerRequest::ConfigurationPreview {
+                        operation: args.operation,
+                        input,
+                    })
+                    .await
+            } else {
+                launch_human_privileged(
+                    PrivilegedAction::Configure(OperationRequest {
+                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        operation: args.operation,
+                        input,
+                        run_id: None,
+                    }),
+                    json,
+                    verbose,
+                )
+            }
+        }
         Command::Authorizations { command } => match command {
             AuthorizationsCommand::Authorize(args) => {
                 let request = boundary_authorization_request(&args)?;
@@ -1526,6 +1575,7 @@ fn completion_definition() -> clap::Command {
 enum PrivilegedAction {
     Setup,
     PolicySet(fin_discovery::PolicySetArgs),
+    Configure(OperationRequest),
     Add(fin_discovery::AddConnectionArgs),
     Update(fin_discovery::AddConnectionArgs),
     Remove(fin_discovery::NamedConnectionArgs),
@@ -1668,6 +1718,12 @@ fn prepare_privileged_command_with_presentation(
                 .args(["enrollment", "policy-set", "--request"])
                 .arg(serde_json::to_string(&args).map_err(|_| generic_input_error())?);
         }
+        PrivilegedAction::Configure(request) => {
+            command
+                .arg(BROKER_PATH)
+                .args(["enrollment", "configure", "--request"])
+                .arg(serde_json::to_string(&request).map_err(|_| generic_input_error())?);
+        }
         PrivilegedAction::Remove(args) => {
             command
                 .arg(BROKER_PATH)
@@ -1695,6 +1751,9 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         }
         PrivilegedAction::PolicySet(_) => {
             "Fin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
+        }
+        PrivilegedAction::Configure(_) => {
+            "Fin needs administrator access to review and configure this Hyperliquid account. Touch ID separately approves the exact venue setting."
         }
         PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
@@ -1773,6 +1832,7 @@ fn human_only(command: &Command) -> bool {
             | Command::Policy {
                 command: PolicyCommand::Set(_)
             }
+            | Command::Configure(ConfigureArgs { dry_run: false, .. })
             | Command::Connections {
                 command: Some(
                     ConnectionsCommand::Add(_)
@@ -1796,6 +1856,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::Preview(_) => "preview",
         Command::Execute(args) if args.dry_run => "preview",
         Command::Execute(_) => "execute",
+        Command::Configure(args) if args.dry_run => "preview",
+        Command::Configure(_) => "configure",
         Command::Authorizations { .. } => "authorizations",
         Command::Plans { .. } => "plans",
         Command::Status { .. } => "status",
@@ -2075,6 +2137,53 @@ mod tests {
 
     fn sample_plan_json() -> &'static str {
         r#"{"version":1,"name":"Synthetic transfer","steps":[{"step_id":"transfer","operation":"wallet.transfer","input":{"request_id":"synthetic-input","wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},"permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},"completion":{"operation_succeeded":true},"funding_dependencies":[]}],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}}"#
+    }
+
+    #[tokio::test]
+    async fn human_configuration_actual_is_handed_off_before_any_broker_call_but_preview_is_read_only()
+     {
+        struct CaptureClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for CaptureClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"summary":"synthetic preview"}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("configuration must never use ordinary execute")
+            }
+        }
+        let client = CaptureClient(Default::default());
+        let actual = Cli::try_parse_from([
+            "fin",
+            "--json",
+            "configure",
+            "hyperliquid.account.set_agent_abstraction",
+            "--input",
+            r#"{"account":"hl-main","enabled":true}"#,
+            "--id",
+            "synthetic-config-1",
+        ])
+        .unwrap();
+        let error = dispatch(actual, &client).await.unwrap_err();
+        assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+        assert!(client.0.lock().unwrap().is_empty());
+
+        let preview = Cli::try_parse_from([
+            "fin",
+            "--json",
+            "configure",
+            "hyperliquid.account.set_agent_abstraction",
+            "--input",
+            r#"{"account":"hl-main","enabled":true}"#,
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(!human_only(&preview.command));
+        dispatch(preview, &client).await.unwrap();
+        assert!(
+            matches!(client.0.lock().unwrap().as_slice(), [BrokerRequest::ConfigurationPreview { operation, .. }] if operation == "hyperliquid.account.set_agent_abstraction")
+        );
     }
 
     #[tokio::test]
@@ -2800,6 +2909,23 @@ mod tests {
                 .contains("do not create another financial request")
         );
         assert!(!error.next_action.contains("synthetic-timeout"));
+
+        let error = broker_timeout(&BrokerRequest::Status {
+            id: "synthetic-operation".into(),
+        });
+        assert_eq!(
+            broker_response_timeout(&BrokerRequest::Status {
+                id: "synthetic-operation".into(),
+            }),
+            OBSERVER_TIMEOUT
+        );
+        assert!(error.next_action.contains("same operation"));
+        assert!(
+            error
+                .next_action
+                .contains("do not submit another financial request")
+        );
+        assert!(!error.next_action.contains("daemon status"));
     }
 
     #[test]
@@ -2855,12 +2981,14 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert_eq!(financial_catalog().len(), 59);
+        assert!(financial_catalog().len() >= 59);
         for name in [
             "wallet.permit2.allowance",
             "wallet.permit2.approve",
             "ramses.quote",
             "ramses.swap",
+            "hyperliquid.orders.place",
+            "hyperliquid.account.withdraw",
         ] {
             assert!(
                 financial_catalog()

@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
 
 ## One CLI and a protected execution role
 
@@ -132,6 +132,16 @@ reviewed on Robinhood and Aave on Ethereum and Base. Base fee envelopes include
 execution, L1 data and operator costs, while receipt completion uses canonical
 L2 inclusion. Relay transfers are a separate application
 capability, not a general wallet write or arbitrary calldata interface.
+
+Reusable EVM wallets also derive runtime-only Hyperliquid owner mappings with
+the same protected signer and read-only/signing status. Hyperliquid operations
+use the existing wallet alias; public connection inventory hides derived owner
+views while protected authorization identities retain their exact venue resources.
+The overlay performs no
+venue calls, persists no alias or new credential, and grants no financial
+authority. Explicit owner mappings remain unchanged and suppress duplicate
+account observers. Generated aliases follow parent wallet rotation/removal;
+unresolved Hyperliquid resources remain part of connection-change checks.
 
 ### Relay bridge composition and settlement
 
@@ -627,3 +637,24 @@ with `make catalog`; recursive key ordering keeps changes reproducible. Discover
 reports scoped operation restrictions separately from CCXT library availability.
 The current profile's conservative single-position and FOK-spot limits can later
 be extended through richer route proofs without changing the approval boundary.
+
+Long-lived submissions may report progressive settlement through cumulative
+`VerifiedEffects` snapshots. Each proof remains bound to the immutable original
+submission and places `settlement_progress` in its evidence with version `1`, a
+strictly increasing per-submission `sequence`, a stable `snapshot_id`, and an
+`event_digests` map from adapter event identity to canonical receipt digest.
+The map only grows; existing identities and digests cannot change. Typed
+effects describe the complete cumulative state at that sequence, including all
+previously proved fills and costs. The proof digest covers these fields and the
+effects. Pending snapshots may defer terminal minimum expectations, but still
+must satisfy approved identities, anchors, and cumulative maxima.
+
+The engine persists each accepted snapshot in an append-only table in the same
+SQLite transaction that updates the operation and its remaining resource/cost
+reservations. An exact retry is idempotent; a stale sequence or changed proof
+content for a reused sequence is rejected. Boundary consumption advances by
+the delta from the last accepted cumulative snapshot. Terminal proof settles the
+full final cumulative effects, including fills already observed during progress,
+and releases the remaining liability once. A terminal failed order preserves
+its proved partial fills and attributable costs. Adapters must not report
+incremental deltas as though they were cumulative snapshots.

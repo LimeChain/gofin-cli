@@ -341,7 +341,7 @@ async fn actual_fee_overage_charges_other_wallet_budget_and_missing_prices_block
     other.preview = Some(other_preview.clone());
     assert_eq!(
         engine
-            .reserve_ordinary_operation(&mut other, &other_preview)
+            .reserve_ordinary_operation(&mut other, &other_preview, None, None)
             .unwrap_err()
             .code,
         "ALLOCATION_LIMIT"
@@ -374,7 +374,7 @@ async fn actual_fee_overage_charges_other_wallet_budget_and_missing_prices_block
         );
         assert_eq!(
             engine
-                .reserve_ordinary_operation(&mut other, &other_preview)
+                .reserve_ordinary_operation(&mut other, &other_preview, None, None)
                 .unwrap_err()
                 .code,
             "ALLOCATION_COST_UNKNOWN",

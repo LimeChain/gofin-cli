@@ -70,6 +70,10 @@ pub struct EnvironmentConfig {
     /// development profile. Missing chains retain the reviewed defaults.
     #[serde(default)]
     pub rpc_urls: BTreeMap<u64, Vec<String>>,
+    /// Optional subset of reviewed EVM networks for disposable development.
+    /// `None` preserves the historical all-reviewed-networks behavior.
+    #[serde(default)]
+    pub reviewed_chain_ids: Option<Vec<u64>>,
     #[serde(default)]
     pub binance_uid: Option<String>,
     #[serde(default)]
@@ -105,6 +109,7 @@ impl EnvironmentConfig {
             credentials: CredentialReferences::default(),
             policy: None,
             rpc_urls: BTreeMap::new(),
+            reviewed_chain_ids: None,
             binance_uid: None,
             binance_sub_uid: None,
             binance_sub_email: None,
@@ -574,7 +579,49 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             });
         }
     }
-    let mut networks = NetworkConfig::reviewed_evm_networks();
+    if let (Some(reference), Some(address)) = (
+        config.credentials.evm_primary.as_ref(),
+        config.evm_addresses.first(),
+    ) && !address.is_empty()
+    {
+        connections.push(ConnectionConfig::Hyperliquid {
+            name: "dev-hyperliquid".into(),
+            resource: ResourceId(format!(
+                "hyperliquid:mainnet:{}:account:primary",
+                address.to_ascii_lowercase()
+            )),
+            owner: address.to_ascii_lowercase(),
+            credential_ref: Some(reference.clone()),
+            signing_enabled: true,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::default(),
+            auto_derived: false,
+        });
+    }
+    let reviewed_chain_ids: Vec<u64> = fin_networks::all()
+        .iter()
+        .map(|network| network.chain_id)
+        .collect();
+    let selected_chain_ids = config
+        .reviewed_chain_ids
+        .as_deref()
+        .unwrap_or(&reviewed_chain_ids);
+    if selected_chain_ids.is_empty()
+        || selected_chain_ids
+            .iter()
+            .any(|chain_id| !reviewed_chain_ids.contains(chain_id))
+        || selected_chain_ids
+            .iter()
+            .enumerate()
+            .any(|(index, chain_id)| selected_chain_ids[..index].contains(chain_id))
+    {
+        return Err(
+            "development chain scope must be a nonempty unique subset of reviewed chains".into(),
+        );
+    }
+    let mut networks: Vec<_> = NetworkConfig::reviewed_evm_networks()
+        .into_iter()
+        .filter(|network| selected_chain_ids.contains(&network.chain_id))
+        .collect();
     for chain_id in config.rpc_urls.keys() {
         if !fin_networks::supports_chain(*chain_id) {
             return Err("development RPC override names an unsupported chain".into());
@@ -625,7 +672,15 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
     let runtime_config = BrokerConfigV2 {
         version: 2,
         networks,
-        deployments: DeploymentConfig::reviewed_amm_networks(),
+        deployments: DeploymentConfig::reviewed_amm_networks()
+            .into_iter()
+            .filter(|deployment| {
+                fin_networks::all().iter().any(|network| {
+                    network.network_id == deployment.network
+                        && selected_chain_ids.contains(&network.chain_id)
+                })
+            })
+            .collect(),
         connections,
         policy,
         approver_uid: unsafe { libc::geteuid() },
@@ -678,11 +733,13 @@ mod tests {
         let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
         legacy.as_object_mut().unwrap().remove("policy");
         legacy.as_object_mut().unwrap().remove("rpc_urls");
+        legacy.as_object_mut().unwrap().remove("reviewed_chain_ids");
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
 
         let loaded = EnvironmentConfig::read(&path, "env").unwrap();
         assert!(loaded.policy.is_none());
         assert!(loaded.rpc_urls.is_empty());
+        assert_eq!(loaded.reviewed_chain_ids, None);
         assert_eq!(broker_config(&loaded).unwrap().policy, BrokerPolicy::beta());
 
         let mut configured = loaded;
@@ -803,6 +860,68 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_chain_scope_limits_networks_and_deployments_without_changing_credentials() {
+        let mut config = EnvironmentConfig::empty("env");
+        config.mode = "live".into();
+        let reference = uuid::Uuid::from_u128(1).hyphenated().to_string();
+        config.credentials.evm_primary = Some(reference.clone());
+        config.evm_addresses = vec!["0x1111111111111111111111111111111111111111".into()];
+        config.reviewed_chain_ids = Some(vec![42161]);
+        // An unused override does not configure or initialize an out-of-scope
+        // network, even if it is unusable. The selected chain remains reviewed.
+        config.rpc_urls.insert(1, Vec::new());
+
+        let runtime = broker_config(&config).unwrap();
+        assert_eq!(runtime.networks.len(), 1);
+        assert_eq!(runtime.networks[0].chain_id, 42161);
+        let expected_deployments: Vec<_> = DeploymentConfig::reviewed_amm_networks()
+            .into_iter()
+            .filter(|deployment| deployment.network == "ethereum:42161")
+            .map(|deployment| deployment.network)
+            .collect();
+        assert!(!expected_deployments.is_empty());
+        let selected_deployments: Vec<_> = runtime
+            .deployments
+            .iter()
+            .map(|deployment| deployment.network.clone())
+            .collect();
+        assert_eq!(selected_deployments, expected_deployments);
+        let wallet = runtime
+            .connections
+            .iter()
+            .find_map(|connection| match connection {
+                ConnectionConfig::Evm {
+                    name,
+                    credential_ref,
+                    ..
+                } if name == "dev-wallet" => credential_ref.as_deref(),
+                _ => None,
+            });
+        let hyperliquid = runtime
+            .connections
+            .iter()
+            .find_map(|connection| match connection {
+                ConnectionConfig::Hyperliquid {
+                    name,
+                    credential_ref,
+                    ..
+                } if name == "dev-hyperliquid" => credential_ref.as_deref(),
+                _ => None,
+            });
+        assert_eq!(wallet, Some(reference.as_str()));
+        assert_eq!(hyperliquid, Some(reference.as_str()));
+    }
+
+    #[test]
+    fn reviewed_chain_scope_rejects_empty_duplicate_and_unreviewed_ids() {
+        let mut config = EnvironmentConfig::empty("env");
+        for invalid in [vec![], vec![42161, 42161], vec![31337]] {
+            config.reviewed_chain_ids = Some(invalid);
+            assert!(broker_config(&config).is_err());
+        }
+    }
+
+    #[test]
     fn development_policy_limits_tighten_custom_policy_and_rpc_override_is_preserved() {
         let mut profile = EnvironmentConfig::empty("env");
         profile.policy = Some(custom_development_policy());
@@ -827,6 +946,49 @@ mod tests {
     }
 
     #[test]
+    fn primary_evm_dev_connection_also_enrolls_hyperliquid_with_same_signer_reference() {
+        let mut config = EnvironmentConfig::empty("env");
+        let reference = uuid::Uuid::from_u128(1).hyphenated().to_string();
+        config.credentials.evm_primary = Some(reference.clone());
+        config.evm_addresses = vec!["0x1111111111111111111111111111111111111111".into()];
+        let broker = broker_config(&config).unwrap();
+        let wallet_ref = broker
+            .connections
+            .iter()
+            .find_map(|connection| match connection {
+                ConnectionConfig::Evm {
+                    name,
+                    credential_ref,
+                    ..
+                } if name == "dev-wallet" => credential_ref.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        let hyperliquid_ref = broker
+            .connections
+            .iter()
+            .find_map(|connection| match connection {
+                ConnectionConfig::Hyperliquid {
+                    name,
+                    credential_ref,
+                    ..
+                } if name == "dev-hyperliquid" => credential_ref.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(wallet_ref, &reference);
+        assert_eq!(hyperliquid_ref, &reference);
+        assert_eq!(
+            broker
+                .connections
+                .iter()
+                .filter(|connection| matches!(connection, ConnectionConfig::Hyperliquid { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn classifies_synthetic_ed25519_and_rsa_pem_keys() {
         assert!(matches!(
             classify_binance_pem("ed-fixture".into(), ED25519_PEM.replace("\\n", "\n")).unwrap(),
@@ -843,10 +1005,14 @@ mod tests {
     async fn offline_import_roundtrips_main_and_sub_ed25519_credentials() {
         let dir = tempdir().unwrap();
         let config_path = dir.path().join("config.json");
+        let journal_path = dir.path().join("operations.sqlite");
+        let prior_journal = b"synthetic journal sentinel";
+        fs::write(&journal_path, prior_journal).unwrap();
         let credential_dir = dir.path().join("credentials");
         let dotenv_path = dir.path().join("keys.env");
         let mut initial = EnvironmentConfig::empty("env");
         initial.policy = Some(custom_development_policy());
+        initial.reviewed_chain_ids = Some(vec![42161]);
         initial
             .rpc_urls
             .insert(1, vec!["https://archive.example.invalid".into()]);
@@ -859,6 +1025,7 @@ mod tests {
         import(&config_path, "env", &dotenv_path, &credential_dir, false)
             .await
             .unwrap();
+        assert_eq!(fs::read(&journal_path).unwrap(), prior_journal);
 
         let saved = EnvironmentConfig::read(&config_path, "env").unwrap();
         assert_eq!(saved.binance_uid.as_deref(), Some("100"));
@@ -868,6 +1035,7 @@ mod tests {
             Some("child@example.invalid")
         );
         assert_eq!(saved.policy, Some(custom_development_policy()));
+        assert_eq!(saved.reviewed_chain_ids, Some(vec![42161]));
         assert_eq!(
             saved.rpc_urls.get(&1),
             Some(&vec!["https://archive.example.invalid".into()])

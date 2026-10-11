@@ -61,14 +61,30 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
     let remaining = expiry
         .signed_duration_since(chrono::Utc::now())
         .num_milliseconds();
-    if challenge.purpose != "configuration"
-        || !challenge.operation_id.starts_with("configuration:")
-        || !matches!(
+    let local_configuration = challenge.purpose == "configuration"
+        && challenge.operation_id.starts_with("configuration:")
+        && matches!(
             challenge.binding["action"].as_str(),
             Some("initialize" | "add" | "update" | "remove" | "policy_set")
         )
-        || challenge.binding["financial_movement"] != false
-        || challenge.binding["future_financial_authority"] != false
+        && challenge.binding["financial_movement"] == false
+        && challenge.binding["future_financial_authority"] == false;
+    let protected_venue_configuration = challenge.purpose == "configuration_write"
+        && matches!(
+            challenge.binding["operation"].as_str(),
+            Some(
+                "hyperliquid.account.set_abstraction"
+                    | "hyperliquid.account.set_dex_abstraction"
+                    | "hyperliquid.account.set_agent_abstraction"
+                    | "hyperliquid.account.create_subaccount"
+                    | "hyperliquid.referral.set"
+                    | "hyperliquid.builder.approve_fee"
+                    | "hyperliquid.vault.create"
+            )
+        );
+    if !(local_configuration || protected_venue_configuration)
+        || challenge.operation_id.trim().is_empty()
+        || challenge.summary.trim().is_empty()
         || binding_hash(&challenge.binding)? != challenge.binding_hash
         || remaining > 90_000
     {
@@ -2487,6 +2503,23 @@ mod tests {
         }
     }
 
+    pub(super) fn human_configuration_write() -> AuthorizationChallenge {
+        let binding = serde_json::json!({
+            "version":1,
+            "operation":"hyperliquid.account.set_agent_abstraction",
+            "execution":{"account":"hl-main","mode":"agent"}
+        });
+        AuthorizationChallenge {
+            purpose: "configuration_write".into(),
+            operation_id: "synthetic-operation-id".into(),
+            binding_hash: binding_hash(&binding).unwrap(),
+            binding,
+            nonce: "b".repeat(64),
+            summary: "Synthetic Hyperliquid configuration".into(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+        }
+    }
+
     #[test]
     fn configuration_expiry_is_actionable_and_distinct_from_invalid_requests() {
         let mut challenge = configuration();
@@ -2589,6 +2622,23 @@ mod tests {
             }
             assert!(proof.validate_for(&changed, 501).is_err(), "{field}");
         }
+    }
+
+    #[test]
+    fn human_configuration_write_review_requires_exact_allowlisted_operation() {
+        let challenge = human_configuration_write();
+        configuration_challenge(&challenge).unwrap();
+        let mut vault = challenge.clone();
+        vault.binding["operation"] = serde_json::json!("hyperliquid.vault.create");
+        vault.binding_hash = binding_hash(&vault.binding).unwrap();
+        configuration_challenge(&vault).unwrap();
+        let mut invalid = challenge.clone();
+        invalid.binding["operation"] = serde_json::json!("hyperliquid.orders.place");
+        invalid.binding_hash = binding_hash(&invalid.binding).unwrap();
+        assert!(configuration_challenge(&invalid).is_err());
+        let mut wrong_purpose = challenge.clone();
+        wrong_purpose.purpose = "financial_write".into();
+        assert!(configuration_challenge(&wrong_purpose).is_err());
     }
 
     #[test]

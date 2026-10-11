@@ -88,7 +88,7 @@ impl Adapter for CountingAdapter {
             name: self.prepared.operation.clone(),
             description: "Synthetic cost-origin guard fixture.".into(),
             kind: fin_domain::OperationKind::Write,
-            execution_actor: fin_domain::ExecutionActor::HumanInteractive,
+            execution_actor: fin_domain::ExecutionActor::AgentInvocable,
             input_schema: json!({"type":"object"}),
             output_schema: json!({"type":"object"}),
             error_schema: json!({"type":"object"}),

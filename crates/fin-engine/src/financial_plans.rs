@@ -774,6 +774,7 @@ impl Engine {
                 None,
                 Some(plan.clone()),
                 Some(prepared),
+                super::ExecutionRoute::Financial,
             )
             .await;
         match result {
@@ -788,7 +789,13 @@ impl Engine {
                     operation.error = Some(error);
                     operation.updated_at = now();
                     if operation.status.terminal() {
-                        self.commit_terminal(operation.clone(), json!(null), json!([]), None)?;
+                        self.commit_terminal(
+                            operation.clone(),
+                            json!(null),
+                            json!([]),
+                            None,
+                            None,
+                        )?;
                     } else {
                         self.update_record(&operation)?;
                     }
@@ -4712,6 +4719,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exact_scope_without_fees_is_valid_but_zero_fee_caps_remain_invalid() {
+        let debit = resource_amount("hl:spot:primary", "USDC", "11000000");
+        let mut scope = FinancialPlanExactScope {
+            mode: financial_plans::FinancialPlanExactMode::Exact,
+            maximum_debits: vec![debit],
+            maximum_costs: vec![],
+            possible_credits: vec![],
+        };
+        validate_exact_scope(&scope).unwrap();
+
+        scope.maximum_costs.push(CostBound {
+            location: AccountingLocation::Cash {
+                resource: ResourceId("hl:spot:primary".into()),
+            },
+            amount: Amount {
+                asset: asset("USDC"),
+                atoms: Quantity::zero(),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        });
+        assert_eq!(
+            validate_exact_scope(&scope).unwrap_err().code,
+            "PLAN_EXACT_SCOPE_INVALID"
+        );
+    }
+
     fn conversion_and_fee() -> Vec<FinancialEffect> {
         // Fee intentionally precedes the gross receipt to ensure accounting
         // does not depend on adapter effect ordering.
@@ -5110,6 +5144,59 @@ mod tests {
             error: None,
             run_id: None,
         }
+    }
+
+    #[test]
+    fn zero_cost_settlement_preserves_principal_without_positive_fee_usage() {
+        let mut plan = prior_record();
+        plan.usage = FinancialPlanUsage::default();
+        plan.revision.permissions[0]
+            .permission
+            .as_mut()
+            .unwrap()
+            .possible_credits
+            .push(FinancialPlanFundingIdentity {
+                resource: ResourceId("spot".into()),
+                asset: asset("USDT"),
+            });
+        let amount = Amount {
+            asset: asset("USDT"),
+            atoms: Quantity::new("5").unwrap(),
+        };
+        let operation = settled_effect_record(vec![
+            FinancialEffect::Transfer {
+                from: ResourceId("acct".into()),
+                to: ResourceId("spot".into()),
+                debit: amount.clone(),
+                credit: amount,
+            },
+            FinancialEffect::Cost {
+                location: AccountingLocation::Cash {
+                    resource: ResourceId("acct".into()),
+                },
+                amount: Amount {
+                    asset: asset("USDT"),
+                    atoms: Quantity::zero(),
+                },
+                category: "synthetic-zero-fee".into(),
+                treatment: CostTreatment::AdditionalDebit,
+            },
+        ]);
+        account_financial_plan_effects(&mut plan, &operation).unwrap();
+        assert_eq!(
+            plan.usage.consumed_debits,
+            vec![resource_amount("acct", "USDT", "5")]
+        );
+        assert!(
+            plan.usage
+                .consumed_costs
+                .iter()
+                .all(|cost| cost.amount.atoms.is_zero())
+        );
+        assert!(plan.usage.reservations.is_empty());
+        assert_eq!(plan.usage.verified_proceeds.len(), 1);
+        assert_eq!(plan.usage.verified_proceeds[0].resource.0, "spot");
+        assert_eq!(plan.usage.verified_proceeds[0].available.as_str(), "5");
     }
 
     #[test]

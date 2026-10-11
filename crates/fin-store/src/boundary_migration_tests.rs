@@ -75,6 +75,8 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
          DROP TABLE bridge_settlement_proofs;
          DROP TABLE bridge_evidence_ids;
          DROP TABLE bridge_transfers;
+         DROP TABLE settlement_progress;
+         DROP TABLE signer_nonces;
          PRAGMA user_version=2;",
         )
         .unwrap();
@@ -85,7 +87,7 @@ fn v2_to_v3_keeps_grants_unresolved_submissions_and_exact_reservations() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         reopened.get_record("SYNTHETIC-op").unwrap().unwrap(),
@@ -208,6 +210,8 @@ fn named_plans_v4_upgrades_with_bridge_schema_without_replaying_rows() {
              DROP TABLE bridge_settlement_proofs;
              DROP TABLE bridge_evidence_ids;
              DROP TABLE bridge_transfers;
+             DROP TABLE settlement_progress;
+             DROP TABLE signer_nonces;
              PRAGMA user_version=4;",
         )
         .unwrap();
@@ -219,7 +223,7 @@ fn named_plans_v4_upgrades_with_bridge_schema_without_replaying_rows() {
             .conn
             .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        9
+        10
     );
     assert_eq!(
         upgraded.financial_plan("SYNTHETIC-plan").unwrap(),
@@ -302,6 +306,8 @@ fn unknown_v4_database_is_rejected_without_ddl_or_row_changes() {
              DROP TABLE bridge_settlement_proofs;
              DROP TABLE bridge_evidence_ids;
              DROP TABLE bridge_transfers;
+             DROP TABLE settlement_progress;
+             DROP TABLE signer_nonces;
              PRAGMA user_version=4;",
         )
         .unwrap();

@@ -36,6 +36,14 @@ pub enum PublicConnection {
         address: String,
         signing_enabled: bool,
     },
+    Hyperliquid {
+        name: String,
+        resource: ResourceId,
+        owner: String,
+        execution_address: String,
+        execution_scope: String,
+        signing_enabled: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -91,6 +99,26 @@ mod tests {
             let mut changed = connection.clone();
             changed[forbidden] = json!("SYNTHETIC-SECRET");
             assert!(serde_json::from_value::<PublicConnection>(changed).is_err());
+        }
+    }
+
+    #[test]
+    fn hyperliquid_public_metadata_exposes_owner_without_protected_reference() {
+        let value = json!({
+            "provider":"hyperliquid",
+            "name":"hl-main",
+            "resource":"hyperliquid:mainnet:0x1111111111111111111111111111111111111111:account:primary",
+            "owner":"0x1111111111111111111111111111111111111111",
+            "execution_address":"0x1111111111111111111111111111111111111111",
+            "execution_scope":"owner",
+            "signing_enabled":true
+        });
+        let parsed: PublicConnection = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        for forbidden in ["credential_ref", "private_key", "api_key", "signature"] {
+            let mut wrong = value.clone();
+            wrong[forbidden] = json!("SYNTHETIC-SECRET");
+            assert!(serde_json::from_value::<PublicConnection>(wrong).is_err());
         }
     }
 }

@@ -133,6 +133,46 @@ impl CredentialProvider for DevelopmentCredentialProvider {
 }
 
 impl BrokerCredentialProvider for DevelopmentCredentialProvider {
+    fn hyperliquid_signer(
+        &self,
+        credential: &str,
+        owner: &str,
+    ) -> Result<fin_exchange::ccxt::HyperliquidSigner> {
+        let reference = CredentialRef::new(credential)?;
+        self.material(&reference, |material| match material {
+            SecretMaterial::EvmPrivateKey { private_key } => {
+                let parsed =
+                    fin_evm::LocalEnvelopeSigner::from_private_key(private_key).map_err(|_| {
+                        FinError::new(
+                            "CREDENTIAL_INVALID",
+                            "credentials",
+                            "Development EVM key material is invalid.",
+                            "Re-import a valid disposable EVM private key.",
+                        )
+                    })?;
+                let derived = format!("{:#x}", parsed.address()).to_ascii_lowercase();
+                if !derived.eq_ignore_ascii_case(owner) {
+                    return Err(FinError::new(
+                        "SIGNER_ADDRESS_MISMATCH",
+                        "signing",
+                        "The development key does not derive the configured Hyperliquid owner.",
+                        "Correct the owner or re-import the disposable development key.",
+                    ));
+                }
+                Ok(fin_exchange::ccxt::HyperliquidSigner {
+                    private_key: Zeroizing::new(private_key.clone()),
+                    wallet_address: derived,
+                })
+            }
+            _ => Err(FinError::new(
+                "CREDENTIAL_TYPE_MISMATCH",
+                "credentials",
+                "Development credential is not an EVM wallet key.",
+                "Import the disposable EVM key for this Hyperliquid owner.",
+            )),
+        })
+    }
+
     fn envelope_signer(
         &self,
         reference: &CredentialRef,
@@ -171,6 +211,88 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
             }
             _ => Err(FinError::validation("Credential type mismatch.")),
         })
+    }
+}
+
+#[cfg(test)]
+mod hyperliquid_signer_tests {
+    use super::*;
+
+    fn development_provider() -> (tempfile::TempDir, DevelopmentCredentialProvider) {
+        let directory = tempfile::tempdir().unwrap();
+        create_store(directory.path()).unwrap();
+        let provider = DevelopmentCredentialProvider::new(directory.path().to_path_buf()).unwrap();
+        (directory, provider)
+    }
+
+    #[test]
+    fn hyperliquid_signer_accepts_matching_synthetic_evm_key() {
+        let (directory, provider) = development_provider();
+        let private_key = "01".repeat(32);
+        let material = SecretMaterial::EvmPrivateKey {
+            private_key: private_key.clone(),
+        };
+        let reference = write_material(directory.path(), &material).unwrap();
+        let expected_address = format!(
+            "{:#x}",
+            fin_evm::LocalEnvelopeSigner::from_private_key(&private_key)
+                .unwrap()
+                .address()
+        );
+
+        let signer = provider
+            .hyperliquid_signer(reference.as_str(), &expected_address.to_uppercase())
+            .unwrap();
+        assert_eq!(signer.wallet_address, expected_address);
+        assert_eq!(signer.private_key.as_str(), private_key);
+    }
+
+    #[test]
+    fn hyperliquid_signer_rejects_wrong_owner_and_non_evm_material() {
+        let (directory, provider) = development_provider();
+        let key_reference = write_material(
+            directory.path(),
+            &SecretMaterial::EvmPrivateKey {
+                private_key: "02".repeat(32),
+            },
+        )
+        .unwrap();
+        let result = provider.hyperliquid_signer(
+            key_reference.as_str(),
+            "0x0000000000000000000000000000000000000001",
+        );
+        assert!(matches!(result, Err(error) if error.code == "SIGNER_ADDRESS_MISMATCH"));
+
+        let other_reference = write_material(
+            directory.path(),
+            &SecretMaterial::BinanceHmac {
+                api_key: "SYNTHETIC-API-KEY".into(),
+                secret: "SYNTHETIC-SECRET".into(),
+            },
+        )
+        .unwrap();
+        let result = provider.hyperliquid_signer(
+            other_reference.as_str(),
+            "0x0000000000000000000000000000000000000001",
+        );
+        assert!(matches!(result, Err(error) if error.code == "CREDENTIAL_TYPE_MISMATCH"));
+    }
+
+    #[test]
+    fn hyperliquid_signer_sanitizes_invalid_scalar_error() {
+        let (directory, provider) = development_provider();
+        let reference = write_material(
+            directory.path(),
+            &SecretMaterial::EvmPrivateKey {
+                private_key: "00".repeat(32),
+            },
+        )
+        .unwrap();
+        let result = provider.hyperliquid_signer(
+            reference.as_str(),
+            "0x0000000000000000000000000000000000000001",
+        );
+        assert!(matches!(result, Err(error) if error.code == "CREDENTIAL_INVALID"));
     }
 }
 

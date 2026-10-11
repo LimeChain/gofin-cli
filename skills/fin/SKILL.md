@@ -38,6 +38,18 @@ Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financi
 
 EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
+Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
+through the protected broker after updating Fin. Use `fin connections list --json`
+to inspect the wallet; no separate Hyperliquid row is shown. Use the existing
+wallet name as the Hyperliquid `account`. The internal mapping reuses the same
+protected signer/address; read-only wallets remain read-only.
+No separate owner key enrollment is needed. Existing explicit same-owner aliases
+and permissions take precedence, and subaccounts/vaults still need explicit
+human-reviewed relationship enrollment. Linking grants no financial authority.
+Read the installed `hyperliquid.*` schemas and fresh account state before planning
+funding or trades; legacy Arbitrum USDC deposits and Arbitrum withdrawals remain
+separate reviewed financial writes with correlated destination proof.
+
 ## Bridge transfers
 
 Start with discovery, then request quotes. Quote-time `bounds` are optional

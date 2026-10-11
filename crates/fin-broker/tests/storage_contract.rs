@@ -15,7 +15,6 @@ fn storage_contract_exports_the_actual_supported_schema_without_initializing_run
         actual,
         json!({"journal_schema_version": fin_store::supported_schema_version()})
     );
-    assert_eq!(actual["journal_schema_version"], 9);
 }
 
 #[test]

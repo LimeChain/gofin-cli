@@ -6,7 +6,8 @@ Fin is a compiled Rust CLI for local financial execution. An agent discovers
 operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
-orders, reusable EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
+orders, Hyperliquid REST spot/perpetual trading and account actions, reusable
+EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
 EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood;
 and Ethereum mainnet Aave.
@@ -22,7 +23,7 @@ bridge providers follow later. Fin is open source; license selection is pending.
 | `fin-broker` | Binary: `fin-broker`, plus an internal Rust library | Load protected configuration, construct integrations, independently validate requests, and coordinate execution. |
 | `fin-engine` | Rust library | Enforce financial limits, manage previews and reservations, coordinate fresh approval, prevent duplicates, and recover uncertain outcomes. |
 | `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
-| Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
+| Application adapters: `fin-binance`, `fin-hyperliquid`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
 | `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
 | `fin-authorization` | Rust library | Enforce OS authorization and verify exact approvals or finite operation-boundary consent. Invoke the internal native helper. |
 | `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
@@ -135,6 +136,71 @@ and read-only connections. Inspect provider-specific prerequisites with
 A reusable EVM wallet appears once, with its supported networks grouped under
 `details.networks`. Derived withdrawal destinations and per-chain signer records
 remain internal to plan authorization; they are not additional enrollments.
+
+Every reusable EVM wallet automatically exposes its Hyperliquid owner account
+using the same protected signer and address. Existing wallets receive the link
+after updating Fin; no credential reentry or separate enrollment is needed.
+Read-only wallets remain read-only, and all financial writes retain Fin approval
+and policy checks. Use the existing wallet name as the Hyperliquid `account`
+(for example, `evm-dev`). `fin connections list` continues to show one wallet
+row; the Hyperliquid owner mapping stays internal, like per-chain wallet views.
+
+Explicit owner connections remain available for independently managed accounts.
+Existing same-owner connections keep their aliases and permissions; Fin does
+not create a duplicate account observer or elevate an explicit read-only account.
+Enroll an independent owner in your own Terminal:
+
+```sh
+fin connections add --provider hyperliquid --name hl-main --credential-type private_key --address 0x1111111111111111111111111111111111111111
+fin connections add --provider hyperliquid --name hl-watch --credential-type read_only --address 0x1111111111111111111111111111111111111111
+```
+
+Delegated subaccounts and vaults are enrolled as separate human-reviewed
+connections using an existing protected master signer. Fin verifies their exact
+relationship with Hyperliquid and rechecks it before writes. Their reads and
+trading actions use the delegated address, while signing keys and nonce state
+remain bound to the master. The delegated scope supports trading, isolated
+margin and TWAP; account transfers, deposits, withdrawals and administration
+remain owner-only. See [terminal onboarding](docs/onboarding.md)
+and the [capability guide](docs/hyperliquid-capabilities.md).
+
+Hyperliquid account mode affects cash accounting. Standard accounts keep spot
+and perpetual collateral separate; Unified accounts share one cash balance,
+which Fin counts once while retaining derivative positions separately.
+Portfolio Margin and DEX abstraction currently fail closed because automatic
+borrowing and cross-DEX collateral liabilities are not yet represented as
+verified ledger effects. Mode-aware snapshots verify the native `userRole` and
+reject API-wallet roles as master identities.
+See Hyperliquid's [account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)
+and the [capability and evidence matrix](docs/hyperliquid-capabilities.md).
+
+The example address is synthetic. Signing enrollment checks that the protected
+key derives the selected owner; this enrollment is offline and does not verify
+venue account access. Hyperliquid's implemented read and write scope, native
+market identities and explicitly unverified branches are listed in the
+[capability guide](docs/hyperliquid-capabilities.md).
+That guide also records which catalog examples are synthetic and schema-checked,
+the automated evidence for each read/write family, and the current USDC-only
+quote constraint on writes.
+
+For a protected human verification sequence, follow the
+[Hyperliquid plan checklist](docs/testing/hyperliquid.md#prepare-a-human-verification-plan).
+The preparation helper uses Fin reads and previews only; it grants no authority
+and submits no orders or withdrawals.
+
+For one unresolved owner-signed USDC spot/perpetual class transfer,
+`hyperliquid.account.invalidate_nonce` prepares a separate approved recovery
+using the original Fin operation ID. Only a verified native Noop acknowledgement
+for its exact old nonce can release the original reservations. Errors or lost
+responses leave them held; the transfer is never replayed. See the
+[recovery contract](docs/hyperliquid-capabilities.md#exact-nonce-recovery-for-uncertain-class-transfers).
+
+The human-only Hyperliquid administration operations use `fin configure`; they
+are not available through `fin execute`. Review without dispatch first with
+`--dry-run --json`. To perform a change, run `fin configure OPERATION --input
+JSON --id REQUEST_ID` yourself in a human Terminal; Fin displays the exact
+configuration scope before requesting Touch ID. `--json` on an actual change
+returns a human-terminal handoff without contacting the protected service.
 
 Binance can be enrolled before an EVM wallet. Withdrawals select the exact
 coin/network from live Binance metadata and accept a named destination or public

@@ -27,6 +27,7 @@ pub enum Provider {
     #[serde(rename = "coingecko")]
     #[value(name = "coingecko")]
     CoinGecko,
+    Hyperliquid,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -45,6 +46,15 @@ pub enum CredentialType {
     PrivateKey,
     ReadOnly,
     ApiKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
+pub enum HyperliquidScopeKind {
+    Owner,
+    Subaccount,
+    Vault,
 }
 
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -73,6 +83,13 @@ pub struct AddConnectionArgs {
     /// Expected public wallet address; checked against the protected signer.
     #[arg(long)]
     pub address: Option<String>,
+    /// Hyperliquid execution account kind. Delegated scopes are attached only
+    /// to an already-enrolled protected master signer during human enrollment.
+    #[arg(long, value_enum)]
+    pub hyperliquid_scope: Option<HyperliquidScopeKind>,
+    /// Hyperliquid subaccount or vault address to attach to the protected master.
+    #[arg(long)]
+    pub execution_address: Option<String>,
     /// CoinGecko API plan: demo (default) or pro. Public metadata only.
     #[arg(long, value_parser = ["demo", "pro"])]
     pub api_plan: Option<String>,
@@ -92,6 +109,15 @@ pub struct NamedConnectionArgs {
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationCommandInput {
+    pub operation: String,
+    pub input: Value,
+    pub request_id: Option<String>,
+    pub dry_run: Option<bool>,
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -333,7 +359,72 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             "--api-plan belongs only to a CoinGecko market-data connection.",
         ));
     }
+    if args.provider != Provider::Hyperliquid
+        && (args.hyperliquid_scope.is_some() || args.execution_address.is_some())
+    {
+        return Err(FinError::validation(
+            "Hyperliquid scope options belong only to a Hyperliquid connection.",
+        ));
+    }
     match args.provider {
+        Provider::Hyperliquid => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.api_plan.is_some()
+            {
+                return Err(FinError::validation(
+                    "Hyperliquid connections require an owner address and do not accept Binance relationships, EVM networks or market-data plans.",
+                ));
+            }
+            if args.address.as_deref().is_none_or(|address| {
+                address.len() != 42
+                    || !address.starts_with("0x")
+                    || !address[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || address[2..].bytes().all(|byte| byte == b'0')
+            }) {
+                return Err(FinError::validation(
+                    "Hyperliquid requires --address with the exact nonzero owner address.",
+                ));
+            }
+            let delegated = matches!(
+                args.hyperliquid_scope,
+                Some(HyperliquidScopeKind::Subaccount | HyperliquidScopeKind::Vault)
+            );
+            if delegated != args.execution_address.is_some() {
+                return Err(FinError::validation(
+                    "Hyperliquid delegated scope requires both --hyperliquid-scope and --execution-address.",
+                ));
+            }
+            if let Some(execution_address) = &args.execution_address
+                && (execution_address.len() != 42
+                    || !execution_address.starts_with("0x")
+                    || !execution_address[2..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                    || execution_address[2..].bytes().all(|byte| byte == b'0'))
+            {
+                return Err(FinError::validation(
+                    "Hyperliquid execution address must be a valid nonzero address.",
+                ));
+            }
+            if delegated && args.credential_type.is_some() {
+                return Err(FinError::validation(
+                    "A delegated Hyperliquid scope reuses the protected master signer; do not provide a new credential type.",
+                ));
+            }
+            if !delegated
+                && !matches!(
+                    args.credential_type,
+                    Some(CredentialType::PrivateKey | CredentialType::ReadOnly)
+                )
+            {
+                return Err(FinError::validation(
+                    "Hyperliquid requires --credential-type private_key or read_only.",
+                ));
+            }
+        }
         Provider::CoinGecko => {
             if args.role.is_some()
                 || args.parent.is_some()
@@ -491,11 +582,14 @@ pub fn operation_definitions() -> Vec<Definition> {
             "fin connections add --provider binance --name savings --role sub --parent main --email subaccount@example.invalid --credential-type hmac",
             "fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo",
             "fin connections add --provider evm --name wallet --credential-type private_key",
-            "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111"
+            "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111",
+            "fin connections add --provider hyperliquid --name hl-main --credential-type read_only --address 0x1111111111111111111111111111111111111111",
+            "fin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
+        "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
         "next_check":"fin connections list --json"
@@ -710,6 +804,23 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"provider":"binance","name":"main","role":"main","credential_type":"rsa"}),
             enrollment.clone(),
         ),
+        definition::<ConfigurationCommandInput>(
+            "configure",
+            "Review or execute a human-interactive venue configuration operation. Actual requests run only from the human's protected Terminal and require fresh Touch ID.",
+            OperationKind::Configuration,
+            ExecutionActor::HumanInteractive,
+            json!({"operation":"hyperliquid.account.set_agent_abstraction","input":{"account":"hl-main","enabled":true},"request_id":"SYNTHETIC-config-change-1"}),
+            json!({
+                "command_line_examples":[
+                    "fin configure hyperliquid.account.set_agent_abstraction --input '{\"account\":\"hl-main\",\"enabled\":true}' --dry-run --json",
+                    "fin configure hyperliquid.account.set_agent_abstraction --input '{\"account\":\"hl-main\",\"enabled\":true}' --id CONFIG_REQUEST_ID"
+                ],
+                "human_only":true,
+                "dry_run":{"broker_method":"configuration_preview","read_only":true,"json_allowed":true},
+                "actual":{"requires_human_terminal":true,"requires_fresh_touch_id":true,"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery","run_id":null,"financial_plan":false},
+                "allowed_operations":"Only exact definitions marked OperationKind::Configuration and ExecutionActor::HumanInteractive can pass the protected engine route. The Hyperliquid admin operations are listed individually in capabilities."
+            }),
+        ),
         definition::<AddConnectionArgs>(
             "connections.update",
             "Update a named connection through protected human enrollment while preserving its stable identity and provider relationship.",
@@ -778,7 +889,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
     connection_schema["$defs"]["Provider"]["enum"] =
-        json!(["binance", "evm", "ethereum", "coingecko"]);
+        json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"]);
     connection_schema["allOf"] = json!([
         {
             "if": {"properties":{"provider":{"const":"binance"}},"required":["provider"]},
@@ -791,6 +902,14 @@ pub fn operation_definitions() -> Vec<Definition> {
                     {"properties":{"role":{"const":"sub"}},"not":{"anyOf":[{"required":["parent"]},{"required":["email"]}]}},
                     {"properties":{"role":{"const":"sub"}},"required":["parent","email"]}
                 ]
+            }
+        },
+        {
+            "if":{"properties":{"provider":{"const":"hyperliquid"}},"required":["provider"]},
+            "then":{
+                "required":["credential_type","address"],
+                "properties":{"credential_type":{"enum":["private_key","read_only"]},"address":{"type":"string","pattern":"^0x[0-9a-fA-F]{40}$"}},
+                "not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["api_plan"]}]}
             }
         },
         {
@@ -1016,7 +1135,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             definition.input_schema["allOf"].as_array().unwrap().len(),
-            3
+            4
         );
         assert_eq!(
             definition.output_schema,
@@ -1049,6 +1168,33 @@ mod tests {
             definition.semantics["binance"]["subaccount_modes"]["standalone"]["hierarchy_authority"],
             "none inferred"
         );
+    }
+
+    #[test]
+    fn hyperliquid_delegated_scope_is_explicit_and_cannot_collect_a_new_key() {
+        use clap::Parser;
+        let args = Cli::try_parse_from([
+            "fin",
+            "--provider",
+            "hyperliquid",
+            "--name",
+            "hl-sub",
+            "--address",
+            "0x1111111111111111111111111111111111111111",
+            "--hyperliquid-scope",
+            "subaccount",
+            "--execution-address",
+            "0x2222222222222222222222222222222222222222",
+        ])
+        .unwrap();
+        validate_add(&args.add).unwrap();
+
+        let mut missing_target = args.add.clone();
+        missing_target.execution_address = None;
+        assert!(validate_add(&missing_target).is_err());
+        let mut new_key = args.add;
+        new_key.credential_type = Some(CredentialType::PrivateKey);
+        assert!(validate_add(&new_key).is_err());
     }
 
     #[test]
@@ -1284,10 +1430,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             add.input_schema["$defs"]["Provider"]["enum"],
-            json!(["binance", "evm", "ethereum", "coingecko"])
+            json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"])
         );
         assert_eq!(
-            add.input_schema["allOf"][1]["then"]["required"],
+            add.input_schema["allOf"][2]["then"]["required"],
             json!(["credential_type"])
         );
         let evm = &add.semantics["evm"];
@@ -1343,6 +1489,83 @@ mod tests {
             validate_add(&parsed.add).unwrap();
             assert!(parsed.add.network.is_none());
         }
+    }
+
+    #[test]
+    fn hyperliquid_enrollment_requires_explicit_owner_and_safe_signing_choice() {
+        let mut input = json!({
+            "provider":"hyperliquid",
+            "name":"hl-main",
+            "credential_type":"private_key",
+            "address":"0x1111111111111111111111111111111111111111"
+        });
+        let args: AddConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+        validate_add(&args).unwrap();
+        assert_eq!(
+            serde_json::to_value(args).unwrap()["provider"],
+            "hyperliquid"
+        );
+        for forbidden in ["role", "parent", "email", "network", "api_plan"] {
+            input[forbidden] = match forbidden {
+                "role" => json!("main"),
+                "network" => json!("ethereum:1"),
+                "api_plan" => json!("demo"),
+                _ => json!("synthetic"),
+            };
+            let args: AddConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+            assert!(validate_add(&args).is_err(), "accepted {forbidden}");
+            input.as_object_mut().unwrap().remove(forbidden);
+        }
+        input.as_object_mut().unwrap().remove("address");
+        let args: AddConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+        assert!(validate_add(&args).is_err());
+        input["address"] = json!("0x0000000000000000000000000000000000000000");
+        let args: AddConnectionArgs = serde_json::from_value(input.clone()).unwrap();
+        assert!(validate_add(&args).is_err());
+        input["address"] = json!("0x1111111111111111111111111111111111111111");
+        input["credential_type"] = json!("read_only");
+        let args: AddConnectionArgs = serde_json::from_value(input).unwrap();
+        validate_add(&args).unwrap();
+    }
+
+    #[test]
+    fn hyperliquid_schema_documents_owner_and_does_not_include_credentials() {
+        use clap::Parser;
+        let add = operation_definitions()
+            .into_iter()
+            .find(|definition| definition.name == "connections.add")
+            .unwrap();
+        assert!(
+            add.input_schema["$defs"]["Provider"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("hyperliquid"))
+        );
+        let metadata = &add.semantics["hyperliquid"];
+        assert_eq!(metadata["owner_required"], true);
+        assert_eq!(metadata["enrollment_network_call"], true);
+        assert_eq!(metadata["automatic_evm_link"]["supported"], true);
+        assert_eq!(metadata["automatic_evm_link"]["credential_reentry"], false);
+        assert_eq!(
+            metadata["automatic_evm_link"]["separate_public_connection"],
+            false
+        );
+        assert_eq!(metadata["automatic_evm_link"]["financial_authority"], false);
+        assert!(metadata["execution_scopes"]["subaccount"].is_string());
+        assert!(metadata["execution_scopes"]["vault"].is_string());
+        let parsed = Cli::try_parse_from([
+            "fin",
+            "--provider",
+            "hyperliquid",
+            "--name",
+            "hl-main",
+            "--credential-type",
+            "read_only",
+            "--address",
+            "0x1111111111111111111111111111111111111111",
+        ])
+        .unwrap();
+        validate_add(&parsed.add).unwrap();
     }
 
     #[test]
@@ -1438,7 +1661,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            add.input_schema["allOf"][2]["then"]["properties"]["credential_type"]["const"],
+            add.input_schema["allOf"][3]["then"]["properties"]["credential_type"]["const"],
             "api_key"
         );
         for example in add.semantics["command_line_examples"]

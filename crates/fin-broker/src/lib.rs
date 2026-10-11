@@ -10,12 +10,17 @@ pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
 mod evm_router;
+pub mod hyperliquid_deposit;
+mod hyperliquid_transport;
+pub mod hyperliquid_withdrawal;
 mod policy;
 mod pricing;
 mod pricing_cache;
 mod public_submission;
 pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
+pub use hyperliquid_deposit::HyperliquidEthereumDepositAdapter;
+pub use hyperliquid_withdrawal::HyperliquidArbitrumWithdrawalProof;
 pub use pricing::SharedUsdValuator;
 
 use async_trait::async_trait;
@@ -146,6 +151,19 @@ pub enum ConnectionConfig {
         resource: ResourceId,
         credential_ref: String,
         api_plan: String,
+    },
+    Hyperliquid {
+        name: String,
+        resource: ResourceId,
+        owner: String,
+        credential_ref: Option<String>,
+        signing_enabled: bool,
+        #[serde(default)]
+        execution_scope: fin_hyperliquid::HyperliquidExecutionScope,
+        /// Runtime-only provenance for links derived from reusable EVM wallets.
+        /// This must never be persisted as an enrolled connection.
+        #[serde(skip)]
+        auto_derived: bool,
     },
 }
 
@@ -332,6 +350,42 @@ impl BrokerConfigV2 {
                     }
                     (name, resource)
                 }
+                ConnectionConfig::Hyperliquid {
+                    name,
+                    resource,
+                    owner,
+                    credential_ref,
+                    signing_enabled,
+                    execution_scope,
+                    ..
+                } => {
+                    let execution_address = execution_scope.address().unwrap_or(owner);
+                    if !fin_hyperliquid::valid_address(owner)
+                        || owner[2..].bytes().all(|byte| byte == b'0')
+                        || owner.bytes().any(|byte| byte.is_ascii_uppercase())
+                        || !fin_hyperliquid::valid_address(execution_address)
+                        || execution_address[2..].bytes().all(|byte| byte == b'0')
+                        || execution_address
+                            .bytes()
+                            .any(|byte| byte.is_ascii_uppercase())
+                        || resource.0
+                            != format!("hyperliquid:mainnet:{}:account:primary", execution_address)
+                        || (execution_scope.address().is_some()
+                            && execution_address.eq_ignore_ascii_case(owner))
+                        || (*signing_enabled != credential_ref.is_some())
+                        || credential_ref.as_ref().is_some_and(|reference| {
+                            fin_credentials::CredentialRef::new(reference).is_err()
+                        })
+                    {
+                        return Err(error(
+                            "CONFIG_HYPERLIQUID_CONNECTION_INVALID",
+                            "configuration",
+                            "Hyperliquid owner or protected signer mapping is invalid.",
+                            "Repair the connection through protected human enrollment.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::Binance {
                     name,
                     resource,
@@ -503,6 +557,7 @@ pub fn operation_definitions() -> Vec<Definition> {
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
     definitions.extend(BridgeAdapter::operation_definitions());
+    definitions.extend(fin_hyperliquid::catalog::definitions());
     for definition in &mut definitions {
         // Bridge transfers use their own persisted finite-boundary grants;
         // do not advertise them as generic named-plan operations.
@@ -598,6 +653,19 @@ pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Sen
         &self,
         credential: &fin_credentials::CredentialRef,
     ) -> fin_domain::Result<(String, Arc<dyn fin_evm::EnvelopeSigner>)>;
+
+    fn hyperliquid_signer(
+        &self,
+        _credential: &str,
+        _owner: &str,
+    ) -> fin_domain::Result<fin_exchange::ccxt::HyperliquidSigner> {
+        Err(error(
+            "CREDENTIAL_TYPE_MISMATCH",
+            "credentials",
+            "This credential provider cannot access a protected Hyperliquid signer.",
+            "Use the protected installed credential provider.",
+        ))
+    }
 }
 
 /// Root-owned credentials are supplied only to protected signing components.
@@ -709,6 +777,26 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
                     "Select the enrolled Ethereum signer reference.",
+                )),
+            })
+    }
+
+    fn hyperliquid_signer(
+        &self,
+        credential: &str,
+        owner: &str,
+    ) -> fin_domain::Result<fin_exchange::ccxt::HyperliquidSigner> {
+        let reference = fin_credentials::CredentialRef::new(credential)?;
+        self.store
+            .with_material(&reference, |material| match material {
+                fin_credentials::SecretMaterial::EvmPrivateKey { private_key } => {
+                    hyperliquid_transport::signer_from_key(private_key, owner)
+                }
+                _ => Err(error(
+                    "CREDENTIAL_TYPE_MISMATCH",
+                    "credentials",
+                    "Credential is not the enrolled Hyperliquid EVM owner key.",
+                    "Select the protected key explicitly enrolled for this Hyperliquid owner.",
                 )),
             })
     }
@@ -1001,6 +1089,82 @@ pub fn build_applications_with_price_source(
     adapters.push(Arc::new(fin_exchange::ExchangeAdapter::new(
         fin_exchange::DefaultExchangeProfile::new(exchange_client.clone()),
     )));
+    let hyperliquid_accounts = config
+        .connections
+        .iter()
+        .filter_map(|connection| match connection {
+            ConnectionConfig::Hyperliquid {
+                name,
+                owner,
+                credential_ref,
+                signing_enabled,
+                execution_scope,
+                auto_derived,
+                ..
+            } => {
+                let account_name = if *auto_derived {
+                    config
+                        .connections
+                        .iter()
+                        .find_map(|candidate| match candidate {
+                            ConnectionConfig::Evm { name, address, .. }
+                                if address.eq_ignore_ascii_case(owner) =>
+                            {
+                                Some(name.clone())
+                            }
+                            _ => None,
+                        })?
+                } else {
+                    name.clone()
+                };
+                Some(fin_hyperliquid::HyperliquidAccount {
+                    name: account_name,
+                    owner: owner.clone(),
+                    credential_ref: credential_ref.clone(),
+                    signing_enabled: *signing_enabled,
+                    execution_scope: execution_scope.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !hyperliquid_accounts.is_empty() {
+        let exchange_credentials: Arc<dyn BrokerCredentialProvider> = credentials.clone();
+        let transport = Arc::new(hyperliquid_transport::HyperliquidCcxtTransport::new(
+            exchange_client.clone(),
+            exchange_credentials,
+        ));
+        let mut profile = fin_hyperliquid::HyperliquidProfile::new(
+            hyperliquid_accounts,
+            transport.clone(),
+            Arc::new(hyperliquid_transport::HyperliquidUsdPrices::new(
+                binance_prices.clone(),
+            )),
+            Arc::new(fin_hyperliquid::DeferredExecutionState::default()),
+        )?;
+        if let Some(arbitrum) = ethereum_adapters
+            .values()
+            .find(|adapter| adapter.config.chain_id == 42161)
+        {
+            profile = profile.with_withdrawal_proof(Arc::new(
+                HyperliquidArbitrumWithdrawalProof::new(arbitrum.clone()),
+            ));
+        }
+        let profile = Arc::new(profile);
+        adapters.push(Arc::new(fin_exchange::ExchangeAdapter::new(
+            profile.without_operation("hyperliquid.account.deposit"),
+        )));
+        if let Some(arbitrum) = ethereum_adapters
+            .values()
+            .find(|adapter| adapter.config.chain_id == 42161)
+        {
+            adapters.push(Arc::new(HyperliquidEthereumDepositAdapter::new(
+                profile,
+                arbitrum.clone(),
+                transport,
+            )));
+        }
+    }
     if config
         .connections
         .iter()
@@ -1364,6 +1528,12 @@ pub fn compose_runtime(
         ));
     }
     let shared_store = dependencies.store.share();
+    let execution_state = Arc::new(fin_store::execution_state::ExecutionStateRepository(
+        shared_store.clone(),
+    ));
+    for adapter in &dependencies.adapters {
+        adapter.attach_execution_state(execution_state.clone())?;
+    }
     if let Some(bridge) = &dependencies.bridge {
         bridge.attach_state(fin_store::BridgeStateRepository::new(shared_store.clone()))?;
     }
@@ -1515,6 +1685,7 @@ impl BrokerRuntime {
                 | R::Connections
                 | R::Doctor
                 | R::Operations
+                | R::ConfigurationPreview { .. }
                 | R::DaemonStart
                 | R::DaemonStop
                 | R::RevokeBoundary { .. }
@@ -1559,6 +1730,23 @@ impl BrokerRuntime {
                     .iter()
                     .flat_map(|adapter| adapter.connections())
                     .collect::<Vec<_>>();
+                let derived_hyperliquid_resources = self
+                    .config
+                    .connections
+                    .iter()
+                    .filter_map(|connection| match connection {
+                        ConnectionConfig::Hyperliquid {
+                            resource,
+                            auto_derived: true,
+                            ..
+                        } => Some(resource),
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                connections.retain(|connection| {
+                    connection.provider != "hyperliquid"
+                        || !derived_hyperliquid_resources.contains(&connection.resource)
+                });
                 for connection in &self.config.connections {
                     if let ConnectionConfig::CoinGecko {
                         name,
@@ -1584,6 +1772,12 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.preview(&operation, &input).await?)
                     .map_err(|_| internal_error())
             }
+            R::ConfigurationPreview { operation, input } => serde_json::to_value(
+                self.engine
+                    .preview_configuration(&operation, &input)
+                    .await?,
+            )
+            .map_err(|_| internal_error()),
             R::PreviewBoundaryAuthorization { request } => {
                 self.engine.preview_boundary_authorization(request).await
             }
@@ -2219,6 +2413,7 @@ fn protocol_methods() -> Vec<&'static str> {
         "doctor",
         "read",
         "preview",
+        "configuration_preview",
         "preview_boundary_authorization",
         "authorize_boundary",
         "boundary_status",
@@ -2334,6 +2529,14 @@ mod store_startup_diagnostic_tests {
 }
 
 pub fn load_protected_config() -> fin_domain::Result<BrokerConfigV2> {
+    let config = load_stored_protected_config()?;
+    enrollment::effective_protected_config(config)
+}
+
+/// Read the protected configuration without runtime-only reviewed aliases.
+/// Enrollment writes this persisted form so derived connections cannot become
+/// stale credentials after their parent wallet is changed or removed.
+pub(crate) fn load_stored_protected_config() -> fin_domain::Result<BrokerConfigV2> {
     validate_installation()?;
     let path = Path::new(CONFIG_PATH);
     validate_metadata(path, true)?;
@@ -2388,18 +2591,20 @@ pub fn load_protected_config() -> fin_domain::Result<BrokerConfigV2> {
             "Repair it through human enrollment.",
         )
     })?;
-    enrollment::effective_protected_config(config)
+    Ok(config)
 }
 
 /// Enrollment helper. It is not exposed over the agent protocol and never
 /// accepts financial actions; root's human terminal owns calls to this API.
 pub fn save_protected_config(config: &BrokerConfigV2) -> fin_domain::Result<()> {
     validate_installation()?;
-    config.validate()?;
+    let mut persisted = config.clone();
+    strip_derived_hyperliquid_links(&mut persisted);
+    persisted.validate()?;
     let path = Path::new(CONFIG_PATH);
     let parent = path.parent().expect("fixed config parent");
     validate_metadata(parent, false)?;
-    let bytes = serde_json::to_vec(config).map_err(|_| {
+    let bytes = serde_json::to_vec(&persisted).map_err(|_| {
         error(
             "CONFIG_INVALID",
             "configuration",
@@ -2416,6 +2621,18 @@ pub fn save_protected_config(config: &BrokerConfigV2) -> fin_domain::Result<()> 
         ));
     }
     atomic_replace(parent, path, &bytes)
+}
+
+pub(crate) fn strip_derived_hyperliquid_links(config: &mut BrokerConfigV2) {
+    config.connections.retain(|connection| {
+        !matches!(
+            connection,
+            ConnectionConfig::Hyperliquid {
+                auto_derived: true,
+                ..
+            }
+        )
+    });
 }
 
 fn atomic_replace(parent: &Path, destination: &Path, bytes: &[u8]) -> fin_domain::Result<()> {
@@ -2933,6 +3150,73 @@ pub fn resource_has_pending_operations(
         pending |= record_reserves_resource(&value, resource)?;
     }
     Ok(pending)
+}
+
+/// Detect unresolved Hyperliquid work owned by a master signer. Unlike a
+/// single account resource, one signing identity may have owner, delegated,
+/// spot, perp, unified, DEX and nonce-recovery records. The prepared binding
+/// carries the exact master owner for every such action.
+pub(crate) fn hyperliquid_owner_has_pending_operations(
+    store: &Store,
+    owner: &str,
+) -> fin_domain::Result<bool> {
+    let records = store.list_records().map_err(|_| {
+        error(
+            "STORE_UNAVAILABLE",
+            "configuration",
+            "Pending-operation state could not be inspected.",
+            "Preserve this EVM signer mapping until the broker journal is available.",
+        )
+    })?;
+    for value in records {
+        if record_reserves_hyperliquid_owner(&value, owner)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn record_reserves_hyperliquid_owner(value: &Value, owner: &str) -> fin_domain::Result<bool> {
+    let record: fin_domain::OperationRecord =
+        serde_json::from_value(value.clone()).map_err(|_| {
+            error(
+                "STORE_INVALID_RECORD",
+                "configuration",
+                "A durable operation record is malformed.",
+                "Do not change signer mappings until the journal has been repaired and reconciled.",
+            )
+        })?;
+    if record.status.terminal() || !record.operation.starts_with("hyperliquid.") {
+        return Ok(false);
+    }
+    let binding = &record.preview.as_ref().ok_or_else(|| {
+        error(
+            "STORE_INVALID_RECORD",
+            "configuration",
+            "A nonterminal Hyperliquid operation has no durable account binding.",
+            "Preserve all reusable signer mappings until the record is repaired and reconciled.",
+        )
+    })?.binding;
+    let bound_owner = binding
+        .get("account")
+        .and_then(|account| account.get("owner"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            // The broker-composed EVM-to-Hyperliquid deposit wraps the
+            // adapter binding and carries its authenticated owner at top level.
+            (record.operation == "hyperliquid.account.deposit")
+                .then(|| binding.get("owner").and_then(Value::as_str))
+                .flatten()
+        })
+        .ok_or_else(|| {
+            error(
+                "STORE_INVALID_RECORD",
+                "configuration",
+                "A nonterminal Hyperliquid operation has no master-owner binding.",
+                "Preserve all reusable signer mappings until the record is repaired and reconciled.",
+            )
+        })?;
+    Ok(bound_owner.eq_ignore_ascii_case(owner))
 }
 
 fn record_reserves_resource(value: &Value, resource: &ResourceId) -> fin_domain::Result<bool> {
@@ -3614,6 +3898,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hyperliquid_scope_migration_keeps_legacy_owner_and_separates_delegated_resources() {
+        let owner = "0x1111111111111111111111111111111111111111";
+        let target = "0x2222222222222222222222222222222222222222";
+        let legacy: ConnectionConfig = serde_json::from_value(json!({
+            "provider":"hyperliquid","name":"legacy","resource":format!("hyperliquid:mainnet:{owner}:account:primary"),
+            "owner":owner,"credential_ref":null,"signing_enabled":false
+        }))
+        .unwrap();
+        assert!(matches!(
+            legacy,
+            ConnectionConfig::Hyperliquid {
+                execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+                ..
+            }
+        ));
+
+        let mut config = config();
+        config.connections.push(ConnectionConfig::Hyperliquid {
+            name: "delegated".into(),
+            resource: ResourceId(format!("hyperliquid:mainnet:{target}:account:primary")),
+            owner: owner.into(),
+            credential_ref: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            signing_enabled: true,
+            execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Subaccount {
+                address: target.into(),
+            },
+            auto_derived: false,
+        });
+        assert!(config.validate().is_ok());
+    }
+
     struct UnusedCredentials;
     impl fin_exchange::ccxt::CredentialProvider for UnusedCredentials {
         fn credentials(
@@ -3684,10 +4000,50 @@ mod tests {
                 credential_ref: None,
                 signing_enabled: false,
             },
+            ConnectionConfig::Hyperliquid {
+                name: "manual-hyperliquid".into(),
+                resource: ResourceId(
+                    "hyperliquid:mainnet:0x2222222222222222222222222222222222222222:account:primary"
+                        .into(),
+                ),
+                owner: "0x2222222222222222222222222222222222222222".into(),
+                credential_ref: None,
+                signing_enabled: false,
+                execution_scope: fin_hyperliquid::HyperliquidExecutionScope::Owner,
+                auto_derived: false,
+            },
         ];
+        config = enrollment::effective_protected_config(config).unwrap();
         config.validate().unwrap();
         let applications = build_protected_applications(&config, Arc::new(UnusedCredentials))
             .expect("synthetic production composition should build without credential access");
+        let pre_runtime_identities = applications
+            .adapters
+            .iter()
+            .flat_map(|adapter| adapter.authorization_identities())
+            .filter(|identity| identity.provider == "hyperliquid")
+            .collect::<Vec<_>>();
+        let evm_link = pre_runtime_identities
+            .iter()
+            .find(|identity| {
+                identity
+                    .resource
+                    .0
+                    .ends_with(&format!("{address}:account:primary"))
+            })
+            .expect("derived Hyperliquid authorization identity keeps the EVM wallet alias");
+        assert_eq!(evm_link.name, "wallet");
+        assert_eq!(
+            evm_link.resource.0,
+            format!("hyperliquid:mainnet:{address}:account:primary")
+        );
+        assert!(pre_runtime_identities.iter().any(|identity| {
+            identity.name == "manual-hyperliquid"
+                && identity
+                    .resource
+                    .0
+                    .contains("0x2222222222222222222222222222222222222222")
+        }));
         let runtime = compose_runtime(
             config,
             RuntimeDependencies {
@@ -3705,17 +4061,25 @@ mod tests {
         let rows = response.result.unwrap().as_array().unwrap().clone();
         assert_eq!(
             rows.len(),
-            3,
-            "only two accounts and one EVM wallet are public"
+            4,
+            "only two Binance accounts, one EVM wallet, and the explicit Hyperliquid row are public"
         );
         let human = fin_presentation::render_human("connections", &json!(rows), false);
         assert!(human.contains("main") && human.contains("sub") && human.contains("wallet"));
+        assert!(human.contains("manual-hyperliquid"));
+        assert!(!human.contains("wallet-hyperliquid"));
         assert!(!human.contains("binance-ethereum-destination"));
         assert_eq!(
             rows.iter()
                 .filter(|row| row["provider"] == "binance")
                 .count(),
             2
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["provider"] == "hyperliquid")
+                .count(),
+            1
         );
         assert!(
             rows.iter()
@@ -3742,6 +4106,15 @@ mod tests {
 
         let identities = runtime.observer.authorization_identities();
         assert!(identities.len() > rows.len());
+        let derived_hyperliquid_identity = identities
+            .iter()
+            .find(|identity| {
+                identity.provider == "hyperliquid"
+                    && identity.resource.0
+                        == format!("hyperliquid:mainnet:{address}:account:primary")
+            })
+            .expect("hidden inventory row remains a protected plan identity");
+        assert_eq!(derived_hyperliquid_identity.name, "wallet");
         let destination_rows = identities
             .iter()
             .filter(|identity| identity.provider == "binance-ethereum-destination")
@@ -5365,6 +5738,65 @@ mod tests {
                 .code,
             "STORE_INVALID_RECORD"
         );
+    }
+
+    #[test]
+    fn pending_hyperliquid_owner_guard_covers_all_write_families_and_delegated_scopes() {
+        let owner = "0x1111111111111111111111111111111111111111";
+        for (index, operation) in [
+            "hyperliquid.order",
+            "hyperliquid.account.invalidate_nonce",
+            "hyperliquid.margin",
+            "hyperliquid.account.deposit",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = fin_domain::OperationRecord {
+                id: format!("pending-{index}"),
+                request_id: format!("request-{index}"),
+                fingerprint: format!("fingerprint-{index}"),
+                fingerprint_version: 1,
+                operation: operation.into(),
+                input: json!({}),
+                status: fin_domain::Status::Submitted,
+                created_at: now(),
+                updated_at: now(),
+                preview: Some(fin_domain::PreparedOperation {
+                    operation: operation.into(),
+                    input: json!({}),
+                    binding: if operation == "hyperliquid.account.deposit" {
+                        json!({"owner":owner,"account":"owner-account"})
+                    } else {
+                        json!({"account":{"owner":owner,"execution_scope":{"type":"subaccount","address":"0x2222222222222222222222222222222222222222"}}})
+                    },
+                    summary: "synthetic pending action".into(),
+                    checks: vec![],
+                    warnings: vec![],
+                    observed_at: now(),
+                    expires_at: now(),
+                    valuation: None,
+                    intent: fin_domain::FinancialIntent::default(),
+                    operation_version: 1,
+                }),
+                approval: None,
+                submission: None,
+                dispatch_evidence: None,
+                effects: None,
+                last_reconciliation_evidence: None,
+                error: None,
+                run_id: None,
+            };
+            let value = serde_json::to_value(record).unwrap();
+            assert!(record_reserves_hyperliquid_owner(&value, owner).unwrap());
+            assert!(
+                !record_reserves_hyperliquid_owner(
+                    &value,
+                    "0x3333333333333333333333333333333333333333"
+                )
+                .unwrap()
+            );
+        }
     }
     #[tokio::test]
     async fn retired_run_mutations_do_not_capture_state_or_change_historical_records() {

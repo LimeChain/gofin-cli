@@ -58,6 +58,10 @@ enum EnrollmentAction {
         #[arg(long)]
         request: String,
     },
+    Configure {
+        #[arg(long)]
+        request: String,
+    },
 }
 
 #[tokio::main]
@@ -146,9 +150,21 @@ async fn run(args: Args) -> fin_domain::Result<()> {
             EnrollmentAction::Add { request } => ("add", request),
             EnrollmentAction::Update { request } => ("update", request),
             EnrollmentAction::Remove { request } => ("remove", request),
+            EnrollmentAction::Configure { request } => ("configure", request),
         };
         let request = validate_public_enrollment_request(&request)?;
         let result = fin_broker::enrollment::handle_with_ui(action_name, request, &ui).await?;
+        if action_name == "configure" {
+            let operation = result["operation"]
+                .as_str()
+                .unwrap_or("Hyperliquid configuration");
+            let status = result["status"].as_str().unwrap_or("recorded");
+            ui.success(&format!("{operation}: {status}")).map_err(|_| {
+                FinError::validation("The configuration result could not be displayed; inspect fin operations before retrying.")
+            })?;
+            ui.detail(&serde_json::to_string(&result).unwrap_or_default());
+            return Ok(());
+        }
         if action_name == "policy_set" {
             ui.success("Financial limits updated.").map_err(|_| {
                 FinError::validation("Limits may be saved; run fin policy show to inspect them.")
@@ -229,7 +245,8 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
             PublicConnection::Binance { name, .. }
             | PublicConnection::Ethereum { name, .. }
             | PublicConnection::Evm { name, .. }
-            | PublicConnection::CoinGecko { name, .. } => name,
+            | PublicConnection::CoinGecko { name, .. }
+            | PublicConnection::Hyperliquid { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",
@@ -292,6 +309,17 @@ mod tests {
             "fin-broker",
             "enrollment",
             "add",
+            "--request",
+            "INVALID_SYNTHETIC_INPUT",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(run(args).await.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+
+        let args = Args::try_parse_from([
+            "fin-broker",
+            "enrollment",
+            "configure",
             "--request",
             "INVALID_SYNTHETIC_INPUT",
             "--json",

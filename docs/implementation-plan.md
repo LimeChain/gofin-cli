@@ -91,6 +91,39 @@ separate hierarchy operations that need them. Enrollment approval summaries
 support standalone subaccounts for add, update and remove, while still rejecting
 partial parent/email associations and unverified or mismatched account identities.
 
+Hyperliquid owner mappings are derived automatically for reusable EVM wallets
+at protected startup and configuration reload. Each mapping inherits its exact
+wallet address, protected credential reference and signing/read-only status;
+linking performs no venue calls or financial writes. Derived records are runtime
+only and stripped before configuration persistence, so wallet rotation/removal
+cannot leave an orphaned alias or stale key. Explicit same-owner mappings win
+without permission elevation or duplicate holdings. Delegated aliases remain
+separate human-reviewed connections. Stable generated names fail closed on
+collisions rather than rebinding existing account names. Account-scoped reads
+always bind the configured owner independently from the signer. Pricing maps the exact native
+Arbitrum USDC quote onto Hyperliquid's USDC asset identity without assuming
+stablecoin parity; the venue asset scale remains separate from Arbitrum token
+units. Nonces attach to durable execution state after protected runtime
+composition. Owner enrollment is offline and reports venue access as
+unverified. A human can separately attach a verified subaccount or vault to an
+already enrolled Hyperliquid master signer. The master remains the signer and
+nonce identity; the delegated address binds reads, journal resources and the
+signed `vaultAddress`. Fixed native relationship reads verify subaccount parent
+or vault leader during enrollment and immediately before write dispatch. This
+scope permits trading, isolated margin and TWAP/cancellation while keeping
+transfers, deposits, withdrawals and account-authority actions owner-only.
+
+Nonce recovery uses an adapter-opted-in `RecoveryBinding` containing the exact
+parent submission. The engine independently requires a zero-effect,
+zero-valuation standalone child with one distinct nonce resource, and SQLite
+atomically claims that link with its reservation. No schema migration or policy
+exception is needed. Hyperliquid supports only unresolved owner-signed USDC
+class transfers: an exact same-nonce native Noop success proves nonexecution
+and prevents later execution of the original. The parent adapter verifies the
+persisted child proof before retiring the original, including after restart;
+failed or missing recovery receipts preserve the financial holds. Historical
+proof validity is independent from the native nonce deadline for new dispatch.
+
 ## Approval contracts
 
 The [bridging design](bridge-design.md) is implemented for Relay-backed direct
@@ -142,8 +175,12 @@ submitted effects. Quote freshness does not renew consent.
 
 Named sequential plans reuse the journal lifecycle with explicit plan-step authority.
 Generic exact scopes bind canonical request inputs, operation schemas, protected
-connection identities and explicit exact-asset caps. Adapter-reviewed scopes are
-opt-in and bind their supported inputs, route identities and variations. Bridge
+connection identities and explicit exact-asset caps. A candidate cost with an
+exact zero amount needs no fee allowance; every positive cost still requires the
+exact authorized location, asset, treatment and remaining cap. Explicit fee caps
+remain positive, and typed zero-cost evidence and operation identities are
+preserved. Adapter-reviewed scopes are opt-in and bind their supported inputs,
+route identities and variations. Bridge
 plans list each saved approval/reset/deposit as a separate `bridge.transfer`
 step; the broker binds each step to the same persisted parent transfer and exact
 step identity, while an engine-enforced cumulative scope applies source
@@ -560,3 +597,23 @@ The credential-preserving effective configuration overlay adds its missing
 Uniswap, WETH and Aave deployments while retaining existing custom profiles,
 connection identities and journal records. The owned AMM fork checks both Base
 principal/cost conservation and restart without signing or broadcasting again.
+
+Hyperliquid rollup completion follows the human-selected sequencer policy:
+Arbitrum source transfers and withdrawal payout receipts need one successful
+canonical sequenced block, without Ethereum inclusion/finality. The same rule
+also overrides legacy finalized/confirmation settings for reviewed rollup wallet
+operations and bridge-source recovery. Base's read-only solver observer also
+uses one canonical sequenced block; Ethereum mainnet and the separately reviewed
+Relay settlement hub keep their own policies. Native bridge credit/payout
+correlation remains required separately.
+
+
+Hyperliquid live-development follow-up (2026-10-10): the disposable development credential provider implements the typed Hyperliquid EVM-owner signer seam, with exact derived-address validation and sanitized malformed-key errors. Native action identities remain journaled before dispatch. Protected credential lookup failures receive an explicit submission-bound non-dispatch marker; reconciliation can terminally release that failed attempt without replay. The one previous default-provider failure remains recoverable only under its exact known error and validated immutable native envelope. Network timeouts and ambiguous dispatch outcomes remain unresolved.
+
+Hyperliquid human verification follow-up (2026-10-11): public `hyperliquid.order` validates an optional symbol against the native orderStatus envelope at `/order/order/coin`, with top-level `status: order`. Unknown IDs, malformed envelopes, absent or non-string coins and mismatched markets fail closed. This read-only correction preserves submission and settlement identities; unscoped order reads retain native unknown-order responses. The focused regression, all 136 Hyperliquid crate tests and strict workspace checks pass. A completed ask-ogi review confirmed the binding and its proposed malformed-response assertions were added.
+
+Hyperliquid withdrawal recovery correction (2026-10-11): the independently proven signed `withdraw3` action uses a millisecond timestamp; its native withdrawal ledger and Bridge2 events use the checked microsecond nonce. The ledger reports net USDC and fee separately, and its hash is the Arbitrum payout transaction, distinct from the original native action hash. Correlate exactly one nonce-linked row, require net plus fee to equal the frozen gross debit, and bind the sequenced payout to that ledger hash. Requested/finalized Bridge2 events and their message, owner, recipient, nonce and exact net amount must agree with one canonical USDC transfer. Receipt quantities retain Arbitrum token atoms (six decimals), distinct from the venue accounting scale (36). Recovery derives new proof requests from existing immutable submissions; it never resigns or resubmits a withdrawal, including after plan expiry.
+
+Delayed Hyperliquid withdrawal reconciliation bounds historical event reads by the independently canonical ledger payout receipt block and uses disjoint pages of at most 512 blocks. It never grows the search upper bound with current time. Public operation status uses the existing observer timeout, since reconciliation performs network proof work; timeout guidance retains the original operation identity and forbids a new submission. Scoped pagination, canonical-event and CLI timeout regressions verify these recovery changes.
+
+Hyperliquid withdrawal indexed-owner correction (2026-10-11): Alloy's fixed-byte address formatter ignores field width, so formatting a 20-byte address with a requested width of 64 still emits 20 bytes. Both Bridge2 log filters now explicitly convert the address into its 32-byte ABI word before hexadecimal encoding. A regression compares both filters to the independently ABI-encoded indexed event owner, including a leading-zero address, and the end-to-end proof mock rejects malformed owner topics. The earlier mock had checked only the event signature and missed this production RPC-invalid encoding; no financial submission or proof requirement changes.

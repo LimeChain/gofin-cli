@@ -58,7 +58,7 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
         if !matches!(outcome, Status::Completed | Status::Failed) {
             return Err(unknown());
         }
-        if let Err(rejection) = validate_effects(record, &verified, &outcome)
+        if let Err(rejection) = validate_effects_mode(record, &verified, &outcome, false)
             && !matches!(
                 rejection.code.as_str(),
                 "COST_EXCEEDS_RESERVATION"
@@ -277,6 +277,8 @@ impl Engine {
         &self,
         record: &mut OperationRecord,
         prepared: &PreparedOperation,
+        replacement_parent: Option<&str>,
+        recovery_parent: Option<&str>,
     ) -> Result<()> {
         let instant = Utc::now();
         let movement_limit =
@@ -344,7 +346,9 @@ impl Engine {
                         "An unresolved operation has no inspectable resource reservation.",
                     ));
                 };
-                if !requested_resources.is_disjoint(&resources(&preview.intent)) {
+                if Some(other.id.as_str()) != replacement_parent
+                    && !requested_resources.is_disjoint(&resources(&preview.intent))
+                {
                     return Err(budget_error(
                         "RESOURCE_RESERVED",
                         "An unresolved operation reserves a resource required by this write.",
@@ -393,15 +397,26 @@ impl Engine {
         );
         record.preview = Some(prepared.clone());
         record.updated_at = now();
-        store
-            .persist_operation_reservation(
+        let persist = if let Some(parent_id) = recovery_parent {
+            store.persist_operation_reservation_with_recovery_parent(
                 &record.id,
                 &rows,
                 &to_value(record)?,
                 &snapshot,
                 &record.updated_at,
+                parent_id,
             )
-            .map_err(map_store)
+        } else {
+            store.persist_operation_reservation_with_parent(
+                &record.id,
+                &rows,
+                &to_value(record)?,
+                &snapshot,
+                &record.updated_at,
+                replacement_parent,
+            )
+        };
+        persist.map_err(map_store)
     }
 }
 
