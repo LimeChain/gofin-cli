@@ -4,7 +4,9 @@ Updated 2026-10-11. Numbers identify requests, not implementation priority. Stat
 
 First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28, 30, 31 and 34**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decision on 2026-10-11; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
-## First release
+Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
+
+## First release — 36% complete (9/25 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -34,7 +36,7 @@ First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28,
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | In progress — first release; user assigned an agent; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | In progress — first release; user reported; major UX hurdle |
 
-## Next release
+## Next release — 0% complete (0/8 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
