@@ -214,6 +214,17 @@ specific change and seek revised bounds and fresh approval. Reconcile any
 uncertain submission before considering another attempt; never widen limits or
 repeatedly request approval just to force an operation through.
 
+Within an active bounded authorization, favor execution settings that reduce
+avoidable failures, retries and delays. Use practical slippage, deadline and fee
+headroom appropriate to the operation and supported by the installed schema.
+Distinguish the approved maximum from the selected attempt setting; choose tighter
+settings when they offer a material benefit to the human, and honor any explicit
+attempt settings the human requested. Gas bidding remains broker-managed.
+When an attempt is confirmed unsubmitted, refresh and adjust within existing
+authorization without requesting another approval. Preserve fixed price floors,
+cumulative limits, scope and expiry; reconcile uncertain submissions before retrying.
+Stop when no feasible attempt fits the approved boundaries or authorization expires.
+
 For operations advertising `semantics.boundary_authorization.supported`, use
 `fin schema OPERATION --json` and `fin schema authorizations.authorize --json`
 to discover fixed fields and allowed variations. Explain the intended outcome,
