@@ -13295,6 +13295,166 @@ mod tests {
         }
     }
 
+    struct DelayedBoundaryAdapter {
+        inner: SyntheticAdapter,
+        resolutions: AtomicUsize,
+        stall_resolution: bool,
+    }
+    #[async_trait]
+    impl Adapter for DelayedBoundaryAdapter {
+        fn definitions(&self) -> Vec<Definition> {
+            self.inner.definitions()
+        }
+        async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+            self.inner.read(operation, input).await
+        }
+        async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+            let mut prepared = self.inner.prepare(operation, input).await?;
+            if !self.stall_resolution {
+                prepared.expires_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+            }
+            Ok(prepared)
+        }
+        async fn prepare_boundaries(
+            &self,
+            prepared: &PreparedOperation,
+            _bounds: &Value,
+        ) -> Result<BoundarySpec> {
+            self.resolutions.fetch_add(1, Ordering::SeqCst);
+            if self.stall_resolution {
+                std::future::pending::<()>().await;
+            }
+            // Exercise an awaited metadata resolver exceeding a short preview
+            // lifetime without sleeping through the normal two-minute window.
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            Ok(BoundarySpec {
+                fixed: prepared.binding.clone(),
+                parameters: json!({}),
+                maximum_debits: prepared.intent.debits.clone(),
+                maximum_costs: prepared.intent.maximum_costs.clone(),
+                summary: "synthetic finite scope".into(),
+            })
+        }
+        async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+            self.inner.revalidate(prepared).await
+        }
+        async fn submit(
+            &self,
+            prepared: &PreparedOperation,
+            journal: Arc<dyn SubmissionJournal>,
+        ) -> Result<Submission> {
+            self.inner.submit(prepared, journal).await
+        }
+        async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+            self.inner.reconcile(record).await
+        }
+    }
+    struct BoundaryResolutionApproval(AtomicUsize);
+    #[async_trait]
+    impl Authorizer for BoundaryResolutionApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            SyntheticAuthorizer.authorize(challenge).await
+        }
+    }
+    #[tokio::test]
+    async fn awaited_boundary_scope_resolution_rechecks_preview_expiry_before_review_and_approval()
+    {
+        let adapter = Arc::new(DelayedBoundaryAdapter {
+            inner: SyntheticAdapter::new(),
+            resolutions: AtomicUsize::new(0),
+            stall_resolution: false,
+        });
+        let approval = Arc::new(BoundaryResolutionApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approval.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let request = BoundaryAuthorizationRequest {
+            request_id: "SYNTHETIC-delayed-boundary".into(),
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            bounds: json!({}),
+            valid_for_seconds: 600,
+            replaces: None,
+        };
+        assert_eq!(
+            engine
+                .preview_boundary_authorization(request.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "PREVIEW_EXPIRED"
+        );
+        assert_eq!(
+            engine.authorize_boundary(request).await.unwrap_err().code,
+            "PREVIEW_EXPIRED"
+        );
+        assert_eq!(adapter.resolutions.load(Ordering::SeqCst), 2);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_boundary_scope_resolution_times_out_without_approval_or_allocation() {
+        let adapter = Arc::new(DelayedBoundaryAdapter {
+            inner: SyntheticAdapter::new(),
+            resolutions: AtomicUsize::new(0),
+            stall_resolution: true,
+        });
+        let approval = Arc::new(BoundaryResolutionApproval(AtomicUsize::new(0)));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter.clone()],
+            approval.clone(),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        for authorize in [false, true] {
+            let request = BoundaryAuthorizationRequest {
+                request_id: format!("SYNTHETIC-stalled-boundary-{authorize}"),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                bounds: json!({}),
+                valid_for_seconds: 600,
+                replaces: None,
+            };
+            let started = tokio::time::Instant::now();
+            let error = if authorize {
+                engine
+                    .authorize_boundary(request.clone())
+                    .await
+                    .unwrap_err()
+            } else {
+                engine
+                    .preview_boundary_authorization(request.clone())
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(error.code, "EVIDENCE_TIMEOUT");
+            assert_eq!(error.stage, "preflight");
+            assert_eq!(tokio::time::Instant::now() - started, PREFLIGHT_TIMEOUT);
+            assert!(
+                engine
+                    .store
+                    .lock()
+                    .unwrap()
+                    .boundary_authorization_by_request(&request.request_id)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(adapter.resolutions.load(Ordering::SeqCst), 2);
+        assert_eq!(approval.0.load(Ordering::SeqCst), 0);
+        assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
+        assert!(engine.operations().unwrap().is_empty());
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "0");
+    }
+
     /// End-to-end finite bridge fixture. Its transfer effects deliberately
     /// consume cumulative approved debits so renewal tests exercise the same
     /// authorization accounting path as an adapter with gas costs.
@@ -13413,7 +13573,7 @@ mod tests {
             Ok(prepared)
         }
 
-        fn prepare_boundaries(
+        async fn prepare_boundaries(
             &self,
             prepared: &PreparedOperation,
             bounds: &Value,

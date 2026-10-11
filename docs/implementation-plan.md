@@ -8,11 +8,11 @@ maintained documentation.
 
 ## Integration baseline
 
-After the human updated the installed bundle, integration resumed on the
-schema 9 mainline through a safe fast-forward. AMM work was carried forward on
-that baseline so protected runtime, journal and configuration compatibility
-remain aligned with the updated installation while retaining the existing
-bridge implementation and its evidence.
+AMM integration follows the current mainline, including Base, Hyperliquid and
+approval responsiveness. Versioned journal migrations preserve older records,
+credentials and pending recovery identities. Reviewed deployments remain an
+additive effective configuration; updating the runtime does not re-enroll
+wallets or replay financial writes.
 
 Reusable EVM wallets gain missing reviewed network and AMM deployment coverage
 through a pure effective-config overlay at protected configuration load. The
@@ -32,6 +32,19 @@ fingerprints, pending bindings and all execution bounds remain unchanged. Exact
 technical details stay in structured review, which the LLM explains to the
 human. Bounded approval wording must not promise an initial minimum receipt
 that its permitted requotes could lower.
+
+Sushi v3 and PancakeSwap v3 use a closed, reviewed deployment map alongside
+legacy Uniswap/Ramses configuration. Router metadata, pool ABI, fee tiers and
+permit-compatible calldata are profile properties; shared financial accounting
+continues to consume typed effects. New grants bind DEX, factory, router and a
+verified pool for each explicitly approved fee tier; legacy single-pool grants
+retain their restriction. Adapter-owned boundary creation resolves these pools
+asynchronously at one pinned block, including future-funded plan steps, without
+introducing venue branches into the financial engine. Each concrete attempt
+still binds one exact pool, with inclusion-block factory lookup and
+protocol-specific swap event decoding.
+Pancake's Robinhood SmartRouter uses its reviewed deadline-bearing multicall
+around deadline-free v3 swap parameters. Token identities remain caller supplied.
 
 All named-plan approvals use one presentation path: the complete bound plan
 name, ordered step count and human consent duration. Revisions explicitly say
@@ -633,3 +646,15 @@ Hyperliquid withdrawal recovery correction (2026-10-11): the independently prove
 Delayed Hyperliquid withdrawal reconciliation bounds historical event reads by the independently canonical ledger payout receipt block and uses disjoint pages of at most 512 blocks. It never grows the search upper bound with current time. Public operation status uses the existing observer timeout, since reconciliation performs network proof work; timeout guidance retains the original operation identity and forbids a new submission. Scoped pagination, canonical-event and CLI timeout regressions verify these recovery changes.
 
 Hyperliquid withdrawal indexed-owner correction (2026-10-11): Alloy's fixed-byte address formatter ignores field width, so formatting a 20-byte address with a requested width of 64 still emits 20 bytes. Both Bridge2 log filters now explicitly convert the address into its 32-byte ABI word before hexadecimal encoding. A regression compares both filters to the independently ABI-encoded indexed event owner, including a leading-zero address, and the end-to-end proof mock rejects malformed owner topics. The earlier mock had checked only the event signature and missed this production RPC-invalid encoding; no financial submission or proof requirement changes.
+
+Native-proceeds plan funding (2026-10-11): the human-selected Arbitrum USDC →
+ETH → USDC single-plan rehearsal exposed a gap in default dependency funding:
+returning all verified ETH leaves no producer proceeds for gas even when the
+wallet has ample separate ETH. An explicitly reviewed optional `funding_scope`
+selects `principal_only`; omitted or `all_debits` retains principal-plus-fee
+funding. Principal settlement consumes producer credits while fee effects retain
+ordinary cumulative caps, reservations and available-balance validation. Legacy
+serialization is unchanged when the field is omitted, and started-step revisions
+cannot alter the declaration. Accounting remains application-independent.
+Independent public-CLI fork rehearsal and human observation are recorded
+separately; a successful plan preview alone is not execution evidence.

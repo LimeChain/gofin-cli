@@ -25,7 +25,10 @@ use fin_evm::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub const WETH: &str = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
@@ -42,6 +45,7 @@ pub fn route_gas_ceiling(operation: &str) -> Result<u64> {
         "wallet.wrap" | "wallet.unwrap" | "wallet.approve" => Ok(100_000),
         "wallet.transfer" => Ok(150_000),
         "uniswap.swap" => Ok(350_000),
+        "sushi.swap" | "pancakeswap.swap" => Ok(500_000),
         "ramses.swap" => Ok(500_000),
         "aave.supply" => Ok(500_000),
         "aave.borrow" => Ok(800_000),
@@ -269,6 +273,61 @@ pub enum RouterKind {
     LegacyV3,
     SwapRouter02,
 }
+/// Closed set of additional reviewed concentrated-liquidity venues.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub enum V3Dex {
+    #[serde(rename = "sushi")]
+    Sushi,
+    #[serde(rename = "pancakeswap")]
+    PancakeSwap,
+}
+impl V3Dex {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Sushi => "sushi",
+            Self::PancakeSwap => "pancakeswap",
+        }
+    }
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Sushi => "Sushi",
+            Self::PancakeSwap => "PancakeSwap",
+        }
+    }
+    pub const fn fee_tiers(self) -> &'static [u32] {
+        match self {
+            Self::Sushi => &[100, 500, 3000, 10000],
+            Self::PancakeSwap => &[100, 500, 2500, 10000],
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum V3PoolAbi {
+    UniswapV3,
+    PancakeV3,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum V3RouterMetadataAbi {
+    UniswapV3,
+    PancakeV3,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct V3DeploymentConfig {
+    pub factory: String,
+    pub quoter: String,
+    pub router: String,
+    pub router_kind: RouterKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_deployer: Option<String>,
+    pub pool_abi: V3PoolAbi,
+    pub router_metadata_abi: V3RouterMetadataAbi,
+    pub allowed_fee_tiers: Vec<u32>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct V4Config {
@@ -310,6 +369,8 @@ pub struct EthereumConfig {
     pub uniswap: Option<UniswapConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ramses: Option<RamsesConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub v3_deployments: BTreeMap<V3Dex, V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<AaveConfig>,
 }
@@ -329,6 +390,7 @@ impl Default for EthereumConfig {
                 v4: None,
             }),
             ramses: None,
+            v3_deployments: BTreeMap::new(),
             aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
                 oracle: "0x54586be62e3c3580375ae3723c145253060ca0c2".into(),
@@ -393,6 +455,7 @@ impl EthereumConfig {
             weth: (chain_id == 8453).then(|| "0x4200000000000000000000000000000000000006".into()),
             uniswap: None,
             ramses: None,
+            v3_deployments: BTreeMap::new(),
             aave: None,
         }
     }
@@ -526,6 +589,36 @@ impl EthereumAdapter {
                 &mut ramses.pool_deployer,
             ]);
         }
+        for (dex, deployment) in &mut config.v3_deployments {
+            let pancake = *dex == V3Dex::PancakeSwap;
+            require(
+                deployment.allowed_fee_tiers == dex.fee_tiers()
+                    && deployment.pool_abi
+                        == if pancake {
+                            V3PoolAbi::PancakeV3
+                        } else {
+                            V3PoolAbi::UniswapV3
+                        }
+                    && deployment.router_metadata_abi
+                        == if pancake {
+                            V3RouterMetadataAbi::PancakeV3
+                        } else {
+                            V3RouterMetadataAbi::UniswapV3
+                        }
+                    && deployment.pool_deployer.is_some() == pancake
+                    && (pancake || deployment.router_kind == RouterKind::LegacyV3),
+                "DEPLOYMENT_PROFILE_INVALID",
+                "V3 deployment ABI, deployer and fee tiers must match its reviewed venue profile.",
+            )?;
+            deployments.extend([
+                &mut deployment.factory,
+                &mut deployment.quoter,
+                &mut deployment.router,
+            ]);
+            if let Some(deployer) = &mut deployment.pool_deployer {
+                deployments.push(deployer);
+            }
+        }
         if let Some(aave) = &mut config.aave {
             deployments.extend([&mut aave.pool, &mut aave.oracle]);
         }
@@ -603,15 +696,21 @@ impl EthereumAdapter {
                 self.config.weth.is_some()
                     || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
+                    || !self.config.v3_deployments.is_empty()
             }
             "wallet.approve" => {
                 self.config.aave.is_some()
                     || self.config.uniswap.is_some()
                     || self.config.ramses.is_some()
+                    || !self.config.v3_deployments.is_empty()
             }
             name if name.starts_with("aave.") => self.config.aave.is_some(),
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
+            name if uniswap::profile::additional_dex(name).is_some() => self
+                .config
+                .v3_deployments
+                .contains_key(&uniswap::profile::additional_dex(name).expect("matched")),
             _ => false,
         }
     }
@@ -659,6 +758,41 @@ impl EthereumAdapter {
             )
         })
     }
+    fn v3_profile(&self, dex: &str) -> Result<uniswap::profile::V3DeploymentProfile<'_>> {
+        use uniswap::profile::V3DeploymentProfile;
+        match dex {
+            "uniswap" => Ok(V3DeploymentProfile::uniswap(self.uniswap()?)),
+            "ramses" => Ok(V3DeploymentProfile::ramses(self.ramses()?)),
+            _ => {
+                let dex = uniswap::profile::additional_dex(dex)
+                    .ok_or_else(|| FinError::validation("Unsupported AMM venue."))?;
+                let config = self.config.v3_deployments.get(&dex).ok_or_else(|| {
+                    error(
+                        "OPERATION_UNAVAILABLE",
+                        "validation",
+                        "This AMM deployment is not configured.",
+                    )
+                })?;
+                Ok(V3DeploymentProfile::additional(dex, config))
+            }
+        }
+    }
+    fn any_v3_profile(&self) -> Result<uniswap::profile::V3DeploymentProfile<'_>> {
+        if self.config.uniswap.is_some() {
+            self.v3_profile("uniswap")
+        } else if self.config.ramses.is_some() {
+            self.v3_profile("ramses")
+        } else {
+            self.v3_profile(
+                self.config
+                    .v3_deployments
+                    .keys()
+                    .next()
+                    .ok_or_else(|| FinError::validation("No v3 deployment configured."))?
+                    .id(),
+            )
+        }
+    }
     async fn resolved_weth(&self, block: Option<u64>) -> Result<String> {
         if let Some(weth) = &self.config.weth {
             return Ok(weth.clone());
@@ -666,7 +800,7 @@ impl EthereumAdapter {
         let router = if let Some(uniswap) = &self.config.uniswap {
             address(&uniswap.router)?
         } else {
-            address(&self.ramses()?.router)?
+            address(self.any_v3_profile()?.router)?
         };
         self.runtime.code_at(router, block).await?;
         let weth = self
@@ -862,13 +996,16 @@ impl Adapter for EthereumAdapter {
     ) -> Result<ReturnRouteProof> {
         self.preflight_route(operation, input, context).await
     }
-    fn prepare_boundaries(
+    async fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> Result<boundaries::BoundarySpec> {
-        if matches!(prepared.operation.as_str(), "uniswap.swap" | "ramses.swap") {
-            return self.swap_boundaries(prepared, bounds);
+        if matches!(
+            prepared.operation.as_str(),
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
+            return self.swap_boundaries(prepared, bounds).await;
         }
         Err(FinError::new(
             "BOUNDARY_AUTHORIZATION_UNSUPPORTED",
@@ -892,7 +1029,7 @@ impl Adapter for EthereumAdapter {
     ) -> Result<()> {
         if matches!(
             spec.fixed.get("operation").and_then(Value::as_str),
-            Some("uniswap.swap" | "ramses.swap")
+            Some("uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap")
         ) {
             return self.validate_swap_candidate(spec, prepared);
         }

@@ -2039,6 +2039,7 @@ dependencies = [
  "chrono",
  "fin-authorization",
  "fin-domain",
+ "fin-evm",
  "fin-store",
  "hex",
  "jsonschema",

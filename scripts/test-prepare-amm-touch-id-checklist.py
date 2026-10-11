@@ -115,5 +115,74 @@ class RamsesChecklistTests(unittest.TestCase):
                     checklist.parse_args()
 
 
+class V3ForkChecklistTests(unittest.TestCase):
+    def argv(self, out, dex="sushi", chain=1, fee=500, protocol="v3"):
+        return ["generator", "--wallet", "synthetic", "--chain-id", str(chain), "--token-out",
+                "0x1111111111111111111111111111111111111111", "--protocol", protocol,
+                "--dex", dex, "--fee-tier", str(fee), "--fee-cap", "0.0001", "--out-dir", str(out)]
+
+    def test_new_forks_use_only_their_read_and_preview_operations(self):
+        token, owner = "0x" + "1" * 40, "0x" + "2" * 40
+        for dex in ("sushi", "pancakeswap"):
+            asset = {"network": "ethereum:1", "reference": "native", "decimals": 18}
+            calls = []
+            def invoke(fin, argv, allowed):
+                calls.append(argv)
+                if argv[:2] == ["read", "wallet.token"]:
+                    return {"data": {"reference": token, "decimals": 6}}
+                if argv[:2] == ["read", "wallet.balances"]:
+                    return {"resource": f"ethereum:1:{owner}", "data": []}
+                if argv[:2] == ["read", f"{dex}.quote"]:
+                    return {"data": {"dex": dex, "protocol": "v3", "fee_tier": 500,
+                        "input": "1000000000000000", "output": "2495236", "token_in": asset,
+                        "token_out": {"reference": token, "decimals": 6}, "price_impact_bps": 1,
+                        "block_number": 123, "block_hash": "0x" + "a" * 64,
+                        "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}}
+                if argv[:2] == ["preview", f"{dex}.swap"]:
+                    return {"operation": f"{dex}.swap", "intent": {
+                        "debits": [{"amount": {"asset": asset, "atoms": "1000000000000000"}}],
+                        "maximum_costs": [{"amount": {"asset": asset, "atoms": "10000000000000"}}]},
+                        "valuation": {"movement_usd_micros": "2500000", "maximum_fee_usd_micros": "25000",
+                            "prices": [{"asset": asset, "unit_atoms": "1000000000000000000", "usd_micros_per_unit": "2500000000"}]}}
+                if argv[:2] == ["plans", "preview"]:
+                    return {"review_hash": "b" * 64}
+                self.fail(f"unexpected command {argv[:2]}")
+            with self.subTest(dex=dex), tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "unsigned"
+                with patch.object(sys, "argv", self.argv(out, dex)), patch.object(checklist, "invoke", side_effect=invoke), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(checklist.main(), 0)
+                swap = json.loads((out / "swap-input.json").read_text())
+                bounds = json.loads((out / "swap-bounds.json").read_text())
+                plan = json.loads((out / "plan.json").read_text())
+                self.assertEqual(swap["fee_tier"], 500)
+                self.assertNotIn("tick_spacing", swap)
+                self.assertNotIn("v4_pool_key", swap)
+                self.assertEqual(bounds["allowed_fee_tiers"], [500])
+                self.assertEqual(plan["steps"][0]["operation"], f"{dex}.swap")
+                self.assertIn(f"fin execute {dex}.swap", (out / "checklist.md").read_text())
+                self.assertTrue(all(c[0] in {"read", "preview", "plans"} for c in calls))
+
+    def test_cli_accepts_each_reviewed_new_fork_network_and_fee(self):
+        for dex, chains in checklist.V3_NETWORKS.items():
+            for chain in chains:
+                for fee in checklist.FEE_TIERS[dex]:
+                    with tempfile.TemporaryDirectory() as tmp, self.subTest(dex=dex, chain=chain, fee=fee):
+                        with patch.object(sys, "argv", self.argv(Path(tmp) / "review", dex, chain, fee)):
+                            args = checklist.parse_args()
+                        self.assertEqual(args.fee_tier, fee)
+
+    def test_cli_rejects_wrong_pool_selectors_network_protocol_and_fee(self):
+        for dex, chain, fee, protocol, extra in [
+            ("sushi", 4663, 500, "v3", []), ("sushi", 1, 2500, "v3", []),
+            ("pancakeswap", 1, 3000, "v3", []), ("pancakeswap", 1, 500, "v4", []),
+            ("sushi", 1, 500, "v3", ["--tick-spacing", "1"]),
+            ("pancakeswap", 4663, 500, "v3", ["--pool-key", "{}"]),
+            ("sushi", 1, 500, "v3", ["--max-pool-fee-ppm", "1000"]),
+        ]:
+            with tempfile.TemporaryDirectory() as tmp, self.subTest(dex=dex, extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                with patch.object(sys, "argv", self.argv(Path(tmp) / "review", dex, chain, fee, protocol) + extra), self.assertRaises(SystemExit):
+                    checklist.parse_args()
+
+
 if __name__ == "__main__":
     unittest.main()

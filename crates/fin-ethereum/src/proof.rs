@@ -807,7 +807,7 @@ impl EthereumAdapter {
                     after: qty.to_string(),
                 });
             }
-            "uniswap.swap" | "ramses.swap" => {
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" => {
                 let recipient = address(b.recipient.as_deref().expect("recipient"))?;
                 let router = address(&b.transaction.to)?;
                 let route_in = address(b.route_token_in.as_deref().expect("route input"))?;
@@ -959,6 +959,65 @@ impl EthereumAdapter {
                                 event.amount1.unsigned_abs(),
                             )
                         } else {
+                            let profile = self
+                                .v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
+                            if super::uniswap::profile::additional_dex(operation).is_some() {
+                                require(
+                                    b.dex.as_deref() == Some(profile.dex_id)
+                                        && b.factory.as_deref() == Some(profile.factory)
+                                        && b.pool_deployer.as_deref() == profile.pool_deployer
+                                        && router == address(profile.router)?,
+                                    "BINDING_INVALID",
+                                    "V3 receipt deployment differs from the immutable binding.",
+                                )?;
+                                self.validate_v3_metadata(profile, Some(r.block_number))
+                                    .await?;
+                                let tier = b.fee_tier.ok_or_else(|| {
+                                    FinError::validation("V3 fee tier is missing.")
+                                })?;
+                                require(
+                                    profile.fee_tiers.contains(&tier),
+                                    "BINDING_INVALID",
+                                    "Bound fee tier is outside the venue profile.",
+                                )?;
+                                let factory_pool = self
+                                    .runtime
+                                    .call(
+                                        address(profile.factory)?,
+                                        &Factory::getPoolCall {
+                                            tokenA: route_in,
+                                            tokenB: route_out,
+                                            fee: fin_evm::alloy::primitives::aliases::U24::from(
+                                                tier,
+                                            ),
+                                        },
+                                        Some(r.block_number),
+                                    )
+                                    .await?;
+                                require(
+                                    factory_pool == pool,
+                                    "POOL_IDENTITY_MISMATCH",
+                                    "Factory does not resolve the bound pool at receipt inclusion.",
+                                )?;
+                                let pool_factory = self
+                                    .runtime
+                                    .call(pool, &UniswapPool::factoryCall {}, Some(r.block_number))
+                                    .await?;
+                                require(
+                                    pool_factory == address(profile.factory)?,
+                                    "POOL_IDENTITY_MISMATCH",
+                                    "Included pool belongs to a different factory.",
+                                )?;
+                                let actual_fee = self
+                                    .runtime
+                                    .call(pool, &UniswapPool::feeCall {}, Some(r.block_number))
+                                    .await?;
+                                require(
+                                    actual_fee.to::<u32>() == tier,
+                                    "POOL_IDENTITY_MISMATCH",
+                                    "Pool fee differs from the bound factory key.",
+                                )?;
+                            }
                             let token0 = self
                                 .runtime
                                 .call(pool, &UniswapPool::token0Call {}, Some(r.block_number))
@@ -967,29 +1026,53 @@ impl EthereumAdapter {
                                 .runtime
                                 .call(pool, &UniswapPool::token1Call {}, Some(r.block_number))
                                 .await?;
-                            let event = exact_one(
-                                events::<UniswapPool::Swap>(receipt, pool)?
-                                    .into_iter()
-                                    .filter(|e| {
-                                        e.sender == router
-                                            && (e.recipient == recipient
-                                                || (b
-                                                    .output
-                                                    .as_ref()
-                                                    .is_some_and(|a| a.reference == "native")
-                                                    && e.recipient == router))
-                                    })
-                                    .collect(),
-                            )?;
-                            (
-                                pool,
-                                token0,
-                                token1,
-                                event.amount0.is_positive(),
-                                event.amount0.unsigned_abs(),
-                                event.amount1.is_positive(),
-                                event.amount1.unsigned_abs(),
-                            )
+                            if profile.pool_abi == V3PoolAbi::PancakeV3 {
+                                let event =
+                                    exact_one(
+                                        events::<PancakePool::Swap>(receipt, pool)?
+                                            .into_iter()
+                                            .filter(|e| {
+                                                e.sender == router
+                                                    && (e.recipient == recipient
+                                                        || (b.output.as_ref().is_some_and(|a| {
+                                                            a.reference == "native"
+                                                        }) && e.recipient == router))
+                                            })
+                                            .collect(),
+                                    )?;
+                                (
+                                    pool,
+                                    token0,
+                                    token1,
+                                    event.amount0.is_positive(),
+                                    event.amount0.unsigned_abs(),
+                                    event.amount1.is_positive(),
+                                    event.amount1.unsigned_abs(),
+                                )
+                            } else {
+                                let event =
+                                    exact_one(
+                                        events::<UniswapPool::Swap>(receipt, pool)?
+                                            .into_iter()
+                                            .filter(|e| {
+                                                e.sender == router
+                                                    && (e.recipient == recipient
+                                                        || (b.output.as_ref().is_some_and(|a| {
+                                                            a.reference == "native"
+                                                        }) && e.recipient == router))
+                                            })
+                                            .collect(),
+                                    )?;
+                                (
+                                    pool,
+                                    token0,
+                                    token1,
+                                    event.amount0.is_positive(),
+                                    event.amount0.unsigned_abs(),
+                                    event.amount1.is_positive(),
+                                    event.amount1.unsigned_abs(),
+                                )
+                            }
                         }
                     };
                 require(

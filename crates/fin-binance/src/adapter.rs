@@ -220,12 +220,12 @@ impl Adapter for BinanceAdapter {
     fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
         self.0.authorization_identities()
     }
-    fn prepare_boundaries(
+    async fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> Result<fin_domain::boundaries::BoundarySpec, FinError> {
-        self.0.prepare_boundaries(prepared, bounds)
+        self.0.prepare_boundaries(prepared, bounds).await
     }
     async fn prepare_plan_permission(
         &self,

@@ -292,6 +292,13 @@ including newly added operations, with exact input and cumulative caps. Plan
 review labels live checks deferred to execution. Financial grants and plans
 cannot authorize enrollment or protected policy changes.
 
+Plan funding dependencies default to producer-funded principal plus additional
+fees. Explicit `funding_scope: "principal_only"` assigns only principal to the
+producer; separately available cash must still cover approved fees as well as
+the principal debit. This supports returning all verified native-ETH swap
+proceeds while paying gas from an existing ETH balance. The optional field is
+included in the reviewed plan, and omission retains legacy bindings.
+
 Every plan input field stays fixed except a string JSON pointer explicitly
 declared by the trusted operation definition as broker-generated per attempt.
 Fin assigns such a field separately for each attempt; the original input

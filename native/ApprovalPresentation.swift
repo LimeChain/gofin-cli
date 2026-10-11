@@ -92,7 +92,7 @@ func financialAuthenticationReason(_ binding: [String: Any], summary: String) ->
     if operation == "bridge.transfer" {
         return bridgeAuthenticationReason(summary: summary)
     }
-    if operation == "uniswap.swap" || operation == "ramses.swap" {
+    if ammOperationPresentation(operation) != nil {
         return ammStandaloneAuthenticationReason(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve this action: ", summary: summary)
@@ -121,7 +121,7 @@ func boundaryAuthenticationReason(_ binding: [String: Any], summary: String) -> 
             sourceAddress: fixed?["source_address"] as? String,
             refundAddress: fixed?["refund_to"] as? String)
     }
-    if operation == "uniswap.swap" || operation == "ramses.swap" {
+    if ammOperationPresentation(operation) != nil {
         return ammBoundarySynopsis(binding, summary: summary)
     }
     return compactAuthenticationReason(prefix: "approve these boundaries: ", summary: summary)
@@ -328,8 +328,80 @@ func reviewedNetworkName(_ network: String) -> String {
     }
 }
 
+// Keep operation identities closed: the broker's prose never selects a DEX.
+private struct AMMOperationPresentation {
+    let dex: String
+    let brand: String
+    let feeTiers: [UInt64]
+    let additionalV3: Bool
+}
+
+private func ammOperationPresentation(_ operation: String) -> AMMOperationPresentation? {
+    switch operation {
+    case "uniswap.swap": return AMMOperationPresentation(dex: "uniswap", brand: "Uniswap", feeTiers: [100, 500, 3000, 10000], additionalV3: false)
+    case "ramses.swap": return AMMOperationPresentation(dex: "ramses", brand: "Ramses", feeTiers: [], additionalV3: false)
+    case "sushi.swap": return AMMOperationPresentation(dex: "sushi", brand: "Sushi", feeTiers: [100, 500, 3000, 10000], additionalV3: true)
+    case "pancakeswap.swap": return AMMOperationPresentation(dex: "pancakeswap", brand: "PancakeSwap", feeTiers: [100, 500, 2500, 10000], additionalV3: true)
+    default: return nil
+    }
+}
+
+private func absentPresentationValue(_ value: Any?) -> Bool {
+    value == nil || value is NSNull
+}
+
+// New fixed-fee venues always carry explicit deployment identities.
+// Legacy Uniswap bindings intentionally retain their existing shape.
+private func additionalV3Identity(_ scope: [String: Any], operation: AMMOperationPresentation, router: Any?) -> Bool {
+    guard operation.additionalV3 else { return true }
+    let zero = "0x" + String(repeating: "0", count: 40)
+    guard scope["dex"] as? String == operation.dex,
+          scope["protocol"] as? String == "v3",
+          let factory = presentationAddress(scope["factory"]), factory != zero,
+          let router = presentationAddress(router), router != zero,
+          absentPresentationValue(scope["tick_spacing"]),
+          absentPresentationValue(scope["max_pool_fee_ppm"]),
+          absentPresentationValue(scope["swap_fee_ppm"]),
+          absentPresentationValue(scope["v4_pool_key"]) else { return false }
+    if operation.dex == "pancakeswap" {
+        guard let deployer = presentationAddress(scope["pool_deployer"]), deployer != zero else { return false }
+    } else if !absentPresentationValue(scope["pool_deployer"]) { return false }
+    return true
+}
+
+// Concrete writes retain one exact pool. New consent scopes bind each allowed
+// fee tier to a reviewed pool; old scopes keep their exact single-pool meaning.
+private func additionalV3PoolScope(_ scope: [String: Any], operation: AMMOperationPresentation,
+                                   bounds: [String: Any]? = nil) -> Bool {
+    guard operation.additionalV3 else { return true }
+    let zero = "0x" + String(repeating: "0", count: 40)
+    guard let bounds else {
+        return scope["approved_pools"] == nil
+            && presentationAddress(scope["pool"]).map({ $0 != zero }) == true
+    }
+    guard let rawTiers = bounds["allowed_fee_tiers"] as? [Any],
+          !rawTiers.isEmpty, rawTiers.count <= operation.feeTiers.count else { return false }
+    let tiers = rawTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
+    guard tiers.count == rawTiers.count, Set(tiers).count == tiers.count,
+          tiers.allSatisfy({ operation.feeTiers.contains($0) }) else { return false }
+    // Absence selects the legacy representation. Null or malformed maps are
+    // not absence, and a map must never coexist with a single-pool field.
+    guard scope["approved_pools"] != nil else {
+        return presentationAddress(scope["pool"]).map({ $0 != zero }) == true
+    }
+    guard scope["pool"] == nil,
+          let pools = scope["approved_pools"] as? [String: Any],
+          Set(pools.keys) == Set(tiers.map(String.init)) else { return false }
+    return pools.values.allSatisfy { presentationAddress($0).map({ $0 != zero }) == true }
+}
+
+private func ammVenueSuffix(_ operation: AMMOperationPresentation) -> String {
+    operation.additionalV3 ? " via \(operation.brand)" : ""
+}
+
 private func ammStandaloneAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
-    guard let execution = binding["execution"] as? [String: Any],
+    guard let operation = ammOperationPresentation(binding["operation"] as? String ?? ""),
+          let execution = binding["execution"] as? [String: Any],
           let intent = binding["financial_intent"] as? [String: Any],
           let token = execution["token"] as? [String: Any],
           let tokenNetwork = presentationString(token["network"], maximum: 64),
@@ -356,12 +428,21 @@ private func ammStandaloneAuthenticationReason(_ binding: [String: Any], summary
           presentationInteger(feeAsset["decimals"], minimum: 18, maximum: 18) != nil,
           let feeAtoms = presentationString(costAmount["atoms"], maximum: 100),
           let fee = presentationAtomicQuantity(feeAtoms, decimals: 18) else { return nil }
+    if operation.additionalV3 {
+        guard let transaction = execution["transaction"] as? [String: Any],
+              additionalV3Identity(execution, operation: operation, router: transaction["to"]),
+              additionalV3PoolScope(execution, operation: operation),
+              presentationInteger(transaction["chain_id"], minimum: 1).map({ tokenNetwork == "ethereum:\($0)" }) == true,
+              presentationAddress(execution["spender"]) == presentationAddress(transaction["to"]),
+              let feeTier = presentationInteger(execution["fee_tier"], minimum: 1, maximum: 10000),
+              operation.feeTiers.contains(feeTier) else { return nil }
+    }
     let labels = ammLabels(summary: summary, bounded: false,
                            inputReference: tokenReference, outputReference: outputReference)
     let now = Date().timeIntervalSince1970
     guard now.isFinite, deadline > UInt64(max(0, now)) else { return nil }
     let remaining = deadline - UInt64(max(0, now))
-    let reason = "allow swapping \(amount) \(labels.input) for at least \(minimum) \(labels.output) on \(reviewedNetworkName(tokenNetwork)); max network fees \(fee) ETH; expires in \(approvalDuration(remaining))."
+    let reason = "allow swapping \(amount) \(labels.input) for at least \(minimum) \(labels.output) on \(reviewedNetworkName(tokenNetwork))\(ammVenueSuffix(operation)); max network fees \(fee) ETH; expires in \(approvalDuration(remaining))."
     let hasPermit = execution["permit_template"].map { !($0 is NSNull) } ?? false
     let scopedPermit = hasPermit
         ? " Any token permit is limited to this swap." : ""
@@ -373,7 +454,7 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
     guard let fixed = binding["fixed"] as? [String: Any],
           let bounds = binding["parameters"] as? [String: Any],
           let operation = fixed["operation"] as? String,
-          operation == "uniswap.swap" || operation == "ramses.swap",
+          let venue = ammOperationPresentation(operation),
           binding["operation"] as? String == operation,
           let network = presentationString(fixed["network"], maximum: 64),
           let chainID = presentationInteger(fixed["chain_id"], minimum: 1),
@@ -402,6 +483,9 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
           rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
           let duration = presentationInteger(binding["valid_for_seconds"], minimum: 1) else { return nil }
 
+    guard additionalV3Identity(fixed, operation: venue, router: fixed["router"]),
+          additionalV3PoolScope(fixed, operation: venue, bounds: bounds),
+          !venue.additionalV3 || absentPresentationValue(bounds["max_pool_fee_ppm"]) else { return nil }
     if operation == "ramses.swap" {
         guard protocolName == "v3",
               let spacing = presentationInteger(fixed["tick_spacing"], minimum: 1, maximum: 200),
@@ -417,7 +501,7 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
         guard let tiers = bounds["allowed_fee_tiers"] as? [Any] else { return nil }
         let parsed = tiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10000) }
         guard !parsed.isEmpty, parsed.count == tiers.count,
-              parsed.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return nil }
+              parsed.allSatisfy({ venue.feeTiers.contains($0) }) else { return nil }
     } else {
         guard let tiers = bounds["allowed_fee_tiers"] as? [Any], tiers.isEmpty,
               let poolKey = fixed["v4_pool_key"] as? [String: Any],
@@ -438,7 +522,7 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
     _ = rateInput
     _ = rateOutput
     _ = maxDeadline
-    let reason = "allow swapping up to \(maxInput) \(labels.input) \(receipt) on \(networkName) for \(approvalDuration(duration)); max network fees \(maxFee) ETH.\(permitScope)"
+    let reason = "allow swapping up to \(maxInput) \(labels.input) \(receipt) on \(networkName)\(ammVenueSuffix(venue)) for \(approvalDuration(duration)); max network fees \(maxFee) ETH.\(permitScope)"
     return reason.count <= 300 ? reason : nil
 }
 
@@ -446,7 +530,7 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
 // Concise plan prompts still reject malformed or mismatched AMM scopes.
 private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
     guard let operation = step["operation"] as? String,
-          operation == "uniswap.swap" || operation == "ramses.swap",
+          let venue = ammOperationPresentation(operation),
           let stepID = presentationString(step["step_id"], maximum: 80),
           let input = step["input"] as? [String: Any],
           let permit = permission["permission"] as? [String: Any],
@@ -494,7 +578,13 @@ private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) 
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
           rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else { return false }
 
-    guard fixed["operation"] as? String == operation else { return false }
+    guard fixed["operation"] as? String == operation,
+          additionalV3Identity(fixed, operation: venue, router: fixed["router"]),
+          additionalV3PoolScope(fixed, operation: venue, bounds: bounds),
+          !venue.additionalV3 || (absentPresentationValue(bounds["max_pool_fee_ppm"])
+              && absentPresentationValue(input["max_pool_fee_ppm"])
+              && absentPresentationValue(input["tick_spacing"])
+              && absentPresentationValue(input["v4_pool_key"])) else { return false }
     if operation == "ramses.swap", fixed["dex"] as? String != "ramses" { return false }
 
     let requestedProtocol = input["protocol"] == nil ? "v3" : presentationString(input["protocol"], maximum: 8)
@@ -533,7 +623,7 @@ private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) 
         guard let allowedTiers = bounds["allowed_fee_tiers"] as? [Any] else { return false }
         let tiers = allowedTiers.compactMap { presentationInteger($0, minimum: 1, maximum: 10_000) }
         guard !tiers.isEmpty, tiers.count == allowedTiers.count,
-              tiers.allSatisfy({ [100, 500, 3000, 10000].contains(Int($0)) }) else { return false }
+              tiers.allSatisfy({ venue.feeTiers.contains($0) }) else { return false }
         if input["fee_tier"] != nil {
             guard let selected = presentationInteger(input["fee_tier"], minimum: 1, maximum: 10_000) else { return false }
             guard tiers.contains(selected) else { return false }
@@ -670,7 +760,7 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
     let details = " (\(steps.count) \(steps.count == 1 ? "step" : "steps"), \(approvalDuration(durationSeconds)))"
     let detailed = lead + details
     let ammSteps = zip(steps, permissions).filter { step, _ in
-        ["uniswap.swap", "ramses.swap"].contains(step["operation"] as? String ?? "")
+        ammOperationPresentation(step["operation"] as? String ?? "") != nil
     }
     if !ammSteps.isEmpty {
         guard ammSteps.allSatisfy({ validAMMPlanStep($0.0, permission: $0.1) }),

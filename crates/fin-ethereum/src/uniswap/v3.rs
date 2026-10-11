@@ -227,3 +227,18 @@ pub fn exact_input_single(request: ExactInputSingle) -> Result<Call> {
         value: if native_in { input } else { U256::ZERO },
     })
 }
+
+/// Pancake SmartRouter requires a final native refund step. The approved
+/// exact-input call remains first, with its original deadline unchanged.
+pub(crate) fn with_refund(calldata: Bytes) -> Result<Bytes> {
+    let mut call = SwapRouter02::multicallCall::abi_decode(&calldata).map_err(|_| {
+        error(
+            "SWAP_ROUTE_INVALID",
+            "validation",
+            "SmartRouter requires a deadline multicall.",
+        )
+    })?;
+    call.data
+        .push(V3Refund::refundETHCall {}.abi_encode().into());
+    Ok(call.abi_encode().into())
+}

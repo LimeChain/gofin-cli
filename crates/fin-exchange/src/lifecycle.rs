@@ -293,7 +293,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
         self.profile.authorization_identities()
     }
-    fn prepare_boundaries(
+    async fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
         bounds: &Value,

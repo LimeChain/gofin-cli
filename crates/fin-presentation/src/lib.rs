@@ -332,7 +332,12 @@ impl Ui {
                             .unwrap_or("previous step");
                         let resource = dependency["resource"].as_str().unwrap_or("resource");
                         let asset = dependency["asset"]["reference"].as_str().unwrap_or("asset");
-                        self.message_to(&format!("   Conditional funding: {asset} from {producer} at {resource}, available only after verified settlement"), "33", output)?;
+                        let funding = if dependency["funding_scope"] == "principal_only" {
+                            "principal from verified producer; fees from separately available cash"
+                        } else {
+                            "principal and additional fees from verified producer"
+                        };
+                        self.message_to(&format!("   Conditional funding: {asset} from {producer} at {resource}; {funding}; available only after verified settlement"), "33", output)?;
                     }
                 }
                 if let Some(permission) = permission {
@@ -1810,6 +1815,82 @@ mod tests {
             )
             .unwrap();
         assert!(String::from_utf8(output).unwrap().contains("for 1 second."));
+    }
+
+    #[test]
+    fn plan_dependency_review_distinguishes_principal_only_and_legacy_fee_funding() {
+        let asset = json!({"network":"ethereum:1","reference":"native","decimals":18});
+        let debit = json!({"resource":"ethereum:1:SYNTHETIC-wallet","amount":{"asset":asset,"atoms":"10000000000000000"}});
+        let cost = json!({"location":{"kind":"cash","resource":"ethereum:1:SYNTHETIC-wallet"},"amount":{"asset":asset,"atoms":"1000000000000000"},"treatment":"additional_debit"});
+        let review = json!({
+            "valid_for_seconds":600,
+            "plan":{"name":"Synthetic funded transfer","steps":[{
+                "step_id":"spend","operation":"wallet.transfer",
+                "input":{"amount":"0.01","recipient":"SYNTHETIC-recipient"},
+                "funding_dependencies":[{"producing_step_id":"produce","resource":"ethereum:1:SYNTHETIC-wallet","asset":asset}]
+            }],"aggregate_bounds":{"maximum_debits":[debit],"maximum_costs":[cost]}},
+            "permissions":[{"step_id":"spend","exact":{"scope":{"maximum_debits":[debit],"maximum_costs":[cost],"possible_credits":[]}}}]
+        });
+        for (scope, principal_only) in [
+            (None, false),
+            (Some(Value::Null), false),
+            (Some(json!("all_debits")), false),
+            (Some(json!("principal_only")), true),
+        ] {
+            let mut scoped_review = review.clone();
+            if let Some(scope) = scope {
+                scoped_review["plan"]["steps"][0]["funding_dependencies"][0]["funding_scope"] =
+                    scope;
+            }
+            for (tty, dumb, no_color) in [
+                (true, false, false),
+                (true, false, true),
+                (true, true, false),
+                (false, false, false),
+            ] {
+                let mut output = Vec::new();
+                ui(false, false, tty, tty, dumb, no_color)
+                    .plan_authorization_review_to(&scoped_review, &mut output)
+                    .unwrap();
+                let text = String::from_utf8(output).unwrap();
+                let funding = if principal_only {
+                    "principal from verified producer; fees from separately available cash"
+                } else {
+                    "principal and additional fees from verified producer"
+                };
+                let row = format!(
+                    "   Conditional funding: native from produce at ethereum:1:SYNTHETIC-wallet; {funding}; available only after verified settlement"
+                );
+                assert!(text.contains(&row));
+                assert_eq!(
+                    text.contains("fees from separately available cash"),
+                    principal_only
+                );
+                assert_eq!(
+                    text.contains("principal and additional fees"),
+                    !principal_only
+                );
+                for material in [
+                    "Plan: Synthetic funded transfer",
+                    "Step debit cap: 0.01",
+                    "Step fee cap: 0.001",
+                    "Aggregate fee cap: 0.001",
+                    "Approval duration: 10 minutes",
+                    "SYNTHETIC-recipient",
+                ] {
+                    assert!(text.contains(material), "missing {material} in {text}");
+                }
+                assert_eq!(text.contains('\x1b'), tty && !dumb && !no_color);
+                if tty && !dumb && !no_color {
+                    assert!(text.contains(&format!("\x1b[33m{row}\x1b[0m\n")));
+                }
+                let mut machine_output = Vec::new();
+                ui(true, true, tty, tty, dumb, no_color)
+                    .plan_authorization_review_to(&scoped_review, &mut machine_output)
+                    .unwrap();
+                assert!(machine_output.is_empty());
+            }
+        }
     }
 
     #[test]

@@ -123,7 +123,19 @@ sol! {
         function getPreviousIndex(address user) external view returns (uint256 value);
         event Mint(address indexed caller,address indexed onBehalfOf,uint256 value,uint256 balanceIncrease,uint256 index);
     }
+    interface PancakePool {
+        function slot0() external view returns (uint160 sqrtPriceX96,int24 tick,uint16 observationIndex,uint16 observationCardinality,uint16 observationCardinalityNext,uint32 feeProtocol,bool unlocked);
+        event Swap(address indexed sender,address indexed recipient,int256 amount0,int256 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick,uint128 protocolFeesToken0,uint128 protocolFeesToken1);
+    }
+    interface V3Refund { function refundETH() external payable; }
+    interface V3DeploymentInfo {
+        function factory() external view returns (address value);
+        function deployer() external view returns (address value);
+        function WETH9() external view returns (address value);
+    }
     interface UniswapPool {
+        function factory() external view returns (address value);
+        function fee() external view returns (uint24 value);
         function token0() external view returns (address value);
         function token1() external view returns (address value);
         function slot0() external view returns (uint160 sqrtPriceX96,int24 tick,uint16 observationIndex,uint16 observationCardinality,uint16 observationCardinalityNext,uint8 feeProtocol,bool unlocked);

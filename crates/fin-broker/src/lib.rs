@@ -113,6 +113,8 @@ pub struct DeploymentConfig {
     pub uniswap: Option<fin_ethereum::UniswapConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ramses: Option<fin_ethereum::RamsesConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub v3_deployments: BTreeMap<fin_ethereum::V3Dex, fin_ethereum::V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<fin_ethereum::AaveConfig>,
 }
@@ -216,6 +218,7 @@ impl DeploymentConfig {
             .filter_map(|network| {
                 let uniswap = amm_deployments::reviewed_uniswap(network.chain_id);
                 let ramses = amm_deployments::reviewed_ramses(network.chain_id);
+                let v3_deployments = amm_deployments::reviewed_v3_deployments(network.chain_id);
                 let aave = if network.chain_id == 1 {
                     fin_ethereum::EthereumConfig::default().aave
                 } else if network.chain_id == 8453 {
@@ -223,13 +226,18 @@ impl DeploymentConfig {
                 } else {
                     None
                 };
-                (uniswap.is_some() || ramses.is_some() || aave.is_some()).then(|| Self {
+                (uniswap.is_some()
+                    || ramses.is_some()
+                    || !v3_deployments.is_empty()
+                    || aave.is_some())
+                .then(|| Self {
                     network: network.id,
                     weth: (network.chain_id == 8453)
                         .then(|| "0x4200000000000000000000000000000000000006".into()),
                     snapshot_tokens: vec![],
                     uniswap,
                     ramses,
+                    v3_deployments,
                     aave,
                 })
             })
@@ -248,6 +256,7 @@ impl DeploymentConfig {
             snapshot_tokens: defaults.snapshot_tokens,
             uniswap: amm_deployments::reviewed_uniswap(1),
             ramses: amm_deployments::reviewed_ramses(1),
+            v3_deployments: amm_deployments::reviewed_v3_deployments(1),
             aave: defaults.aave,
         }
     }
@@ -953,6 +962,34 @@ pub fn build_applications_with_price_source(
         )?);
         eth_rpcs.insert(network.chain_id, rpc.clone());
     }
+    build_applications_with_transports(config, credentials, source, eth_rpcs)
+}
+
+/// Compose real adapters with caller-owned typed EVM transports. The configuration
+/// remains subject to production validation; this is an internal dependency seam,
+/// not a serialized configuration or broker-protocol transport override.
+pub fn build_applications_with_transports(
+    config: &BrokerConfigV2,
+    credentials: Arc<dyn BrokerCredentialProvider>,
+    source: Arc<dyn fin_pricing::UsdPriceSource>,
+    eth_rpcs: BTreeMap<u64, Arc<dyn fin_evm::EvmRpc>>,
+) -> fin_domain::Result<ProtectedApplications> {
+    config.validate()?;
+    let expected: std::collections::BTreeSet<_> = config
+        .networks
+        .iter()
+        .map(|network| network.chain_id)
+        .collect();
+    if eth_rpcs
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        != expected
+    {
+        return Err(FinError::validation(
+            "Supplied EVM transports must exactly match the configured network scope.",
+        ));
+    }
     let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
@@ -1029,6 +1066,7 @@ pub fn build_applications_with_price_source(
                 snapshot_tokens: deployment.snapshot_tokens.clone(),
                 uniswap: deployment.uniswap.clone(),
                 ramses: deployment.ramses.clone(),
+                v3_deployments: deployment.v3_deployments.clone(),
                 aave: deployment.aave.clone(),
             }
         } else if network.chain_id == 8453 {
@@ -6716,6 +6754,11 @@ mod tests {
     fn v2_config_requires_verified_physical_identity_and_safe_rpc_urls() {
         let mut config = config();
         config.networks[0].rpc_urls = vec!["https://user:secret@example.invalid".into()];
+        assert_eq!(
+            config.validate().unwrap_err().code,
+            "CONFIG_NETWORK_INVALID"
+        );
+        config.networks[0].rpc_urls = vec!["http://127.0.0.1:8545".into()];
         assert_eq!(
             config.validate().unwrap_err().code,
             "CONFIG_NETWORK_INVALID"

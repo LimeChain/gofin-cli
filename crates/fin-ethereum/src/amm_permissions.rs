@@ -47,7 +47,7 @@ pub struct SwapBounds {
     )]
     pub absolute_minimum_output: Option<String>,
     #[schemars(
-        description = "Allowed Uniswap v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing."
+        description = "Allowed reviewed v3 fee tiers; must be empty for v4 and Ramses, whose pool identity is fixed by its key or tick spacing."
     )]
     pub allowed_fee_tiers: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +132,17 @@ fn parse_bounds(
             return Err(FinError::validation(
                 "Ramses pool identity uses tick spacing, so allowed_fee_tiers must be empty.",
             ));
+        }
+        value if super::uniswap::profile::additional_dex(value).is_some() => {
+            let dex = super::uniswap::profile::additional_dex(value).expect("matched");
+            if tiers.is_empty()
+                || tiers.iter().any(|tier| !dex.fee_tiers().contains(tier))
+                || bounds.max_pool_fee_ppm.is_some()
+            {
+                return Err(FinError::validation(
+                    "This venue requires nonempty reviewed fee tiers.",
+                ));
+            }
         }
         "ramses" => {}
         "v3" | "v4" => {}
@@ -282,7 +293,14 @@ async fn request_identity(
     adapter: &EthereumAdapter,
     input: &Value,
     operation: &str,
-) -> Result<(request::Request, Value, AssetId, AssetId, DisplayLabels)> {
+) -> Result<(
+    request::Request,
+    Value,
+    AssetId,
+    AssetId,
+    DisplayLabels,
+    u64,
+)> {
     let config = adapter.config.uniswap.as_ref();
     let is_ramses = operation == "ramses.swap";
     let request = request::parse(operation, input)?;
@@ -294,11 +312,8 @@ async fn request_identity(
     } else {
         request.protocol.as_deref().unwrap_or("v3")
     };
-    let v3_profile = if is_ramses {
-        super::uniswap::profile::V3DeploymentProfile::ramses(adapter.ramses()?)
-    } else {
-        super::uniswap::profile::V3DeploymentProfile::uniswap(adapter.uniswap()?)
-    };
+    let dex = super::uniswap::profile::operation_dex(operation)?;
+    let v3_profile = adapter.v3_profile(dex)?;
     let router = match protocol {
         "v3" | "ramses" => address(v3_profile.router)?,
         "v4" => address(
@@ -430,11 +445,19 @@ async fn request_identity(
         fixed["pool_deployer"] = json!(adapter.ramses()?.pool_deployer);
         fixed["initial_pool_fee_ppm"] = json!(fee);
     }
-    Ok((request, fixed, token_in, token_out, labels))
+    if super::uniswap::profile::additional_dex(operation).is_some() {
+        fixed["dex"] = json!(dex);
+        fixed["factory"] = json!(v3_profile.factory);
+        fixed["pool_deployer"] = json!(v3_profile.pool_deployer);
+    }
+    Ok((request, fixed, token_in, token_out, labels, block))
 }
 
 fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
-    if !matches!(prepared.operation.as_str(), "uniswap.swap" | "ramses.swap") {
+    if !matches!(
+        prepared.operation.as_str(),
+        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+    ) {
         return Err(FinError::validation(
             "AMM boundary applies only to configured single-pool swaps.",
         ));
@@ -510,6 +533,18 @@ fn fixed_from_prepared(prepared: &PreparedOperation) -> Result<Value> {
         fixed["factory"] = json!(b.factory);
         fixed["pool_deployer"] = json!(b.pool_deployer);
     }
+    if super::uniswap::profile::additional_dex(&prepared.operation).is_some() {
+        let dex = super::uniswap::profile::operation_dex(&prepared.operation)?;
+        if b.dex.as_deref() != Some(dex) || b.factory.is_none() || b.pool.is_none() {
+            return Err(FinError::validation(
+                "Additional v3 venue binding lacks its exact deployment identity.",
+            ));
+        }
+        fixed["dex"] = json!(dex);
+        fixed["factory"] = json!(b.factory);
+        fixed["pool_deployer"] = json!(b.pool_deployer);
+        fixed["pool"] = json!(b.pool);
+    }
     Ok(fixed)
 }
 
@@ -551,7 +586,10 @@ fn make_spec(
         )
     } else {
         format!(
-            "Uniswap v3 allowed fee tiers {:?} ppm",
+            "{} v3 allowed fee tiers {:?} ppm",
+            super::uniswap::profile::additional_dex(dex)
+                .map(V3Dex::display_name)
+                .unwrap_or("Uniswap"),
             bounds.allowed_fee_tiers
         )
     };
@@ -617,21 +655,152 @@ fn make_spec(
 }
 
 impl EthereumAdapter {
+    /// Resolve only the explicitly approved tier set at one metadata block.
+    /// Pool identity checks do not need funded balances or a price quote.
+    async fn approved_v3_pools(
+        &self,
+        fixed: &Value,
+        tiers: &[u32],
+        block: u64,
+    ) -> Result<BTreeMap<u32, String>> {
+        let operation = fixed["operation"]
+            .as_str()
+            .ok_or_else(|| FinError::validation("Swap operation identity is missing."))?;
+        let dex = super::uniswap::profile::operation_dex(operation)?;
+        let profile = self.v3_profile(dex)?;
+        require(
+            super::uniswap::profile::additional_dex(dex).is_some()
+                && fixed["dex"] == dex
+                && fixed["factory"] == profile.factory
+                && fixed["router"] == profile.router
+                && fixed["pool_deployer"] == json!(profile.pool_deployer)
+                && fixed["chain_id"] == self.config.chain_id,
+            "POOL_SCOPE_INVALID",
+            "Swap scope differs from the configured v3 deployment.",
+        )?;
+        let input: AssetId = serde_json::from_value(fixed["token_in"].clone())
+            .map_err(|_| FinError::validation("Scope input token is invalid."))?;
+        let output: AssetId = serde_json::from_value(fixed["token_out"].clone())
+            .map_err(|_| FinError::validation("Scope output token is invalid."))?;
+        let wrapped_native = if input.reference == "native" || output.reference == "native" {
+            Some(
+                self.runtime
+                    .call(
+                        address(profile.router)?,
+                        &abi::V3RouterInfo::WETH9Call {},
+                        Some(block),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let currency = |asset: &AssetId| -> Result<Address> {
+            if asset.reference == "native" {
+                Ok(wrapped_native.expect("native resolved"))
+            } else {
+                address(&asset.reference)
+            }
+        };
+        let token_in = currency(&input)?;
+        let token_out = currency(&output)?;
+        require(
+            token_in != token_out,
+            "SWAP_ASSET_INVALID",
+            "Scope currencies resolve to the same pool token.",
+        )?;
+        let factory = address(profile.factory)?;
+        self.runtime.code_at(factory, Some(block)).await?;
+        for &tier in tiers {
+            require(
+                profile.fee_tiers.contains(&tier),
+                "FEE_TIER_UNSUPPORTED",
+                "Scope fee tier is outside the reviewed venue profile.",
+            )?;
+        }
+        let resolve = |tier: u32| async move {
+            let pool = self
+                .runtime
+                .call(
+                    factory,
+                    &abi::Factory::getPoolCall {
+                        tokenA: token_in,
+                        tokenB: token_out,
+                        fee: fin_evm::alloy::primitives::aliases::U24::from(tier),
+                    },
+                    Some(block),
+                )
+                .await?;
+            require(
+                pool != Address::ZERO,
+                "POOL_SCOPE_UNAVAILABLE",
+                "An approved fee tier has no pool at the authorization block.",
+            )?;
+            let (_, actual_factory, token0, token1, actual_fee) = tokio::try_join!(
+                self.runtime.code_at(pool, Some(block)),
+                self.runtime
+                    .call(pool, &abi::UniswapPool::factoryCall {}, Some(block)),
+                self.runtime
+                    .call(pool, &abi::UniswapPool::token0Call {}, Some(block)),
+                self.runtime
+                    .call(pool, &abi::UniswapPool::token1Call {}, Some(block)),
+                self.runtime
+                    .call(pool, &abi::UniswapPool::feeCall {}, Some(block)),
+            )?;
+            require(
+                actual_factory == factory
+                    && actual_fee.to::<u32>() == tier
+                    && ((token0 == token_in && token1 == token_out)
+                        || (token0 == token_out && token1 == token_in)),
+                "POOL_IDENTITY_MISMATCH",
+                "Approved pool does not match its factory, token pair and fee tier.",
+            )?;
+            Ok::<_, FinError>((tier, lower_address(pool)))
+        };
+        // Every reviewed profile has at most four fee tiers. Concurrent pinned
+        // reads stay within that finite set; no wallet snapshot is introduced.
+        let pairs = match tiers {
+            [a] => vec![resolve(*a).await?],
+            [a, b] => {
+                let (a, b) = tokio::try_join!(resolve(*a), resolve(*b))?;
+                vec![a, b]
+            }
+            [a, b, c] => {
+                let (a, b, c) = tokio::try_join!(resolve(*a), resolve(*b), resolve(*c))?;
+                vec![a, b, c]
+            }
+            [a, b, c, d] => {
+                let (a, b, c, d) =
+                    tokio::try_join!(resolve(*a), resolve(*b), resolve(*c), resolve(*d))?;
+                vec![a, b, c, d]
+            }
+            _ => {
+                return Err(FinError::validation(
+                    "Approve between one and four reviewed pool fee tiers.",
+                ));
+            }
+        };
+        Ok(pairs.into_iter().collect())
+    }
+
     pub(crate) async fn swap_plan_permission(
         &self,
         operation: &str,
         input: &Value,
         raw_bounds: &Value,
     ) -> Result<PlanPermission> {
-        if !matches!(operation, "uniswap.swap" | "ramses.swap") {
+        if !matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             return Err(FinError::new(
                 "PLAN_PERMISSION_UNSUPPORTED",
                 "authorization",
-                "AMM plan permission supports reviewed Uniswap and Ramses swaps only.",
+                "AMM plan permission supports configured single-pool AMM swaps only.",
                 "Choose a supported swap step.",
             ));
         }
-        let (request, fixed, input_asset, output_asset, labels) =
+        let (request, fixed, input_asset, output_asset, labels, block) =
             tokio::time::timeout(std::time::Duration::from_secs(10), request_identity(self, input, operation))
                 .await
                 .map_err(|_| {
@@ -749,6 +918,12 @@ impl EthereumAdapter {
                 "Uniswap v4 fee is fixed by its explicit pool key.",
             ));
         }
+        if super::uniswap::profile::additional_dex(operation).is_some() {
+            let pools = self
+                .approved_v3_pools(&fixed, &bounds.allowed_fee_tiers, block)
+                .await?;
+            fixed["approved_pools"] = json!(pools);
+        }
         let resource: ResourceId = serde_json::from_value(fixed["resource"].clone())
             .map_err(|_| FinError::validation("Physical resource identity is invalid."))?;
         let spec = make_spec(
@@ -781,12 +956,12 @@ impl EthereumAdapter {
         })
     }
 
-    pub(crate) fn swap_boundaries(
+    pub(crate) async fn swap_boundaries(
         &self,
         prepared: &PreparedOperation,
         raw_bounds: &Value,
     ) -> Result<BoundarySpec> {
-        let fixed = fixed_from_prepared(prepared)?;
+        let mut fixed = fixed_from_prepared(prepared)?;
         let input_asset: AssetId = serde_json::from_value(fixed["token_in"].clone())
             .map_err(|_| FinError::validation("Input asset identity is invalid."))?;
         let output_asset: AssetId = serde_json::from_value(fixed["token_out"].clone())
@@ -809,6 +984,22 @@ impl EthereumAdapter {
                 .map_err(|_| FinError::validation("Prepared Ramses binding is invalid."))?;
             bounds.max_pool_fee_ppm = binding.max_pool_fee_ppm.or(binding.swap_fee_ppm);
         }
+        if super::uniswap::profile::additional_dex(&prepared.operation).is_some() {
+            // This metadata pin belongs to scope creation. The exact selected
+            // transaction keeps its original pool binding independently.
+            let block = fin_evm::rpc_u64(
+                &self
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?;
+            let pools = self
+                .approved_v3_pools(&fixed, &bounds.allowed_fee_tiers, block)
+                .await?;
+            fixed.as_object_mut().expect("fixed scope").remove("pool");
+            fixed["approved_pools"] = json!(pools);
+        }
         let labels = display_labels_from_prepared(&prepared.summary);
         let spec = make_spec(fixed, bounds, input_asset, output_asset, resource, &labels)?;
         self.validate_swap_candidate(&spec, prepared)?;
@@ -825,7 +1016,45 @@ impl EthereumAdapter {
 }
 
 fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Result<()> {
-    let fixed = fixed_from_prepared(prepared)?;
+    let mut fixed = fixed_from_prepared(prepared)?;
+    if let Some(raw_pools) = spec.fixed.get("approved_pools") {
+        if spec.fixed.get("pool").is_some()
+            || super::uniswap::profile::additional_dex(&prepared.operation).is_none()
+        {
+            return Err(FinError::validation(
+                "Approved pool maps require an additional v3 venue and no single fixed pool.",
+            ));
+        }
+        let pools: BTreeMap<u32, String> = serde_json::from_value(raw_pools.clone())
+            .map_err(|_| FinError::validation("Approved pool map is invalid."))?;
+        let bounds: SwapBounds = serde_json::from_value(spec.parameters.clone())
+            .map_err(|_| FinError::validation("Approved swap bounds are invalid."))?;
+        let canonical = json!(pools);
+        if &canonical != raw_pools
+            || pools.keys().copied().collect::<Vec<_>>() != bounds.allowed_fee_tiers
+            || pools
+                .values()
+                .any(|pool| !address(pool).is_ok_and(|value| value != Address::ZERO))
+        {
+            return Err(FinError::validation(
+                "Approved pool map must have canonical fee keys matching its bounds and nonzero pool addresses.",
+            ));
+        }
+        let binding: Binding = serde_json::from_value(prepared.binding.clone())
+            .map_err(|_| FinError::validation("Prepared swap binding is invalid."))?;
+        let tier = binding
+            .fee_tier
+            .ok_or_else(|| FinError::validation("Prepared v3 fee tier is missing."))?;
+        if pools.get(&tier).map(String::as_str) != binding.pool.as_deref() {
+            return Err(fail(
+                "approved_pools",
+                canonical,
+                json!({"fee_tier":tier,"pool":binding.pool}),
+            ));
+        }
+        fixed.as_object_mut().expect("fixed scope").remove("pool");
+        fixed["approved_pools"] = raw_pools.clone();
+    }
     if fixed != spec.fixed {
         return Err(fail("fixed identity", spec.fixed.clone(), fixed));
     }
@@ -954,7 +1183,7 @@ fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Resu
         .map(|value| Quantity::from_decimal(value, output_asset.decimals))
         .transpose()?;
     let route = RouteIdentity {
-        dex: "uniswap".into(),
+        dex: spec.fixed["dex"].as_str().unwrap_or("uniswap").into(),
         version: request.protocol.clone().unwrap_or_else(|| "v3".into()),
         assets: vec![input_asset.clone(), output_asset.clone()],
         fingerprint: b.pool.clone().unwrap_or_default(),

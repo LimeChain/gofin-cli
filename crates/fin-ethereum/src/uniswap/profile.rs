@@ -1,11 +1,14 @@
 //! Closed, ABI-specific AMM deployment descriptions.
 //!
 //! Profiles are constructed only from reviewed deployment configuration. The
-//! public config and operation bindings remain unchanged; this internal layer
+//! legacy config and operation bindings remain unchanged; this internal layer
 //! keeps a DEX's factory, quote, fee, and router assumptions together instead
 //! of spreading them through quote and preparation code.
 
-use crate::{RamsesConfig, RouterKind, UniswapConfig};
+use crate::{
+    RamsesConfig, RouterKind, UniswapConfig, V3DeploymentConfig, V3Dex, V3PoolAbi,
+    V3RouterMetadataAbi,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FactoryLookup {
@@ -42,6 +45,9 @@ pub(crate) struct V3DeploymentProfile<'a> {
     pub(crate) pool_fee_semantics: PoolFeeSemantics,
     pub(crate) router_kind: RouterKind,
     pub(crate) pool_deployer: Option<&'a str>,
+    pub(crate) pool_abi: V3PoolAbi,
+    pub(crate) router_metadata_abi: V3RouterMetadataAbi,
+    pub(crate) fee_tiers: &'a [u32],
 }
 
 impl<'a> V3DeploymentProfile<'a> {
@@ -58,9 +64,28 @@ impl<'a> V3DeploymentProfile<'a> {
             pool_fee_semantics: PoolFeeSemantics::FixedFeeTier,
             router_kind: config.router_kind,
             pool_deployer: None,
+            pool_abi: V3PoolAbi::UniswapV3,
+            router_metadata_abi: V3RouterMetadataAbi::UniswapV3,
+            fee_tiers: &[100, 500, 3000, 10000],
         }
     }
 
+    pub(crate) fn additional(dex: V3Dex, config: &'a V3DeploymentConfig) -> Self {
+        Self {
+            dex_id: dex.id(),
+            factory: &config.factory,
+            quoter: &config.quoter,
+            router: &config.router,
+            factory_lookup: FactoryLookup::FeeTierU24,
+            quoter_abi: QuoterAbi::UniswapV3QuoterV2,
+            pool_fee_semantics: PoolFeeSemantics::FixedFeeTier,
+            router_kind: config.router_kind,
+            pool_deployer: config.pool_deployer.as_deref(),
+            pool_abi: config.pool_abi,
+            router_metadata_abi: config.router_metadata_abi,
+            fee_tiers: &config.allowed_fee_tiers,
+        }
+    }
     pub(crate) fn ramses(config: &'a RamsesConfig) -> Self {
         Self {
             dex_id: "ramses",
@@ -75,6 +100,27 @@ impl<'a> V3DeploymentProfile<'a> {
             // swap calldata is encoded by its ABI-specific helper.
             router_kind: RouterKind::LegacyV3,
             pool_deployer: Some(&config.pool_deployer),
+            pool_abi: V3PoolAbi::UniswapV3,
+            router_metadata_abi: V3RouterMetadataAbi::UniswapV3,
+            fee_tiers: &[],
         }
+    }
+}
+
+/// Resolve operation names once; consumers never select a fallback venue.
+pub(crate) fn operation_dex(operation: &str) -> crate::Result<&'static str> {
+    match operation {
+        "uniswap.quote" | "uniswap.swap" => Ok("uniswap"),
+        "ramses.quote" | "ramses.swap" => Ok("ramses"),
+        "sushi.quote" | "sushi.swap" => Ok("sushi"),
+        "pancakeswap.quote" | "pancakeswap.swap" => Ok("pancakeswap"),
+        _ => Err(crate::FinError::validation("Unsupported AMM operation.")),
+    }
+}
+pub(crate) fn additional_dex(value: &str) -> Option<crate::V3Dex> {
+    match value {
+        "sushi" | "sushi.quote" | "sushi.swap" => Some(crate::V3Dex::Sushi),
+        "pancakeswap" | "pancakeswap.quote" | "pancakeswap.swap" => Some(crate::V3Dex::PancakeSwap),
+        _ => None,
     }
 }

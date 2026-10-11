@@ -38,6 +38,78 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
+/// Startup-only development fixture check; this path is absent from the installed
+/// broker. It accepts only endpoints already vetted by profile::fork_rpc_urls.
+async fn owned_fork_identity(endpoint: &str, expected_chain: u64) -> Result<Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "owned fork identity transport is unavailable")?;
+    let response: Value = client
+        .post(endpoint)
+        .json(&serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"anvil_metadata", "params":[]}))
+        .send()
+        .await
+        .map_err(|_| "owned fork identity is unavailable")?
+        .error_for_status()
+        .map_err(|_| "owned fork identity is unavailable")?
+        .json()
+        .await
+        .map_err(|_| "owned fork identity is invalid")?;
+    validate_owned_fork_identity(&response, expected_chain)
+}
+
+fn validate_owned_fork_identity(response: &Value, expected_chain: u64) -> Result<Value, String> {
+    let metadata = &response["result"];
+    let instance = metadata["instanceId"].as_str();
+    let anchor = metadata["forkedNetwork"]["forkBlockHash"].as_str();
+    if response.get("error").is_some_and(|error| !error.is_null())
+        || metadata["chainId"].as_u64() != Some(expected_chain)
+        || instance.is_none_or(str::is_empty)
+        || anchor.is_none_or(|hash| {
+            hash.len() != 66
+                || !hash.starts_with("0x")
+                || !hash[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || !metadata["forkedNetwork"]["forkBlockNumber"].is_u64()
+    {
+        return Err(
+            "owned fork node must report its expected chain, instance and fork anchor".into(),
+        );
+    }
+    Ok(serde_json::json!({
+        "chain_id":expected_chain,
+        "instance_id":instance,
+        "fork_block_hash":anchor,
+        "fork_block_number":metadata["forkedNetwork"]["forkBlockNumber"],
+    }))
+}
+
+#[cfg(test)]
+mod owned_fork_tests {
+    use super::*;
+
+    #[test]
+    fn startup_identity_requires_expected_chain_and_real_fork_metadata() {
+        let mut response = serde_json::json!({"result":{
+            "chainId":1, "instanceId":"synthetic-owned-instance",
+            "forkedNetwork":{"forkBlockHash":format!("0x{}", "ab".repeat(32)), "forkBlockNumber":123}
+        }});
+        assert!(validate_owned_fork_identity(&response, 1).is_ok());
+        assert!(validate_owned_fork_identity(&response, 42161).is_err());
+        response["result"]["forkedNetwork"]["forkBlockHash"] = serde_json::json!("garbage");
+        assert!(validate_owned_fork_identity(&response, 1).is_err());
+        response["result"]["forkedNetwork"]["forkBlockHash"] =
+            serde_json::json!(format!("0x{}", "ab".repeat(32)));
+        response["result"]["instanceId"] = serde_json::json!("");
+        assert!(validate_owned_fork_identity(&response, 1).is_err());
+        assert!(
+            validate_owned_fork_identity(&serde_json::json!({"error":{"code":-1}}), 1).is_err()
+        );
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Args {
@@ -627,6 +699,7 @@ async fn run(args: Args) -> Result<(), String> {
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
             .map_err(|e| e.to_string())?;
     }
+    let mut owned_fork_metadata = serde_json::Map::new();
     let (runtime_config, adapters, valuator, bridge) = if args.mode == "live" {
         let runtime_config = profile::broker_config(&environment_config)?;
         let credentials = Arc::new(
@@ -635,17 +708,47 @@ async fn run(args: Args) -> Result<(), String> {
             )
             .map_err(|_| "development credential store is unavailable")?,
         );
-        let applications = fin_broker::build_applications_with_price_source(
-            &runtime_config,
-            credentials,
-            Arc::new(
-                fin_pricing::ExchangeSpotPrices::new(
-                    fin_pricing::CoinGeckoPrices::new()
-                        .map_err(|_| "public pricing is unavailable")?,
-                )
-                .map_err(|_| "public pricing is unavailable")?,
-            ),
-        )
+        let source: Arc<dyn fin_pricing::UsdPriceSource> = Arc::new(
+            fin_pricing::ExchangeSpotPrices::new(
+                fin_pricing::CoinGeckoPrices::new().map_err(|_| "public pricing is unavailable")?,
+            )
+            .map_err(|_| "public pricing is unavailable")?,
+        );
+        let applications = if let Some(endpoints) = profile::fork_rpc_urls(&environment_config)? {
+            let mut transports = std::collections::BTreeMap::new();
+            for (chain_id, endpoint) in endpoints {
+                let rpc: Arc<dyn fin_evm::EvmRpc> = Arc::new(
+                    fin_evm::HttpRpc::isolated_localhost(endpoint.clone(), chain_id)
+                        .map_err(|_| "owned fork transport could not be initialized")?,
+                );
+                // Verify a fork node, not merely any process accepting loopback HTTP.
+                // The public CLI harness separately pins ownership and anchor before
+                // every financial dispatch; no production RPC fallback is configured.
+                let metadata = owned_fork_identity(&endpoint, chain_id).await?;
+                let chain = rpc
+                    .request("eth_chainId", serde_json::json!([]))
+                    .await
+                    .map_err(|_| "owned fork chain identity could not be verified")?;
+                if chain
+                    .as_str()
+                    .and_then(|hex| hex.strip_prefix("0x"))
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                    != Some(chain_id)
+                {
+                    return Err("owned fork RPC chain does not match the selected chain".into());
+                }
+                owned_fork_metadata.insert(chain_id.to_string(), metadata);
+                transports.insert(chain_id, rpc);
+            }
+            fin_broker::build_applications_with_transports(
+                &runtime_config,
+                credentials,
+                source,
+                transports,
+            )
+        } else {
+            fin_broker::build_applications_with_price_source(&runtime_config, credentials, source)
+        }
         .map_err(|_| "live development adapters could not be initialized")?;
         (
             runtime_config,
@@ -688,6 +791,8 @@ async fn run(args: Args) -> Result<(), String> {
         "approval_mechanism":"development-auto-approval-no-os-authentication",
         "touch_id_required":false,
         "real_funds_possible":args.mode == "live",
+        "evm_transport":if owned_fork_metadata.is_empty() { "reviewed_public_rpc" } else { "owned_local_fork_only" },
+        "owned_forks":owned_fork_metadata,
         "account_identity_verification":if requires_identity_check { "required_before_account_operations" } else { "not_configured" },
         "sub_email_mapping":sub_email_mapping,
         "operations":operation_definitions,

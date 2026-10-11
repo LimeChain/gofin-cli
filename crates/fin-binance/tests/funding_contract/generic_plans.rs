@@ -143,6 +143,7 @@ fn plan() -> FinancialPlanSpec {
                     operation_succeeded: true,
                 },
                 funding_dependencies: vec![FinancialPlanFundingDependency {
+                    funding_scope: None,
                     producing_step_id: "fund-main".into(),
                     resource: ResourceId(MAIN.into()),
                     asset: usdc("binance"),

@@ -21,6 +21,7 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+fin-evm.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 fin-authorization.workspace = true
 tempfile.workspace = true

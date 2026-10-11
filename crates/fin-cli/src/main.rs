@@ -3048,7 +3048,10 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("capabilities"));
         assert!(help.contains("connections"));
-        assert!(financial_catalog().len() >= 59);
+        assert_eq!(
+            financial_catalog().len(),
+            fin_broker::operation_definitions().len()
+        );
         for name in [
             "wallet.permit2.allowance",
             "wallet.permit2.approve",
@@ -3056,6 +3059,10 @@ mod tests {
             "ramses.swap",
             "hyperliquid.orders.place",
             "hyperliquid.account.withdraw",
+            "sushi.quote",
+            "sushi.swap",
+            "pancakeswap.quote",
+            "pancakeswap.swap",
         ] {
             assert!(
                 financial_catalog()
@@ -3756,7 +3763,7 @@ mod tests {
             })
         }
 
-        fn prepare_boundaries(
+        async fn prepare_boundaries(
             &self,
             prepared: &fin_domain::PreparedOperation,
             bounds: &Value,

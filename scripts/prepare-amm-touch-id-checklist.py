@@ -26,7 +26,11 @@ MAX_TOTAL_COST_USD = Decimal("20")
 GROSS_LIMIT_USD = Decimal("100")
 ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ALLOWED_READS = {"wallet.token", "wallet.balances", "uniswap.quote"}
-ALLOWED_READS.add("ramses.quote")
+ALLOWED_READS.update({"ramses.quote", "sushi.quote", "pancakeswap.quote"})
+SWAP_OPERATIONS = {"uniswap.swap", "ramses.swap", "sushi.swap", "pancakeswap.swap"}
+FEE_TIERS = {"uniswap": (100, 500, 3000, 10000), "sushi": (100, 500, 3000, 10000),
+             "pancakeswap": (100, 500, 2500, 10000)}
+V3_NETWORKS = {"sushi": (1, 42161), "pancakeswap": (1, 42161, 4663)}
 
 
 class ChecklistError(Exception):
@@ -42,7 +46,7 @@ def invoke(fin: str, argv: list[str], allowed: set[str]) -> dict[str, Any]:
     if len(argv) >= 2 and argv[0] == "read" and argv[1] in allowed:
         command = f"read {argv[1]}"
     elif (len(argv) >= 2 and argv[0] == "preview"
-          and argv[1] in {"uniswap.swap", "ramses.swap"} and argv[1] in allowed):
+          and argv[1] in SWAP_OPERATIONS and argv[1] in allowed):
         command = f"preview {argv[1]}"
     elif len(argv) >= 2 and argv[:2] == ["plans", "preview"] and "plans" in allowed:
         command = "plans preview"
@@ -73,7 +77,7 @@ def read(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def preview(fin: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-    if operation not in {"uniswap.swap", "ramses.swap"}:
+    if operation not in SWAP_OPERATIONS:
         raise ChecklistError("internal refusal: unsupported Fin preview")
     return invoke(fin, ["preview", operation, "--input", compact(payload), "--json"], {operation})
 
@@ -158,9 +162,9 @@ def require_quote_evidence(quote: dict[str, Any]) -> tuple[int, int, int]:
 
 
 def operation_names(dex: str) -> tuple[str, str]:
-    if dex == "ramses":
-        return "ramses.quote", "ramses.swap"
-    return "uniswap.quote", "uniswap.swap"
+    if dex not in {"uniswap", "ramses", "sushi", "pancakeswap"}:
+        raise ChecklistError("unsupported DEX")
+    return f"{dex}.quote", f"{dex}.swap"
 
 
 def validate_ramses_quote(quote: dict[str, Any], tick_spacing: int,
@@ -200,12 +204,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chain-id", required=True, type=int)
     parser.add_argument("--token-out", required=True, help="Exact caller-reviewed output token contract")
     parser.add_argument("--protocol", required=True, choices=("v3", "v4"))
-    parser.add_argument("--dex", default="uniswap", choices=("uniswap", "ramses"))
+    parser.add_argument("--dex", default="uniswap", choices=("uniswap", "ramses", "sushi", "pancakeswap"))
     parser.add_argument("--fee-cap", required=True, help="Maximum native transaction fee in ETH")
     parser.add_argument("--max-pool-fee-ppm", type=int,
                         help="Optional Ramses quote-time pool-fee ceiling in ppm")
     route = parser.add_mutually_exclusive_group(required=False)
-    route.add_argument("--fee-tier", type=int, help="Reviewed Uniswap v3 fee tier in ppm")
+    route.add_argument("--fee-tier", type=int, help="Reviewed v3 fee tier in ppm for the selected DEX")
     route.add_argument("--pool-key", help="Complete caller-reviewed Uniswap v4 pool-key JSON object")
     parser.add_argument("--tick-spacing", type=int, help="Reviewed Ramses v3 tick spacing")
     parser.add_argument("--network", default="evm", choices=("evm", "ethereum"))
@@ -213,8 +217,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.chain_id <= 0 or not ADDRESS.fullmatch(args.token_out):
         parser.error("--chain-id must be positive and --token-out must be an exact EVM address")
-    if args.dex == "uniswap" and args.tick_spacing is not None:
+    if args.dex != "ramses" and args.tick_spacing is not None:
         parser.error("--tick-spacing is only valid with --dex ramses")
+    if args.dex in V3_NETWORKS and (args.chain_id not in V3_NETWORKS[args.dex] or args.protocol != "v3"):
+        parser.error("Selected DEX requires v3 and a reviewed network")
     if args.dex == "ramses":
         if args.chain_id != 4663 or args.protocol != "v3":
             parser.error("Ramses acceptance is currently reviewed only for v3 on chain 4663")
@@ -223,12 +229,12 @@ def parse_args() -> argparse.Namespace:
         if args.max_pool_fee_ppm is not None and not 0 <= args.max_pool_fee_ppm < 1_000_000:
             parser.error("--max-pool-fee-ppm must be between 0 and 999999")
     elif args.protocol == "v3" and (args.fee_tier is None or args.pool_key is not None):
-        parser.error("Uniswap v3 requires --fee-tier and forbids --pool-key")
+        parser.error("v3 requires --fee-tier and forbids --pool-key")
     elif args.protocol == "v4" and (args.pool_key is None or args.fee_tier is not None):
         parser.error("Uniswap v4 requires --pool-key and forbids --fee-tier")
-    if args.dex == "uniswap" and args.fee_tier is not None and args.fee_tier not in (100, 500, 3000, 10000):
-        parser.error("--fee-tier must be one of 100, 500, 3000, or 10000")
-    if args.dex == "uniswap" and args.max_pool_fee_ppm is not None:
+    if args.dex in FEE_TIERS and args.fee_tier is not None and args.fee_tier not in FEE_TIERS[args.dex]:
+        parser.error(f"--fee-tier must be a reviewed {args.dex} tier: {FEE_TIERS[args.dex]}")
+    if args.dex != "ramses" and args.max_pool_fee_ppm is not None:
         parser.error("--max-pool-fee-ppm is only valid with --dex ramses")
     if args.out_dir.exists():
         parser.error("--out-dir must be a new, unused directory")
@@ -280,7 +286,9 @@ def main() -> int:
         raise ChecklistError("quote protocol did not match the selected protocol")
     if args.dex == "ramses":
         max_pool_fee_ppm = validate_ramses_quote(quote, args.tick_spacing, args.max_pool_fee_ppm)
-    elif args.protocol == "v3" and int(quote.get("fee_tier", -1)) != args.fee_tier:
+    elif args.dex in V3_NETWORKS and quote.get("dex") != args.dex:
+        raise ChecklistError("quote DEX did not match the selected deployment")
+    if args.dex != "ramses" and args.protocol == "v3" and int(quote.get("fee_tier", -1)) != args.fee_tier:
         raise ChecklistError("quote fee tier did not match the requested v3 tier")
     input_atoms, output_atoms, impact = require_quote_evidence(quote)
     quoted_in = quote.get("token_in", {})
@@ -347,7 +355,7 @@ def main() -> int:
         "max_price_impact_bps": MAX_IMPACT_BPS,
         "minimum_rate": {"output_atoms": str(output_atoms * 98), "input_atoms": str(input_atoms * 100)},
         "absolute_minimum_output": None,
-        "allowed_fee_tiers": [args.fee_tier] if args.dex == "uniswap" and args.protocol == "v3" else [],
+        "allowed_fee_tiers": [args.fee_tier] if args.dex in FEE_TIERS and args.protocol == "v3" else [],
         "max_deadline_seconds": MAX_DEADLINE_SECONDS,
     }
     intent = swap_preview["intent"]
@@ -420,7 +428,7 @@ def build_checklist(args: argparse.Namespace, recipient: str, minimum: str,
     pool_fee = getattr(args, "max_pool_fee_ppm", None)
     route = (f"Ramses v3, tick spacing {args.tick_spacing}, maximum quoted pool fee "
              f"{pool_fee if pool_fee is not None else 'the initially quoted fee'} ppm"
-             if dex == "ramses" else f"Uniswap {args.protocol}")
+             if dex == "ramses" else f"{ {'uniswap':'Uniswap', 'sushi':'Sushi', 'pancakeswap':'PancakeSwap'}[dex]} {args.protocol}")
     return f"""# Human Touch ID handoff — review required
 
 Generated from pinned read-only Fin results for {route} on chain `{args.chain_id}`.

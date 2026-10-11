@@ -67,7 +67,8 @@ pub struct EnvironmentConfig {
     #[serde(default)]
     pub policy: Option<BrokerPolicy>,
     /// Optional explicit per-chain public RPC endpoints for this disposable
-    /// development profile. Missing chains retain the reviewed defaults.
+    /// development profile. Missing chains retain the reviewed defaults. Explicit
+    /// all-chain numeric loopback overrides select owned-fork transport injection.
     #[serde(default)]
     pub rpc_urls: BTreeMap<u64, Vec<String>>,
     /// Optional subset of reviewed EVM networks for disposable development.
@@ -511,6 +512,66 @@ fn classify_binance_pem(api_key: String, private_key: String) -> Result<SecretMa
     Err("Binance PEM is not a supported PKCS8 RSA or Ed25519 private key".into())
 }
 
+/// Development-only fork selection. A fork profile must cover every explicitly
+/// selected chain with exactly one numeric loopback HTTP endpoint and no fallback.
+/// These URLs never enter the production-validated BrokerConfigV2.
+pub fn fork_rpc_urls(config: &EnvironmentConfig) -> Result<Option<BTreeMap<u64, String>>, String> {
+    let has_http = config
+        .rpc_urls
+        .values()
+        .flatten()
+        .any(|text| reqwest::Url::parse(text).is_ok_and(|url| url.scheme() == "http"));
+    if !has_http {
+        return Ok(None);
+    }
+    let selected = config
+        .reviewed_chain_ids
+        .as_ref()
+        .ok_or("owned fork transport requires an explicit reviewed development chain scope")?;
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|chain| !fin_networks::supports_chain(*chain))
+        || selected
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != selected.len()
+        || config
+            .rpc_urls
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != selected
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+    {
+        return Err("owned fork endpoints must exactly cover the selected reviewed chains".into());
+    }
+    let mut endpoints = BTreeMap::new();
+    for (chain, urls) in &config.rpc_urls {
+        let [text] = urls.as_slice() else {
+            return Err("owned fork transport requires exactly one endpoint per chain".into());
+        };
+        let url = reqwest::Url::parse(text).map_err(|_| "owned fork endpoint is invalid")?;
+        if url.scheme() != "http"
+            || !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "::1"))
+            || url.port().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.path() != "/"
+        {
+            return Err("owned fork endpoints require numeric loopback HTTP with an explicit port and no credentials, path, query or fragment".into());
+        }
+        endpoints.insert(*chain, text.clone());
+    }
+    Ok(Some(endpoints))
+}
+
 pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, String> {
     let mut connections = Vec::new();
     if let Some(reference) = &config.credentials.binance {
@@ -627,12 +688,15 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             return Err("development RPC override names an unsupported chain".into());
         }
     }
+    let fork_endpoints = fork_rpc_urls(config)?;
     for network in &mut networks {
         if let Some(rpc_urls) = config.rpc_urls.get(&network.chain_id) {
             if rpc_urls.is_empty() {
                 return Err("development RPC override must include a public HTTPS endpoint".into());
             }
-            network.rpc_urls = rpc_urls.clone();
+            if fork_endpoints.is_none() {
+                network.rpc_urls = rpc_urls.clone();
+            }
         }
     }
     let mut policy = config.policy.clone().unwrap_or_else(BrokerPolicy::beta);
@@ -749,6 +813,61 @@ mod tests {
         let runtime_config = broker_config(&loaded).unwrap();
         assert_eq!(runtime_config.policy, custom_development_policy());
         assert!(runtime_config.validate().is_ok());
+    }
+
+    #[test]
+    fn owned_fork_transport_preserves_production_validated_profiles() {
+        let mut config = EnvironmentConfig::empty("env");
+        config.reviewed_chain_ids = Some(vec![1]);
+        for endpoint in ["http://127.0.0.1:8545", "http://[::1]:8545"] {
+            config.rpc_urls.insert(1, vec![endpoint.into()]);
+            assert_eq!(fork_rpc_urls(&config).unwrap().unwrap()[&1], endpoint);
+            let runtime = broker_config(&config).unwrap();
+            runtime.validate().unwrap();
+            assert_eq!(runtime.networks.len(), 1);
+            assert_eq!(runtime.networks[0], NetworkConfig::ethereum_mainnet());
+            assert!(fin_evm::HttpRpc::new(runtime.networks[0].rpc_urls.clone(), 1).is_ok());
+        }
+    }
+
+    #[test]
+    fn owned_fork_transport_rejects_ambiguous_endpoints_and_public_fallback() {
+        let mut config = EnvironmentConfig::empty("env");
+        config.reviewed_chain_ids = Some(vec![1]);
+        for endpoint in [
+            "http://localhost:8545",
+            "http://0.0.0.0:8545",
+            "http://example.invalid:8545",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8545/path",
+            "http://user:secret@127.0.0.1:8545",
+            "http://127.0.0.1:8545?key=secret",
+            "http://127.0.0.1:8545#fragment",
+        ] {
+            config.rpc_urls.insert(1, vec![endpoint.into()]);
+            assert!(fork_rpc_urls(&config).is_err(), "{endpoint}");
+            assert!(broker_config(&config).is_err(), "{endpoint}");
+        }
+        config.rpc_urls.insert(
+            1,
+            vec![
+                "http://127.0.0.1:8545".into(),
+                "https://eth.drpc.org".into(),
+            ],
+        );
+        assert!(fork_rpc_urls(&config).is_err());
+        config
+            .rpc_urls
+            .insert(1, vec!["http://127.0.0.1:8545".into()]);
+        config
+            .rpc_urls
+            .insert(42161, vec!["https://arb1.arbitrum.io/rpc".into()]);
+        assert!(fork_rpc_urls(&config).is_err());
+        config.rpc_urls.remove(&42161);
+        config.reviewed_chain_ids = Some(vec![1, 42161]);
+        assert!(fork_rpc_urls(&config).is_err());
+        config.reviewed_chain_ids = None;
+        assert!(fork_rpc_urls(&config).is_err());
     }
 
     #[test]

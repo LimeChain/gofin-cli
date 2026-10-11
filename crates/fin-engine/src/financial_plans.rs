@@ -1890,11 +1890,12 @@ fn validate_plan_permissions(
             }
             let declared_consumption = permission_debits(permission).iter().any(|debit| {
                 debit.resource == dependency.resource && debit.amount.asset == dependency.asset
-            }) || permission_costs(permission).iter().any(|cost| {
-                cost.treatment == fin_domain::CostTreatment::AdditionalDebit
-                    && cost.location.resource() == &dependency.resource
-                    && cost.amount.asset == dependency.asset
-            });
+            }) || (dependency.includes_additional_costs()
+                && permission_costs(permission).iter().any(|cost| {
+                    cost.treatment == fin_domain::CostTreatment::AdditionalDebit
+                        && cost.location.resource() == &dependency.resource
+                        && cost.amount.asset == dependency.asset
+                }));
             if !declared_consumption {
                 return Err(plan_error(
                     "PLAN_FUNDING_UNUSED",
@@ -3121,7 +3122,11 @@ fn validate_plan_funding(
             .fold(BigUint::zero(), |sum, cost| {
                 sum + cost.amount.atoms.integer()
             });
-        let required = debit_required + fee_required;
+        let required = if dependency.includes_additional_costs() {
+            debit_required + fee_required
+        } else {
+            debit_required
+        };
         if required.is_zero() {
             return Err(plan_error(
                 "PLAN_FUNDING_UNUSED",
@@ -3562,7 +3567,7 @@ pub(super) fn account_financial_plan_effects(
         entry.2 -= fee;
     }
     for (resource, asset, amount) in debit_map.into_values() {
-        consume_plan_funding(plan, &step_id, &resource, &asset, &amount)?;
+        consume_plan_funding(plan, &step_id, &resource, &asset, &amount, false)?;
         let item = ResourceAmount {
             resource,
             amount: Amount {
@@ -3576,7 +3581,7 @@ pub(super) fn account_financial_plan_effects(
         .values()
         .filter(|(_, _, treatment, _)| treatment == &fin_domain::CostTreatment::AdditionalDebit)
     {
-        consume_plan_funding(plan, &step_id, location.resource(), asset, amount)?;
+        consume_plan_funding(plan, &step_id, location.resource(), asset, amount, true)?;
     }
     for (location, asset, treatment, amount) in cost_map.into_values() {
         plan.usage.consumed_costs = add_cost_bounds(
@@ -3631,6 +3636,7 @@ fn consume_plan_funding(
     resource: &ResourceId,
     asset: &fin_domain::AssetId,
     amount: &BigUint,
+    is_additional_cost: bool,
 ) -> Result<()> {
     let step = plan
         .revision
@@ -3648,7 +3654,11 @@ fn consume_plan_funding(
     let dependencies = step
         .funding_dependencies
         .iter()
-        .filter(|dependency| &dependency.resource == resource && &dependency.asset == asset)
+        .filter(|dependency| {
+            &dependency.resource == resource
+                && &dependency.asset == asset
+                && (!is_additional_cost || dependency.includes_additional_costs())
+        })
         .collect::<Vec<_>>();
     if dependencies.is_empty() {
         return Ok(());
@@ -5211,6 +5221,7 @@ mod tests {
         plan.usage = FinancialPlanUsage::default();
         plan.revision.spec.steps[0].funding_dependencies =
             vec![financial_plans::FinancialPlanFundingDependency {
+                funding_scope: None,
                 producing_step_id: "producer".into(),
                 resource: ResourceId("acct".into()),
                 asset: asset("USDT"),
@@ -5960,5 +5971,278 @@ mod tests {
             select_next_eligible_step(&partial_sequence).as_deref(),
             Some("partial")
         );
+    }
+    fn funding_record(
+        scope: Option<financial_plans::FinancialPlanFundingScope>,
+        proceeds: &str,
+    ) -> FinancialPlanAuthorizationRecord {
+        let mut plan = prior_record();
+        plan.usage = FinancialPlanUsage::default();
+        let mut producer = step_spec();
+        producer.step_id = "producer".into();
+        plan.revision.spec.steps.insert(0, producer);
+        let mut producer_permission = plan.revision.permissions[0].clone();
+        producer_permission.step_id = "producer".into();
+        producer_permission
+            .permission
+            .as_mut()
+            .unwrap()
+            .possible_credits = vec![FinancialPlanFundingIdentity {
+            resource: ResourceId("acct".into()),
+            asset: asset("USDT"),
+        }];
+        plan.revision.permissions.insert(0, producer_permission);
+        plan.revision.spec.steps[1].funding_dependencies =
+            vec![financial_plans::FinancialPlanFundingDependency {
+                producing_step_id: "producer".into(),
+                resource: ResourceId("acct".into()),
+                asset: asset("USDT"),
+                funding_scope: scope,
+            }];
+        let fee = CostBound {
+            location: AccountingLocation::Cash {
+                resource: ResourceId("acct".into()),
+            },
+            amount: Amount {
+                asset: asset("USDT"),
+                atoms: Quantity::from_u64(2),
+            },
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        plan.revision.spec.aggregate_bounds.maximum_costs = vec![fee.clone()];
+        plan.revision.permissions[1]
+            .permission
+            .as_mut()
+            .unwrap()
+            .spec
+            .maximum_costs = vec![fee];
+        plan.usage.verified_proceeds = vec![FinancialPlanProceeds {
+            producing_step_id: "producer".into(),
+            resource: ResourceId("acct".into()),
+            asset: asset("USDT"),
+            available: Quantity::new(proceeds).unwrap(),
+            consumed: Quantity::zero(),
+        }];
+        plan
+    }
+    fn funded_prepared(principal: &str, fee: &str) -> PreparedOperation {
+        PreparedOperation {
+            operation: "synthetic.write".into(),
+            input: json!({}),
+            binding: json!({}),
+            summary: "synthetic".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: now(),
+            expires_at: (Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+            valuation: None,
+            intent: FinancialIntent {
+                debits: vec![resource_amount("acct", "USDT", principal)],
+                maximum_costs: vec![CostBound {
+                    location: AccountingLocation::Cash {
+                        resource: ResourceId("acct".into()),
+                    },
+                    amount: Amount {
+                        asset: asset("USDT"),
+                        atoms: Quantity::new(fee).unwrap(),
+                    },
+                    treatment: CostTreatment::AdditionalDebit,
+                }],
+                expected: vec![],
+                locks: vec![],
+            },
+            operation_version: 1,
+        }
+    }
+    #[test]
+    fn principal_only_full_proceeds_keeps_fee_caps_and_reservations_independent() {
+        use financial_plans::FinancialPlanFundingScope as Scope;
+        let prepared = funded_prepared("10", "1");
+        for legacy in [None, Some(Scope::AllDebits)] {
+            assert_eq!(
+                validate_plan_funding(&funding_record(legacy, "10"), "step-1", &prepared)
+                    .unwrap_err()
+                    .code,
+                "PLAN_FUNDING_NOT_SETTLED"
+            );
+        }
+        let mut plan = funding_record(Some(Scope::PrincipalOnly), "10");
+        validate_plan_funding(&plan, "step-1", &prepared).unwrap();
+        validate_plan_aggregate_remaining(&plan, &prepared).unwrap();
+        assert_eq!(
+            validate_plan_funding(&plan, "step-1", &funded_prepared("11", "1"))
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_NOT_SETTLED"
+        );
+        assert_eq!(
+            validate_plan_funding(&plan, "step-1", &funded_prepared("0", "1"))
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_UNUSED"
+        );
+        assert!(validate_plan_aggregate_remaining(&plan, &funded_prepared("10", "3")).is_err());
+        plan.usage
+            .reservations
+            .push(financial_plans::FinancialPlanReservation {
+                attempt_id: "other-attempt".into(),
+                step_id: "step-1".into(),
+                debits: vec![],
+                costs: vec![prepared.intent.maximum_costs[0].clone()],
+            });
+        assert!(validate_plan_aggregate_remaining(&plan, &funded_prepared("10", "2")).is_err());
+        let mut fee_only = plan.clone();
+        fee_only.revision.permissions[1]
+            .permission
+            .as_mut()
+            .unwrap()
+            .spec
+            .maximum_debits
+            .clear();
+        fee_only.revision.spec.steps[1].completion.principal_spend = None;
+        fee_only.revision.spec.steps[1]
+            .completion
+            .operation_succeeded = true;
+        assert_eq!(
+            validate_plan_permissions(&fee_only.revision.spec, &fee_only.revision.permissions)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_UNUSED"
+        );
+        let mut ambiguous = plan.clone();
+        let duplicate = ambiguous.revision.spec.steps[1].funding_dependencies[0].clone();
+        ambiguous.revision.spec.steps[1]
+            .funding_dependencies
+            .push(duplicate);
+        assert!(ambiguous.revision.spec.validate().is_err());
+        assert_eq!(
+            validate_plan_permissions(&ambiguous.revision.spec, &ambiguous.revision.permissions)
+                .unwrap_err()
+                .code,
+            "PLAN_FUNDING_AMBIGUOUS"
+        );
+    }
+    #[test]
+    fn principal_only_settlement_orders_costs_safely_and_survives_restart_and_revision_checks() {
+        use financial_plans::FinancialPlanFundingScope as Scope;
+        let prepared = funded_prepared("10", "1");
+        let principal = FinancialEffect::CashDebit {
+            resource: ResourceId("acct".into()),
+            amount: prepared.intent.debits[0].amount.clone(),
+        };
+        let fee = FinancialEffect::Cost {
+            location: prepared.intent.maximum_costs[0].location.clone(),
+            amount: prepared.intent.maximum_costs[0].amount.clone(),
+            category: "synthetic-gas".into(),
+            treatment: CostTreatment::AdditionalDebit,
+        };
+        let mut usages = vec![];
+        for effects in [vec![principal.clone(), fee.clone()], vec![fee, principal]] {
+            let mut plan = funding_record(Some(Scope::PrincipalOnly), "10");
+            account_financial_plan_effects(&mut plan, &settled_effect_record(effects)).unwrap();
+            assert_eq!(plan.usage.verified_proceeds[0].consumed.as_str(), "10");
+            assert_eq!(plan.usage.consumed_costs[0].amount.atoms.as_str(), "1");
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("principal-only.sqlite");
+            let serialized = serde_json::to_value(&plan).unwrap();
+            {
+                let mut store = Store::open(&path).unwrap();
+                store
+                    .begin_financial_plan_request(
+                        "synthetic-funding",
+                        "fingerprint",
+                        "plan",
+                        &now(),
+                    )
+                    .unwrap();
+                store
+                    .commit_financial_plan_revision(
+                        "synthetic-funding",
+                        "fingerprint",
+                        "plan",
+                        "rev-1",
+                        None,
+                        &serde_json::to_value(&plan.revision).unwrap(),
+                        &serialized,
+                        &now(),
+                    )
+                    .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            let recovered: FinancialPlanAuthorizationRecord =
+                serde_json::from_value(store.financial_plan("plan").unwrap().unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&recovered).unwrap(), serialized);
+            assert_eq!(
+                validate_plan_funding(&recovered, "step-1", &funded_prepared("1", "1"))
+                    .unwrap_err()
+                    .code,
+                "PLAN_FUNDING_NOT_SETTLED"
+            );
+            let mut next = recovered.revision.spec.clone();
+            next.steps[1].funding_dependencies[0].funding_scope = None;
+            assert_eq!(
+                validate_revision_transition(
+                    Some(&recovered),
+                    &next,
+                    &recovered.revision.permissions,
+                    &recovered.usage,
+                    &store
+                )
+                .unwrap_err()
+                .code,
+                "PLAN_REVISION_HISTORY_CONFLICT"
+            );
+            usages.push(plan.usage);
+        }
+        assert_eq!(usages[0], usages[1]);
+    }
+    struct FundingGasRpc {
+        balance: u64,
+    }
+    #[async_trait::async_trait]
+    impl fin_evm::EvmRpc for FundingGasRpc {
+        async fn request(&self, method: &str, _params: Value) -> Result<Value> {
+            Ok(match method {
+                "eth_chainId" => json!("0x1"),
+                "eth_call" => json!("0x"),
+                "eth_estimateGas" => json!("0x5208"),
+                "eth_getBlockByNumber" => json!({"baseFeePerGas":"0x1"}),
+                "eth_maxPriorityFeePerGas" => json!("0x1"),
+                "eth_getTransactionCount" => json!("0x0"),
+                "eth_getBalance" => json!(format!("{:#x}", self.balance)),
+                _ => panic!("unexpected synthetic funding RPC {method}"),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn principal_only_does_not_let_full_proceeds_pay_their_own_maximum_gas() {
+        use fin_evm::alloy::primitives::{Address, Bytes, U256};
+        let plan = funding_record(
+            Some(financial_plans::FinancialPlanFundingScope::PrincipalOnly),
+            "1000000",
+        );
+        validate_plan_funding(
+            &plan,
+            "step-1",
+            &funded_prepared("1000000", "1000000000000"),
+        )
+        .unwrap();
+        for (balance, success) in [(1_000_000, false), (1_000_001_000_000, true)] {
+            let runtime = fin_evm::EvmRuntime::new(Arc::new(FundingGasRpc { balance }), 1, None);
+            let result = runtime
+                .prepare(
+                    Address::repeat_byte(1),
+                    Address::repeat_byte(2),
+                    U256::from(1_000_000),
+                    Bytes::new(),
+                    U256::from(1_000_000_000_000u64),
+                )
+                .await;
+            if success {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err().code, "INSUFFICIENT_GAS_BALANCE");
+            }
+        }
     }
 }

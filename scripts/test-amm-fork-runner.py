@@ -40,7 +40,7 @@ class Lease:
 
 
 class OwnershipTests(unittest.TestCase):
-    def exercise(self, mismatch=False, test_stops=True):
+    def exercise(self, mismatch=False, test_stops=True, dex="uniswap"):
         events = []
         node, test = Owned(events, "node"), Owned(events, "test", test_stops)
         def rpc(url, method, params):
@@ -54,9 +54,9 @@ class OwnershipTests(unittest.TestCase):
              patch.object(RUNNER, "start_owned_process", side_effect=[node, test]) as start:
             if mismatch or not test_stops:
                 with self.assertRaisesRegex(RuntimeError, "anchor mismatch" if mismatch else "cleanup unresolved"):
-                    RUNNER.run(1, Path(directory))
+                    RUNNER.run(1, Path(directory), dex=dex)
             else:
-                self.assertEqual(RUNNER.run(1, Path(directory)), 101)
+                self.assertEqual(RUNNER.run(1, Path(directory), dex=dex), 101)
             calls = start.call_args_list
         return events, calls
 
@@ -74,6 +74,19 @@ class OwnershipTests(unittest.TestCase):
     def test_unresolved_test_keeps_node_for_reconciliation(self):
         events, _ = self.exercise(test_stops=False)
         self.assertEqual(events, ["stop-test", "detach-test", "detach-node"])
+
+    def test_each_new_fork_has_owned_node_and_v3_only_exact_fixture(self):
+        import json
+        for dex in ("sushi", "pancakeswap"):
+            with self.subTest(dex=dex):
+                events, calls = self.exercise(dex=dex)
+                self.assertEqual(events, ["stop-test", "stop-node"])
+                fixture = json.loads(calls[1].kwargs["env"]["FIN_AMM_FORK_FIXTURE"])
+                self.assertEqual(fixture["dex"], dex)
+                self.assertEqual(fixture["fee_tier"], 500)
+                self.assertNotIn("uniswap", fixture)
+                self.assertEqual(fixture[dex], RUNNER.protocol_config(1, dex))
+                self.assertEqual(fixture["token"], RUNNER.TOKENS[1])
 
     def test_protocol_constants_do_not_add_token_defaults(self):
         for chain in RUNNER.URLS:
@@ -98,6 +111,37 @@ class OwnershipTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "reviewed router"):
                     RUNNER.run(chain, Path(directory), legacy, "ramses")
             transport.assert_not_called()
+
+
+class V3DeploymentTests(unittest.TestCase):
+    def test_new_forks_use_exact_reviewed_contract_profiles(self):
+        for dex, chains, fees, abi in (
+            ("sushi", [1, 42161], [100, 500, 3000, 10000], "uniswap_v3"),
+            ("pancakeswap", [1, 42161, 4663], [100, 500, 2500, 10000], "pancake_v3"),
+        ):
+            self.assertEqual(RUNNER.reviewed_chains(dex), chains)
+            for chain in chains:
+                with self.subTest(dex=dex, chain=chain):
+                    config = RUNNER.protocol_config(chain, dex)
+                    self.assertEqual(config["allowed_fee_tiers"], fees)
+                    self.assertEqual(config["pool_abi"], abi)
+                    self.assertEqual(config["router_metadata_abi"], abi)
+                    self.assertNotIn("token", config)
+                    self.assertNotIn("weth", config)
+                    self.assertNotIn("v4", config)
+                    if dex == "pancakeswap":
+                        self.assertIsNotNone(config["pool_deployer"])
+                        self.assertEqual(config["router_kind"], "swap_router02" if chain == 4663 else "legacy_v3")
+
+    def test_new_fork_invalid_scope_refuses_before_rpc_or_node(self):
+        with patch.object(RUNNER, "rpc") as rpc, patch.object(RUNNER, "start_owned_process") as start, tempfile.TemporaryDirectory() as directory:
+            for chain, legacy, dex, fee in [(4663, False, "sushi", 500), (1, True, "sushi", 500),
+                                           (1, True, "pancakeswap", 500), (1, False, "pancakeswap", 3000),
+                                           (1, False, "sushi", 2500)]:
+                with self.subTest(chain=chain, dex=dex, fee=fee), self.assertRaises(RuntimeError):
+                    RUNNER.run(chain, Path(directory), legacy, dex, fee)
+            rpc.assert_not_called()
+            start.assert_not_called()
 
 
 if __name__ == "__main__":

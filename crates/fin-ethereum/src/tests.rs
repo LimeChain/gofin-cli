@@ -49,6 +49,7 @@ pub(super) struct Fixture {
     pub(super) nonce: AtomicU64,
     pub(super) chain: AtomicU64,
     pub(super) calls: Mutex<Vec<String>>,
+    call_requests: Mutex<Vec<Value>>,
     symbol_blocks: Mutex<Vec<Value>>,
     missing_selector: Mutex<Option<[u8; 4]>>,
     other_revision_reserve: Mutex<bool>,
@@ -87,6 +88,7 @@ impl Fixture {
             nonce: AtomicU64::new(0),
             chain: AtomicU64::new(1),
             calls: Mutex::new(Vec::new()),
+            call_requests: Mutex::new(Vec::new()),
             symbol_blocks: Mutex::new(Vec::new()),
             missing_selector: Mutex::new(None),
             other_revision_reserve: Mutex::new(false),
@@ -1731,6 +1733,7 @@ impl EvmRpc for Fixture {
                 json!({"hash":txhash(),"from":t.sender,"to":t.to,"nonce":format!("{:#x}",t.nonce),"chainId":format!("{:#x}",t.chain_id),"type":"0x2","gas":format!("{:#x}",t.gas),"value":hex_quantity(fin_evm::u256(&t.value)?),"input":t.calldata,"maxFeePerGas":hex_quantity(fin_evm::u256(&t.max_fee_per_gas)?),"maxPriorityFeePerGas":hex_quantity(fin_evm::u256(&t.max_priority_fee_per_gas)?),"accessList":[],"blockHash":r["blockHash"],"blockNumber":r["blockNumber"]})
             }
             "eth_call" => {
+                self.call_requests.lock().unwrap().push(params.clone());
                 if params[0].get("from").is_some() {
                     if *self.simulation_failure.lock().unwrap() {
                         return Err(FinError::new(
@@ -6566,4 +6569,617 @@ async fn scoped_snapshot_retains_related_collateral_and_debt_outside_requested_a
             .iter()
             .any(|coverage| coverage.contains("related-aave-exposure=true"))
     );
+}
+
+mod additional_v3_profiles {
+    use super::*;
+
+    fn deployment(dex: V3Dex, kind: RouterKind) -> V3DeploymentConfig {
+        V3DeploymentConfig {
+            factory: lower_address(addr(450)),
+            quoter: lower_address(addr(460)),
+            router: lower_address(addr(470)),
+            router_kind: kind,
+            pool_deployer: (dex == V3Dex::PancakeSwap).then(|| lower_address(addr(480))),
+            pool_abi: if dex == V3Dex::PancakeSwap {
+                V3PoolAbi::PancakeV3
+            } else {
+                V3PoolAbi::UniswapV3
+            },
+            router_metadata_abi: if dex == V3Dex::PancakeSwap {
+                V3RouterMetadataAbi::PancakeV3
+            } else {
+                V3RouterMetadataAbi::UniswapV3
+            },
+            allowed_fee_tiers: dex.fee_tiers().to_vec(),
+        }
+    }
+    fn configured(rpc: Arc<Fixture>, dex: V3Dex, kind: RouterKind) -> EthereumAdapter {
+        let mut a = adapter(rpc.clone());
+        a.config.uniswap = None;
+        a.config.ramses = None;
+        a.config.v3_deployments.insert(dex, deployment(dex, kind));
+        rpc.call_overrides.lock().unwrap().extend([
+            (
+                V3DeploymentInfo::factoryCall::SELECTOR,
+                abi_value(addr(450)),
+            ),
+            (UniswapPool::feeCall::SELECTOR, abi_value(U256::from(500))),
+        ]);
+        if kind == RouterKind::SwapRouter02 {
+            *rpc.simulation_override.lock().unwrap() = Some(abi_value(vec![
+                fin_evm::alloy::primitives::Bytes::from(U256::from(3_000_000).abi_encode()),
+                fin_evm::alloy::primitives::Bytes::new(),
+            ]));
+        }
+        a
+    }
+    fn bounds() -> Value {
+        json!({"max_input":"0.002","max_fee_eth":"0.001","max_slippage_bps":100,"max_price_impact_bps":10000,
+            "minimum_rate":{"input_atoms":"1000000000000000000","output_atoms":"2970000000"},
+            "allowed_fee_tiers":[500],"max_deadline_seconds":600})
+    }
+    #[test]
+    fn closed_config_decoding_and_legacy_serialization_remain_exact() {
+        let legacy = serde_json::to_value(EthereumConfig::default()).unwrap();
+        assert!(legacy.get("v3_deployments").is_none());
+        let restored: EthereumConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.v3_deployments.is_empty());
+        assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
+        for dex in [V3Dex::Sushi, V3Dex::PancakeSwap] {
+            let mut config = EthereumConfig::wallet_only(1, 2, vec![]);
+            config
+                .v3_deployments
+                .insert(dex, deployment(dex, RouterKind::LegacyV3));
+            let encoded = serde_json::to_value(config).unwrap();
+            assert!(encoded["v3_deployments"].get(dex.id()).is_some());
+            assert!(serde_json::from_value::<EthereumConfig>(encoded).is_ok());
+        }
+        let mut unknown = legacy;
+        unknown["v3_deployments"] =
+            json!({"unknown":deployment(V3Dex::Sushi, RouterKind::LegacyV3)});
+        assert!(serde_json::from_value::<EthereumConfig>(unknown).is_err());
+    }
+    #[tokio::test]
+    async fn new_venues_prepare_native_and_finite_permit_without_uniswap_configuration() {
+        for (dex, kind) in [
+            (V3Dex::Sushi, RouterKind::LegacyV3),
+            (V3Dex::PancakeSwap, RouterKind::LegacyV3),
+            (V3Dex::PancakeSwap, RouterKind::SwapRouter02),
+        ] {
+            let rpc = Arc::new(Fixture::new());
+            let a = configured(rpc.clone(), dex, kind);
+            assert!(a.supports_operation(&format!("{}.quote", dex.id())));
+            assert!(!a.supports_operation("uniswap.quote"));
+            let mut input = swap_input();
+            input["token_in"] = json!("native");
+            input["fee_tier"] = json!(500);
+            let operation = format!("{}.swap", dex.id());
+            let prepared = a.prepare(&operation, &input).await.unwrap();
+            let b: Binding = serde_json::from_value(prepared.binding.clone()).unwrap();
+            assert_eq!(b.dex.as_deref(), Some(dex.id()));
+            assert_eq!(
+                b.factory.as_deref(),
+                Some(lower_address(addr(450)).as_str())
+            );
+            assert_eq!(b.pool.as_deref(), Some(lower_address(addr(500)).as_str()));
+            assert_eq!(b.transaction.value, quantity(exact("0.001", 18).unwrap()));
+            assert!(b.permit_template.is_none());
+            assert!(prepared.summary.contains(dex.display_name()));
+            if kind == RouterKind::SwapRouter02 {
+                let call = SwapRouter02::multicallCall::abi_decode(
+                    &fin_evm::rpc_bytes(&json!(b.transaction.calldata)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    call.deadline,
+                    U256::from(input["deadline"].as_u64().unwrap())
+                );
+                assert_eq!(call.data.len(), 2);
+                assert_eq!(&call.data[1][..4], &V3Refund::refundETHCall::SELECTOR);
+            }
+            let spec = a.prepare_boundaries(&prepared, &bounds()).await.unwrap();
+            assert_eq!(spec.fixed["dex"], dex.id());
+            assert_eq!(spec.fixed["factory"], lower_address(addr(450)));
+            assert!(spec.fixed.get("pool").is_none());
+            assert_eq!(
+                spec.fixed["approved_pools"]["500"],
+                lower_address(addr(500))
+            );
+            a.validate_boundary_candidate(&spec, &prepared).unwrap();
+            for field in ["factory", "pool", "pool_deployer"] {
+                let mut changed = prepared.clone();
+                changed.binding[field] = json!(lower_address(addr(999)));
+                assert!(
+                    a.validate_boundary_candidate(&spec, &changed).is_err(),
+                    "{field}"
+                );
+            }
+            let mut foreign = prepared.clone();
+            foreign.binding["dex"] = json!("uniswap");
+            assert!(a.validate_boundary_candidate(&spec, &foreign).is_err());
+            let permission = a
+                .prepare_plan_permission(&operation, &input, &bounds())
+                .await
+                .unwrap();
+            assert_eq!(permission.spec.fixed, spec.fixed);
+            // ERC-20 authority is finite and binds precisely this router; the
+            // unsigned permit is materialized only after authorization.
+            input["token_in"] = json!(lower_address(addr(100)));
+            *rpc.allowance.lock().unwrap() = U256::MAX;
+            let permit = a.prepare(&operation, &input).await.unwrap();
+            let binding: Binding = serde_json::from_value(permit.binding).unwrap();
+            let Some(fin_evm::AuthorizedPermit::Eip2612(p)) = binding
+                .permit_template
+                .as_ref()
+                .map(|template| template.permit())
+            else {
+                panic!("exact permit expected")
+            };
+            assert_eq!(p.spender, lower_address(addr(470)));
+            assert_eq!(p.value, quantity(exact("0.001", 18).unwrap()));
+            assert_eq!(binding.transaction.value, Quantity::zero());
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .contains(&"eth_sendRawTransaction".into())
+            );
+        }
+    }
+    #[tokio::test]
+    async fn pancake_uint32_slot_and_venue_fee_tiers_are_not_uniswap_assumptions() {
+        let rpc = Arc::new(Fixture::new());
+        let a = configured(rpc.clone(), V3Dex::PancakeSwap, RouterKind::LegacyV3);
+        rpc.call_overrides.lock().unwrap().insert(
+            UniswapPool::slot0Call::SELECTOR,
+            abi_value((
+                U160::from(1u64) << 96,
+                I24::ZERO,
+                0u16,
+                0u16,
+                0u16,
+                65537u32,
+                true,
+            )),
+        );
+        let quote = json!({"wallet":"synthetic","network":"evm","chain_id":1,"token_in":"native","token_out":lower_address(addr(101)),"amount":"0.001","fee_tier":500});
+        assert!(a.read("pancakeswap.quote", &quote).await.is_ok());
+        let sushi = configured(rpc.clone(), V3Dex::Sushi, RouterKind::LegacyV3);
+        let wide_slot = fin_evm::rpc_bytes(
+            &rpc.call_overrides.lock().unwrap()[&UniswapPool::slot0Call::SELECTOR],
+        )
+        .unwrap();
+        assert_eq!(
+            PancakePool::slot0Call::abi_decode_returns(&wide_slot)
+                .unwrap()
+                .feeProtocol,
+            65537
+        );
+        let mut wrong = quote.clone();
+        wrong["fee_tier"] = json!(3000);
+        assert!(a.read("pancakeswap.quote", &wrong).await.is_err());
+        wrong["fee_tier"] = json!(2500);
+        assert!(sushi.read("sushi.quote", &wrong).await.is_err());
+        wrong["fee_tier"] = json!(500);
+        wrong["protocol"] = json!("v4");
+        assert!(a.read("pancakeswap.quote", &wrong).await.is_err());
+        rpc.call_overrides.lock().unwrap().insert(
+            V3DeploymentInfo::factoryCall::SELECTOR,
+            abi_value(addr(451)),
+        );
+        assert_eq!(
+            a.read("pancakeswap.quote", &quote).await.unwrap_err().code,
+            "DEPLOYMENT_MISMATCH"
+        );
+    }
+    #[tokio::test]
+    async fn receipt_requires_selected_venue_event_and_fresh_factory_pool_identity() {
+        for dex in [V3Dex::Sushi, V3Dex::PancakeSwap] {
+            let rpc = Arc::new(Fixture::new());
+            let a = configured(rpc.clone(), dex, RouterKind::LegacyV3);
+            *rpc.allowance.lock().unwrap() = exact("0.01", 18).unwrap();
+            let p = a
+                .prepare(&format!("{}.swap", dex.id()), &swap_input())
+                .await
+                .unwrap();
+            let b: Binding = serde_json::from_value(p.binding.clone()).unwrap();
+            let q = fin_evm::u256(&b.units).unwrap();
+            let out = U256::from(3_000_000);
+            let uni_event = UniswapPool::Swap {
+                sender: addr(470),
+                recipient: addr(1),
+                amount0: I256::from_raw(q),
+                amount1: -I256::from_raw(out),
+                sqrtPriceX96: Default::default(),
+                liquidity: 1,
+                tick: Default::default(),
+            };
+            let pancake_event = PancakePool::Swap {
+                sender: addr(470),
+                recipient: addr(1),
+                amount0: I256::from_raw(q),
+                amount1: -I256::from_raw(out),
+                sqrtPriceX96: Default::default(),
+                liquidity: 1,
+                tick: Default::default(),
+                protocolFeesToken0: 3,
+                protocolFeesToken1: 4,
+            };
+            let good_event = if dex == V3Dex::PancakeSwap {
+                event(addr(500), pancake_event.clone(), 21)
+            } else {
+                event(addr(500), uni_event.clone(), 21)
+            };
+            let wrong_event = if dex == V3Dex::PancakeSwap {
+                event(addr(500), uni_event, 21)
+            } else {
+                event(addr(500), pancake_event, 21)
+            };
+            let mut logs = vec![
+                wrong_event,
+                event(
+                    addr(100),
+                    Erc20::Transfer {
+                        from: addr(1),
+                        to: addr(500),
+                        value: q,
+                    },
+                    21,
+                ),
+                event(
+                    addr(101),
+                    Erc20::Transfer {
+                        from: addr(500),
+                        to: addr(1),
+                        value: out,
+                    },
+                    21,
+                ),
+            ];
+            rpc.latest.store(22, Ordering::SeqCst);
+            rpc.set_receipt(&b, 21, logs.clone());
+            let r = record(p);
+            assert!(a.reconcile(&r).await.is_err());
+            logs[0] = good_event;
+            rpc.set_receipt(&b, 21, logs.clone());
+            rpc.call_requests.lock().unwrap().clear();
+            assert_eq!(a.reconcile(&r).await.unwrap().status, Status::Completed);
+            let requests = rpc.call_requests.lock().unwrap().clone();
+            assert!(
+                requests.iter().any(|params| {
+                    params[0]["to"] == lower_address(addr(450))
+                        && params[1] == "0x15"
+                        && fin_evm::rpc_bytes(&params[0]["data"]).is_ok_and(|data| {
+                            data.get(..4) == Some(&Factory::getPoolCall::SELECTOR)
+                        })
+                }),
+                "factory identity must be read at the exact inclusion block"
+            );
+            if dex == V3Dex::PancakeSwap {
+                let mut truncated = logs.clone();
+                let data = truncated[0]["data"].as_str().unwrap();
+                truncated[0]["data"] = json!(data[..data.len() - 64].to_owned());
+                rpc.set_receipt(&b, 21, truncated);
+                assert!(a.reconcile(&r).await.is_err());
+                rpc.set_receipt(&b, 21, logs.clone());
+            }
+            rpc.call_overrides
+                .lock()
+                .unwrap()
+                .insert(Factory::getPoolCall::SELECTOR, abi_value(addr(501)));
+            assert_eq!(
+                a.reconcile(&r).await.unwrap_err().code,
+                "POOL_IDENTITY_MISMATCH"
+            );
+            rpc.call_overrides
+                .lock()
+                .unwrap()
+                .remove(&Factory::getPoolCall::SELECTOR);
+            rpc.call_overrides.lock().unwrap().insert(
+                V3DeploymentInfo::factoryCall::SELECTOR,
+                abi_value(addr(451)),
+            );
+            assert_eq!(
+                a.reconcile(&r).await.unwrap_err().code,
+                "DEPLOYMENT_MISMATCH"
+            );
+        }
+    }
+    struct MultiPoolRpc {
+        inner: Arc<Fixture>,
+        second_tier: u32,
+        missing_fee: Mutex<Option<u32>>,
+        bad_identity: Mutex<Option<&'static str>>,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+    #[async_trait]
+    impl EvmRpc for MultiPoolRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.into(), params.clone()));
+            if method == "eth_call" {
+                let data = fin_evm::rpc_bytes(&params[0]["data"])?;
+                let to = address(params[0]["to"].as_str().unwrap())?;
+                let selector = data.get(..4).unwrap_or_default();
+                if selector == Factory::getPoolCall::SELECTOR {
+                    let fee = Factory::getPoolCall::abi_decode(&data)
+                        .unwrap()
+                        .fee
+                        .to::<u32>();
+                    let missing = *self.missing_fee.lock().unwrap();
+                    return Ok(abi_value(if missing == Some(fee) {
+                        Address::ZERO
+                    } else if fee == 500 {
+                        addr(500)
+                    } else if fee == self.second_tier {
+                        addr(501)
+                    } else if fee == 10_000 {
+                        addr(502)
+                    } else {
+                        Address::ZERO
+                    }));
+                }
+                if [addr(500), addr(501), addr(502)].contains(&to) {
+                    let bad = *self.bad_identity.lock().unwrap();
+                    if selector == UniswapPool::feeCall::SELECTOR {
+                        let fee = if to == addr(500) {
+                            500
+                        } else if to == addr(501) {
+                            self.second_tier
+                        } else {
+                            10_000
+                        };
+                        return Ok(abi_value(U256::from(if bad == Some("fee") {
+                            100
+                        } else {
+                            fee
+                        })));
+                    }
+                    if selector == UniswapPool::factoryCall::SELECTOR {
+                        return Ok(abi_value(if bad == Some("factory") {
+                            addr(451)
+                        } else {
+                            addr(450)
+                        }));
+                    }
+                    if selector == UniswapPool::token1Call::SELECTOR && bad == Some("token") {
+                        return Ok(abi_value(addr(102)));
+                    }
+                }
+            }
+            self.inner.request(method, params).await
+        }
+    }
+    fn multi_pool_adapter(dex: V3Dex) -> (EthereumAdapter, Arc<MultiPoolRpc>) {
+        let fixture = Arc::new(Fixture::new());
+        let mut adapter = configured(fixture.clone(), dex, RouterKind::LegacyV3);
+        let rpc = Arc::new(MultiPoolRpc {
+            inner: fixture,
+            second_tier: if dex == V3Dex::Sushi { 3000 } else { 2500 },
+            missing_fee: Mutex::new(None),
+            bad_identity: Mutex::new(None),
+            calls: Mutex::new(vec![]),
+        });
+        adapter.runtime = Arc::new(EvmRuntime::new(rpc.clone(), 1, None));
+        (adapter, rpc)
+    }
+    fn multi_bounds(second: u32) -> Value {
+        let mut raw = bounds();
+        // Scope creation canonicalizes the caller's tier order.
+        raw["allowed_fee_tiers"] = json!([second, 500]);
+        raw
+    }
+    fn native_candidate(tier: u32) -> Value {
+        let mut input = swap_input();
+        input["token_in"] = json!("native");
+        input["fee_tier"] = json!(tier);
+        input
+    }
+    #[tokio::test]
+    async fn approved_pool_maps_allow_each_tier_and_preserve_legacy_exact_pool_scope() {
+        for dex in [V3Dex::Sushi, V3Dex::PancakeSwap] {
+            let (adapter, rpc) = multi_pool_adapter(dex);
+            let operation = format!("{}.swap", dex.id());
+            let first_input = native_candidate(500);
+            let first = adapter.prepare(&operation, &first_input).await.unwrap();
+            let second = adapter
+                .prepare(&operation, &native_candidate(rpc.second_tier))
+                .await
+                .unwrap();
+            let raw = multi_bounds(rpc.second_tier);
+            let standalone = adapter.prepare_boundaries(&first, &raw).await.unwrap();
+            let plan = adapter
+                .prepare_plan_permission(&operation, &first_input, &raw)
+                .await
+                .unwrap();
+            assert_eq!(standalone.fixed, plan.spec.fixed);
+            assert!(standalone.fixed.get("pool").is_none());
+            assert_eq!(
+                standalone.fixed["approved_pools"],
+                json!({"500":lower_address(addr(500)),rpc.second_tier.to_string():lower_address(addr(501))})
+            );
+            assert_eq!(
+                standalone.parameters["allowed_fee_tiers"],
+                json!([500, rpc.second_tier])
+            );
+            let encoded = serde_json::to_value(&standalone).unwrap();
+            let decoded: fin_domain::boundaries::BoundarySpec =
+                serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+            for spec in [&standalone, &plan.spec] {
+                adapter.validate_boundary_candidate(spec, &first).unwrap();
+                adapter.validate_boundary_candidate(spec, &second).unwrap();
+                let unapproved = adapter
+                    .prepare(&operation, &native_candidate(10_000))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    adapter
+                        .validate_boundary_candidate(spec, &unapproved)
+                        .unwrap_err()
+                        .code,
+                    "BOUNDARY_VIOLATION"
+                );
+                let mut swapped = spec.clone();
+                swapped.fixed["approved_pools"]["500"] = json!(lower_address(addr(501)));
+                swapped.fixed["approved_pools"][rpc.second_tier.to_string()] =
+                    json!(lower_address(addr(500)));
+                assert!(
+                    adapter
+                        .validate_boundary_candidate(&swapped, &first)
+                        .is_err()
+                );
+                for field in ["factory", "token_in"] {
+                    let mut changed = second.clone();
+                    if field == "token_in" {
+                        changed.binding["token"]["reference"] = json!(lower_address(addr(102)));
+                        changed.input["token_in"] = json!(lower_address(addr(102)));
+                    } else {
+                        changed.binding[field] = json!(lower_address(addr(451)));
+                    }
+                    assert!(
+                        adapter.validate_boundary_candidate(spec, &changed).is_err(),
+                        "{field}"
+                    );
+                }
+                let mut bad_key = spec.clone();
+                bad_key.fixed["approved_pools"] = json!({"0500":lower_address(addr(500)),rpc.second_tier.to_string():lower_address(addr(501))});
+                assert!(
+                    adapter
+                        .validate_boundary_candidate(&bad_key, &first)
+                        .is_err()
+                );
+                let mut ambiguous = spec.clone();
+                ambiguous.fixed["pool"] = json!(lower_address(addr(500)));
+                assert!(
+                    adapter
+                        .validate_boundary_candidate(&ambiguous, &first)
+                        .is_err()
+                );
+            }
+            // Old persisted venue scopes keep the exact pool restriction even
+            // when their original bounds happened to list several tiers.
+            let mut legacy = standalone;
+            legacy
+                .fixed
+                .as_object_mut()
+                .unwrap()
+                .remove("approved_pools");
+            legacy.fixed["pool"] = json!(lower_address(addr(500)));
+            adapter
+                .validate_boundary_candidate(&legacy, &first)
+                .unwrap();
+            assert!(
+                adapter
+                    .validate_boundary_candidate(&legacy, &second)
+                    .is_err()
+            );
+            assert_eq!(rpc.inner.nonce.load(Ordering::SeqCst), 0);
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, _)| method == "eth_sendRawTransaction")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn future_funded_plan_resolves_pinned_pool_set_without_quotes_or_balances() {
+        for dex in [V3Dex::Sushi, V3Dex::PancakeSwap] {
+            let (adapter, rpc) = multi_pool_adapter(dex);
+            let operation = format!("{}.swap", dex.id());
+            let mut input = native_candidate(500);
+            input["amount"] = json!("2");
+            input["min_output"] = json!("6000");
+            let mut raw = multi_bounds(rpc.second_tier);
+            raw["max_input"] = json!("2");
+            // The fixture only has 1 ETH, so preparing this concrete write
+            // would fail. Static plan authorization requires neither funding
+            // nor a price quote for that future operation.
+            adapter
+                .prepare_plan_permission(&operation, &input, &raw)
+                .await
+                .unwrap();
+            let calls = rpc.calls.lock().unwrap().clone();
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(method, params)| method == "eth_call"
+                        && fin_evm::rpc_bytes(&params[0]["data"]).is_ok_and(
+                            |data| data.get(..4) == Some(&Factory::getPoolCall::SELECTOR)
+                        ))
+                    .all(|(_, params)| params[1] == "0x14")
+            );
+            assert!(
+                !calls
+                    .iter()
+                    .any(|(method, params)| method == "eth_getBalance"
+                        || method == "eth_getTransactionCount"
+                        || (method == "eth_call"
+                            && fin_evm::rpc_bytes(&params[0]["data"])
+                                .is_ok_and(|data| data.get(..4)
+                                    == Some(&Quoter::quoteExactInputSingleCall::SELECTOR)
+                                    || data.get(..4) == Some(&Erc20::balanceOfCall::SELECTOR))))
+            );
+            *rpc.missing_fee.lock().unwrap() = Some(rpc.second_tier);
+            assert_eq!(
+                adapter
+                    .prepare_plan_permission(&operation, &input, &raw)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "POOL_SCOPE_UNAVAILABLE"
+            );
+            *rpc.missing_fee.lock().unwrap() = None;
+            for bad in ["factory", "token", "fee"] {
+                *rpc.bad_identity.lock().unwrap() = Some(bad);
+                assert_eq!(
+                    adapter
+                        .prepare_plan_permission(&operation, &input, &raw)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    "POOL_IDENTITY_MISMATCH",
+                    "{bad}"
+                );
+            }
+            assert_eq!(rpc.inner.nonce.load(Ordering::SeqCst), 0);
+            assert!(
+                !rpc.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(method, _)| method == "eth_sendRawTransaction")
+            );
+        }
+    }
+    #[tokio::test]
+    async fn standalone_boundary_rejects_missing_authorization_time_pool() {
+        let (adapter, rpc) = multi_pool_adapter(V3Dex::Sushi);
+        let prepared = adapter
+            .prepare("sushi.swap", &native_candidate(500))
+            .await
+            .unwrap();
+        *rpc.missing_fee.lock().unwrap() = Some(3000);
+        assert_eq!(
+            adapter
+                .prepare_boundaries(&prepared, &multi_bounds(3000))
+                .await
+                .unwrap_err()
+                .code,
+            "POOL_SCOPE_UNAVAILABLE"
+        );
+        assert_eq!(rpc.inner.nonce.load(Ordering::SeqCst), 0);
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, _)| method == "eth_sendRawTransaction")
+        );
+    }
 }

@@ -404,6 +404,70 @@ fn v4_swap_fee_ppm(packed_protocol_fee: u32, lp_fee_ppm: u32, zero_for_one: bool
 }
 
 impl EthereumAdapter {
+    pub(crate) async fn validate_v3_metadata(
+        &self,
+        profile: super::uniswap::profile::V3DeploymentProfile<'_>,
+        block: Option<u64>,
+    ) -> Result<()> {
+        // Legacy profiles keep their existing checks and bindings. Additional
+        // venues independently bind factory/router/quoter identities.
+        if super::uniswap::profile::additional_dex(profile.dex_id).is_none() {
+            return Ok(());
+        }
+        let observe = |target: Address| async move {
+            let (_, factory, weth) = tokio::try_join!(
+                self.runtime.code_at(target, block),
+                self.runtime
+                    .call(target, &V3DeploymentInfo::factoryCall {}, block),
+                self.runtime
+                    .call(target, &V3RouterInfo::WETH9Call {}, block),
+            )?;
+            require(
+                factory == address(profile.factory)?,
+                "DEPLOYMENT_MISMATCH",
+                "V3 router or quoter factory differs from its reviewed configuration.",
+            )?;
+            require(
+                weth != Address::ZERO
+                    && self
+                        .config
+                        .weth
+                        .as_ref()
+                        .is_none_or(|expected| address(expected).is_ok_and(|a| a == weth)),
+                "DEPLOYMENT_MISMATCH",
+                "V3 wrapped-native identity differs from the configured network.",
+            )?;
+            self.runtime.code_at(weth, block).await?;
+            if profile.router_metadata_abi == V3RouterMetadataAbi::PancakeV3 {
+                let expected = address(
+                    profile
+                        .pool_deployer
+                        .ok_or_else(|| FinError::validation("Pancake deployer is missing."))?,
+                )?;
+                let (_, actual) = tokio::try_join!(
+                    self.runtime.code_at(expected, block),
+                    self.runtime
+                        .call(target, &V3DeploymentInfo::deployerCall {}, block)
+                )?;
+                require(
+                    actual == expected,
+                    "DEPLOYMENT_MISMATCH",
+                    "Pancake router or quoter deployer differs from its reviewed configuration.",
+                )?;
+            }
+            Ok::<_, FinError>(weth)
+        };
+        let (router_weth, quoter_weth) = tokio::try_join!(
+            observe(address(profile.router)?),
+            observe(address(profile.quoter)?)
+        )?;
+        require(
+            router_weth == quoter_weth,
+            "DEPLOYMENT_MISMATCH",
+            "V3 router and quoter wrapped-native identities differ.",
+        )?;
+        Ok(())
+    }
     pub async fn token(&self, reference: &str, block: Option<u64>) -> Result<Token> {
         if reference == "native" {
             return Ok(Token {
@@ -959,9 +1023,13 @@ impl EthereumAdapter {
         let observed_at = now();
         let protocol = super::uniswap::Protocol::parse(protocol)?;
         require(
-            dex != "ramses" || protocol == super::uniswap::Protocol::V3,
-            "RAMSES_VERSION_UNSUPPORTED",
-            "Ramses currently supports only its reviewed v3-style pool and router interface.",
+            dex == "uniswap" || protocol == super::uniswap::Protocol::V3,
+            if dex == "ramses" {
+                "RAMSES_VERSION_UNSUPPORTED"
+            } else {
+                "AMM_VERSION_UNSUPPORTED"
+            },
+            "This venue supports only its reviewed v3 pool and router interface.",
         )?;
         if dex == "uniswap" && protocol == super::uniswap::Protocol::V4 {
             let mut quote = self
@@ -995,7 +1063,7 @@ impl EthereumAdapter {
         require(
             v4_key.is_none(),
             "V4_POOL_UNEXPECTED",
-            "Uniswap v3 does not accept a v4 pool key.",
+            "V3 venues do not accept a v4 pool key.",
         )?;
         let ti = self.token(input, block).await?;
         let to = self.token(output, block).await?;
@@ -1010,17 +1078,7 @@ impl EthereumAdapter {
             "ZERO_AMOUNT",
             "Swap input must be positive.",
         )?;
-        let profile = match dex {
-            "uniswap" => super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?),
-            "ramses" => super::uniswap::profile::V3DeploymentProfile::ramses(self.ramses()?),
-            _ => {
-                return Err(error(
-                    "DEX_UNSUPPORTED",
-                    "validation",
-                    "This reviewed AMM deployment is unavailable.",
-                ));
-            }
-        };
+        let profile = self.v3_profile(dex)?;
         let weth = if ti.reference == "native" || to.reference == "native" {
             let router = address(profile.router)?;
             self.runtime.code_at(router, block).await?;
@@ -1059,7 +1117,8 @@ impl EthereumAdapter {
         self.runtime
             .code_at(address(profile.quoter)?, block)
             .await?;
-        if let Some(expected_deployer) = profile.pool_deployer {
+        if profile.factory_lookup == super::uniswap::profile::FactoryLookup::TickSpacingI24 {
+            let expected_deployer = profile.pool_deployer.expect("Ramses deployer");
             self.runtime
                 .code_at(address(profile.router)?, block)
                 .await?;
@@ -1102,6 +1161,7 @@ impl EthereumAdapter {
                 "Ramses quoter or router does not match the reviewed pool-deployer profile.",
             )?;
         }
+        self.validate_v3_metadata(profile, block).await?;
         let tiers: Vec<u32> = if profile.dex_id == "ramses" {
             let spacing = tick_spacing.ok_or_else(|| {
                 error(
@@ -1117,9 +1177,14 @@ impl EthereumAdapter {
             )?;
             vec![spacing as u32]
         } else if let Some(t) = tier {
+            require(
+                profile.fee_tiers.contains(&t),
+                "FEE_TIER_UNSUPPORTED",
+                "Fee tier is outside this reviewed venue profile.",
+            )?;
             vec![t]
         } else {
-            vec![100, 500, 3000, 10000]
+            profile.fee_tiers.to_vec()
         };
         let mut best = None;
         for fee in tiers {
@@ -1196,11 +1261,42 @@ impl EthereumAdapter {
                     .runtime
                     .call(pool, &UniswapPool::token1Call {}, block)
                     .await?;
-                let slot = self
-                    .runtime
-                    .call(pool, &UniswapPool::slot0Call {}, block)
-                    .await?;
-                (token0, token1, slot.sqrtPriceX96, fee)
+                let sqrt_price = match profile.pool_abi {
+                    V3PoolAbi::UniswapV3 => {
+                        self.runtime
+                            .call(pool, &UniswapPool::slot0Call {}, block)
+                            .await?
+                            .sqrtPriceX96
+                    }
+                    V3PoolAbi::PancakeV3 => {
+                        self.runtime
+                            .call(pool, &PancakePool::slot0Call {}, block)
+                            .await?
+                            .sqrtPriceX96
+                    }
+                };
+                if super::uniswap::profile::additional_dex(profile.dex_id).is_some() {
+                    let factory = self
+                        .runtime
+                        .call(pool, &UniswapPool::factoryCall {}, block)
+                        .await?;
+                    require(
+                        factory == address(profile.factory)?,
+                        "POOL_IDENTITY_MISMATCH",
+                        "Pool belongs to a different factory.",
+                    )?;
+                    let actual_fee = self
+                        .runtime
+                        .call(pool, &UniswapPool::feeCall {}, block)
+                        .await?
+                        .to::<u32>();
+                    require(
+                        actual_fee == fee,
+                        "POOL_IDENTITY_MISMATCH",
+                        "Pool fee differs from the selected factory key.",
+                    )?;
+                }
+                (token0, token1, sqrt_price, fee)
             };
             if !((pool_token0 == pool_in && pool_token1 == pool_out)
                 || (pool_token0 == pool_out && pool_token1 == pool_in))
@@ -1297,11 +1393,7 @@ impl EthereumAdapter {
                 "No reviewed single-pool fee tier returned a positive quote.",
             )
         })?;
-        quote.router = Some(if dex == "ramses" {
-            profile.router.to_owned()
-        } else {
-            configured_quote_router(self, "v3")?
-        });
+        quote.router = Some(profile.router.to_owned());
         quote.permission_strategy = Some(if quote.token_in.reference == "native" {
             "Native input is wrapped by the reviewed v3 router; no token allowance is needed."
                 .into()
@@ -1579,14 +1671,10 @@ impl EthereumAdapter {
                     .await?;
                 json!({"receipt":receipt,"completion":"Raw receipt observation alone is not a verified operation."})
             }
-            "uniswap.quote" | "ramses.quote" => {
+            "uniswap.quote" | "ramses.quote" | "sushi.quote" | "pancakeswap.quote" => {
                 let mut quote = self
                     .quote_protocol(ProtocolQuoteRequest {
-                        dex: if operation == "ramses.quote" {
-                            "ramses"
-                        } else {
-                            "uniswap"
-                        },
+                        dex: super::uniswap::profile::operation_dex(operation)?,
                         input: r.token_in.as_deref().expect("schema"),
                         output: r.token_out.as_deref().expect("schema"),
                         amount: r.amount.as_deref().expect("schema"),

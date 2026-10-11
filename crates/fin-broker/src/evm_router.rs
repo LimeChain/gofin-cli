@@ -297,13 +297,14 @@ impl Adapter for EvmNetworkRouter {
     ) -> fin_domain::Result<PreparedOperation> {
         self.route(input)?.prepare(operation, input).await
     }
-    fn prepare_boundaries(
+    async fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> fin_domain::Result<fin_domain::boundaries::BoundarySpec> {
         self.prepared(prepared)?
             .prepare_boundaries(prepared, bounds)
+            .await
     }
     async fn prepare_plan_permission(
         &self,

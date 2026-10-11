@@ -1161,7 +1161,9 @@ pub trait Adapter: Send + Sync {
     }
     /// Derive the enforceable, operation-specific scope for a bounded
     /// authorization. Adapters opt in explicitly; the default fails closed.
-    fn prepare_boundaries(
+    /// Scope derivation may asynchronously resolve fresh pinned protocol
+    /// identities; callers recheck prepared freshness after the awaited result.
+    async fn prepare_boundaries(
         &self,
         _prepared: &PreparedOperation,
         _bounds: &Value,

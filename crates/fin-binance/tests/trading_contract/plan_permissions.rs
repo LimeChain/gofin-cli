@@ -247,6 +247,7 @@ fn two_step_plan() -> FinancialPlanSpec {
                     operation_succeeded: false,
                 },
                 funding_dependencies: vec![FinancialPlanFundingDependency {
+                    funding_scope: None,
                     producing_step_id: "buy-eth".into(),
                     resource: ResourceId(SPOT.into()),
                     asset: plan_asset("ETH"),

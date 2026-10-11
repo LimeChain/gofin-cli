@@ -551,7 +551,10 @@ fn expand_reviewed_evm_coverage_with(
     }
 
     for reviewed in reviewed_amms {
-        if reviewed.uniswap.is_none() && reviewed.ramses.is_none() {
+        if reviewed.uniswap.is_none()
+            && reviewed.ramses.is_none()
+            && reviewed.v3_deployments.is_empty()
+        {
             continue;
         }
         let Some(index) = config
@@ -565,6 +568,7 @@ fn expand_reviewed_evm_coverage_with(
                 snapshot_tokens: Vec::new(),
                 uniswap: reviewed.uniswap.clone(),
                 ramses: reviewed.ramses.clone(),
+                v3_deployments: reviewed.v3_deployments.clone(),
                 aave: if reviewed.network == "ethereum:8453" {
                     reviewed.aave.clone()
                 } else {
@@ -580,6 +584,13 @@ fn expand_reviewed_evm_coverage_with(
             if reviewed.ramses.is_some() {
                 warnings.push(format!(
                     "Added reviewed Ramses v3 deployment coverage for {}.",
+                    reviewed.network
+                ));
+            }
+            for dex in reviewed.v3_deployments.keys() {
+                warnings.push(format!(
+                    "Added reviewed {} v3 deployment coverage for {}.",
+                    dex.id(),
                     reviewed.network
                 ));
             }
@@ -614,6 +625,18 @@ fn expand_reviewed_evm_coverage_with(
                     ));
                 }
                 Some(_) => {}
+            }
+        }
+        for (dex, deployment) in &reviewed.v3_deployments {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                existing.v3_deployments.entry(*dex)
+            {
+                entry.insert(deployment.clone());
+                warnings.push(format!(
+                    "Added reviewed {} v3 deployment coverage for {}.",
+                    dex.id(),
+                    reviewed.network
+                ));
             }
         }
         if existing.ramses.is_none() && reviewed.ramses.is_some() {
@@ -1618,6 +1641,7 @@ mod tests {
             snapshot_tokens: vec!["0x7777777777777777777777777777777777777777".into()],
             uniswap: Some(custom_uniswap.clone()),
             ramses: None,
+            v3_deployments: BTreeMap::new(),
             aave: Some(custom_aave.clone()),
         };
         let mut config = empty_config(
@@ -1827,6 +1851,7 @@ mod tests {
                     snapshot_tokens: vec!["0x9999999999999999999999999999999999999999".into()],
                     uniswap: Some(custom_uniswap.clone()),
                     ramses: None,
+                    v3_deployments: BTreeMap::new(),
                     aave: Some(fin_ethereum::EthereumConfig::default().aave.unwrap()),
                 },
                 DeploymentConfig {
@@ -1835,6 +1860,7 @@ mod tests {
                     snapshot_tokens: vec![],
                     uniswap: None,
                     ramses: Some(custom_ramses.clone()),
+                    v3_deployments: BTreeMap::new(),
                     aave: None,
                 },
             ],
@@ -2172,6 +2198,7 @@ mod tests {
                 router: "0x3333333333333333333333333333333333333333".into(),
                 pool_deployer: "0x4444444444444444444444444444444444444444".into(),
             }),
+            v3_deployments: BTreeMap::new(),
             aave: None,
         };
         let error = effective_protected_config_with(
@@ -2544,5 +2571,72 @@ mod tests {
             error.code.as_str(),
             "PROTECTED_BROKER_REQUIRED" | "INVALID_INSTALLATION" | "AUTHORIZATION_UNAVAILABLE"
         ));
+    }
+    #[test]
+    fn reviewed_v3_fork_overlay_preserves_custom_profiles_and_credentials() {
+        use fin_ethereum::V3Dex;
+        let mut deployment = DeploymentConfig::ethereum_mainnet();
+        let mut custom = deployment.v3_deployments.remove(&V3Dex::Sushi).unwrap();
+        custom.router = "0x1111111111111111111111111111111111111111".into();
+        deployment.v3_deployments.clear();
+        deployment
+            .v3_deployments
+            .insert(V3Dex::Sushi, custom.clone());
+        let mut config = empty_config(vec![NetworkConfig::ethereum_mainnet()], vec![deployment]);
+        config.connections.push(reusable_read_only_wallet());
+        let original_connections = config.connections.clone();
+        let effective = effective_protected_config(config.clone()).unwrap();
+        // Main also derives Hyperliquid access from a reusable wallet. The
+        // original wallet and credential mapping must remain byte-identical.
+        let wallets: Vec<_> = effective
+            .connections
+            .iter()
+            .filter(|connection| matches!(connection, ConnectionConfig::Evm { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(wallets, original_connections);
+        let mainnet = effective
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:1")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&mainnet.v3_deployments[&V3Dex::Sushi]).unwrap(),
+            serde_json::to_value(&custom).unwrap()
+        );
+        assert!(mainnet.v3_deployments.contains_key(&V3Dex::PancakeSwap));
+        let robinhood = effective
+            .deployments
+            .iter()
+            .find(|d| d.network == "ethereum:4663")
+            .unwrap();
+        assert!(!robinhood.v3_deployments.contains_key(&V3Dex::Sushi));
+        assert!(robinhood.v3_deployments.contains_key(&V3Dex::PancakeSwap));
+        let again = effective_protected_config(effective.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(again).unwrap(),
+            serde_json::to_value(effective).unwrap()
+        );
+        assert!(
+            !config.deployments[0]
+                .v3_deployments
+                .contains_key(&V3Dex::PancakeSwap)
+        );
+    }
+
+    #[test]
+    fn legacy_deployment_decoding_and_closed_fork_names_are_preserved() {
+        let old = json!({"network":"ethereum:1","weth":null,"snapshot_tokens":[],"uniswap":null,"ramses":null,"aave":null});
+        let deployment: DeploymentConfig = serde_json::from_value(old.clone()).unwrap();
+        assert!(deployment.v3_deployments.is_empty());
+        assert!(
+            serde_json::to_value(&deployment)
+                .unwrap()
+                .get("v3_deployments")
+                .is_none()
+        );
+        let mut unknown = old;
+        unknown["v3_deployments"] = json!({"unreviewed":{}});
+        assert!(serde_json::from_value::<DeploymentConfig>(unknown).is_err());
     }
 }

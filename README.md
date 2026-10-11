@@ -9,7 +9,8 @@ The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, Hyperliquid REST spot/perpetual trading and account actions, reusable
 EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
-EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood;
+EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood,
+Sushi v3 on Ethereum/Arbitrum and PancakeSwap v3 on Ethereum/Arbitrum/Robinhood;
 and Ethereum mainnet Aave.
 The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
@@ -1041,6 +1042,15 @@ target when the economic outcome must also be met. Read results are retained but
 cannot establish financial proceeds. Existing spot-order variation scopes remain
 available separately.
 
+A funding dependency normally covers both principal and additional fees in its
+exact asset. Set `funding_scope: "principal_only"` explicitly when the producer
+funds only swap principal and fees come from separately available wallet cash.
+For example, a USDC → ETH → USDC plan can sell all receipt-verified ETH while
+paying gas from the wallet's existing ETH. Fin still checks principal plus the
+maximum gas against the current balance and reserves/caps all fees. Omitting the
+field or selecting `"all_debits"` preserves the original funding rule. Discover
+the complete declaration with `fin schema plans.preview --json`.
+
 Bridge transfers can join the same plan as their funding steps. A plan has one
 separate `bridge.transfer` step for each saved approval, optional allowance
 reset and deposit. Repeat the quote-returned `transferId` and each exact
@@ -1062,7 +1072,8 @@ deposit, using the destination wallet's chain-qualified resource and exact token
 identity. If a native-ETH bridge uses the Binance withdrawal to fund both
 principal and gas, its verified net receipt must include a gas buffer; otherwise
 the combined debit exceeds that producer credit. Gas paid from an existing wallet
-balance remains outside the withdrawal dependency. Plan preview can review these
+balance remains outside the withdrawal dependency; use `principal_only` when
+the principal and gas share the dependency's asset. Plan preview can review these
 future-funded bridge steps without a balance check or write simulation. It checks
 fresh Fin pricing for selected USD bounds but does not assure execution-time
 balances, fees or simulations. Actual bridge preparation repeats those checks
@@ -1220,3 +1231,21 @@ python3 scripts/audit-binance-reads.py --accounts MAIN_NAME SUB_NAME
 The audit moves no funds. Single-order lookups require an observed existing ID;
 missing history is reported as not run, without creating an order. Full positions
 and bounded order/trade/income slices retain their different coverage.
+
+### Additional v3 AMMs
+
+Sushi and PancakeSwap reuse the shared quote/swap, finite permit, approval and
+accounting paths. Availability follows reviewed deployments and exact route
+liquidity; token contracts are caller supplied. Robinhood PancakeSwap uses the
+reviewed SmartRouter's v3 path with a deadline-bearing multicall. Inspect the
+current schemas before supplying exact token contracts and decimal quantities:
+
+```sh
+fin schema sushi.quote --json
+fin schema sushi.swap --json
+fin schema pancakeswap.quote --json
+fin schema pancakeswap.swap --json
+```
+
+See [v3 fork verification](docs/testing/v3-forks.md) for isolated development,
+owned forks and the distinction between development approval and Touch ID.

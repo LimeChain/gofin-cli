@@ -4473,7 +4473,7 @@ impl Adapter for BridgeAdapter {
         })
     }
 
-    fn prepare_boundaries(
+    async fn prepare_boundaries(
         &self,
         prepared: &PreparedOperation,
         bounds: &Value,

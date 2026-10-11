@@ -441,7 +441,10 @@ impl EthereumAdapter {
         self.runtime.assert_chain().await?;
         let reference = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
-        } else if matches!(operation, "uniswap.swap" | "ramses.swap") {
+        } else if matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             r.token_in.as_deref().expect("schema").to_owned()
         } else {
             r.token.as_deref().expect("schema").to_owned()
@@ -747,6 +750,12 @@ impl EthereumAdapter {
                         ]
                         .into_iter()
                         .flatten()
+                        .chain(
+                            self.config
+                                .v3_deployments
+                                .values()
+                                .map(|value| value.router.as_str()),
+                        )
                         .any(|candidate| {
                             lower_address(address(candidate).expect("validated deployment"))
                                 == lower_address(spender)
@@ -821,7 +830,7 @@ impl EthereumAdapter {
                 });
                 evidence["spender"] = json!(lower_address(spender));
             }
-            "uniswap.swap" | "ramses.swap" => {
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" => {
                 let input_cash = cash(context, &resource, &principal)?;
                 let lo = if all { u256(&input_cash.minimum)? } else { cap };
                 let hi = if all { u256(&input_cash.maximum)? } else { cap };
@@ -830,11 +839,9 @@ impl EthereumAdapter {
                     "PLAN_PRINCIPAL_UNFUNDED",
                     "Swap principal must fit finite broker-selected cash.",
                 )?;
-                let router_address = if operation == "ramses.swap" {
-                    &self.ramses()?.router
-                } else {
-                    &self.uniswap()?.router
-                };
+                let profile =
+                    self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
+                let router_address = profile.router;
                 finite_allowance(context, &resource, &token.reference, router_address, hi)?;
                 require(
                     address(r.recipient.as_deref().expect("schema"))? == owner,
@@ -843,11 +850,7 @@ impl EthereumAdapter {
                 )?;
                 let quote = self
                     .quote_protocol(crate::reads::ProtocolQuoteRequest {
-                        dex: if operation == "ramses.swap" {
-                            "ramses"
-                        } else {
-                            "uniswap"
-                        },
+                        dex: super::uniswap::profile::operation_dex(operation)?,
                         input: &token.reference,
                         output: r.token_out.as_deref().expect("schema"),
                         amount: &quantity(lo).to_decimal(token.decimals),

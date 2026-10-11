@@ -1,5 +1,47 @@
 import Foundation
 
+// Synthetic malformed consent fixtures are shared by boundary and plan tests.
+private func invalidPoolMapScopes(fixed: [String: Any], parameters: [String: Any], tier: Int, dex: String)
+    -> [(String, [String: Any], [String: Any])] {
+    let pool = "0x3333333333333333333333333333333333333333"
+    let zero = "0x" + String(repeating: "0", count: 40)
+    var cases: [(String, [String: Any], [String: Any])] = []
+    for (label, value) in [
+        ("null map", NSNull() as Any), ("array map", [pool] as Any),
+        ("empty map", [String: Any]() as Any),
+        ("noncanonical tier", ["0\(tier)":pool] as Any),
+        ("unknown tier", ["1234":pool] as Any),
+        ("wrong venue tier", [String(dex == "sushi" ? 2500 : 3000):pool] as Any),
+        ("zero pool", [String(tier):zero] as Any),
+        ("malformed pool", [String(tier):"SYNTHETIC-not-an-address"] as Any),
+        ("null pool", [String(tier):NSNull()] as Any),
+        ("nonstring pool", [String(tier):123] as Any),
+        ("extra entry", [String(tier):pool, "500":"0x6666666666666666666666666666666666666666"] as Any)
+    ] {
+        var invalid = fixed; invalid["approved_pools"] = value
+        cases.append((label, invalid, parameters))
+    }
+    for (label, value) in [("both pool and map", pool as Any), ("null pool with map", NSNull() as Any)] {
+        var invalid = fixed; invalid["pool"] = value
+        cases.append((label, invalid, parameters))
+    }
+    for (label, value) in [
+        ("no allowed tiers", [] as Any), ("duplicate tiers", [tier, tier] as Any),
+        ("missing map entry", [tier, 500] as Any), ("boolean tier", [true] as Any),
+        ("too many tiers", [100, 500, tier, 10000, tier] as Any)
+    ] {
+        var invalid = parameters; invalid["allowed_fee_tiers"] = value
+        cases.append((label, fixed, invalid))
+    }
+    var crossDex = fixed; crossDex["dex"] = dex == "sushi" ? "pancakeswap" : "sushi"
+    cases.append(("DEX cross-scope", crossDex, parameters))
+    var wrongDeployer = fixed; wrongDeployer["pool_deployer"] = dex == "sushi" ? pool as Any : zero as Any
+    cases.append(("deployer cross-scope", wrongDeployer, parameters))
+    var noDeployer = fixed; noDeployer.removeValue(forKey:"pool_deployer")
+    if dex == "pancakeswap" { cases.append(("missing deployer", noDeployer, parameters)) }
+    return cases
+}
+
 @main
 struct ApprovalPresentationTests {
     static func main() {
@@ -239,6 +281,45 @@ struct ApprovalPresentationTests {
             assert(ramsesReason.contains(detail), detail)
         }
         assert(ramsesReason.count <= 300 && !ramsesReason.contains("0x") && !ramsesReason.contains("pool"))
+        // Synthetic protocol fixtures exercise presentation only; no Touch ID.
+        for (operation, dex, brand, tier) in [("sushi.swap", "sushi", "Sushi", 3000), ("pancakeswap.swap", "pancakeswap", "PancakeSwap", 2500)] {
+            var forkBinding = swapBinding
+            forkBinding["operation"] = operation
+            var execution = swapBinding["execution"] as! [String: Any]
+            execution["dex"] = dex; execution["protocol"] = "v3"; execution["fee_tier"] = tier
+            execution["factory"] = "0x4444444444444444444444444444444444444444"
+            execution["pool"] = "0x3333333333333333333333333333333333333333"
+            execution["spender"] = "0x2222222222222222222222222222222222222222"
+            execution["transaction"] = ["to":execution["spender"]!, "chain_id":1]
+            if dex == "pancakeswap" { execution["pool_deployer"] = "0x5555555555555555555555555555555555555555" }
+            forkBinding["execution"] = execution
+            let reason = financialAuthenticationReason(forkBinding, summary:swapSummary)!
+            for detail in ["0.1 WETH", "at least 200 USDC", "on Ethereum via \(brand)", "max network fees 0.001 ETH", "expires in "] { assert(reason.contains(detail), detail) }
+            assert(reason.count <= 300 && !reason.contains("0x") && !reason.contains("ppm"))
+            assert(nativeApprovalReasonForOS(reason + ".") == String(reason.dropLast()))
+            for field in ["dex", "factory", "pool", "transaction"] {
+                var incomplete = execution; incomplete.removeValue(forKey:field)
+                forkBinding["execution"] = incomplete
+                assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil, field)
+            }
+            for (field, value) in [("dex", "ramses" as Any), ("protocol", "v4" as Any), ("tick_spacing", 10 as Any), ("max_pool_fee_ppm", 1000 as Any), ("fee_tier", (dex == "sushi" ? 2500 : 3000) as Any)] {
+                var invalid = execution; invalid[field] = value; forkBinding["execution"] = invalid
+                assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil, field)
+            }
+            for map in [[String(tier):execution["pool"]!] as Any, NSNull() as Any] {
+                var mappedExecution = execution; mappedExecution["approved_pools"] = map; forkBinding["execution"] = mappedExecution
+                assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil)
+                mappedExecution.removeValue(forKey:"pool"); forkBinding["execution"] = mappedExecution
+                assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil)
+            }
+            var zeroPool = execution; zeroPool["pool"] = "0x" + String(repeating:"0", count:40)
+            forkBinding["execution"] = zeroPool
+            assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil)
+            if dex == "pancakeswap" {
+                var noDeployer = execution; noDeployer.removeValue(forKey:"pool_deployer"); forkBinding["execution"] = noDeployer
+                assert(financialAuthenticationReason(forkBinding, summary:swapSummary) == nil)
+            }
+        }
         var permitExecution = swapBinding["execution"] as! [String: Any]
         permitExecution["permit_template"] = ["typed":"synthetic"]
         var permitBinding = swapBinding
@@ -349,6 +430,49 @@ struct ApprovalPresentationTests {
         }
         for hidden in ["0x", "pool", "factory", "ppm", "atoms", "bps"] { assert(!ramsesBoundaryReason.contains(hidden), hidden) }
         assert(ramsesBoundaryReason.count <= 300)
+        for (operation, dex, brand, tier) in [("sushi.swap", "sushi", "Sushi", 3000), ("pancakeswap.swap", "pancakeswap", "PancakeSwap", 2500)] {
+            var forkBoundary = swapBoundary; forkBoundary["operation"] = operation
+            var fixed = swapBoundary["fixed"] as! [String: Any]
+            fixed["operation"] = operation; fixed["dex"] = dex
+            fixed["factory"] = "0x4444444444444444444444444444444444444444"
+            fixed["pool"] = "0x3333333333333333333333333333333333333333"
+            fixed["pool_deployer"] = dex == "pancakeswap" ? "0x5555555555555555555555555555555555555555" as Any : NSNull()
+            var parameters = swapBoundary["parameters"] as! [String: Any]; parameters["allowed_fee_tiers"] = [tier]
+            forkBoundary["fixed"] = fixed; forkBoundary["parameters"] = parameters
+            let reason = boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary)!
+            assert(reason.contains("at least 190 USDC on Ethereum via \(brand) for 10 minutes"))
+            assert(reason.contains("max network fees 0.001 ETH") && reason.count <= 300 && !reason.contains("0x"))
+            var legacyMultiple = parameters; legacyMultiple["allowed_fee_tiers"] = [500, tier]
+            forkBoundary["parameters"] = legacyMultiple
+            assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == reason)
+            var mappedFixed = fixed; mappedFixed.removeValue(forKey:"pool")
+            mappedFixed["approved_pools"] = [String(tier):fixed["pool"]!]
+            forkBoundary["fixed"] = mappedFixed; forkBoundary["parameters"] = parameters
+            assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == reason)
+            var allParameters = parameters; allParameters["allowed_fee_tiers"] = [100, 500, tier, 10000]
+            var allFixed = mappedFixed
+            allFixed["approved_pools"] = ["100":"0x1111111111111111111111111111111111111111", "500":"0x6666666666666666666666666666666666666666", String(tier):fixed["pool"]!, "10000":"0x7777777777777777777777777777777777777777"]
+            forkBoundary["fixed"] = allFixed; forkBoundary["parameters"] = allParameters
+            assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == reason)
+            for (label, invalidFixed, invalidParameters) in invalidPoolMapScopes(fixed:mappedFixed, parameters:parameters, tier:tier, dex:dex) {
+                forkBoundary["fixed"] = invalidFixed; forkBoundary["parameters"] = invalidParameters
+                assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == nil, label)
+            }
+            forkBoundary["parameters"] = parameters
+            for field in ["dex", "factory", "pool", "router"] {
+                var incomplete = fixed; incomplete.removeValue(forKey:field); forkBoundary["fixed"] = incomplete
+                assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == nil, field)
+            }
+            for (field, value) in [("dex", "uniswap" as Any), ("protocol", "v4" as Any), ("tick_spacing", 10 as Any)] {
+                var invalid = fixed; invalid[field] = value; forkBoundary["fixed"] = invalid
+                assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == nil, field)
+            }
+            forkBoundary["fixed"] = fixed
+            parameters["allowed_fee_tiers"] = [dex == "sushi" ? 2500 : 3000]; forkBoundary["parameters"] = parameters
+            assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == nil)
+            parameters["allowed_fee_tiers"] = [tier]; parameters["max_pool_fee_ppm"] = 1000; forkBoundary["parameters"] = parameters
+            assert(boundaryAuthenticationReason(forkBoundary, summary:swapBoundarySummary) == nil)
+        }
         var excessiveRamsesFee = ramsesBoundary
         var excessiveRamsesBounds = excessiveRamsesFee["parameters"] as! [String: Any]
         excessiveRamsesBounds["max_pool_fee_ppm"] = 1_000_000
@@ -496,6 +620,83 @@ struct ApprovalPresentationTests {
         ramsesPlan["permissions"] = [ramsesPlanPermission]
         let ramsesPlanReason = financialPlanAuthenticationReason(ramsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
         assert(ramsesPlanReason == ammPlanReason)
+        for (operation, dex, _, tier) in [("sushi.swap", "sushi", "Sushi", 3000), ("pancakeswap.swap", "pancakeswap", "PancakeSwap", 2500)] {
+            var step = swapPlanStep; step["operation"] = operation
+            var input = swapInput; input["fee_tier"] = tier; step["input"] = input
+            var fixed = ammSpec["fixed"] as! [String: Any]
+            fixed["operation"] = operation; fixed["dex"] = dex
+            fixed["factory"] = "0x4444444444444444444444444444444444444444"
+            fixed["pool"] = "0x3333333333333333333333333333333333333333"
+            fixed["pool_deployer"] = dex == "pancakeswap" ? "0x5555555555555555555555555555555555555555" as Any : NSNull()
+            var parameters = ammSpec["parameters"] as! [String: Any]; parameters["allowed_fee_tiers"] = [tier]
+            var spec = ammSpec; spec["fixed"] = fixed; spec["parameters"] = parameters
+            var permissionBody = ammPlanPermission["permission"] as! [String: Any]; permissionBody["spec"] = spec
+            var permission = ammPlanPermission; permission["permission"] = permissionBody
+            var body = ammPlan["plan"] as! [String: Any]; body["steps"] = [step]
+            var forkPlan = ammPlan; forkPlan["plan"] = body; forkPlan["permissions"] = [permission]
+            let summary = "Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds."
+            let reason = financialPlanAuthenticationReason(forkPlan, summary:summary)!
+            assert(reason == ammPlanReason)
+            assert(reason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
+            var revisedForkPlan = forkPlan; revisedForkPlan["replaces_revision_id"] = "synthetic-prior-fork-revision"
+            let revisedReason = "approve the revised plan “Synthetic bounded swap” (1 step, 10 minutes)"
+            assert(financialPlanAuthenticationReason(revisedForkPlan, summary:summary) == revisedReason)
+            func reviewedPlan(_ scope: [String: Any], _ bounds: [String: Any], input selectedInput: [String: Any]) -> [String: Any] {
+                var reviewedSpec = spec; reviewedSpec["fixed"] = scope; reviewedSpec["parameters"] = bounds
+                var reviewedPermissionBody = permissionBody; reviewedPermissionBody["spec"] = reviewedSpec
+                var reviewedPermission = permission; reviewedPermission["permission"] = reviewedPermissionBody
+                var reviewedStep = step; reviewedStep["input"] = selectedInput
+                var reviewedBody = body; reviewedBody["steps"] = [reviewedStep]
+                var reviewed = forkPlan; reviewed["plan"] = reviewedBody; reviewed["permissions"] = [reviewedPermission]
+                return reviewed
+            }
+            var legacyMultiple = parameters; legacyMultiple["allowed_fee_tiers"] = [500, tier]
+            assert(financialPlanAuthenticationReason(reviewedPlan(fixed, legacyMultiple, input:input), summary:summary) == reason)
+            var mappedFixed = fixed; mappedFixed.removeValue(forKey:"pool")
+            mappedFixed["approved_pools"] = [String(tier):fixed["pool"]!]
+            assert(financialPlanAuthenticationReason(reviewedPlan(mappedFixed, parameters, input:input), summary:summary) == reason)
+            var revisedMappedPlan = reviewedPlan(mappedFixed, parameters, input:input)
+            revisedMappedPlan["replaces_revision_id"] = "synthetic-prior-fork-revision"
+            assert(financialPlanAuthenticationReason(revisedMappedPlan, summary:summary) == revisedReason)
+            var allParameters = parameters; allParameters["allowed_fee_tiers"] = [100, 500, tier, 10000]
+            var allFixed = mappedFixed
+            allFixed["approved_pools"] = ["100":"0x1111111111111111111111111111111111111111", "500":"0x6666666666666666666666666666666666666666", String(tier):fixed["pool"]!, "10000":"0x7777777777777777777777777777777777777777"]
+            var selected500 = input; selected500["fee_tier"] = 500
+            assert(financialPlanAuthenticationReason(reviewedPlan(allFixed, allParameters, input:selected500), summary:summary) == reason)
+            assert(financialPlanAuthenticationReason(reviewedPlan(mappedFixed, parameters, input:selected500), summary:summary) == nil)
+            for (label, invalidFixed, invalidParameters) in invalidPoolMapScopes(fixed:mappedFixed, parameters:parameters, tier:tier, dex:dex) {
+                assert(financialPlanAuthenticationReason(reviewedPlan(invalidFixed, invalidParameters, input:input), summary:summary) == nil, label)
+                var invalidRevision = reviewedPlan(invalidFixed, invalidParameters, input:input)
+                invalidRevision["replaces_revision_id"] = "synthetic-prior-fork-revision"
+                assert(financialPlanAuthenticationReason(invalidRevision, summary:summary) == nil, label)
+            }
+            for field in ["dex", "factory", "pool", "router"] {
+                var incomplete = fixed; incomplete.removeValue(forKey:field)
+                var invalidSpec = spec; invalidSpec["fixed"] = incomplete
+                var invalidBody = permissionBody; invalidBody["spec"] = invalidSpec
+                var invalidPermission = permission; invalidPermission["permission"] = invalidBody
+                forkPlan["permissions"] = [invalidPermission]
+                assert(financialPlanAuthenticationReason(forkPlan, summary:summary) == nil, field)
+            }
+            var wrongFixed = fixed; wrongFixed["dex"] = "ramses"
+            var invalidSpec = spec; invalidSpec["fixed"] = wrongFixed
+            permissionBody["spec"] = invalidSpec; permission["permission"] = permissionBody; forkPlan["permissions"] = [permission]
+            assert(financialPlanAuthenticationReason(forkPlan, summary:summary) == nil)
+            permissionBody["spec"] = spec; permission["permission"] = permissionBody; forkPlan["permissions"] = [permission]
+            for (field, value) in [("fee_tier", (dex == "sushi" ? 2500 : 3000) as Any), ("max_pool_fee_ppm", 1000 as Any), ("tick_spacing", 10 as Any), ("protocol", "v4" as Any)] {
+                var invalidInput = input; invalidInput[field] = value
+                var invalidStep = step; invalidStep["input"] = invalidInput
+                body["steps"] = [invalidStep]; forkPlan["plan"] = body
+                assert(financialPlanAuthenticationReason(forkPlan, summary:summary) == nil, field)
+            }
+            var secondStep = step; secondStep["step_id"] = "swap-2"
+            var secondPermission = permission; secondPermission["step_id"] = "swap-2"
+            body["steps"] = [step, secondStep]; forkPlan["plan"] = body; forkPlan["permissions"] = [permission, secondPermission]
+            let multipleReason = financialPlanAuthenticationReason(forkPlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")!
+            assert(multipleReason == "approve the plan “Synthetic bounded swap” (2 steps, 10 minutes)")
+            var revisedMultiplePlan = forkPlan; revisedMultiplePlan["replaces_revision_id"] = "synthetic-prior-fork-revision"
+            assert(financialPlanAuthenticationReason(revisedMultiplePlan, summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.") == "approve the revised plan “Synthetic bounded swap” (2 steps, 10 minutes)")
+        }
         var higherAggregatePlan = ammPlan
         var higherAggregateBody = ammPlan["plan"] as! [String: Any]
         var higherAggregateBounds = higherAggregateBody["aggregate_bounds"] as! [String: Any]

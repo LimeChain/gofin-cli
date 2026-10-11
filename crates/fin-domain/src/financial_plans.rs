@@ -91,6 +91,15 @@ pub struct FinancialPlanExactPermission {
     pub connections_hash: String,
 }
 
+/// Which verified expenditures a producing step must fund. Fees always retain
+/// their own approved caps and available-balance checks.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FinancialPlanFundingScope {
+    AllDebits,
+    PrincipalOnly,
+}
+
 /// A future input is available only from verified output of the named earlier
 /// step, at this exact custody resource and asset identity.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -99,6 +108,17 @@ pub struct FinancialPlanFundingDependency {
     pub producing_step_id: String,
     pub resource: crate::ResourceId,
     pub asset: AssetId,
+    /// Omission retains legacy principal-plus-additional-cost funding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "all_debits (default) requires verified producer proceeds for principal and additional fees. principal_only requires producer proceeds only for principal; fees remain capped and must fit the available balance in addition to principal."
+    )]
+    pub funding_scope: Option<FinancialPlanFundingScope>,
+}
+impl FinancialPlanFundingDependency {
+    pub fn includes_additional_costs(&self) -> bool {
+        self.funding_scope != Some(FinancialPlanFundingScope::PrincipalOnly)
+    }
 }
 
 /// Exact resource/asset identity that an operation may credit; amount is
@@ -645,6 +665,7 @@ mod tests {
         dependent.step_id = "buy".into();
         dependent.funding_dependencies = vec![
             FinancialPlanFundingDependency {
+                funding_scope: None,
                 producing_step_id: "sell".into(),
                 resource: ResourceId("binance:account:synthetic".into()),
                 asset: AssetId {
@@ -654,6 +675,7 @@ mod tests {
                 },
             },
             FinancialPlanFundingDependency {
+                funding_scope: None,
                 producing_step_id: "sell".into(),
                 resource: ResourceId("binance:account:synthetic".into()),
                 asset: AssetId {
@@ -700,5 +722,47 @@ mod tests {
                 .is_none()
         );
         assert_eq!(binding["attempt"]["execution"]["execution"], "synthetic");
+    }
+    #[test]
+    fn funding_scope_preserves_legacy_bytes_hash_and_rejects_unknown_scopes() {
+        let legacy = r#"{"producing_step_id":"producer","resource":"wallet","asset":{"network":"ethereum:1","reference":"native","decimals":18}}"#;
+        let dependency: FinancialPlanFundingDependency = serde_json::from_str(legacy).unwrap();
+        assert!(dependency.funding_scope.is_none());
+        assert!(dependency.includes_additional_costs());
+        assert_eq!(serde_json::to_string(&dependency).unwrap(), legacy);
+        let legacy_hash = crate::binding_hash(&serde_json::to_value(&dependency).unwrap()).unwrap();
+        assert_eq!(
+            legacy_hash,
+            "ba84f9a70996d51d9256e78d23f8c2baaa711899a1b1ab7cb296e74412c0f164"
+        );
+        for scope in [
+            FinancialPlanFundingScope::AllDebits,
+            FinancialPlanFundingScope::PrincipalOnly,
+        ] {
+            let mut explicit = dependency.clone();
+            explicit.funding_scope = Some(scope);
+            let value = serde_json::to_value(&explicit).unwrap();
+            assert_ne!(crate::binding_hash(&value).unwrap(), legacy_hash);
+            assert_eq!(
+                serde_json::from_value::<FinancialPlanFundingDependency>(value).unwrap(),
+                explicit
+            );
+        }
+        let mut bad = serde_json::to_value(dependency).unwrap();
+        bad["funding_scope"] = serde_json::json!("future_balance");
+        assert!(serde_json::from_value::<FinancialPlanFundingDependency>(bad).is_err());
+        let schema =
+            serde_json::to_value(schemars::schema_for!(FinancialPlanFundingDependency)).unwrap();
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "funding_scope")
+        );
+        assert_eq!(
+            schema["$defs"]["FinancialPlanFundingScope"]["enum"],
+            serde_json::json!(["all_debits", "principal_only"])
+        );
     }
 }

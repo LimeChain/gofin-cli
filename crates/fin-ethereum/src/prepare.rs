@@ -7,6 +7,26 @@ use fin_evm::{
     quantity, rpc_bytes, u256,
 };
 
+/// Translate the shared financial bound failure using typed request values.
+/// The shared validator still decides whether the request may proceed.
+fn swap_validation_error(err: FinError, request: &fin_amm::AmmSwapRequest) -> FinError {
+    if err.code != "AMM_BOUND_EXCEEDED" {
+        return err;
+    }
+    let observed = request.quote.price_impact_bps;
+    let approved = request.maximum_price_impact_bps;
+    if observed <= 10_000 && approved <= 10_000 && observed > approved {
+        return error("PRICE_IMPACT_LIMIT", "validation", &format!(
+            "Quoted price impact is {observed} bps, above the approved maximum of {approved} bps."
+        )).with_details(json!({"observed_price_impact_bps":observed,"maximum_price_impact_bps":approved}));
+    }
+    error(
+        "SLIPPAGE_LIMIT",
+        "validation",
+        "Minimum output is below the approved fresh quote floor or above its attainable output.",
+    )
+}
+
 fn quote_native_output(binding: &Binding) -> bool {
     binding
         .output
@@ -36,7 +56,7 @@ struct UniswapAmm<'a> {
     token_in: reads::Token,
     input_units: U256,
     maximum_fee: Quantity,
-    ramses: bool,
+    operation: String,
 }
 
 #[async_trait::async_trait]
@@ -58,7 +78,7 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
         let mut quote = self
             .adapter
             .quote_protocol(reads::ProtocolQuoteRequest {
-                dex: if self.ramses { "ramses" } else { "uniswap" },
+                dex: super::uniswap::profile::operation_dex(&self.operation)?,
                 input: &self.token_in.reference,
                 output: self.request.token_out.as_deref().expect("schema"),
                 amount: &quantity(self.input_units).to_decimal(self.token_in.decimals),
@@ -92,11 +112,8 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
     }
 
     async fn prepare_swap(&self, request: fin_amm::AmmSwapRequest) -> Result<PreparedOperation> {
-        fin_amm::validate_swap(&request, chrono::Utc::now()).map_err(|err| {
-            if err.code == "AMM_BOUND_EXCEEDED" {
-                error("SLIPPAGE_LIMIT", "validation", "Minimum output is below the approved fresh quote floor or above its attainable output.")
-            } else { err }
-        })?;
+        fin_amm::validate_swap(&request, chrono::Utc::now())
+            .map_err(|err| swap_validation_error(err, &request))?;
         require(
             request.resource == self.resource
                 && request.approved_resource == self.resource
@@ -108,11 +125,7 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
         let prepared = self
             .adapter
             .prepare_operation_inner(
-                if self.ramses {
-                    "ramses.swap"
-                } else {
-                    "uniswap.swap"
-                },
+                &self.operation,
                 &self.input,
                 self.original.as_ref(),
                 &self.context,
@@ -139,7 +152,10 @@ impl EthereumAdapter {
         if operation == "wallet.permit2.approve" {
             return self.prepare_permit2_approval(input, None, context).await;
         }
-        if !matches!(operation, "uniswap.swap" | "ramses.swap") {
+        if !matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             return self
                 .prepare_operation_inner(operation, input, original, context)
                 .await;
@@ -184,7 +200,7 @@ impl EthereumAdapter {
             token_in: token_in.clone(),
             input_units: amount,
             maximum_fee: quantity(maximum_fee),
-            ramses: operation == "ramses.swap",
+            operation: operation.to_owned(),
         };
         let quote = fin_amm::AmmDex::quote(
             &quote_backend,
@@ -243,7 +259,10 @@ impl EthereumAdapter {
         self.runtime.assert_chain().await?;
         let token_ref = if matches!(operation, "wallet.wrap" | "wallet.unwrap") {
             self.resolved_weth(None).await?
-        } else if matches!(operation, "uniswap.swap" | "ramses.swap") {
+        } else if matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             r.token_in.as_deref().expect("schema").to_owned()
         } else {
             r.token.as_deref().expect("schema").to_owned()
@@ -264,7 +283,16 @@ impl EthereumAdapter {
                 token.decimals,
             )?
         };
-        if all_amount && matches!(operation, "wallet.unwrap" | "uniswap.swap" | "ramses.swap") {
+        if all_amount
+            && matches!(
+                operation,
+                "wallet.unwrap"
+                    | "uniswap.swap"
+                    | "ramses.swap"
+                    | "sushi.swap"
+                    | "pancakeswap.swap"
+            )
+        {
             let observed = self.balance_of(&token, owner, None).await?;
             require(
                 observed > U256::ZERO && observed <= qty,
@@ -473,15 +501,11 @@ impl EthereumAdapter {
                 .abi_encode()
                 .into()
             }
-            "uniswap.swap" | "ramses.swap" => {
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap" => {
                 let is_ramses = operation == "ramses.swap";
                 let quote = self
                     .quote_protocol(reads::ProtocolQuoteRequest {
-                        dex: if operation == "ramses.swap" {
-                            "ramses"
-                        } else {
-                            "uniswap"
-                        },
+                        dex: super::uniswap::profile::operation_dex(operation)?,
                         input: &token.reference,
                         output: r.token_out.as_deref().expect("schema"),
                         amount: &quantity(qty).to_decimal(token.decimals),
@@ -538,11 +562,8 @@ impl EthereumAdapter {
                     fee_cap: amm_quote.maximum_fee.clone(),
                     maximum_price_impact_bps: r.max_price_impact_bps.unwrap_or(10_000),
                 };
-                let validated = fin_amm::validate_swap(&amm_request, chrono::Utc::now()).map_err(|err| {
-                    if err.code == "AMM_BOUND_EXCEEDED" {
-                        error("SLIPPAGE_LIMIT", "validation", "Minimum output is below the approved fresh quote floor or above its attainable output.")
-                    } else { err }
-                })?;
+                let validated = fin_amm::validate_swap(&amm_request, chrono::Utc::now())
+                    .map_err(|err| swap_validation_error(err, &amm_request))?;
                 let fresh_minimum = u256(&validated)?;
                 shared_swap = Some(amm_request);
                 let quote_output = u256(&quote.output)?;
@@ -629,7 +650,7 @@ impl EthereumAdapter {
                     )?
                 } else {
                     let profile =
-                        super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?);
+                        self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
                     address(profile.router)?
                 };
                 self.runtime.code_at(router, Some(quote_block)).await?;
@@ -829,6 +850,13 @@ impl EthereumAdapter {
                 // mutable quote observation and must not enter the fixed
                 // fee-tier binding field.
                 b.fee_tier = (!is_ramses).then_some(quote.fee_tier);
+                if super::uniswap::profile::additional_dex(operation).is_some() {
+                    let profile =
+                        self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
+                    b.dex = Some(profile.dex_id.into());
+                    b.factory = Some(profile.factory.to_owned());
+                    b.pool_deployer = profile.pool_deployer.map(str::to_owned);
+                }
                 if is_ramses {
                     b.dex = Some("ramses".into());
                     b.tick_spacing = quote.tick_spacing;
@@ -911,7 +939,7 @@ impl EthereumAdapter {
                     call.calldata
                 } else if protocol == super::uniswap::Protocol::V3 {
                     let profile =
-                        super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?);
+                        self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?;
                     let token_in = address(&quote.pool_token_in)?;
                     let token_out = address(&quote.pool_token_out)?;
                     let mut call = super::uniswap::v3::exact_input_single(
@@ -929,6 +957,11 @@ impl EthereumAdapter {
                             native_out: quote.token_out.reference == "native",
                         },
                     )?;
+                    if profile.router_metadata_abi == V3RouterMetadataAbi::PancakeV3
+                        && profile.router_kind == RouterKind::SwapRouter02
+                    {
+                        call.calldata = super::uniswap::v3::with_refund(call.calldata)?;
+                    }
                     if let Some(AuthorizedPermit::Eip2612(permit)) = &eip2612_authorization {
                         let (with_permit, layout) = super::uniswap::v3::with_eip2612(
                             profile.router_kind,
@@ -1430,6 +1463,8 @@ impl EthereumAdapter {
                 | "wallet.transfer"
                 | "uniswap.swap"
                 | "ramses.swap"
+                | "sushi.swap"
+                | "pancakeswap.swap"
                 | "aave.supply"
                 | "aave.repay"
         ) {
@@ -1534,7 +1569,10 @@ impl EthereumAdapter {
                 "Simulated withdrawal differs from requested exact cash amount.",
             )?;
         }
-        if matches!(operation, "uniswap.swap" | "ramses.swap") {
+        if matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             let protocol = b.protocol.as_deref().unwrap_or("v3");
             if b.permit_template.is_some() || protocol == "v4" {
                 // Universal Router v4 `execute` intentionally returns no amount;
@@ -1546,7 +1584,7 @@ impl EthereumAdapter {
                 let router_kind = if ramses {
                     RouterKind::LegacyV3
                 } else {
-                    super::uniswap::profile::V3DeploymentProfile::uniswap(self.uniswap()?)
+                    self.v3_profile(super::uniswap::profile::operation_dex(operation)?)?
                         .router_kind
                 };
                 let received = if router_kind == RouterKind::SwapRouter02 || quote_native_output(&b)
@@ -1616,7 +1654,10 @@ impl EthereumAdapter {
             // Observed claims may accrue but immutable execution fields and approved origin remain frozen.
             b.supplied_before = old.supplied_before.clone();
             b.debt_before = old.debt_before.clone();
-            if matches!(operation, "uniswap.swap" | "ramses.swap") {
+            if matches!(
+                operation,
+                "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+            ) {
                 // Keep the original quote evidence immutable after proving the
                 // fresh quote still meets its minimum and impact ceiling.
                 b.quote_output = old.quote_output.clone();
@@ -1846,7 +1887,10 @@ impl EthereumAdapter {
             .expect("principal and fee observations");
         let expires = (chrono::Utc::now() + chrono::Duration::seconds(120))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        if matches!(operation, "uniswap.swap" | "ramses.swap") {
+        if matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             let router = b.spender.as_deref().expect("swap router spender");
             let strategy = if b.token.reference == "native" {
                 "native input requires no token allowance; the reviewed router performs the native settlement"
@@ -1950,7 +1994,10 @@ impl EthereumAdapter {
                 detail: "The exact frozen transaction was simulated during preparation.".into(),
             });
         }
-        let summary = if matches!(operation, "uniswap.swap" | "ramses.swap") {
+        let summary = if matches!(
+            operation,
+            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+        ) {
             let output = b.output.as_ref().expect("swap output");
             let output_symbol = swap_output_symbol.as_deref().unwrap_or(&output.reference);
             let protocol = b.protocol.as_deref().unwrap_or("v3");
@@ -1968,7 +2015,13 @@ impl EthereumAdapter {
                     key.fee, key.tick_spacing
                 )
             } else {
-                format!("Uniswap v3 fee {} ppm", b.fee_tier.expect("v3 fee tier"))
+                format!(
+                    "{} v3 fee {} ppm",
+                    super::uniswap::profile::additional_dex(operation)
+                        .map(V3Dex::display_name)
+                        .unwrap_or("Uniswap"),
+                    b.fee_tier.expect("v3 fee tier")
+                )
             };
             let permission = swap_permission
                 .as_deref()
@@ -2033,6 +2086,66 @@ mod permit_signer_tests {
         assert_eq!(
             require_eoa_permit_signer(&delegated).unwrap_err().code,
             "ALLOWANCE_INSUFFICIENT"
+        );
+    }
+}
+
+#[cfg(test)]
+mod validation_error_tests {
+    use super::*;
+    use crate::tests::{Fixture, adapter, swap_input};
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn excessive_price_impact_has_its_own_error_and_never_reaches_submission() {
+        let rpc = Arc::new(Fixture::new());
+        let adapter = adapter(rpc.clone());
+        let mut input = swap_input();
+        input["max_price_impact_bps"] = json!(100);
+        for inner in [false, true] {
+            let result = if inner {
+                adapter
+                    .prepare_operation_inner(
+                        "uniswap.swap",
+                        &input,
+                        None,
+                        &PreparationContext::default(),
+                    )
+                    .await
+            } else {
+                adapter.prepare("uniswap.swap", &input).await
+            };
+            let err = result.unwrap_err();
+            assert_eq!(err.code, "PRICE_IMPACT_LIMIT");
+            let details = err.details.unwrap();
+            assert!(details["observed_price_impact_bps"].as_u64().unwrap() > 100);
+            assert_eq!(details["maximum_price_impact_bps"], 100);
+        }
+        // A minimum output above the quote retains the existing classification.
+        input["max_price_impact_bps"] = json!(10_000);
+        input["min_output"] = json!("3.01");
+        for inner in [false, true] {
+            let result = if inner {
+                adapter
+                    .prepare_operation_inner(
+                        "uniswap.swap",
+                        &input,
+                        None,
+                        &PreparationContext::default(),
+                    )
+                    .await
+            } else {
+                adapter.prepare("uniswap.swap", &input).await
+            };
+            assert_eq!(result.unwrap_err().code, "SLIPPAGE_LIMIT");
+        }
+        assert_eq!(rpc.nonce.load(Ordering::SeqCst), 0);
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction" || method == "eth_estimateGas")
         );
     }
 }

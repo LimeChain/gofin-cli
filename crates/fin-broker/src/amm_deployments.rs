@@ -1,7 +1,11 @@
 //! Reviewed protocol contracts; asset identities are supplied by callers.
 //! Source: https://github.com/Uniswap/contracts/tree/main/deployments
 //! Version-specific encodings require the owned AMM fork verification.
-use fin_ethereum::{RamsesConfig, RouterKind, UniswapConfig, V4Config};
+use fin_ethereum::{
+    RamsesConfig, RouterKind, UniswapConfig, V3DeploymentConfig, V3Dex, V3PoolAbi,
+    V3RouterMetadataAbi, V4Config,
+};
+use std::collections::BTreeMap;
 
 pub fn reviewed_ramses(chain_id: u64) -> Option<RamsesConfig> {
     (chain_id == 4663).then(|| RamsesConfig {
@@ -71,4 +75,79 @@ pub fn reviewed_uniswap(chain_id: u64) -> Option<UniswapConfig> {
         _ => return None,
     };
     Some(cfg)
+}
+
+// Sushi pinned official v3-core/v3-periphery deployment JSON;
+// Pancake: https://developer.pancakeswap.finance/contracts/v3/addresses
+// Exact pool/event and router ABIs are profile properties; no asset constants.
+pub fn reviewed_sushi(chain_id: u64) -> Option<V3DeploymentConfig> {
+    let cfg = match chain_id {
+        1 => V3DeploymentConfig {
+            factory: "0xbACEB8eC6b9355Dfc0269C18bac9d6E2Bdc29C4F".into(),
+            quoter: "0x64e8802FE490fa7cc61d3463958199161Bb608A7".into(),
+            router: "0x2E6cd2d30aa43f40aa81619ff4b6E0a41479B13F".into(),
+            router_kind: RouterKind::LegacyV3,
+            pool_deployer: None,
+            pool_abi: V3PoolAbi::UniswapV3,
+            router_metadata_abi: V3RouterMetadataAbi::UniswapV3,
+            allowed_fee_tiers: vec![100, 500, 3000, 10000],
+        },
+        42161 => V3DeploymentConfig {
+            factory: "0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e".into(),
+            quoter: "0x0524E833cCD057e4d7A296e3aaAb9f7675964Ce1".into(),
+            router: "0x8A21F6768C1f8075791D08546Dadf6daA0bE820c".into(),
+            router_kind: RouterKind::LegacyV3,
+            pool_deployer: None,
+            pool_abi: V3PoolAbi::UniswapV3,
+            router_metadata_abi: V3RouterMetadataAbi::UniswapV3,
+            allowed_fee_tiers: vec![100, 500, 3000, 10000],
+        },
+        _ => return None,
+    };
+    Some(cfg)
+}
+pub fn reviewed_pancakeswap(chain_id: u64) -> Option<V3DeploymentConfig> {
+    let cfg = match chain_id {
+        1 => V3DeploymentConfig {
+            factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865".into(),
+            quoter: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997".into(),
+            router: "0x1b81D678ffb9C0263b24A97847620C99d213eB14".into(),
+            router_kind: RouterKind::LegacyV3,
+            pool_deployer: Some("0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9".into()),
+            pool_abi: V3PoolAbi::PancakeV3,
+            router_metadata_abi: V3RouterMetadataAbi::PancakeV3,
+            allowed_fee_tiers: vec![100, 500, 2500, 10000],
+        },
+        42161 => V3DeploymentConfig {
+            factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865".into(),
+            quoter: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997".into(),
+            router: "0x1b81D678ffb9C0263b24A97847620C99d213eB14".into(),
+            router_kind: RouterKind::LegacyV3,
+            pool_deployer: Some("0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9".into()),
+            pool_abi: V3PoolAbi::PancakeV3,
+            router_metadata_abi: V3RouterMetadataAbi::PancakeV3,
+            allowed_fee_tiers: vec![100, 500, 2500, 10000],
+        },
+        4663 => V3DeploymentConfig {
+            factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865".into(),
+            quoter: "0x8553AA1615549A86882151784b329B017aA7c832".into(),
+            router: "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4".into(),
+            router_kind: RouterKind::SwapRouter02,
+            pool_deployer: Some("0x41ff9AA7e16B8B1a8a8dc4f0eFacd93D02d071c9".into()),
+            pool_abi: V3PoolAbi::PancakeV3,
+            router_metadata_abi: V3RouterMetadataAbi::PancakeV3,
+            allowed_fee_tiers: vec![100, 500, 2500, 10000],
+        },
+        _ => return None,
+    };
+    Some(cfg)
+}
+pub fn reviewed_v3_deployments(chain_id: u64) -> BTreeMap<V3Dex, V3DeploymentConfig> {
+    [
+        (V3Dex::Sushi, reviewed_sushi(chain_id)),
+        (V3Dex::PancakeSwap, reviewed_pancakeswap(chain_id)),
+    ]
+    .into_iter()
+    .filter_map(|(dex, config)| config.map(|config| (dex, config)))
+    .collect()
 }

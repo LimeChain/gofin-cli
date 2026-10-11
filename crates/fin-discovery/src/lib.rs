@@ -139,12 +139,14 @@ pub fn evm_network_profiles() -> Value {
         fin_networks::all()
             .iter()
             .map(|network| {
-                let operations = if matches!(network.chain_id, 1 | 8453) {
+                let operations = if network.chain_id == 1 {
+                    json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
+                } else if network.chain_id == 8453 {
                     json!(["wallet", "Uniswap", "Aave"])
                 } else if network.chain_id == 4663 {
-                    json!(["wallet", "Uniswap", "Ramses v3"])
+                    json!(["wallet", "Uniswap", "Ramses v3", "PancakeSwap v3"])
                 } else if network.chain_id == 42161 {
-                    json!(["wallet", "Uniswap"])
+                    json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3"])
                 } else {
                     json!(["wallet"])
                 };
@@ -588,7 +590,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
-        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
+        "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave supports verified Ethereum and Base deployments. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
         "failure":"Safe stable error and next action; add cancellation/validation leaves no candidate, while update cancellation/validation preserves the prior active connection. An uncertain commit remains blocked until configuration readback confirms its state.",
         "replacement":"Pending operations are checked by physical resource before changing/removing credentials; unresolved work refuses replacement.",
@@ -1456,11 +1458,11 @@ mod tests {
         );
         assert_eq!(
             evm["network_profiles"][2]["operations"],
-            json!(["wallet", "Uniswap"])
+            json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3"])
         );
         assert_eq!(
             evm["network_profiles"][3]["operations"],
-            json!(["wallet", "Uniswap", "Ramses v3"])
+            json!(["wallet", "Uniswap", "Ramses v3", "PancakeSwap v3"])
         );
         assert!(
             !evm["network_profiles"][0]["operations"]
@@ -1475,6 +1477,23 @@ mod tests {
                 .contains("Ramses v3 is available on Robinhood Chain only")
         );
         assert_eq!(evm["network_profiles"][3]["name"], "Robinhood Chain");
+        assert_eq!(
+            evm["network_profiles"][0]["operations"],
+            json!(["wallet", "Uniswap", "Sushi v3", "PancakeSwap v3", "Aave"])
+        );
+        assert!(
+            !evm["network_profiles"][3]["operations"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("Sushi v3"))
+        );
+        for scope in [
+            "Sushi v3 is available on Ethereum and Arbitrum",
+            "PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain",
+            "Robinhood uses its reviewed SmartRouter deployment",
+        ] {
+            assert!(evm["dapp_scope"].as_str().unwrap().contains(scope));
+        }
         assert!(evm["wallet_scope"].as_str().unwrap().contains("reusable"));
         for example in add.semantics["command_line_examples"]
             .as_array()

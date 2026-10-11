@@ -248,7 +248,7 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
         &authorization.id,
         "uniswap.swap",
         &understated_impact,
-        "SLIPPAGE_LIMIT",
+        "PRICE_IMPACT_LIMIT",
     )
     .await;
 

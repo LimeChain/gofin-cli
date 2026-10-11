@@ -37,16 +37,18 @@ pub fn as_amm_quote(
     maximum_fee: Quantity,
     permission: fin_amm::PermissionRequirement,
 ) -> Result<fin_amm::AmmQuote> {
-    let dex_id = if quote.dex == "ramses" {
-        "ramses"
-    } else if quote.protocol == "v4" {
+    let dex_id = if quote.protocol == "v4" {
         "uniswap"
     } else {
-        profile::V3DeploymentProfile::uniswap(adapter.uniswap()?).dex_id
+        adapter
+            .v3_profile(if quote.dex.is_empty() {
+                "uniswap"
+            } else {
+                &quote.dex
+            })?
+            .dex_id
     };
-    let router = if quote.dex == "ramses" {
-        adapter.ramses()?.router.clone()
-    } else if quote.protocol == "v4" {
+    let router = if quote.protocol == "v4" {
         adapter
             .uniswap()?
             .v4
@@ -61,9 +63,7 @@ pub fn as_amm_quote(
             .router
             .clone()
     } else {
-        profile::V3DeploymentProfile::uniswap(adapter.uniswap()?)
-            .router
-            .to_owned()
+        adapter.v3_profile(dex_id)?.router.to_owned()
     };
     let mut route_data = json!({"chain_id":adapter.config.chain_id,"router":router,"protocol":quote.protocol,"pool":quote.pool,"fee":quote.fee_tier,"pool_key":quote.pool_key,"token_in":quote.pool_token_in,"token_out":quote.pool_token_out});
     if quote.dex == "ramses" {
@@ -73,6 +73,10 @@ pub fn as_amm_quote(
             .as_object_mut()
             .expect("route identity object")
             .remove("fee");
+    }
+    if profile::additional_dex(dex_id).is_some() {
+        route_data["dex"] = json!(dex_id);
+        route_data["factory"] = json!(adapter.v3_profile(dex_id)?.factory);
     }
     let route = fin_amm::RouteIdentity {
         dex: dex_id.into(),

@@ -24,7 +24,16 @@ impl Engine {
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
-        let spec = adapter.prepare_boundaries(&prepared, &request.bounds)?;
+        let spec = bounded_evidence(
+            &request.operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare_boundaries(&prepared, &request.bounds),
+        )
+        .await?;
+        // Scope metadata resolution may perform awaited network reads. The
+        // concrete preview must still be fresh before review or authorization.
+        validate_prepared(&prepared, &request.operation, Utc::now())?;
         let bridge_scope = bridge_boundary_scope(&prepared, &request.input)?;
         let prospective_debit =
             self.bridge_boundary_prospective_debit(bridge_scope.as_ref(), &prepared, &spec)?;
@@ -183,7 +192,16 @@ impl Engine {
         self.complete_cost_origin_prices(&mut prepared, &BTreeSet::new())
             .await?;
         validate_prepared(&prepared, &request.operation, Utc::now())?;
-        let spec = adapter.prepare_boundaries(&prepared, &request.bounds)?;
+        let spec = bounded_evidence(
+            &request.operation,
+            "preflight",
+            PREFLIGHT_TIMEOUT,
+            adapter.prepare_boundaries(&prepared, &request.bounds),
+        )
+        .await?;
+        // Scope metadata resolution may perform awaited network reads. The
+        // concrete preview must still be fresh before review or authorization.
+        validate_prepared(&prepared, &request.operation, Utc::now())?;
         let bridge_scope = bridge_boundary_scope(&prepared, &request.input)?;
         let prospective_debit =
             self.bridge_boundary_prospective_debit(bridge_scope.as_ref(), &prepared, &spec)?;

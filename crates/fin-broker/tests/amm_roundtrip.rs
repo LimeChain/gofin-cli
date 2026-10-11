@@ -2,11 +2,14 @@
 use async_trait::async_trait;
 use fin_domain::*;
 use fin_engine::{Engine, EngineOptions};
-use fin_ethereum::{EthereumAdapter, EthereumConfig, WalletConnection, WalletValuation};
+use fin_ethereum::{EthereumAdapter, EthereumConfig, V3Dex, WalletConnection, WalletValuation};
 use fin_evm::*;
 use fin_store::Store;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[path = "support/base_amm_fork_fees.rs"]
 mod base_amm_fork_fees;
@@ -119,11 +122,14 @@ impl Authorizer for Approval {
     }
 }
 struct FixtureValuation;
-struct FixtureSigner(LocalEnvelopeSigner);
+struct FixtureSigner {
+    signer: LocalEnvelopeSigner,
+    permits: Mutex<Vec<AuthorizedPermit>>,
+}
 #[async_trait]
 impl EnvelopeSigner for FixtureSigner {
     async fn sign_prepared(&self, tx: &FrozenTransaction) -> Result<alloy::primitives::Bytes> {
-        self.0.sign_prepared(tx).await
+        self.signer.sign_prepared(tx).await
     }
     async fn sign_authorized_permit(
         &self,
@@ -133,7 +139,8 @@ impl EnvelopeSigner for FixtureSigner {
             "{}",
             json!({"stage":"synthetic_permit_signing","permit":permit,"digest":format!("{:#x}",permit.digest()?)})
         );
-        self.0.sign_authorized_permit(permit).await
+        self.permits.lock().unwrap().push(permit.clone());
+        self.signer.sign_authorized_permit(permit).await
     }
 }
 #[async_trait]
@@ -237,20 +244,39 @@ async fn settled(
     assert_eq!(duplicate.submission, record.submission);
     Ok(record)
 }
-fn received(record: &OperationRecord) -> Result<Amount> {
+fn conversion(record: &OperationRecord) -> Result<(Amount, Amount)> {
     record
         .effects
         .as_ref()
         .and_then(|bundle| {
             bundle.effects.iter().find_map(|effect| {
-                if let FinancialEffect::Conversion { received, .. } = effect {
-                    Some(received.clone())
+                if let FinancialEffect::Conversion {
+                    spent, received, ..
+                } = effect
+                {
+                    Some((spent.clone(), received.clone()))
                 } else {
                     None
                 }
             })
         })
         .ok_or_else(|| FinError::validation("Missing verified swap conversion"))
+}
+
+fn received(record: &OperationRecord) -> Result<Amount> {
+    Ok(conversion(record)?.1)
+}
+
+fn log_quote(dex: &str, protocol: &str, direction: &str, quote: &Value) {
+    let data = &quote["data"];
+    println!(
+        "{}",
+        json!({"stage":"synthetic_quote", "dex":dex, "protocol":protocol,
+            "direction":direction, "input":data["input"], "output":data["output"],
+            "fee_tier":data["fee_tier"], "swap_fee_ppm":data["swap_fee_ppm"],
+            "price_impact_bps":data["price_impact_bps"], "pool":data["pool"],
+            "block_number":data["block_number"], "block_hash":data["block_hash"]})
+    );
 }
 
 #[tokio::test]
@@ -271,7 +297,11 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     .map_err(|_| FinError::validation("Invalid fork fixture"))?;
     let chain = fixture["chain_id"].as_u64().unwrap();
     let dex = fixture["dex"].as_str().unwrap_or("uniswap");
-    assert!(matches!(dex, "uniswap" | "ramses"));
+    assert!(matches!(
+        dex,
+        "uniswap" | "ramses" | "sushi" | "pancakeswap"
+    ));
+    let fee_dex = matches!(dex, "uniswap" | "sushi" | "pancakeswap");
     let quote_operation = format!("{dex}.quote");
     let swap_operation = format!("{dex}.swap");
     let rpc = Arc::new(OwnedRpc {
@@ -290,7 +320,10 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     rpc.guard().await?;
     let local_signer = LocalEnvelopeSigner::from_private_key(PUBLIC_ANVIL_KEY)?;
     let owner = lower_address(local_signer.address());
-    let signer = Arc::new(FixtureSigner(local_signer));
+    let signer = Arc::new(FixtureSigner {
+        signer: local_signer,
+        permits: Mutex::new(vec![]),
+    });
     let token = fixture["token"].as_str().unwrap();
     let mut config = EthereumConfig::wallet_only(chain, 1, vec![token.into()]);
     // Match mainnet confirmation policy; reviewed rollups use sequencer inclusion.
@@ -301,6 +334,16 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             config.uniswap.is_none(),
             "Ramses must work without Uniswap configured"
         );
+    } else if matches!(dex, "sushi" | "pancakeswap") {
+        let key: V3Dex = serde_json::from_value(json!(dex)).unwrap();
+        config
+            .v3_deployments
+            .insert(key, serde_json::from_value(fixture[dex].clone()).unwrap());
+        assert!(
+            config.uniswap.is_none(),
+            "Second fork must work without Uniswap configured"
+        );
+        assert!(config.ramses.is_none());
     } else {
         config.uniswap = Some(serde_json::from_value(fixture["uniswap"].clone()).unwrap());
     }
@@ -312,7 +355,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                 address: owner.clone(),
                 signing_enabled: true,
             }],
-            Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer))),
+            Arc::new(EvmRuntime::new(rpc.clone(), chain, Some(signer.clone()))),
         )?
         .with_wallet_valuation(Arc::new(FixtureValuation)),
     );
@@ -329,7 +372,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     let base = json!({"wallet":"fork-wallet","network":"evm","chain_id":chain});
     let baseline = adapter.read("wallet.balances", &base).await?;
     let mut results = vec![];
-    let protocols = if dex == "ramses" {
+    let protocols = if dex != "uniswap" {
         vec!["v3"]
     } else {
         vec!["v3", "v4"]
@@ -346,10 +389,14 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             quote.as_object_mut().unwrap().remove("protocol");
             quote["tick_spacing"] = fixture["tick_spacing"].clone();
         }
+        if protocol == "v3" && fee_dex {
+            quote["fee_tier"] = fixture["fee_tier"].clone();
+        }
         if protocol == "v4" {
             quote["v4_pool_key"] = fixture["v4_pool_key"].clone();
         }
         let q = adapter.read(&quote_operation, &quote).await?;
+        log_quote(dex, protocol, "forward", &q);
         let out: Quantity = serde_json::from_value(q["data"]["output"].clone()).unwrap();
         assert!(!out.is_zero());
         let mut input = quote.clone();
@@ -361,29 +408,45 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
         input["max_price_impact_bps"] = json!(100);
         input["min_output"] = json!(
             out.mul_div_ceil(&Quantity::from_u64(9950), &Quantity::from_u64(10000))?
-                .to_decimal(6)
+                .to_decimal(q["data"]["token_out"]["decimals"].as_u64().unwrap() as u8)
         );
         let grant = engine.authorize_boundary(fin_domain::boundaries::BoundaryAuthorizationRequest {
             request_id: format!("{protocol}-forward-grant"), operation: swap_operation.clone(), input: input.clone(),
-            bounds: json!({"max_input":"0.001","max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":"1000000000000000"},"allowed_fee_tiers":if protocol=="v3" && dex=="uniswap" {vec![100,500,3000,10000]} else {vec![]},"max_deadline_seconds":600}),
+            bounds: json!({"max_input":"0.001","max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":"1000000000000000"},"allowed_fee_tiers":if protocol=="v3" && fee_dex {vec![fixture["fee_tier"].as_u64().unwrap()]} else {vec![]},"max_deadline_seconds":600}),
             valid_for_seconds:600,replaces:None,
         }).await?;
-        if dex == "ramses" {
+        if dex != "uniswap" {
             let nonce_before = rpc
                 .request("eth_getTransactionCount", json!([owner, "pending"]))
                 .await?;
-            for (field, value) in [
+            let mut changed_fields = vec![
                 ("amount", json!("0.0011")),
                 ("slippage_bps", json!(101)),
                 ("max_price_impact_bps", json!(101)),
                 ("max_fee_eth", json!("0.011")),
-                ("max_pool_fee_ppm", json!(200)),
-                ("tick_spacing", json!(5)),
                 (
                     "recipient",
                     json!("0x0000000000000000000000000000000000000001"),
                 ),
-            ] {
+            ];
+            if dex == "ramses" {
+                changed_fields
+                    .extend([("max_pool_fee_ppm", json!(200)), ("tick_spacing", json!(5))]);
+            } else {
+                changed_fields.extend([
+                    (
+                        "fee_tier",
+                        json!(if fixture["fee_tier"] == 10000 {
+                            500
+                        } else {
+                            10000
+                        }),
+                    ),
+                    ("protocol", json!("v4")),
+                    ("tick_spacing", json!(1)),
+                ]);
+            }
+            for (field, value) in changed_fields {
                 let mut changed = input.clone();
                 changed[field] = value;
                 assert!(
@@ -391,7 +454,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                         .preview_boundary(&grant.id, &swap_operation, &changed)
                         .await
                         .is_err(),
-                    "Ramses scope accepted changed {field}"
+                    "{dex} scope accepted changed {field}"
                 );
             }
             assert!(
@@ -409,12 +472,21 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             );
             println!(
                 "{}",
-                json!({"stage":"ramses_bound_rejections", "checked":["amount","slippage","impact","gas_cap","quote_fee_ceiling","spacing","recipient","dex"],"submitted":false})
+                json!({"stage":"fork_bound_rejections", "dex":dex,"submitted":false})
             );
         }
         input["_fork_authority"] = json!(grant.id);
+        let permit_count_before_forward = signer.permits.lock().unwrap().len();
         let forward = settled(&engine, &rpc, &swap_operation, input).await?;
-        if dex == "ramses" {
+        assert_eq!(
+            signer.permits.lock().unwrap().len(),
+            permit_count_before_forward,
+            "Native input must not sign a spending permit"
+        );
+        let (spent, _) = conversion(&forward)?;
+        assert_eq!(spent.asset.reference, "native");
+        assert_eq!(spent.atoms, Quantity::new("1000000000000000")?);
+        if dex != "uniswap" {
             engine.revoke_boundary(&grant.id).await?;
             assert!(
                 engine
@@ -459,6 +531,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
         reverse["token_out"] = json!("native");
         reverse["amount"] = json!(proceeds.atoms.to_decimal(proceeds.asset.decimals));
         let q = adapter.read(&quote_operation, &reverse).await?;
+        log_quote(dex, protocol, "reverse", &q);
         let out: Quantity = serde_json::from_value(q["data"]["output"].clone()).unwrap();
         reverse["request_id"] = json!(format!("{protocol}-reverse"));
         reverse["recipient"] = json!(owner);
@@ -470,19 +543,20 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             out.mul_div_ceil(&Quantity::from_u64(9950), &Quantity::from_u64(10000))?
                 .to_decimal(18)
         );
-        if dex == "ramses" {
+        let permits_before = signer.permits.lock().unwrap().len();
+        if dex != "uniswap" {
             let prepared = adapter.prepare(&swap_operation, &reverse).await?;
             let plan: fin_domain::financial_plans::FinancialPlanSpec = serde_json::from_value(json!({
-                "version":1, "name":"Owned Ramses reverse with verified proceeds",
+                "version":1, "name":format!("Owned {dex} reverse with verified proceeds"),
                 "steps":[{"step_id":"reverse","operation":swap_operation,"input":reverse,
-                    "permitted_variations":{"max_input":proceeds.atoms.to_decimal(proceeds.asset.decimals),"max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":proceeds.atoms},"allowed_fee_tiers":[],"max_deadline_seconds":600},
+                    "permitted_variations":{"max_input":proceeds.atoms.to_decimal(proceeds.asset.decimals),"max_fee_eth":"0.01","max_slippage_bps":100,"max_price_impact_bps":100,"minimum_rate":{"output_atoms":out.mul_div_ceil(&Quantity::from_u64(98), &Quantity::from_u64(100))?,"input_atoms":proceeds.atoms},"allowed_fee_tiers":if fee_dex {vec![fixture["fee_tier"].as_u64().unwrap()]} else {vec![]},"max_deadline_seconds":600},
                     "completion":{"operation_succeeded":true},"funding_dependencies":[]}],
                 "aggregate_bounds":{"maximum_debits":prepared.intent.debits,"maximum_costs":[{
                     "location":{"kind":"cash","resource":format!("ethereum:{chain}:{owner}")},"amount":{"asset":{"network":format!("ethereum:{chain}"),"reference":"native","decimals":18},"atoms":"10000000000000000"},"treatment":"additional_debit"}]}
             })).unwrap();
             let mut authorization_request =
                 fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
-                    request_id: "owned-ramses-reverse-plan".into(),
+                    request_id: format!("owned-{dex}-reverse-plan"),
                     plan,
                     valid_for_seconds: 600,
                     replaces_revision_id: None,
@@ -498,10 +572,56 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
             reverse["_fork_plan"] = json!({"id":authorized.plan_id});
         }
         let returned = settled(&engine, &rpc, &swap_operation, reverse).await?;
-        assert_eq!(received(&returned)?.asset.reference, "native");
+        let (reverse_spent, reverse_received) = conversion(&returned)?;
+        assert_eq!(
+            reverse_spent, proceeds,
+            "Return spends exactly verified forward proceeds"
+        );
+        assert_eq!(reverse_received.asset.reference, "native");
+        // Permits are finite and bound to the actual receipt proceeds. Their
+        // consumed nonces cannot be restored; only allowance state can be.
+        let signed_permits = signer.permits.lock().unwrap()[permits_before..].to_vec();
+        for permit in &signed_permits {
+            match permit {
+                AuthorizedPermit::Eip2612(p) => {
+                    assert_eq!(p.chain_id, chain);
+                    assert_eq!(p.token.to_lowercase(), token.to_lowercase());
+                    assert_eq!(p.owner.to_lowercase(), owner);
+                    assert_eq!(p.spender.to_lowercase(), spender.to_lowercase());
+                    assert_eq!(p.value, proceeds.atoms);
+                    let data = format!("0x7ecebe00{:0>64}", owner.trim_start_matches("0x"));
+                    let nonce = rpc
+                        .request("eth_call", json!([{"to":token,"data":data},"latest"]))
+                        .await?;
+                    let nonce = alloy::primitives::U256::from_str_radix(
+                        nonce.as_str().unwrap().trim_start_matches("0x"),
+                        16,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        Quantity::new(nonce.to_string())?,
+                        p.nonce.checked_add(&Quantity::from_u64(1))?,
+                        "Receipt consumed exactly the signed permit nonce"
+                    );
+                }
+                AuthorizedPermit::Permit2Single(p) => {
+                    assert_eq!(p.chain_id, chain);
+                    assert_eq!(p.token.to_lowercase(), token.to_lowercase());
+                    assert_eq!(p.owner.to_lowercase(), owner);
+                    assert_eq!(p.amount, proceeds.atoms);
+                    assert_eq!(
+                        p.spender.to_lowercase(),
+                        fixture["uniswap"]["v4"]["router"]
+                            .as_str()
+                            .unwrap()
+                            .to_lowercase()
+                    );
+                }
+            }
+        }
         let mut restore = allowance.clone();
         restore["request_id"] = json!(format!("{protocol}-restore"));
-        restore["amount"] = json!(old.to_decimal(6));
+        restore["amount"] = json!(old.to_decimal(proceeds.asset.decimals));
         restore["max_fee_eth"] = json!("0.01");
         settled(&engine, &rpc, "wallet.approve", restore).await?;
         let after = adapter.read("wallet.allowance", &allowance).await?;
@@ -533,7 +653,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                 assert!(permit2_after["data"]["expiration"].as_u64().unwrap() > 0);
             }
         }
-        results.push(json!({"permit2_after":permit2_after,"protocol":protocol,"forward":forward,"reverse":returned,"allowance_restored":true}));
+        results.push(json!({"permit2_after":permit2_after,"signed_finite_permits":signed_permits,"protocol":protocol,"forward":forward,"reverse":returned,"allowance_restored":true}));
     }
     let final_state = adapter.read("wallet.balances", &base).await?;
     let stable = |value: &Value| {
@@ -597,6 +717,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
     let nonce_before = rpc
         .request("eth_getTransactionCount", json!([owner, "pending"]))
         .await?;
+    let permit_count_before_recovery = signer.permits.lock().unwrap().len();
     drop(engine);
     let recovered = Engine::new(
         Store::open(directory.path().join("operations.sqlite")).unwrap(),
@@ -615,6 +736,11 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
         nonce_before,
         rpc.request("eth_getTransactionCount", json!([owner, "pending"]))
             .await?
+    );
+    assert_eq!(
+        signer.permits.lock().unwrap().len(),
+        permit_count_before_recovery,
+        "Recovery must not sign another permit"
     );
     println!(
         "{}",
