@@ -1,6 +1,6 @@
 # Extend swap support to SushiSwap and PancakeSwap
 
-Status: In progress, reported by the user on 2026-10-10. The user has already assigned an agent to this work. Builds on completed [item 5, Uniswap swaps](swap-support.md). Required for the first release, assigned by the user on 2026-10-11. Completion and verification have not been reported.
+Status: Implemented, reported by the user on 2026-10-11. Builds on completed [item 5, Uniswap swaps](swap-support.md). Required for the first release, assigned by the user on 2026-10-11. This roadmap update does not independently verify implementation or network/version coverage.
 
 ## Requested scope
 
