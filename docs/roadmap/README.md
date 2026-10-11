@@ -38,7 +38,7 @@ First-release scope: **items 1–12, 14–23 and 30 (release preparedness)**, as
 | 30 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
 | 31 | [RPC redundancy](rpc-redundancy.md) | Requested — multiple endpoints, health checks and safe failover; release scope to define |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | In progress — user assigned an agent; extends completed item 5 |
-| 33 | [Action duration and completion estimates](action-duration-estimates.md) | Requested — expected duration, stage timing and remaining-time guidance; release scope to define |
+| 33 | [Action duration and completion estimates](action-duration-estimates.md) | In progress — user reported; major UX hurdle; release scope to define |
 | 34 | [Action effects in Touch ID approvals](touch-id-action-effects.md) | Requested — design and verify concise financial-effect summaries; release scope to define |
 
 This directory on the `roadmap` branch is the maintained source of truth for backlog scope, status and release planning. Update this index and the linked feature document together when scope or status changes. Keep IDs stable unless explicitly renumbering, and update links and references when doing so. Record the source of completion claims; implementation and verification are distinct. No GitHub issue creation or financial execution is implied by a roadmap entry. Plan approval is a distinct product feature from this roadmap.
