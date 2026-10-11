@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–12, 14–23 and 30 ([release preparedness](release-preparedness.md))**. Integration entries 11–12 and 14–23 below are part of that scope. Item 13 (OKX) is deferred to the next release; entries 24–28 are later roadmap work, and item 29 has no release assignment yet. This release scope reflects user decisions through 2026-10-10.
+The first release requires **backlog items 1–23 inclusive**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–22 below are part of that scope. Item 24 (OKX) is deferred to the next release; entries 25–29 are later roadmap work, and item 30 has no release assignment yet. IDs were renumbered on 2026-10-11 to group release scope without changing feature scope or status.
 
 ## Shared scoping rules
 
@@ -21,83 +21,83 @@ Implement and verify the full Kraken action suite supported by the selected CCXT
 
 Extend and verify Coinbase integration. Confirm the intended Coinbase product/API and required account, trading and funding actions; inspect existing integration coverage first.
 
-## 13. OKX support
-
-Status: Deferred to the next release by the user on 2026-10-10. No longer required for the first release; item ID and requested capability are retained.
-
-Extend and verify OKX integration. Define supported account types, markets, trading and funding actions and their credential/authorization requirements.
-
-## 14. Solana wallet and transactions
+## 13. Solana wallet and transactions
 
 Provide Solana wallet and transaction support through Fin, including the protected signing and transaction lifecycle needed by subsequent Solana integrations. Define native/token holdings and transfer scope, supported token programs, fee handling, confirmation and uncertain-submission recovery. Treat this as the foundation for on-chain Solana operations.
 
-## 15. Solana Meteora support
+## 14. Solana Meteora support
 
-Integrate Meteora on Solana. Agree the intended products and actions—such as swaps or liquidity-position management—before implementation. Reuse item 14's wallet/transaction foundation.
+Integrate Meteora on Solana. Agree the intended products and actions—such as swaps or liquidity-position management—before implementation. Reuse item 13's wallet/transaction foundation.
 
-## 16. Solana Jupiter support
+## 15. Solana Jupiter support
 
-Integrate Jupiter on Solana. “Jupyter” is interpreted as Jupiter based on the user's Solana integration context; this interpretation remains correctable. Define the intended Jupiter products and action coverage rather than assuming every product is included. Reuse item 14 where on-chain execution is required.
+Integrate Jupiter on Solana. “Jupyter” is interpreted as Jupiter based on the user's Solana integration context; this interpretation remains correctable. Define the intended Jupiter products and action coverage rather than assuming every product is included. Reuse item 13 where on-chain execution is required.
 
-## 17. Solana Pump support
+## 16. Solana Pump support
 
-Integrate the requested Pump ecosystem on Solana. Clarify the intended Pump product(s) and actions, including whether the goal is trading/swapping, asset creation or other functionality. No token-launch capability is implicitly selected. Reuse item 14 for on-chain execution.
+Integrate the requested Pump ecosystem on Solana. Clarify the intended Pump product(s) and actions, including whether the goal is trading/swapping, asset creation or other functionality. No token-launch capability is implicitly selected. Reuse item 13 for on-chain execution.
 
-## 18. Solana Backpack support
+## 17. Solana Backpack support
 
 Support the requested Backpack integration. Clarify whether this means Backpack wallet connectivity, Backpack Exchange operations or both. Dependencies and credential requirements depend on that choice; do not assume an exchange integration is an on-chain Solana adapter.
 
-## 19. Robinhood Chain Ramses support
+## 18. Robinhood Chain Ramses support
 
 Status: Implemented, reported complete by the user on 2026-10-10 alongside [item 5, Uniswap swap support](swap-support.md). Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered operation coverage.
 
 The original request was to integrate Ramses on Robinhood Chain using existing wallet/network infrastructure where applicable. This completion update does not independently claim liquidity-position support or other operations beyond the delivered integration.
 
-## 20. Base support
+## 19. Base support
 
 Status: Implemented, reported complete by the user on 2026-10-10. The requested scope covers wallets, available onboarded dapps, bridging, deposits and withdrawals. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered coverage. See the [detailed Base record](base-support.md).
 
-## 21. Solana Kamino support
+## 20. Solana Kamino support
 
-Integrate Kamino on Solana for the first release. Review the existing product concept's Kamino lending scope and agree the precise supported products and actions before implementation. Reuse item 14's wallet/transaction foundation and shared plan authorization, while preserving protocol-specific position and financial meanings.
+Integrate Kamino on Solana for the first release. Review the existing product concept's Kamino lending scope and agree the precise supported products and actions before implementation. Reuse item 13's wallet/transaction foundation and shared plan authorization, while preserving protocol-specific position and financial meanings.
 
-## 22. Solana Phoenix support
+## 21. Solana Phoenix support
 
-Integrate Phoenix on Solana for the first release. Define the intended products, markets and supported read/trading/account actions during scoping, with explicit execution and recovery semantics. Reuse item 14's wallet/transaction foundation and shared plan authorization where applicable.
+Integrate Phoenix on Solana for the first release. Define the intended products, markets and supported read/trading/account actions during scoping, with explicit execution and recovery semantics. Reuse item 13's wallet/transaction foundation and shared plan authorization where applicable.
 
-## 23. At least two bridges to Solana
+## 22. At least two bridges to Solana
 
 Required for the first release. Support at least two distinct bridge integrations capable of moving supported assets to Solana from agreed Fin source networks. Two routes through the same bridge do not alone satisfy the two-bridge requirement. Providers, source networks, assets and any reverse-direction product scope remain to be selected.
 
 Verify current official route availability and exact source/destination asset representations during scoping. Expose route discovery, fees, minimum receipts, approvals, destination gas/account requirements and recovery stages. Use Fin's plan authorization and persist each submission identity through verified usable destination receipt; source confirmation alone is insufficient.
 
-Reuse item 14's Solana wallet/transaction foundation. Coordinate with item 10 if a verified CCTP-to-Solana integration is selected; do not count it as delivered without route-specific implementation and evidence. Across support in item 28 is not implicitly one of the two bridges or a first-release dependency.
+Reuse item 13's Solana wallet/transaction foundation. Coordinate with item 10 if a verified CCTP-to-Solana integration is selected; do not count it as delivered without route-specific implementation and evidence. Across support in item 29 is not implicitly one of the two bridges or a first-release dependency.
 
 Acceptance must demonstrate each selected bridge independently, including duplicate prevention, delayed/uncertain outcomes and restart recovery. Live tests need separately authorized amounts, the existing shared budget and a verified funded return path, even if reverse bridging is outside the initial product scope.
 
-## 24. SEI support
+## 24. OKX support
+
+Status: Deferred to the next release by the user on 2026-10-10. No longer required for the first release; requested capability is retained.
+
+Extend and verify OKX integration. Define supported account types, markets, trading and funding actions and their credential/authorization requirements.
+
+## 25. SEI support
 
 Add SEI coverage for available onboarded dapps and bridging. Define the relevant network/execution environment, protocol deployments, assets and bridge routes before choosing reusable runtime components.
 
-## 25. BSC support
+## 26. BSC support
 
 Add BSC coverage for available onboarded dapps and bridging. Verify chain/token identities, protocol deployments and supported source/destination routes; reuse shared EVM infrastructure where appropriate.
 
-## 26. Hedera bridging
+## 27. Hedera bridging
 
-Support bridging to/from Hedera. Define counterpart networks, assets, bridge mechanisms, required wallet/signing infrastructure and both source and destination receipt evidence. Coordinate any reusable Hedera foundation with item 27.
+Support bridging to/from Hedera. Define counterpart networks, assets, bridge mechanisms, required wallet/signing infrastructure and both source and destination receipt evidence. Coordinate any reusable Hedera foundation with item 28.
 
-## 27. Hedera SaucerSwap support
+## 28. Hedera SaucerSwap support
 
-Integrate SaucerSwap on Hedera. Agree supported versions/products and actions, including whether swaps, liquidity provision or both are wanted. Identify required Hedera wallet/transaction foundations and share them with item 26 where applicable; bridging need not itself be a prerequisite for using an already funded wallet.
+Integrate SaucerSwap on Hedera. Agree supported versions/products and actions, including whether swaps, liquidity provision or both are wanted. Identify required Hedera wallet/transaction foundations and share them with item 27 where applicable; bridging need not itself be a prerequisite for using an already funded wallet.
 
-## 28. Across.to support
+## 29. Across.to support
 
 Add Across.to bridge support as later roadmap work. “Accross.to” is interpreted as Across.to. Select supported source/destination networks, assets and actions after verifying current official capabilities; do not assume Solana or any other network is supported.
 
-Integrate discovery, bounded previews, plan-authorized execution, verified destination receipt and recovery using shared Fin contracts. Keep quoted timing and fees distinct from verified execution results. This entry remains separate from item 23 unless the user later selects it for first-release bridge coverage.
+Integrate discovery, bounded previews, plan-authorized execution, verified destination receipt and recovery using shared Fin contracts. Keep quoted timing and fees distinct from verified execution results. This entry remains separate from item 22 unless the user later selects it for first-release bridge coverage.
 
-## 29. Ethereum Smart Wallet support
+## 30. Ethereum Smart Wallet support
 
 Requested on 2026-10-09. Support Ethereum smart wallets through Fin. The wallet standard/provider, precise capabilities and target release remain to be defined; this request does not automatically expand the first-release scope.
 
