@@ -1,12 +1,12 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-11. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-12. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28, 30, 31 and 34**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decision on 2026-10-11; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 40% complete (10/25 items)
+## First release — 44% complete (11/25 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 4 | [Parallel development sandboxes](parallel-development-sandbox.md) | Implemented — user reported |
 | 5 | [Uniswap swap verification and bounded parameter changes](swap-support.md) | Implemented — user reported; SushiSwap/PancakeSwap follow-up tracked as item 32 |
 | 6 | [Canonical Ethereum ↔ Arbitrum / Robinhood Chain bridges](canonical-ethereum-l2-bridges.md) | Implemented — user reported |
-| 7 | [Aave support](aave-support.md) | In progress — user reported; review existing implementation and define network/version coverage |
+| 7 | [Aave support](aave-support.md) | Implemented — user reported |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
