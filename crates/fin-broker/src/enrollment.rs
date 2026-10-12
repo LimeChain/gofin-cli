@@ -400,6 +400,19 @@ fn collect_setup_policy(mut read: impl FnMut(&str) -> Result<String>) -> Result<
     Ok(policy)
 }
 
+/// Canonical first-install configuration, shared with the protected review.
+fn setup_configuration(approver_uid: u32, policy: BrokerPolicy) -> BrokerConfigV2 {
+    BrokerConfigV2 {
+        version: 2,
+        approver_uid,
+        networks: NetworkConfig::reviewed_evm_networks(),
+        deployments: DeploymentConfig::reviewed_amm_networks(),
+        connections: vec![],
+        policy,
+        extensions: BTreeMap::new(),
+    }
+}
+
 async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     let _lock = lock_protected_configuration(true)?;
     let mut terminal = HumanTerminal::open(args.approver_uid)?;
@@ -416,15 +429,7 @@ async fn initialize(args: Initialize, ui: &Ui) -> Result<Value> {
     }
     let policy = collect_setup_policy(|label| terminal.read_public_line(label))?;
     terminal.finish()?;
-    let config = BrokerConfigV2 {
-        version: 2,
-        approver_uid: args.approver_uid,
-        networks: NetworkConfig::reviewed_evm_networks(),
-        deployments: DeploymentConfig::reviewed_amm_networks(),
-        connections: vec![],
-        policy,
-        extensions: BTreeMap::new(),
-    };
+    let config = setup_configuration(args.approver_uid, policy);
     config.validate()?;
     let binding = json!({"action":"initialize","configuration":config,"installs":["compiled fin CLI","protected root broker","native Touch ID helper","launchd socket activation","private configuration, credentials, and durable journal"],
         "financial_movement":false,"future_financial_authority":false});
@@ -2261,6 +2266,27 @@ mod tests {
                 .code,
             "ENROLLMENT_CANCELLED"
         );
+    }
+
+    #[test]
+    fn setup_review_accepts_collected_limits_and_current_reviewed_deployments() {
+        for inputs in [["50", "50"], ["", ""], ["0", "0"], ["1000.000001", "5000"]] {
+            let mut inputs = inputs.into_iter();
+            let policy = collect_setup_policy(|_| Ok(inputs.next().unwrap().into())).unwrap();
+            let movement =
+                fin_domain::policy::format_limit(&policy.max_movement_usd_micros).unwrap();
+            let allocation =
+                fin_domain::policy::format_limit(&policy.max_run_allocation_usd_micros).unwrap();
+            let config = setup_configuration(501, policy);
+            let binding = json!({
+                "action":"initialize", "configuration":config,
+                "financial_movement":false, "future_financial_authority":false
+            });
+            let text = presentation::review(&binding).unwrap();
+            assert!(text.contains(&format!("Movement limit: {movement}")));
+            assert!(text.contains(&format!("24-hour allocation limit: {allocation}")));
+            assert!(text.contains("Every financial write still requires fresh Touch ID."));
+        }
     }
 
     #[test]

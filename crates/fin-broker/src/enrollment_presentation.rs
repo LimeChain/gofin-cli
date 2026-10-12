@@ -70,15 +70,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 )
             })?;
         config.validate()?;
-        let mut expected = BrokerConfigV2 {
-            version: 2,
-            approver_uid: config.approver_uid,
-            networks: NetworkConfig::reviewed_evm_networks(),
-            deployments: vec![DeploymentConfig::ethereum_mainnet()],
-            connections: vec![],
-            policy: BrokerPolicy::beta(),
-            extensions: BTreeMap::new(),
-        };
+        let mut expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
         expected.policy.max_movement_usd_micros = config.policy.max_movement_usd_micros.clone();
         expected.policy.max_run_allocation_usd_micros =
             config.policy.max_run_allocation_usd_micros.clone();
@@ -554,15 +546,7 @@ mod tests {
 
     #[test]
     fn setup_review_matches_only_the_implemented_policy() {
-        let config = BrokerConfigV2 {
-            version: 2,
-            approver_uid: 501,
-            networks: NetworkConfig::reviewed_evm_networks(),
-            deployments: vec![DeploymentConfig::ethereum_mainnet()],
-            connections: vec![],
-            policy: BrokerPolicy::beta(),
-            extensions: BTreeMap::new(),
-        };
+        let config = setup_configuration(501, BrokerPolicy::beta());
         let mut binding = json!({"action":"initialize","financial_movement":false,"future_financial_authority":false,"configuration":config});
         let text = review(&binding).unwrap();
         assert!(text.contains("Confirm this Mac account as Fin's approver."));
@@ -579,6 +563,40 @@ mod tests {
         );
         binding["configuration"]["policy"]["require_run_for_writes"] = true.into();
         assert!(review(&binding).is_err());
+    }
+
+    #[test]
+    fn setup_review_rejects_changes_outside_the_collected_limits() {
+        let config = setup_configuration(501, BrokerPolicy::beta());
+        let original = json!({
+            "action": "initialize",
+            "financial_movement": false,
+            "future_financial_authority": false,
+            "configuration": config,
+        });
+        for (path, value) in [
+            ("/configuration/policy/preview_ttl_seconds", json!(60)),
+            (
+                "/configuration/policy/allow_unpriced_exchange_assets",
+                json!(true),
+            ),
+            (
+                "/configuration/networks/0/rpc_urls/0",
+                json!("https://example.invalid/rpc"),
+            ),
+            ("/configuration/deployments", json!([])),
+            ("/configuration/extensions", json!({"unexpected": true})),
+            ("/financial_movement", json!(true)),
+            ("/future_financial_authority", json!(true)),
+        ] {
+            let mut binding = original.clone();
+            *binding.pointer_mut(path).expect("setup field exists") = value;
+            assert_eq!(
+                review(&binding).unwrap_err().code,
+                "INVALID_CHALLENGE",
+                "{path}"
+            );
+        }
     }
     #[test]
     fn unsafe_display_characters_and_financial_bindings_cannot_hide_material() {

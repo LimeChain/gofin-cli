@@ -8,6 +8,11 @@ maintained documentation.
 
 ## Integration baseline
 
+First-install configuration and its protected review share one configuration
+factory, so release-reviewed network and deployment profiles cannot drift between
+setup and approval. Review accepts only the two human-entered financial limits
+as policy overrides; all other setup fields must match the canonical defaults.
+
 AMM integration follows the current mainline, including Base, Hyperliquid and
 approval responsiveness. Versioned journal migrations preserve older records,
 credentials and pending recovery identities. Reviewed deployments remain an
