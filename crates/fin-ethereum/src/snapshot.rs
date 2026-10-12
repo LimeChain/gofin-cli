@@ -12,14 +12,14 @@ use tokio::{
 pub(crate) const SNAPSHOT_CONCURRENCY: usize = 8;
 type ReadCell = Arc<OnceCell<Result<Value>>>;
 
-struct SnapshotRpc {
+pub(crate) struct SnapshotRpc {
     inner: Arc<dyn EvmRpc>,
     tag: String,
     permits: Semaphore,
     reads: Mutex<BTreeMap<String, ReadCell>>,
 }
 impl SnapshotRpc {
-    fn new(inner: Arc<dyn EvmRpc>, block: u64, limit: usize) -> Self {
+    pub(crate) fn new(inner: Arc<dyn EvmRpc>, block: u64, limit: usize) -> Self {
         Self {
             inner,
             tag: block_tag(Some(block)),
@@ -80,7 +80,7 @@ impl EvmRpc for SnapshotRpc {
 enum CaptureUnit {
     Wallet(WalletConnection),
     Holding(WalletConnection, String),
-    Reserve(WalletConnection, String),
+    Reserve(WalletConnection, String, Option<String>),
 }
 #[derive(Default)]
 struct CapturePart {
@@ -214,11 +214,14 @@ impl EthereumAdapter {
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
         });
-        let all = if self.config.aave.is_some() {
-            capture.all_tokens(None, Some(block)).await?
-        } else {
-            Vec::new()
-        };
+        let mut all = Vec::new();
+        for market in self.market_configs() {
+            let selected = capture.selected_market(&json!({"market":market.pool}))?;
+            let adapter = selected.as_ref().unwrap_or(&capture);
+            for token in adapter.all_tokens(None, Some(block)).await? {
+                all.push((market.pool.clone(), token));
+            }
+        }
         let mut units = Vec::new();
         for wallet in &self.wallets {
             units.push(CaptureUnit::Wallet(wallet.clone()));
@@ -228,8 +231,12 @@ impl EthereumAdapter {
             for token in scope {
                 units.push(CaptureUnit::Holding(wallet.clone(), token.clone()));
             }
-            for token in &all {
-                units.push(CaptureUnit::Reserve(wallet.clone(), token.clone()));
+            for (pool, token) in &all {
+                units.push(CaptureUnit::Reserve(
+                    wallet.clone(),
+                    token.clone(),
+                    Some(pool.clone()),
+                ));
             }
         }
         let mut tasks = JoinSet::new();
@@ -321,8 +328,18 @@ impl EthereumAdapter {
         })
     }
     async fn capture_unit(&self, unit: CaptureUnit, block: u64) -> Result<CapturePart> {
+        if let CaptureUnit::Reserve(w, t, Some(pool)) = &unit
+            && let Some(a) = self.selected_market(&json!({"market":pool}))?
+        {
+            return Box::pin(
+                a.capture_unit(CaptureUnit::Reserve(w.clone(), t.clone(), None), block),
+            )
+            .await;
+        }
         let w = match &unit {
-            CaptureUnit::Wallet(w) | CaptureUnit::Holding(w, _) | CaptureUnit::Reserve(w, _) => w,
+            CaptureUnit::Wallet(w) | CaptureUnit::Holding(w, _) | CaptureUnit::Reserve(w, _, _) => {
+                w
+            }
         };
         let owner = address(&w.address)?;
         let r = resource(self.config.chain_id, owner);
@@ -360,14 +377,10 @@ impl EthereumAdapter {
                         self.balance_of(&token, owner, Some(block)).await?,
                     ),
                 });
-                let spenders = self
-                    .config
-                    .aave
-                    .as_ref()
-                    .map(|a| &a.pool)
-                    .into_iter()
-                    .chain(self.config.uniswap.as_ref().map(|u| &u.router));
-                for spender in spenders {
+                let mut spenders: BTreeSet<String> =
+                    self.market_configs().into_iter().map(|a| a.pool).collect();
+                spenders.extend(self.config.uniswap.as_ref().map(|u| u.router.clone()));
+                for spender in &spenders {
                     part.state.authorities.push(AuthorityState {
                         resource: r.clone(),
                         authority: authority(&token.reference, spender),
@@ -378,7 +391,7 @@ impl EthereumAdapter {
                     });
                 }
             }
-            CaptureUnit::Reserve(_, t) => {
+            CaptureUnit::Reserve(_, t, _) => {
                 let reserve = self.reserve(&t, Some(block)).await?;
                 let user = self
                     .user_reserve(&reserve.token, owner, Some(block))

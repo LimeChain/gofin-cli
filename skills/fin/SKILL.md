@@ -36,7 +36,7 @@ Setup and credential changes belong to the human's fresh Terminal. Explain the s
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
 
-EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
+EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
 Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
 through the protected broker after updating Fin. Use `fin connections list --json`
@@ -261,41 +261,6 @@ only scopes confirmed by `fin plans preview`; they support adapter-reviewed
 bridge steps and other eligible financial operations. Enrollment and policy
 changes have their own approval flow.
 
-Budget the complete sequential workflow before requesting plan approval. Allow
-5 minutes per onchain operation or immediate CEX trade, and 15 minutes per
-withdrawal or fast bridge. Count all required writes, including allowance/reset
-writes, and dependency waits; the fast-bridge allowance already includes its
-settlement wait. Increase allowances for longer route estimates. Sum them, add
-25% headroom with a minimum of 5 minutes, then round upward to a 5-minute boundary.
-Withdrawal → swap → fast bridge is 15 + 5 + 15 minutes and needs a **45-minute
-authorization** after headroom and rounding. These are planning budgets, not
-settlement guarantees, quote lifetimes, or transaction deadlines.
-
-Strongly prefer calculating and setting an explicit `--valid-for`, and state the
-chosen authorization duration during conversational review. Fin automatically
-budgets omitted durations for classified immediate workflows. Resting/trigger
-orders, TWAPs, delayed bridge stages and unclassified writes require an explicit
-full workflow horizon. Respect explicit user duration constraints and protected
-adapter limits; report conflicts instead of silently shortening the budget.
-
-For a future-funded Uniswap or Ramses step, omit `input.deadline` and set the
-step's `action_deadline_seconds` within its advertised maximum (at most 600).
-The approved relative window is separate from the parent lifetime. Submit the
-same deadline-free template; Fin resolves an absolute deadline only when the
-step becomes eligible. Before preparation, inspect authorization timing in
-`fin plans status`. Fin requires the entire approved action window to remain.
-`PLAN_INSUFFICIENT_AUTHORIZATION_TIME` means no candidate was prepared: reconcile
-unresolved work, preview a longer revision with `--replaces REVISION_ID`, and
-request fresh native approval. Never automatically renew consent or rewrite a
-prepared candidate's deadline, input or identity. Replace only an unsubmitted
-candidate through the supported explicit replacement path. Reconcile submitted
-or uncertain attempts after expiry using their original identities.
-
-The native approval challenge has its own short timeout. The client's 300-second
-transport wait limits one request, not the plan lifetime or settlement. A lost
-response requires recovery of the same request/attempt ID, never a new write.
-Quotes still expire independently and refresh only through supported paths.
-
 For a bounded sequence that should share one Touch ID approval, create one named
 plan. The name is a display label and is included in approval; changing it needs
 a revised approval. Keep step IDs stable and ordered, declare completion targets,
@@ -329,7 +294,7 @@ each step is prepared for execution.
 Neither preview reserves funds or approves:
 
 ```text
-fin plans preview --input PLAN_JSON --valid-for 45m --json
+fin plans preview --input PLAN_JSON --json
 ```
 
 Review the returned ordered permissions, variations, cumulative bounds, prior
@@ -339,7 +304,7 @@ authorization. For machine-driven review, carry that exact hash into authorizati
 a changed review is rejected before Touch ID:
 
 ```text
-fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 45m --review-hash REVIEW_HASH --json
+fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-hash REVIEW_HASH --json
 ```
 
 The human reviews the full plan in the terminal and approves one named revision
@@ -406,8 +371,47 @@ This read renews no authority and broadcasts nothing. Recovery must fit the
 original cumulative fee budgets. Empty bounded external-finalization discovery
 has partial coverage; it is not proof that no finalization exists.
 
-A full relative action window must be shorter than the parent lifetime, leaving
-time for orchestration. Fin reports `PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW`
-before approval if they cannot fit; choose an explicit longer duration or a
-shorter reviewed action window. For a single onchain step with an automatic
-10-minute parent, a 5-minute action window leaves the planned headroom.
+### Aave V3
+
+Inspect `aave.markets`, `aave.reserves`, `aave.positions` and their current schemas.
+Select exact chain, pool (`market`), reserve contract and spender; omission of
+market retains the configured legacy default. Keep wallet funds, supplied claims,
+collateral and variable debt separate. Current position balances include interest;
+historical external principal is not inferred from current quantities.
+
+Use separately approved finite `wallet.approve` and native wrap/unwrap steps.
+Borrow with fixed health-factor, outstanding-debt and debt/collateral bounds.
+Withdraw/collateral-disable with debt require an explicit health-factor floor.
+Review these point-in-time constraints without promising future liquidation safety.
+For named plan variations, use the operation's `semantics.plan_permission` bounds
+schema. Gross borrowing ceilings include finite rounding and never reset on repayment.
+Only amount and fee variations are allowed; market, assets, spender, recipient,
+collateral/eMode and risk fields remain fixed. Future funds are usable only after
+prior steps settle. Bounded `all` repayment/withdrawal must prove zero residual
+scaled debt/claim; reconcile original operations instead of resubmitting.
+
+Horizon uses a separately reviewed backing kernel and issuer-dependent RWA
+eligibility. EtherFi caps may prevent new positions. Unsupported versions/modes,
+missing permissions, unpriced assets and unavailable liquidity are explicit limits;
+never substitute another market, asset or mode without reviewing changed intent.
+
+### Plan timing
+
+Named plans automatically budget omitted durations from trusted operation and
+saved route metadata: 5 minutes per onchain write/immediate exchange action,
+15 minutes per withdrawal/fast bridge, plus 25% headroom (at least 5 minutes),
+rounded upward to 5 minutes. Bridge approval/reset writes count separately;
+bridge settlement is counted once. Longer saved arrival estimates increase the
+bridge allowance. Resting orders, TWAPs, delayed bridge stages and unclassified
+writes require an explicit `--valid-for`. Agents should calculate and disclose
+an explicit duration. Withdrawal → swap → fast bridge needs **45 minutes**.
+
+For a future-funded Uniswap/Ramses step, use `action_deadline_seconds: 600` and
+omit `input.deadline`. Fin resolves the concrete deadline when preparing an
+eligible attempt; the parent authorization does not extend the 600-second swap
+limit. Quote freshness and the client's 300-second transport wait remain separate.
+Check `fin plans status PLAN_ID --json` before execution. If the full action
+window no longer fits, use the reported `PLAN_INSUFFICIENT_AUTHORIZATION_TIME`
+recovery path and obtain approval for a fresh revision. Revisions preserve
+completed progress; submitted or uncertain operations retain their original
+identities. See [timing verification](../../docs/testing/plan-timing.md).

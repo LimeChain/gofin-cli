@@ -69,7 +69,7 @@ const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
 
@@ -117,6 +117,8 @@ pub struct DeploymentConfig {
     pub v3_deployments: BTreeMap<fin_ethereum::V3Dex, fin_ethereum::V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<fin_ethereum::AaveConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aave_markets: Vec<fin_ethereum::AaveConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -224,7 +226,12 @@ impl DeploymentConfig {
                 } else if network.chain_id == 8453 {
                     fin_ethereum::EthereumConfig::base_aave(vec![]).aave
                 } else {
-                    None
+                    fin_ethereum::aave::reviewed_markets(network.chain_id)
+                        .first()
+                        .map(|m| fin_ethereum::AaveConfig {
+                            pool: m.pool.clone(),
+                            oracle: m.oracle.clone(),
+                        })
                 };
                 (uniswap.is_some()
                     || ramses.is_some()
@@ -239,6 +246,13 @@ impl DeploymentConfig {
                     ramses,
                     v3_deployments,
                     aave,
+                    aave_markets: fin_ethereum::aave::reviewed_markets(network.chain_id)
+                        .into_iter()
+                        .map(|m| fin_ethereum::AaveConfig {
+                            pool: m.pool,
+                            oracle: m.oracle,
+                        })
+                        .collect(),
                 })
             })
             .collect()
@@ -258,6 +272,7 @@ impl DeploymentConfig {
             ramses: amm_deployments::reviewed_ramses(1),
             v3_deployments: amm_deployments::reviewed_v3_deployments(1),
             aave: defaults.aave,
+            aave_markets: defaults.aave_markets,
         }
     }
 }
@@ -1056,6 +1071,7 @@ pub fn build_applications_with_transports(
             .find(|deployment| deployment.network == network.id)
         {
             fin_ethereum::EthereumConfig {
+                aave_markets: deployment.aave_markets.clone(),
                 chain_id: network.chain_id,
                 confirmations: network.confirmations,
                 require_finalized: network.chain_id != 1

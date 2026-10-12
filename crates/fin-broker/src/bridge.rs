@@ -4522,6 +4522,7 @@ impl Adapter for BridgeAdapter {
             deferred_receipt,
             authorization_seconds: bounds.authorization_seconds.map(u64::from),
             cumulative_scope: Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![],
                 scope_id: record.id,
                 maximum_debits,
                 maximum_costs,

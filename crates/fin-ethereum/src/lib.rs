@@ -1,4 +1,5 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
+pub mod aave;
 mod abi;
 #[cfg(test)]
 mod amm_conformance_tests;
@@ -375,6 +376,8 @@ pub struct EthereumConfig {
     pub v3_deployments: BTreeMap<V3Dex, V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<AaveConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aave_markets: Vec<AaveConfig>,
 }
 impl Default for EthereumConfig {
     fn default() -> Self {
@@ -393,6 +396,8 @@ impl Default for EthereumConfig {
             }),
             ramses: None,
             v3_deployments: BTreeMap::new(),
+
+            aave_markets: vec![],
             aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
                 oracle: "0x54586be62e3c3580375ae3723c145253060ca0c2".into(),
@@ -459,6 +464,7 @@ impl EthereumConfig {
             ramses: None,
             v3_deployments: BTreeMap::new(),
             aave: None,
+            aave_markets: vec![],
         }
     }
 }
@@ -536,6 +542,7 @@ impl OracleObservationClock for SystemOracleClock {
         })
     }
 }
+#[derive(Clone)]
 pub struct EthereumAdapter {
     pub config: EthereumConfig,
     pub wallets: Vec<WalletConnection>,
@@ -632,6 +639,20 @@ impl EthereumAdapter {
         if let Some(aave) = &mut config.aave {
             deployments.extend([&mut aave.pool, &mut aave.oracle]);
         }
+        require(
+            config.aave_markets.len() <= 16,
+            "AAVE_MARKET_SCOPE_INVALID",
+            "Aave market scope exceeds the reviewed read bound.",
+        )?;
+        let mut pools = BTreeSet::new();
+        for market in &mut config.aave_markets {
+            require(
+                pools.insert(lower_address(address(&market.pool)?)),
+                "AAVE_MARKET_DUPLICATE",
+                "Aave profiles duplicate one pool identity.",
+            )?;
+            deployments.extend([&mut market.pool, &mut market.oracle]);
+        }
         for value in deployments {
             let a = address(value)?;
             require(
@@ -715,7 +736,10 @@ impl EthereumAdapter {
                     || self.config.ramses.is_some()
                     || !self.config.v3_deployments.is_empty()
             }
-            name if name.starts_with("aave.") => self.config.aave.is_some(),
+            "aave.markets" => true,
+            name if name.starts_with("aave.") => {
+                self.config.aave.is_some() || !self.config.aave_markets.is_empty()
+            }
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             name if uniswap::profile::additional_dex(name).is_some() => self
@@ -915,6 +939,8 @@ struct Binding {
     pub scaled_before: Option<Quantity>,
     pub repay_all: bool,
     pub all_amount: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aave_emode: Option<Quantity>,
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
@@ -978,9 +1004,15 @@ impl Adapter for EthereumAdapter {
         self.read_snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.read(operation, input).await;
+        }
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare(operation, input).await;
+        }
         let mut prepared = self
             .prepare_operation(operation, input, None, &PreparationContext::default())
             .await?;
@@ -993,6 +1025,9 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare_with_context(operation, input, context).await;
+        }
         let mut prepared = self
             .prepare_operation(operation, input, None, context)
             .await?;
@@ -1031,6 +1066,12 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         bounds: &Value,
     ) -> Result<financial_plans::PlanPermission> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare_plan_permission(operation, input, bounds).await;
+        }
+        if operation.starts_with("aave.") {
+            return self.aave_plan_permission(operation, input, bounds).await;
+        }
         self.swap_plan_permission(operation, input, bounds).await
     }
     fn validate_boundary_candidate(
@@ -1038,6 +1079,15 @@ impl Adapter for EthereumAdapter {
         spec: &boundaries::BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
+        if spec.fixed["operation"]
+            .as_str()
+            .is_some_and(|op| op.starts_with("aave."))
+        {
+            if let Some(a) = self.selected_market(&prepared.input)? {
+                return a.validate_aave_candidate(spec, prepared);
+            }
+            return self.validate_aave_candidate(spec, prepared);
+        }
         if matches!(
             spec.fixed.get("operation").and_then(Value::as_str),
             Some("uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap")
@@ -1052,6 +1102,9 @@ impl Adapter for EthereumAdapter {
         ))
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.revalidate(prepared).await;
+        }
         if prepared.operation == "wallet.permit2.approve" {
             return self.permit2_revalidate(prepared).await;
         }
@@ -1089,6 +1142,9 @@ impl Adapter for EthereumAdapter {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.submit(prepared, journal).await;
+        }
         if prepared.operation == "wallet.permit2.approve" {
             return self.permit2_submit(prepared, journal).await;
         }
@@ -1122,7 +1178,42 @@ impl Adapter for EthereumAdapter {
             )
             .await
     }
+    async fn verified_position_baselines(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Vec<PositionAnchor>> {
+        let Some(prepared) = &record.preview else {
+            return Ok(vec![]);
+        };
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.verified_position_baselines(record).await;
+        }
+        if !record.operation.starts_with("aave.") {
+            return Ok(vec![]);
+        }
+        let b: Binding = serde_json::from_value(prepared.binding.clone())
+            .map_err(|_| FinError::validation("Invalid original Aave binding."))?;
+        let token = self.token(&b.token.reference, None).await?;
+        let owner = address(&b.transaction.sender)?;
+        let mut baselines = Vec::new();
+        for (anchor, receipt) in [
+            (&b.supply_anchor, &b.a_token),
+            (&b.debt_anchor, &b.debt_token),
+        ] {
+            if let (Some(anchor), Some(receipt)) = (anchor, receipt) {
+                self.validate_anchor(anchor, &token, owner, address(receipt)?)
+                    .await?;
+                baselines.push(anchor.clone());
+            }
+        }
+        Ok(baselines)
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        if let Some(preview) = &record.preview
+            && let Some(a) = self.selected_market(&preview.input)?
+        {
+            return a.reconcile(record).await;
+        }
         if record.operation == "wallet.permit2.approve" {
             return self.permit2_reconcile(record).await;
         }

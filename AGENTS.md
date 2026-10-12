@@ -13,6 +13,7 @@
 - Use exact quantities, explicit asset/network identities and verified evidence. Persist submission identity before dispatch; reconcile uncertain outcomes instead of replaying writes. Submission acceptance is not settlement.
 - Preserve credentials, financial history, pending identities and reservations across upgrades. Use versioned migrations and test interrupted upgrades where persistence changes.
 - Keep public help, discovery, schemas and examples aligned with actual behavior. Preserve venue-specific meanings and report incomplete observations honestly.
+- Preserve Aave V3 market, reserve, collateral and debt identities independently. Keep market selection and health/debt bounds fixed through preview, approval and dispatch; test supported markets through their owned fork targets.
 - Make the smallest complete change. Fix defects within the requested workflow; keep unrelated improvements separate and avoid speculative abstractions or extra release gates.
 
 ## Read only what the task needs
@@ -27,6 +28,7 @@ Fin is a Rust workspace. Start with the affected code, its tests and nearby inst
 | Terminal enrollment, approval presentation or machine discovery | [Onboarding contract](docs/onboarding.md) |
 | Test selection, workflow fixtures or evidence requirements | [Testing guide](docs/testing/README.md) |
 | Environment lifecycle or an owned fork | [Development environments](docs/testing/development-environments.md) or [fork setup](docs/testing/fork.md) |
+| Aave V3 source or market work | Current Aave schemas and `make test-aave-fork` / `make test-aave-cli-fork` |
 
 Read relevant sections rather than entire manuals. Use existing source and tests to locate integration-specific behavior; do not require a new guide for each integration.
 

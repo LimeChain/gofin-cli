@@ -243,7 +243,7 @@ struct DisplayLabels {
     output: String,
 }
 
-fn safe_display_label(symbol: Option<&str>) -> String {
+pub(crate) fn safe_display_label(symbol: Option<&str>) -> String {
     const MAX_LABEL_BYTES: usize = 32;
     match symbol {
         Some(value)
@@ -1591,6 +1591,7 @@ mod tests {
             scaled_before: None,
             repay_all: false,
             all_amount: false,
+            aave_emode: None,
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,

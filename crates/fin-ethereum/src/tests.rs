@@ -1830,6 +1830,33 @@ impl EvmRpc for Fixture {
                     Erc20::transferCall::SELECTOR | Erc20::approveCall::SELECTOR => {
                         abi_value(!*self.erc20_false.lock().unwrap())
                     }
+                    AToken::POOLCall::SELECTOR => abi_value(addr(300)),
+                    AToken::UNDERLYING_ASSET_ADDRESSCall::SELECTOR => abi_value(addr(101)),
+                    Pool::getUserEModeCall::SELECTOR => abi_value(U256::ZERO),
+                    Pool::getConfigurationCall::SELECTOR => abi_value(
+                        U256::from(8000)
+                            | (U256::from(8500) << 16)
+                            | (U256::from(1) << 56)
+                            | (U256::from(1) << 58),
+                    ),
+                    Pool::getReserveDataCall::SELECTOR => abi_value(PoolReserveData {
+                        configuration: U256::from(8000) | (U256::from(8500) << 16),
+                        liquidityIndex: s.income.to::<u128>(),
+                        currentLiquidityRate: 0,
+                        variableBorrowIndex: s.debt_index.to::<u128>(),
+                        currentVariableBorrowRate: 0,
+                        currentStableBorrowRate: 0,
+                        lastUpdateTimestamp: U40::from(1),
+                        id: 0,
+                        aTokenAddress: addr(110),
+                        stableDebtTokenAddress: addr(115),
+                        variableDebtTokenAddress: addr(120),
+                        interestRateStrategyAddress: addr(130),
+                        accruedToTreasury: 0,
+                        unbacked: 0,
+                        isolationModeTotalDebt: 0,
+                    }),
+                    Pool::POOL_REVISIONCall::SELECTOR => abi_value(U256::from(10)),
                     Pool::ADDRESSES_PROVIDERCall::SELECTOR => abi_value(addr(200)),
                     AddressesProvider::getPoolCall::SELECTOR => abi_value(addr(300)),
                     AddressesProvider::getPriceOracleCall::SELECTOR => abi_value(addr(400)),
@@ -3309,6 +3336,12 @@ async fn withdrawal_credits_exact_proved_yield_and_closes_scaled_claim() {
 #[tokio::test]
 async fn borrow_ceil_rounding_is_deferred_and_repay_proves_interest_once() {
     let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
+    }
     let a = adapter(rpc.clone());
     let p = a
         .prepare("aave.borrow", &aave_input("aave.borrow"))
@@ -4147,6 +4180,10 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .filter_map(|position| position.anchor)
             .collect(),
     };
+    rpc.call_overrides.lock().unwrap().insert(
+        AToken::UNDERLYING_ASSET_ADDRESSCall::SELECTOR,
+        abi_value(addr(100)),
+    );
     let yielded_preview = a
         .prepare_with_context("aave.withdraw", &withdraw, &yielded_context)
         .await
@@ -5195,7 +5232,8 @@ mod wallet_only_tests {
                     "wallet.balances",
                     "wallet.token",
                     "wallet.allowance",
-                    "wallet.receipt"
+                    "wallet.receipt",
+                    "aave.markets"
                 ]
                 .into_iter()
                 .collect()
@@ -7185,3 +7223,6 @@ mod additional_v3_profiles {
         );
     }
 }
+
+#[path = "aave_tests.rs"]
+mod aave_tests;

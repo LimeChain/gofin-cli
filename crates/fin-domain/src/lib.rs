@@ -1276,6 +1276,15 @@ pub trait Adapter: Send + Sync {
             "Keep the request unresolved and use a reviewed human-only configuration operation.",
         ))
     }
+    /// Adapter-verified historical position observations bound to the original
+    /// preview/submission. Used only when the journal has no earlier Fin anchor;
+    /// never replaces trusted lineage or creates wallet cash/funding authority.
+    async fn verified_position_baselines(
+        &self,
+        _record: &OperationRecord,
+    ) -> Result<Vec<PositionAnchor>> {
+        Ok(Vec::new())
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation>;
     /// Reconcile persisted human configuration submissions through the exact
     /// submission identity. This is a read/recovery operation, not authority

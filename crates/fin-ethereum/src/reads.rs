@@ -46,6 +46,19 @@ impl Token {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reserve {
     pub token: Token,
+    pub a_token_revision: Quantity,
+    pub variable_debt_revision: Quantity,
+    pub configuration: Quantity,
+    pub borrowable_in_isolation: bool,
+    pub siloed_borrowing: bool,
+    pub isolation_debt_ceiling: Quantity,
+    pub isolation_debt_ceiling_decimals: u8,
+    pub normalized_income: Quantity,
+    pub normalized_variable_debt: Quantity,
+    pub liquidity_rate_ray: Quantity,
+    pub variable_borrow_rate_ray: Quantity,
+    pub last_update_timestamp: u64,
+    pub access_restrictions: Vec<String>,
     pub a_token: String,
     pub stable_debt_token: String,
     pub variable_debt_token: String,
@@ -563,6 +576,16 @@ impl EthereumAdapter {
             .call(pool, &Pool::ADDRESSES_PROVIDERCall {}, block)
             .await?;
         self.runtime.code_at(provider, block).await?;
+        if let Some(profile) = aave::reviewed_markets(self.config.chain_id)
+            .into_iter()
+            .find(|p| p.pool == self.aave().map(|a| a.pool.as_str()).unwrap_or(""))
+        {
+            require(
+                provider == address(&profile.addresses_provider)?,
+                "DEPLOYMENT_IDENTITY_MISMATCH",
+                "Pool provider differs from the reviewed market identity.",
+            )?;
+        }
         require(
             self.runtime
                 .call(provider, &AddressesProvider::getPoolCall {}, block)
@@ -673,7 +696,63 @@ impl EthereumAdapter {
                 block,
             )
             .await?;
+        let pool = address(&self.aave()?.pool)?;
+        let configuration = self
+            .runtime
+            .call(pool, &Pool::getConfigurationCall { asset }, block)
+            .await?;
+        let a_token_revision = self
+            .runtime
+            .call(
+                receipts.aTokenAddress,
+                &AToken::ATOKEN_REVISIONCall {},
+                block,
+            )
+            .await?;
+        let variable_debt_revision = self
+            .runtime
+            .call(
+                receipts.variableDebtTokenAddress,
+                &AToken::DEBT_TOKEN_REVISIONCall {},
+                block,
+            )
+            .await?;
+        let normalized_income = self
+            .runtime
+            .call(pool, &Pool::getReserveNormalizedIncomeCall { asset }, block)
+            .await?;
+        let normalized_variable_debt = self
+            .runtime
+            .call(
+                pool,
+                &Pool::getReserveNormalizedVariableDebtCall { asset },
+                block,
+            )
+            .await?;
+        let deployed = self
+            .runtime
+            .call(pool, &Pool::getReserveDataCall { asset }, block)
+            .await?;
         Ok(Reserve {
+            liquidity_rate_ray: quantity(U256::from(deployed.currentLiquidityRate)),
+            variable_borrow_rate_ray: quantity(U256::from(deployed.currentVariableBorrowRate)),
+            last_update_timestamp: deployed.lastUpdateTimestamp.to::<u64>(),
+            access_restrictions: if self.horizon_math() {
+                vec!["Horizon collateral eligibility and issuer transfer permissions are reserve-specific. Writes use the wallet itself as beneficiary and must pass exact simulation; no issuer permission is granted by Fin.".into()]
+            } else {
+                vec![]
+            },
+            borrowable_in_isolation: !((configuration >> 61usize) & U256::from(1)).is_zero(),
+            siloed_borrowing: !((configuration >> 62usize) & U256::from(1)).is_zero(),
+            isolation_debt_ceiling: quantity(
+                (configuration >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1)),
+            ),
+            isolation_debt_ceiling_decimals: 2,
+            a_token_revision: quantity(a_token_revision),
+            variable_debt_revision: quantity(variable_debt_revision),
+            configuration: quantity(configuration),
+            normalized_income: quantity(normalized_income),
+            normalized_variable_debt: quantity(normalized_variable_debt),
             token,
             a_token: lower_address(receipts.aTokenAddress),
             stable_debt_token: lower_address(receipts.stableDebtTokenAddress),
@@ -1555,16 +1634,75 @@ impl EthereumAdapter {
         let w = self.resolve(&r, false)?;
         self.runtime.assert_chain().await?;
         let owner = address(&w.address)?;
-        let block = rpc_u64(
-            &self
+        let block = if let Some(block) = r.block_number {
+            block
+        } else {
+            rpc_u64(
+                &self
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?
+        };
+        let aave_header = if operation.starts_with("aave.") {
+            let header = self
                 .runtime
                 .rpc
-                .request("eth_blockNumber", json!([]))
-                .await?,
-        )?;
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([fin_evm::block_tag(Some(block)), false]),
+                )
+                .await?;
+            fin_evm::hash(header["hash"].as_str().unwrap_or(""))?;
+            require(
+                rpc_u64(&header["number"])? == block,
+                "AAVE_READ_CHANGED",
+                "Aave read block identity differs.",
+            )?;
+            Some(header)
+        } else {
+            None
+        };
         let mut summary: Option<String> = None;
         let mut discovery = None;
         let data = match operation {
+            "aave.markets" => {
+                let mut markets = Vec::new();
+                for market in self.market_configs() {
+                    let mut input = input.clone();
+                    input["market"] = json!(market.pool);
+                    let selected = self.selected_market(&input)?;
+                    let a = selected.as_ref().unwrap_or(self);
+                    let profile = aave::reviewed_markets(self.config.chain_id)
+                        .into_iter()
+                        .find(|m| m.pool == market.pool);
+                    let ready = a.data_provider(Some(block)).await;
+                    let pool_revision = a
+                        .runtime
+                        .call(
+                            address(&market.pool)?,
+                            &Pool::POOL_REVISIONCall {},
+                            Some(block),
+                        )
+                        .await;
+                    let compatible = pool_revision
+                        .as_ref()
+                        .is_ok_and(|r| a.compatible_pool_revision(*r));
+                    markets.push(json!({"pool":market.pool,"oracle":market.oracle,"profile":profile,"backing_source_commit":if a.horizon_math() { Some(aave::math::HORIZON_SOURCE_COMMIT) } else { None },"pool_revision":pool_revision.as_ref().ok().map(|v| quantity(*v)),"risk_revision_compatible":compatible,"provider_verified":ready.is_ok(),"error":ready.err(),"supported_operations":["aave.reserves","aave.positions","aave.supply","aave.borrow","aave.repay","aave.withdraw","aave.collateral"],"write_compatibility":"Selected reserve token revisions, access restrictions and current protocol state are checked before dispatch."}));
+                }
+                summary = Some(if markets.is_empty() {
+                    "No reviewed compatible Aave V3 market on this network.".into()
+                } else {
+                    format!(
+                        "{} enabled Aave V3 markets; default {}. Next: inspect aave.reserves for current eligibility and caps.",
+                        markets.len(),
+                        self.aave()?.pool
+                    )
+                });
+                json!({"version":"v3","markets":markets,"available":!self.market_configs().is_empty(),"unavailable_reason":if self.market_configs().is_empty() { Some("No reviewed compatible Aave V3 deployment on this network.") } else { None },"address_book_commit":aave::ADDRESS_BOOK_COMMIT,"unsupported":["v2","v4","stable-rate writes","eMode changes","delegation","gateway flows"]})
+            }
+
             "wallet.token" => {
                 let token = self
                     .token(r.token.as_deref().expect("schema"), Some(block))
@@ -1709,21 +1847,23 @@ impl EthereumAdapter {
                 json!(quote)
             }
             "aave.reserves" => {
-                let mut reserves = Vec::new();
-                for t in self.all_tokens(r.tokens.as_ref(), Some(block)).await? {
-                    reserves.push(self.reserve(&t, Some(block)).await?)
-                }
-                json!(reserves)
+                let rows = self
+                    .aave_rows(r.tokens.as_ref(), owner, block, false)
+                    .await?;
+                let blocked = rows
+                    .iter()
+                    .filter(|r| r["paused"] == true || r["frozen"] == true || r["active"] != true)
+                    .count();
+                summary = Some(format!(
+                    "{} exact Aave reserves checked; {blocked} paused, frozen or inactive. Caps, liquidity and permissions are checked again before each write. Next: use --json for token identities and current restrictions.",
+                    rows.len()
+                ));
+                json!(rows)
             }
             "aave.positions" => {
-                let mut positions = Vec::new();
-                for t in self.all_tokens(r.tokens.as_ref(), Some(block)).await? {
-                    let reserve = self.reserve(&t, Some(block)).await?;
-                    positions.push(
-                        self.user_reserve(&reserve.token, owner, Some(block))
-                            .await?,
-                    )
-                }
+                let positions = self
+                    .aave_rows(r.tokens.as_ref(), owner, block, true)
+                    .await?;
                 let account = self
                     .runtime
                     .call(
@@ -1732,13 +1872,41 @@ impl EthereumAdapter {
                         Some(block),
                     )
                     .await?;
-                json!({"positions":positions,"account":{"collateral_base":quantity(account.totalCollateralBase),"debt_base":quantity(account.totalDebtBase),"available_borrow_base":quantity(account.availableBorrowsBase),"liquidation_threshold_bps":quantity(account.currentLiquidationThreshold),"health_factor":quantity(account.healthFactor)},"all_reserves":r.tokens.is_none()})
+                summary = Some(aave::reads::position_summary(
+                    &positions,
+                    &quantity(account.totalDebtBase),
+                    &quantity(account.healthFactor),
+                ));
+                json!({"positions":positions,"emode_category":quantity(self.aave_mode(owner,Some(block)).await?),"account":{"collateral_base":quantity(account.totalCollateralBase),"debt_base":quantity(account.totalDebtBase),"available_borrow_base":quantity(account.availableBorrowsBase),"liquidation_threshold_bps":quantity(account.currentLiquidationThreshold),"health_factor":quantity(account.healthFactor)},"all_reserves":r.tokens.is_none()})
             }
             _ => return Err(FinError::validation("Unsupported read.")),
         };
+        let state_hash = aave_header.as_ref().map(|h| h["hash"].clone());
+        if let Some(before) = aave_header {
+            let after = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([fin_evm::block_tag(Some(block)), false]),
+                )
+                .await?;
+            require(
+                after["hash"] == before["hash"] && rpc_u64(&after["number"])? == block,
+                "AAVE_READ_CHANGED",
+                "Aave read block identity changed.",
+            )?;
+        }
         let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":self.clock.now().to_rfc3339(),"block":block,"data":data,"discovery":discovery});
+        if let Some(hash) = state_hash {
+            result["block_hash"] = hash;
+        }
         if let Some(summary) = summary {
-            result["summary"] = json!(summary);
+            result["summary"] = json!(if r.block_number.is_some() {
+                format!("State at block {block}: {summary}")
+            } else {
+                summary
+            });
         }
         Ok(result)
     }

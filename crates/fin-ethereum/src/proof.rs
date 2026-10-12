@@ -178,6 +178,8 @@ pub struct SupplyBacking {
     pub scaled_minted: Quantity,
     pub backed_principal: Quantity,
     pub rounding_loss: Quantity,
+    #[serde(default, skip_serializing_if = "Quantity::is_zero")]
+    pub rounding_gain: Quantity,
     pub mint_balance_increase: Quantity,
     pub mint_value: Quantity,
     pub supplied_after: Quantity,
@@ -190,6 +192,25 @@ pub fn revision_five_backing(
     previous_index: Quantity,
     mint_index: Quantity,
     income_index: Quantity,
+) -> Result<SupplyBacking> {
+    supply_backing(
+        input,
+        scaled_before,
+        scaled_after,
+        previous_index,
+        mint_index,
+        income_index,
+        false,
+    )
+}
+fn supply_backing(
+    input: Quantity,
+    scaled_before: Quantity,
+    scaled_after: Quantity,
+    previous_index: Quantity,
+    mint_index: Quantity,
+    income_index: Quantity,
+    legacy: bool,
 ) -> Result<SupplyBacking> {
     let q = u256(&input)?;
     let before = u256(&scaled_before)?;
@@ -208,28 +229,46 @@ pub fn revision_five_backing(
         "SUPPLY_INDEX_INVALID",
         "Scaled mint/index fields exceed reviewed revision-5 invariants.",
     )?;
-    let minted = mul(q, ray)? / index;
+    let minted = add(
+        mul(q, ray)?,
+        if legacy {
+            index / U256::from(2)
+        } else {
+            U256::ZERO
+        },
+    )? / index;
     require(
         minted > U256::ZERO && after == add(before, minted)?,
         "SUPPLY_SCALED_MISMATCH",
         "Scaled mint does not match exact revision-5 floor conversion.",
     )?;
-    let before_at_mint = mul(before, index)? / ray;
-    let prior_balance = mul(before, previous)? / ray;
-    let total_at_mint = mul(after, index)? / ray;
-    let supplied_after = mul(after, income)? / ray;
-    let principal = sub(total_at_mint, before_at_mint)?;
+    let round = if legacy {
+        ray / U256::from(2)
+    } else {
+        U256::ZERO
+    };
+    let before_at_mint = add(mul(before, index)?, round)? / ray;
+    let prior_balance = add(mul(before, previous)?, round)? / ray;
+    let total_at_mint = add(mul(after, index)?, round)? / ray;
+    let supplied_after = add(mul(after, income)?, round)? / ray;
+    let backed = sub(total_at_mint, before_at_mint)?;
+    let principal = backed.min(q);
     require(
-        principal <= q,
+        legacy || backed <= q,
         "SUPPLY_BACKING_MISMATCH",
         "Minted backing exceeds exact input.",
     )?;
     Ok(SupplyBacking {
+        rounding_gain: quantity(backed.saturating_sub(q)),
         scaled_minted: quantity(minted),
         backed_principal: quantity(principal),
         rounding_loss: quantity(sub(q, principal)?),
         mint_balance_increase: quantity(sub(before_at_mint, prior_balance)?),
-        mint_value: quantity(sub(total_at_mint, prior_balance)?),
+        mint_value: quantity(if legacy {
+            add(q, sub(before_at_mint, prior_balance)?)?
+        } else {
+            sub(total_at_mint, prior_balance)?
+        }),
         supplied_after: quantity(supplied_after),
         yield_after_mint: quantity(sub(supplied_after, total_at_mint)?),
     })
@@ -744,29 +783,57 @@ impl EthereumAdapter {
             }
             "wallet.wrap" | "wallet.unwrap" => {
                 let weth = address(&self.resolved_weth(Some(r.block_number)).await?)?;
-                if operation == "wallet.wrap" {
-                    let e = exact_one(
-                        events::<Weth::Deposit>(receipt, weth)?
-                            .into_iter()
-                            .filter(|e| e.dst == owner)
-                            .collect(),
-                    )?;
-                    require(
-                        e.wad == qty,
-                        "WRAP_PROOF_MISMATCH",
-                        "WETH deposit event differs from original native value.",
-                    )?;
+                let wrapping = operation == "wallet.wrap";
+                let classic: Vec<U256> = if wrapping {
+                    events::<Weth::Deposit>(receipt, weth)?
+                        .into_iter()
+                        .filter(|e| e.dst == owner)
+                        .map(|e| e.wad)
+                        .collect()
                 } else {
-                    let e = exact_one(
-                        events::<Weth::Withdrawal>(receipt, weth)?
+                    events::<Weth::Withdrawal>(receipt, weth)?
+                        .into_iter()
+                        .filter(|e| e.src == owner)
+                        .map(|e| e.wad)
+                        .collect()
+                };
+                if classic.is_empty() {
+                    // Reviewed Arbitrum WETH uses exact ERC-20 mint/burn logs.
+                    // Envelope, actual cash legs and inclusion are still proved.
+                    require(
+                        self.config.chain_id == 42161
+                            && lower_address(weth) == "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+                        "WRAP_PROOF_MISMATCH",
+                        "This WETH deployment requires its exact deposit/withdrawal event.",
+                    )?;
+                    let (from, to) = if wrapping {
+                        (Address::ZERO, owner)
+                    } else {
+                        (owner, Address::ZERO)
+                    };
+                    let event = exact_one(
+                        events::<Erc20::Transfer>(receipt, weth)?
                             .into_iter()
-                            .filter(|e| e.src == owner)
+                            .filter(|e| e.from == from && e.to == to)
                             .collect(),
                     )?;
                     require(
-                        e.wad == qty,
+                        event.value == qty,
                         "WRAP_PROOF_MISMATCH",
-                        "WETH withdrawal event differs from exact input.",
+                        "WETH mint/burn event differs from exact input.",
+                    )?;
+                    self.verify_native_swap_balance(
+                        owner,
+                        r,
+                        if wrapping { qty } else { U256::ZERO },
+                        if wrapping { U256::ZERO } else { qty },
+                    )
+                    .await?;
+                } else {
+                    require(
+                        exact_one(classic)? == qty,
+                        "WRAP_PROOF_MISMATCH",
+                        "WETH deposit/withdrawal event differs from exact input.",
                     )?;
                 }
                 effects.push(FinancialEffect::Conversion {
@@ -1409,20 +1476,32 @@ impl EthereumAdapter {
                                     Some(r.block_number),
                                 )
                                 .await?
-                                == U256::from(5)
+                                == self.supply_revision()
                                 && post_index == mint.index
                                 && quantity(before) == *b.scaled_before.as_ref().expect("scaled"),
                             "SUPPLY_PROOF_MISMATCH",
                             "aToken revision, original scaled balance or minted index changed.",
                         )?;
-                        let backing = revision_five_backing(
-                            b.units.clone(),
-                            quantity(before),
-                            quantity(after),
-                            quantity(previous),
-                            quantity(mint.index),
-                            quantity(income),
-                        )?;
+                        let backing = if self.horizon_math() {
+                            supply_backing(
+                                b.units.clone(),
+                                quantity(before),
+                                quantity(after),
+                                quantity(previous),
+                                quantity(mint.index),
+                                quantity(income),
+                                true,
+                            )
+                        } else {
+                            revision_five_backing(
+                                b.units.clone(),
+                                quantity(before),
+                                quantity(after),
+                                quantity(previous),
+                                quantity(mint.index),
+                                quantity(income),
+                            )
+                        }?;
                         require(
                             quantity(mint.balanceIncrease) == backing.mint_balance_increase
                                 && quantity(mint.value) == backing.mint_value
@@ -1485,7 +1564,10 @@ impl EthereumAdapter {
                                 r.block_number - 1,
                             )
                             .await?;
-                        let total_yield = add(accrued, u256(&backing.yield_after_mint)?)?;
+                        let total_yield = add(
+                            add(accrued, u256(&backing.yield_after_mint)?)?,
+                            u256(&backing.rounding_gain)?,
+                        )?;
                         effects.insert(
                             effects
                                 .iter()
@@ -1564,26 +1646,38 @@ impl EthereumAdapter {
                             "DEBT_INDEX_INVALID",
                             "Debt mint index must be a valid positive normalized ray.",
                         )?;
-                        let scaled_minted =
-                            add(mul(qty, ray)?, minted.index - U256::from(1))? / minted.index;
+                        let scaled_minted = self.scaled_change(
+                            qty,
+                            minted.index,
+                            &PositionKind::VariableDebt,
+                            true,
+                        )?;
                         require(
                             minted.index >= ray
                                 && index >= minted.index
+                                && scaled_minted > U256::ZERO
                                 && after == add(before, scaled_minted)?,
                             "DEBT_SCALED_MISMATCH",
                             "Borrow scaled debt mint differs from exact ceiling conversion.",
                         )?;
-                        let pre_claim =
-                            anchors::backing(before, minted.index, &PositionKind::VariableDebt)?;
-                        let post_claim_at_mint =
-                            anchors::backing(after, minted.index, &PositionKind::VariableDebt)?;
+                        let pre_claim = self.position_backing(
+                            before,
+                            minted.index,
+                            &PositionKind::VariableDebt,
+                        )?;
+                        let post_claim_at_mint = self.position_backing(
+                            after,
+                            minted.index,
+                            &PositionKind::VariableDebt,
+                        )?;
                         let added = sub(post_claim_at_mint, pre_claim)?;
                         require(
-                            added >= qty,
+                            self.horizon_math() || added >= qty,
                             "DEBT_BACKING_MISMATCH",
                             "Debt backing is below borrowed cash.",
                         )?;
-                        let rounding = sub(added, qty)?;
+                        let rounding = added.saturating_sub(qty);
+                        let rounding_gain = qty.saturating_sub(added);
                         require(
                             rounding
                                 <= u256(
@@ -1603,9 +1697,14 @@ impl EthereumAdapter {
                             )
                             .await?;
                         let prior_claim =
-                            anchors::backing(before, previous, &PositionKind::VariableDebt)?;
+                            self.position_backing(before, previous, &PositionKind::VariableDebt)?;
                         require(
-                            minted.value == sub(post_claim_at_mint, prior_claim)?
+                            minted.value
+                                == if self.horizon_math() {
+                                    add(qty, sub(pre_claim, prior_claim)?)?
+                                } else {
+                                    sub(post_claim_at_mint, prior_claim)?
+                                }
                                 && minted.balanceIncrease == sub(pre_claim, prior_claim)?
                                 && transfers(receipt, debt_token, Address::ZERO, owner)?
                                     == minted.value,
@@ -1623,7 +1722,7 @@ impl EthereumAdapter {
                             )
                             .await?;
                         let extra_after = sub(
-                            anchors::backing(after, index, &PositionKind::VariableDebt)?,
+                            self.position_backing(after, index, &PositionKind::VariableDebt)?,
                             post_claim_at_mint,
                         )?;
                         let total_accrual = add(add(pre_accrual, rounding)?, extra_after)?;
@@ -1662,7 +1761,8 @@ impl EthereumAdapter {
                         // exposure, rather than inventing an unanchored accrual.
                         // Existing debt retains its prior principal/accrual split.
                         let opening = prior.principal.atoms.is_zero() && before.is_zero();
-                        let (principal_change, accrued_change) = if opening {
+                        let (principal_change, accrued_change) = if opening && !self.horizon_math()
+                        {
                             require(
                                 total_accrual
                                     <= u256(
@@ -1682,7 +1782,7 @@ impl EthereumAdapter {
                             position: debt_position.clone(),
                             asset: b.token.clone(),
                             position_kind: PositionKind::VariableDebt,
-                            delta: SignedQuantity::positive(&quantity(accrued_change)),
+                            delta: aave::math::signed_difference(accrued_change, rounding_gain),
                         });
                         effects.push(FinancialEffect::DebtChange {
                             resource: b.resource.clone(),
@@ -1747,15 +1847,14 @@ impl EthereumAdapter {
                                 Some(r.block_number),
                             )
                             .await?;
-                        let ray = pow10(27)?;
                         let before_claim =
-                            anchors::backing(before, index, &PositionKind::VariableDebt)?;
+                            self.position_backing(before, index, &PositionKind::VariableDebt)?;
                         let after_claim =
-                            anchors::backing(after, index, &PositionKind::VariableDebt)?;
+                            self.position_backing(after, index, &PositionKind::VariableDebt)?;
                         let burned = if actual == before_claim {
                             before
                         } else {
-                            mul(actual, ray)? / index
+                            self.scaled_change(actual, index, &PositionKind::VariableDebt, false)?
                         };
                         require(
                             after == sub(before, burned)?
@@ -1765,7 +1864,7 @@ impl EthereumAdapter {
                         )?;
                         let cleared = sub(before_claim, after_claim)?;
                         require(
-                            cleared > U256::ZERO && cleared <= actual,
+                            cleared > U256::ZERO && (self.horizon_math() || cleared <= actual),
                             "REPAY_BACKING_MISMATCH",
                             "Exact debt extinguishment exceeds actual repayment.",
                         )?;
@@ -1794,8 +1893,10 @@ impl EthereumAdapter {
                                 u256(&deferred_interest)?,
                                 u256(&deferred)?,
                                 actual,
-                                cleared,
+                                cleared.min(actual),
                             )?;
+                        let rounding_gain = cleared.saturating_sub(actual);
+                        let principal_leg = cleared.min(actual);
                         let anchor = self
                             .make_anchor_with_costs(
                                 &token,
@@ -1814,7 +1915,7 @@ impl EthereumAdapter {
                             position: debt_position.clone(),
                             asset: b.token.clone(),
                             position_kind: PositionKind::VariableDebt,
-                            delta: SignedQuantity::positive(&quantity(interest)),
+                            delta: aave::math::signed_difference(interest, rounding_gain),
                         });
                         effects.push(FinancialEffect::CashDebit {
                             resource: b.resource.clone(),
@@ -1824,7 +1925,7 @@ impl EthereumAdapter {
                             resource: b.resource.clone(),
                             debt: debt_position,
                             asset: b.token.clone(),
-                            delta: SignedQuantity::negative(&quantity(cleared)),
+                            delta: SignedQuantity::negative(&quantity(principal_leg)),
                             anchor: Some(anchor),
                         });
                         effects.push(origin(
@@ -1832,7 +1933,7 @@ impl EthereumAdapter {
                             debt_location(b),
                             &b.token,
                             actual,
-                            cleared,
+                            principal_leg,
                         ));
                         if total_cost > U256::ZERO {
                             effects.push(FinancialEffect::Cost {
@@ -1908,14 +2009,17 @@ impl EthereumAdapter {
                             "WITHDRAW_INDEX_INVALID",
                             "Withdraw index must be a positive normalized ray.",
                         )?;
-                        let burned = add(mul(qty, ray)?, index - U256::from(1))? / index;
+                        let burned =
+                            self.scaled_change(qty, index, &PositionKind::Supply, false)?;
                         require(
                             after == sub(before, burned)?,
                             "WITHDRAW_SCALED_MISMATCH",
                             "Withdraw scaled burn does not match exact ceiling rule.",
                         )?;
-                        let before_claim = anchors::backing(before, index, &PositionKind::Supply)?;
-                        let after_claim = anchors::backing(after, index, &PositionKind::Supply)?;
+                        let before_claim =
+                            self.position_backing(before, index, &PositionKind::Supply)?;
+                        let after_claim =
+                            self.position_backing(after, index, &PositionKind::Supply)?;
                         if b.all_amount {
                             require(
                                 after.is_zero()
@@ -1933,11 +2037,13 @@ impl EthereumAdapter {
                         )?;
                         let decreased = sub(before_claim, after_claim)?;
                         require(
-                            decreased >= qty,
+                            self.horizon_math() || decreased >= qty,
                             "WITHDRAW_BACKING_MISMATCH",
                             "Claim decrease is below cash withdrawal.",
                         )?;
-                        let rounding = sub(decreased, qty)?;
+                        let rounding = decreased.saturating_sub(qty);
+                        let rounding_gain = qty.saturating_sub(decreased);
+                        let principal_leg = decreased.max(qty);
                         let accrued = self
                             .accrued_before(
                                 b.supply_anchor.as_ref().expect("anchor"),
@@ -1963,13 +2069,16 @@ impl EthereumAdapter {
                             position: supply_position.clone(),
                             asset: b.token.clone(),
                             position_kind: PositionKind::Supply,
-                            delta: SignedQuantity::positive(&quantity(accrued)),
+                            delta: SignedQuantity::positive(&quantity(add(
+                                accrued,
+                                rounding_gain,
+                            )?)),
                         });
                         effects.push(FinancialEffect::PositionChange {
                             resource: b.resource.clone(),
                             position: supply_position,
                             asset: b.token.clone(),
-                            delta: SignedQuantity::negative(&quantity(decreased)),
+                            delta: SignedQuantity::negative(&quantity(principal_leg)),
                             scaled_receipt: Some(quantity(after)),
                             anchor: Some(anchor),
                         });
@@ -1984,7 +2093,7 @@ impl EthereumAdapter {
                                 resource: recipient_resource,
                             },
                             &b.token,
-                            decreased,
+                            principal_leg,
                             qty,
                         ));
                         if rounding > U256::ZERO {
@@ -2301,6 +2410,48 @@ mod native_weth_settlement_tests {
                 pool,
                 router,
                 amount,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod legacy_math_tests {
+    use super::*;
+    #[test]
+    fn half_up_mint_exposes_exact_gain_and_loss_without_tolerance() {
+        let ray = pow10(27).unwrap();
+        for (input, index, backed, gain, loss) in [
+            (1, ray * U256::from(3) / U256::from(2), 1, 1, 0),
+            (2, ray * U256::from(3) / U256::from(2), 2, 0, 0),
+            (3, ray * U256::from(11) / U256::from(10), 3, 0, 0),
+        ] {
+            let scaled = (U256::from(input) * ray + index / U256::from(2)) / index;
+            let output = supply_backing(
+                quantity(U256::from(input)),
+                Quantity::zero(),
+                quantity(scaled),
+                Quantity::zero(),
+                quantity(index),
+                quantity(index),
+                true,
+            )
+            .unwrap();
+            assert_eq!(output.backed_principal, Quantity::from_u64(backed));
+            assert_eq!(output.rounding_gain, Quantity::from_u64(gain));
+            assert_eq!(output.rounding_loss, Quantity::from_u64(loss));
+            assert_eq!(output.mint_value, Quantity::from_u64(input));
+        }
+        assert!(
+            supply_backing(
+                Quantity::from_u64(1),
+                Quantity::zero(),
+                Quantity::zero(),
+                Quantity::zero(),
+                quantity(ray * U256::from(3)),
+                quantity(ray * U256::from(3)),
+                true
             )
             .is_err()
         );

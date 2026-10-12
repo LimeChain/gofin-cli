@@ -7,12 +7,14 @@ operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, Hyperliquid REST spot/perpetual trading and account actions, reusable
-EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
+EVM wallets on Ethereum, Base, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
 EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood,
 Sushi v3 on Ethereum/Arbitrum and PancakeSwap v3 on Ethereum/Arbitrum/Robinhood;
-and Ethereum mainnet Aave.
-Fin is open source; license selection is pending.
+and reviewed Aave V3 markets on Ethereum, Base and Arbitrum.
+The [product concept](docs/fin-product-concept.md)
+describes the broader exchange, trading and DeFi scope. MCP and additional
+bridge providers follow later. Fin is open source; license selection is pending.
 
 ## Components and responsibilities
 
@@ -288,7 +290,8 @@ Read-only broker requests and independent observers run with bounded concurrency
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
 RPC reads have one 10-second deadline across retries and fallback. Required
-preparation and post-approval evidence collection have 30-second stage deadlines.
+preparation, post-approval evidence collection and required external reads have
+120-second stage deadlines.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -485,7 +488,7 @@ probe uses no accounts or credentials:
 cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [pricing evidence and approved USD ceilings](docs/rust-architecture.md#pricing-evidence-and-approved-usd-ceilings).
+See [pricing contracts](docs/implementation-plan.md#pricing-contracts).
 Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
@@ -639,7 +642,8 @@ matching usable Binance credit and balance evidence. Delayed credit and lost
 responses retain the original submission and reservation: use
 `fin status OPERATION_ID --json`, never repeat with a new ID to recover.
 
-Use the [verification selection guide](docs/testing/README.md#verification-selection) for focused automated coverage and [$fin-e2e](skills/fin-e2e/SKILL.md) for live deposit verification. Verify matching usable Binance credit as well as the source transfer; human Touch ID remains a separate [human checklist](docs/testing/onboarding.md) case.
+See the [deposit verification checklist](docs/testing/binance.md#evm-deposit-verification)
+for synthetic checks and the later human Touch ID session.
 
 ## Financial limits
 
@@ -708,7 +712,10 @@ remain intact; an unrestored historical portfolio does not block normal use.
 Policy changes refuse nonterminal operations: reconcile the original work first.
 A change never expands an already approved operation or replays a write.
 
-Live E2E test defaults are **$20 per movement and $200 total allocation**. Under `fin-e2e`, agents may document finite overrides for complex actions; baseline restoration is optional. Align finite development policy and grants with the scenario through Fin, as described in [$fin-e2e](skills/fin-e2e/SKILL.md).
+The independent **$100 live-test budget and full restoration requirement are
+instructions for the LLM conducting explicitly authorized acceptance tests**,
+not runtime policy. They still apply even when personal limits are larger or
+zero. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
 
 New installations select these limits during `fin setup`, before configuration
 Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
@@ -776,12 +783,6 @@ nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`
 neither completed restoration. The linked verification record separates these
 results from pending human Touch ID and live acceptance.
 
-For **agent-led live E2E verification**, invoke `$fin-e2e` or ask the agent to use [the repository skill](skills/fin-e2e/SKILL.md), for example:
-
-> Use $fin-e2e to verify the live-write workflow before human verification. Choose a scenario if needed, fix failures, and verify its effects and settlement with automatic development approval.
-
-Invocation authorizes scenario selection, repairs, retries and optional restoration. Defaults are $20 per movement and $200 total, with documented finite overrides when the agent needs them for complex actions. The agent reuses imported `dev-wallet` credentials or imports development credentials from `.env`. It completes live-write verification before handing off human-only installation or Touch ID checks; hard or impossible restoration does not block a pass. Ordinary development remains synthetic. This developer skill is separate from the bundled `fin` user skill and is linked from `AGENTS.md`; no Fin installation/update is needed.
-
 For **real-adapter development**, provide disposable, noncritical credentials in
 a gitignored dotenv file using [.env.fin-dev.example](.env.fin-dev.example). These
 keys are intentionally accessible to the agent. Import and execution run as your
@@ -789,10 +790,10 @@ user, with **no sudo, password or Touch ID prompts**:
 
 ```sh
 # Human: copy the template, fill in dedicated development keys, then restrict the file.
-cp -n .env.fin-dev.example .env  # preserve any existing development credentials
-chmod 600 .env
+cp .env.fin-dev.example .env.fin-dev
+chmod 600 .env.fin-dev
 # Agent: import once into a separate named environment, then use the normal CLI.
-make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env"
+make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env.fin-dev"
 make dev-env-start DEV_ENV=live DEV_MODE=live
 make dev-env-cli DEV_ENV=live ARGS='connections --json'
 make dev-env-cli DEV_ENV=live ARGS='capabilities --json'
@@ -845,11 +846,22 @@ Uninstall retains the maintenance lock and service-stop checks so it cannot
 race an active command or approval. Neither uninstall nor setup runs as part of
 ordinary tests. `make help` lists the targets.
 
-Follow [AGENTS.md](AGENTS.md) and read the documents relevant to the change. Use the [testing guide](docs/testing/README.md#verification-selection) to select focused checks. Keep help, schemas, examples and tests aligned. Preserve pending operations, exact quantities and financial identities across changes. Never commit credentials or private live logs.
+Read [AGENTS.md](AGENTS.md), the [implementation plan](docs/implementation-plan.md),
+[Rust architecture](docs/rust-architecture.md), [onboarding](docs/onboarding.md),
+[security contract](docs/security.md) and [testing guide](docs/testing/README.md)
+before changing execution or authorization behavior. Keep help, schemas,
+examples and tests aligned. Preserve pending operations, exact quantities and
+financial identities across changes. Never commit credentials or private live
+logs. Historical TypeScript source and reports remain in Git history and do not
+establish Rust verification.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](docs/testing/onboarding.md).
-Live acceptance requires explicit authorization (including `fin-e2e` invocation for disposable development), production venues and the selected reviewed mainnet network. Verify the required live-write effects and settlement against the initial/final state; optional restoration is separate. Apply the $20 movement / $200 allocation defaults and any documented permitted overrides from the [live-test contract](docs/testing/README.md#live-test-contract). These are test rules, not global product limits.
+Live acceptance requires explicit authorization, production accounts and Ethereum
+mainnet. Each movement and the total allocation are capped at **$100 equivalent**,
+including costs; capture the baseline and fund the complete return path before
+writing. Restoration must finish before a run can pass. These are test limits,
+not global product limits. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
 
 ## Exchange architecture and local verification
 
@@ -998,7 +1010,7 @@ python3 scripts/prepare-amm-touch-id-checklist.py --help
 
 ```sh
 fin plans preview --input PLAN_JSON --json
-fin plans authorize --input PLAN_JSON --id APPROVAL_REQUEST_ID --valid-for 45m
+fin plans authorize --input PLAN_JSON --id APPROVAL_REQUEST_ID --valid-for 10m
 fin plans status PLAN_ID --json
 fin execute binance.spot.order-place --input ORDER_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --dry-run --json
 # Remove --dry-run only when deliberately submitting that step.
@@ -1239,7 +1251,52 @@ fin schema pancakeswap.swap --json
 See [v3 fork verification](docs/testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
 
-### Plan timing
+## Aave V3 markets and positions
+
+Discover reviewed deployments before enrollment with `fin schema aave.markets --json`.
+Read current compatibility, reserves and positions through an enrolled wallet:
+
+```sh
+fin read aave.markets --input '{"wallet":"wallet","network":"evm","chain_id":1}' --json
+fin read aave.reserves --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
+fin read aave.positions --input '{"wallet":"wallet","network":"evm","chain_id":8453}' --json
+```
+
+For a read-only historical observation, `aave.reserves` and `aave.positions`
+accept optional `block_number` and return the canonical `block_hash`. Writes
+always use fresh state and reject that field.
+
+Aave operations accept optional `market` with an enabled exact pool address;
+omitting it preserves the configured default. The broker validates pool/provider,
+oracle, reserve identities and deployed backing revisions. Ethereum Core, Lido,
+EtherFi and Horizon are distinct markets. EtherFi's current reserve caps may
+prevent new positions; Horizon RWA token eligibility, transfer restrictions and
+trusted valuation remain prerequisites. Robinhood reports no reviewed Aave V3
+market. V2/V4, stable-rate writes, eMode changes, delegation and gateways are
+explicitly outside this integration. Native ETH uses separate wrap/unwrap steps.
+
+Supply, collateral, variable borrow, repay and withdraw use normal previews and
+execution, or named plans. Partial/full repay and withdraw retain exact quantity
+contracts; `amount: "all"` requires finite `max_amount` and proves zero residual
+scaled debt/claim. Borrowing requires `min_health_factor`; optional `max_debt_usd`
+and `max_debt_to_collateral_bps` constrain the total resulting position. Removing
+collateral with debt requires `min_health_factor > 1`, even when the protocol
+itself would permit the change. These are execution constraints, not protection
+against later price changes, interest or liquidation.
+
+Named Aave plan variations use `min_amount`, `max_amount`, `max_fee_eth` and, for
+borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
+also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only
+quantity and fee selections vary; market, asset, spender, recipient, collateral
+setting, eMode and risk limits stay bound. Repayment never replenishes gross
+borrowing authority. Future scopes need no projected balances; each dispatch
+uses current state and verified prior steps.
+
+Run the owned deployed-state fork checks with `make test-aave-fork` and
+`make test-aave-cli-fork`; select the network with `AAVE_FORK_CHAIN=1`, `8453`
+or `42161`.
+
+## Plan timing
 
 Named plans automatically budget omitted durations from trusted operation and
 saved route metadata: 5 minutes per onchain write/immediate exchange action,
