@@ -12,9 +12,7 @@ Relay transfers, including narrow canonical native-ETH routes, between reviewed
 EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood,
 Sushi v3 on Ethereum/Arbitrum and PancakeSwap v3 on Ethereum/Arbitrum/Robinhood;
 and Ethereum mainnet Aave.
-The [product concept](docs/fin-product-concept.md)
-describes the broader exchange, trading and DeFi scope. MCP and additional
-bridge providers follow later. Fin is open source; license selection is pending.
+Fin is open source; license selection is pending.
 
 ## Components and responsibilities
 
@@ -487,7 +485,7 @@ probe uses no accounts or credentials:
 cargo run --locked -p fin-pricing --example exchange_probe -- --public-read-only
 ```
 
-See [pricing contracts](docs/implementation-plan.md#pricing-contracts).
+See [pricing evidence and approved USD ceilings](docs/rust-architecture.md#pricing-evidence-and-approved-usd-ceilings).
 Public service availability is best effort. To use a Demo/Pro plan, enroll its
 market-data key yourself in Terminal (the key is requested privately):
 
@@ -641,8 +639,7 @@ matching usable Binance credit and balance evidence. Delayed credit and lost
 responses retain the original submission and reservation: use
 `fin status OPERATION_ID --json`, never repeat with a new ID to recover.
 
-See the [deposit verification checklist](docs/testing/binance.md#evm-deposit-verification)
-for synthetic checks and the later human Touch ID session.
+Use the [verification selection guide](docs/testing/README.md#verification-selection) for focused automated coverage and [$fin-e2e](skills/fin-e2e/SKILL.md) for live deposit verification. Verify matching usable Binance credit as well as the source transfer; human Touch ID remains a separate [human checklist](docs/testing/onboarding.md) case.
 
 ## Financial limits
 
@@ -711,7 +708,7 @@ remain intact; an unrestored historical portfolio does not block normal use.
 Policy changes refuse nonterminal operations: reconcile the original work first.
 A change never expands an already approved operation or replays a write.
 
-Live E2E test defaults are **$20 per movement and $200 total allocation**. Under `fin-e2e`, agents may document finite overrides for complex actions; baseline restoration is optional. These test-planning rules do not alter enforced personal policy or existing grants. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
+Live E2E test defaults are **$20 per movement and $200 total allocation**. Under `fin-e2e`, agents may document finite overrides for complex actions; baseline restoration is optional. Align finite development policy and grants with the scenario through Fin, as described in [$fin-e2e](skills/fin-e2e/SKILL.md).
 
 New installations select these limits during `fin setup`, before configuration
 Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
@@ -848,14 +845,7 @@ Uninstall retains the maintenance lock and service-stop checks so it cannot
 race an active command or approval. Neither uninstall nor setup runs as part of
 ordinary tests. `make help` lists the targets.
 
-Read [AGENTS.md](AGENTS.md), the [implementation plan](docs/implementation-plan.md),
-[Rust architecture](docs/rust-architecture.md), [onboarding](docs/onboarding.md),
-[security contract](docs/security.md) and [testing guide](docs/testing/README.md)
-before changing execution or authorization behavior. Keep help, schemas,
-examples and tests aligned. Preserve pending operations, exact quantities and
-financial identities across changes. Never commit credentials or private live
-logs. Historical TypeScript source and reports remain in Git history and do not
-establish Rust verification.
+Follow [AGENTS.md](AGENTS.md) and read the documents relevant to the change. Use the [testing guide](docs/testing/README.md#verification-selection) to select focused checks. Keep help, schemas, examples and tests aligned. Preserve pending operations, exact quantities and financial identities across changes. Never commit credentials or private live logs.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](docs/testing/onboarding.md).

@@ -427,7 +427,7 @@ A fresh-agent rehearsal must start from CLI discovery alone and produce correct 
 
 Human acceptance uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
 
-Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).
+Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes and optional restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [human onboarding checklist](testing/onboarding.md) and the [report template](testing/report-template.md).
 
 ## Exchange connectivity and discovery
 
@@ -474,7 +474,7 @@ Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
 even with a TTY. Policy changes refuse nonterminal operations, preserving
 reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
-Touch ID. Live-test $100 and restoration instructions remain in the testing guide.
+Touch ID. Live-development verification follows [$fin-e2e](../skills/fin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
 See [limit and reload behavior](../README.md#financial-limits).
 
 ## Approval responsiveness

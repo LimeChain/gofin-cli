@@ -64,6 +64,3 @@ The fixture is pinned to block **26099326**, hash
 `0xe24db6a0bd48918550f6a7c35c0e129172816d1f6641ac16a37459627551f7bf`.
 The script uses Foundry Anvil and a public archive RPC; unavailable archived state
 blocks reproduction. Never silently substitute current mainnet state.
-
-The TypeScript harness has been retired. Its earlier source is available in
-[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5). Historical results do not establish Rust passes.

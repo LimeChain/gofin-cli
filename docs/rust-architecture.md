@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
 
 ## One CLI and a protected execution role
 
@@ -417,7 +417,7 @@ authority; a matching amount/time alone cannot recover a lost transaction ID.
 
 The broker keeps one serialized mutation/settlement queue and bounded concurrent read requests. Snapshot observers run concurrently with a 10-second evidence deadline and report partial coverage. Required preparation/revalidation have 30-second deadlines; RPC reads share a 10-second budget across identity, retries and fallback. The financial submission future is never cancelled by an evidence timeout. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
 
-Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Keep a read-only migration/parity path for TS records where required by the implementation goal.
+Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Preserve supported legacy records through explicit, versioned migrations and verify interrupted-upgrade recovery.
 
 ## Verified financial effects and exact arithmetic
 
@@ -474,7 +474,7 @@ cost caps, reservations, per-write approval and original-request recovery remain
 mandatory. Priced-to-unpriced or source/pair changes require a new approval.
 Previously excluded amounts remain honestly excluded in retained records;
 disabling the exception does not disable reconciliation. Historical scoped runs
-reject estimates, preserving the acceptance-test budget/restoration contract.
+reject estimates so test accounting remains fully valued.
 
 Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
@@ -491,13 +491,13 @@ valuation.
 
 Use exact decimal strings at boundaries, integer quantities with explicit asset/scale internally, checked `U256` conversion at EVM boundaries, and exact signed deltas and valuation arithmetic. Never pass financial quantities or policy valuations through `f64`. Use explicit conservative rounding for reserves; requested amounts must not be silently rounded. A fixed-width decimal type is not a universal container for 256-bit chain values.
 
-Carry forward these demonstrated TS requirements:
+Preserve these financial accounting requirements:
 
 - Preserve finer Binance observed precision separately from spendable chain units. Observed residuals must not disappear through numeric conversion.
 - Aave supplied underlying, scaled receipt units, accrual indices, and debt are different quantities. Reviewed protocol math and historical evidence establish backing; do not hide rounding with a tolerance.
 - Receipt tokens and their underlying position are not separate wealth. Borrowed proceeds and debt remain distinct; test allocation counts proceeds without netting debt.
 - Chain inclusion, canonical finality, intended effects, and spendable exchange credit have separate completion criteria.
-- Live acceptance tests separately restore principal, positions and allowances and reconcile costs under the testing contract; ordinary operations may retain intentional portfolio changes.
+- Live E2E tests verify the required financial effects and reconcile costs under [$fin-e2e](../skills/fin-e2e/SKILL.md). Baseline restoration is optional unless it is part of the requested scenario.
 
 Human-owned policy has two exact USD ceilings. The movement ceiling includes
 gross movement plus maximum execution costs. The legacy-named
@@ -517,11 +517,7 @@ limits until an explicit human change. Legacy run-required configuration no
 longer gates ordinary execution. No migration removes pending identities,
 financial evidence or reservations, or broadens approved operation authority.
 
-The $100 development budget, baseline snapshots, complete return plans and
-cleanup completion are LLM live-testing instructions in
-[the testing guide](testing/README.md#live-test-contract), not runtime policy.
-There is no normal/verification execution classification. Personal policy never
-authorizes exceeding the independent live-test instructions.
+Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for live development verification, scenario budgets and optional restoration. Align the isolated environment’s finite policy and authorizations with the scenario through Fin. There is no normal/verification execution classification; production policy remains human-owned.
 
 ## Exchange connectivity and extension
 

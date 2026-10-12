@@ -1,94 +1,72 @@
 # Working on Fin
 
-## Top three priorities
+## Priorities
 
-1. **UX perfection.** Make interactions slick, responsive and frictionless for both human and LLM users.
-2. **Secrets and guardrails security.** Fin's main value proposition is protecting the human's secrets and intent from a misbehaving LLM while enabling the LLM to execute the human's authorized intents.
-3. **Codebase maintainability.** Fin has and will gain many integrations and use cases. Clear, simple and extensible architecture, abstractions and code style are paramount to adding them quickly and reliably.
+1. Make Fin fast, clear and frictionless for humans and agents.
+2. Protect production secrets and enforce the human's financial intent independently of the agent.
+3. Keep integrations easy to add through simple, reusable component boundaries.
 
-Read [README.md](README.md), [the concept](docs/fin-product-concept.md), [the implementation plan](docs/implementation-plan.md), and [the testing guide](docs/testing/README.md) before implementation. The linked Binance and Ethereum guides contain the first acceptance cases.
+## Development principles
 
-Fin is implemented in compiled Rust. Read [the Rust architecture](docs/rust-architecture.md) and [terminal onboarding/discovery contract](docs/onboarding.md). Retired TypeScript source and verification reports are available in Git history; historical evidence does not establish Rust verification.
+- Minimize human re-authorization and time from approval to write submission. Repeated approval is a major verification hurdle: reuse valid authority and accommodate quote, fee and execution variations within approved limits. Complete non-time-sensitive preparation before approval and keep the submission path short. Request re-authorization only when existing authority cannot cover the action; preserve required freshness, binding and policy checks without silently broadening consent.
+- Keep argument parsing and presentation in the CLI; the broker independently validates authority and coordinates execution. Keep venue/protocol behavior in adapters and typed financial accounting in shared libraries.
+- Use exact quantities, explicit asset/network identities and verified evidence. Persist submission identity before dispatch; reconcile uncertain outcomes instead of replaying writes. Submission acceptance is not settlement.
+- Preserve credentials, financial history, pending identities and reservations across upgrades. Use versioned migrations and test interrupted upgrades where persistence changes.
+- Keep public help, discovery, schemas and examples aligned with actual behavior. Preserve venue-specific meanings and report incomplete observations honestly.
+- Make the smallest complete change. Fix defects within the requested workflow; keep unrelated improvements separate and avoid speculative abstractions or extra release gates.
 
-## Components and responsibilities
+## Read only what the task needs
 
-| Component | Binary or library | Responsibility |
-| --- | --- | --- |
-| `fin-cli` | Binary: `fin` | Parse arguments, expose help and schemas, render progress/results, and send requests to the broker. |
-| `fin-broker` | Binary: `fin-broker`, plus an internal Rust library | Load protected configuration, construct integrations, independently validate requests, and coordinate execution. |
-| `fin-engine` | Rust library | Enforce financial limits, manage previews and reservations, coordinate fresh approval, prevent duplicates, and recover uncertain outcomes. |
-| `fin-store` | Rust library | Persist operation identities, submissions, proofs, run state and the financial journal. |
-| Application adapters: `fin-binance`, `fin-ethereum`, `fin-evm` | Rust libraries | Implement venue/protocol behavior, RPC and exchange calls, simulation, submission, receipt verification and typed financial effects. |
-| `fin-pricing` | Rust library | Supply exact USD quotes with asset identity, source freshness and bounded caching. |
-| `fin-authorization` | Rust library | Enforce OS authorization and verify exact approvals or finite operation-boundary consent. Invoke the internal native helper. |
-| `fin-credentials` + `fin-human-terminal` | Rust libraries | Store/use credentials inside the protected role and enforce private human-terminal enrollment. |
-| Native Touch ID helper | Compiled Swift binary: `fin-touch-id`; human display name **Fin** | Present trusted approval details and request fresh macOS Touch ID authentication. |
-| `fin-domain`, `fin-discovery`, `fin-protocol`, `fin-presentation` | Shared Rust libraries | Define exact types, discovery metadata, the broker protocol and reusable output patterns. |
+Fin is a Rust workspace. Start with the affected code, its tests and nearby instructions. There is no mandatory full-document reading pass.
 
-Financial business logic runs inside the protected broker process through its
-libraries; those libraries are not separate services. The CLI shares contracts
-and presentation code, but its input validation grants no execution authority.
-The broker enforces approval, policy and credential access independently.
+| When needed | Reference |
+| --- | --- |
+| Public commands or development entrypoints | Relevant sections of [README](README.md), `make help`, and CLI discovery |
+| Component boundaries or a cross-component design change | [Rust architecture](docs/rust-architecture.md) |
+| Production authorization, signing or credential changes | [Security contract](docs/security.md) |
+| Terminal enrollment, approval presentation or machine discovery | [Onboarding contract](docs/onboarding.md) |
+| Test selection, workflow fixtures or evidence requirements | [Testing guide](docs/testing/README.md) |
+| Environment lifecycle or an owned fork | [Development environments](docs/testing/development-environments.md) or [fork setup](docs/testing/fork.md) |
 
-## Product decisions
+Read relevant sections rather than entire manuals. Use existing source and tests to locate integration-specific behavior; do not require a new guide for each integration.
 
-- Product Fin, repository/package `fin-cli`, binary `fin`; open source, license pending.
-- CLI plus a small companion skill first. MCP and general chain-to-chain bridging are later work.
-- Setup is bundled with Fin and terminal-driven. The human runs installation and credential enrollment in their own terminal; custom credential-entry UI and a graphical installer are not beta requirements. Keep later add/update/remove flows available without reinstalling.
-- Setup automatically configures persistent completion for the human account's login shell (Zsh, Bash, Fish), without an opt-in prompt. Use standard user locations and minimal Fin-marked blocks; preserve user configuration and remove only Fin-owned content on uninstall. Keep manual generation available for custom use, outside normal onboarding steps. Development tests must use temporary homes.
-- LLM discovery includes setup, service lifecycle, and connection management, before a broker/configuration/credentials exist. Shared definitions drive help, explanation, safe input/output/error schemas, examples, validation, and human-versus-agent execution metadata. Never ask for credentials in chat or pass them through an agent-controlled terminal.
-- One public CLI talks to a protected execution role. Keep OS authentication behind `fin-authorization`, with the compiled Swift helper internal to its macOS provider. Define other platform boundaries without claiming unimplemented write authorization works.
-- The LLM plans and invokes steps. Fin validates and executes individual operations, with durable records and reconciliation.
-- In the installed production runtime, require fresh Touch ID to create or replace financial authorization. Supported operation-boundary consent permits concrete attempts within its approved scope, cumulative limits and expiry without another prompt; the broker independently validates every dispatch. Other operations retain fresh exact approval per write. Revoking authorization requires no Touch ID and stops future dispatch; it does not cancel venue orders already submitted. Reads, previews, and status checks do not require financial-action approval.
-- Production credentials and approval enforcement must be protected from the agent's tools. A flag, prompt instruction, mock biometric response, or ordinary same-user process is not proof of that boundary.
-- Preserve venue-specific financial meanings. Consistent shared fields do not imply identical balance and position schemas.
-- An EVM wallet is one protected signer/address reusable across reviewed networks. Keep network RPC, fees, finality and protocol deployments separate from credentials. Preserve legacy chain-qualified financial identities and pending records; broadening a legacy connection uses protected configuration approval.
-- Software updates automatically supply missing release-reviewed network and AMM deployment profiles to enrolled reusable EVM wallets, without credential reentry or separate configuration approval. Preserve custom profiles, wallet identities, personal policy and pending bindings. This availability grants no financial authority; legacy chain-scoped wallets remain scoped.
-- Design every new product version for in-place upgrades without requiring users to re-enter secrets already enrolled. Use explicit, versioned migrations, including SQL schema/data migrations where applicable, to evolve existing configuration, credential metadata and durable financial state; do not reset state or require credential re-enrollment to accommodate a new format or feature. Keep secret values inside the protected credential store and preserve their references, connection identities, personal policy, authorization bindings and pending recovery records. Verify migrations from supported older versions, including interrupted upgrades, without losing state or replaying financial writes.
-- Rollup verification settles on canonical sequencer inclusion, without waiting for an RPC `finalized` marker or parent-chain finality. Apply the same reviewed-network rule to wallet transfers, AMM swaps, permission changes and external credits. Verify the original transaction envelope, canonical receipt, exact protocol effects, permissions and costs before settlement; preserve unresolved identities across restart. Register new rollups explicitly in the shared network classification.
-- Token indexers supply candidates, not exact balance or exhaustive coverage evidence. Verify quantities through pinned RPC reads and label discovery coverage honestly. Financial snapshots declare a bounded tracked asset scope; unsupported USD valuation must not infer value from a symbol. Binance assets without a direct USDC/USDT pair may use explicitly marked unknown $0 estimates; writes require the protected, default-off unpriced exchange policy exception and disclose excluded USD coverage. Scoped acceptance runs still require verified valuations.
-- Start with Binance funding and Ethereum wallet/Uniswap/Aave flows without silently dropping the remaining concept scope.
-- Normal operations support intentional permanent portfolio changes without run creation, verification classification, return planning or baseline restoration. Product ceilings are human-owned protected configuration; setup collects them and changes need fresh human authorization. Zero removes the corresponding personal ceiling. The legacy-named allocation setting is an installation-wide rolling 24-hour gross budget across commands; unresolved submissions remain reserved beyond that window. Historical run records remain internal recovery data, not gates on normal use; there is no public run command or execute run argument.
-- Keep beta engineering practical. Do not introduce additional release-hardening or formal audit gates from unaccepted review suggestions.
+## Production and development boundaries
 
-## CLI experience conventions
+Production credentials, policy and authorization belong to the protected broker. Keep OS authentication behind `fin-authorization`; enforce exact or bounded financial authority independently at dispatch. Never expose production secrets to agent tools, collect them in chat, or ship an authorization-disable switch.
 
-- Keep Fin terminal-driven. Do not open custom review, confirmation, details, or credential dialogs anywhere in the CLI; the operating system's Touch ID prompt is the only approval popup. Humans review concise summaries in their terminal; agents present the intent and permitted variations before requesting authorization. The Touch ID prompt identifies the exact approval scope; every concrete submission retains its own immutable identity and binding.
-- Native approval text leads with the human's intent and readable asset quantities, fee limits and expiry. Use verified token labels and human durations (for example, 10 minutes), with exact addresses, atom values, routing and rate formulas in structured details. The LLM explains technical choices in conversation. Use standalone execution for a single exact action and plans for coherent sequences or explicitly bounded delegation.
-- Default human output is brief: the current action, its result, and one useful next step. Avoid JSON dumps, implementation inventories, repeated disclaimers, and unrelated network or policy details during setup. Put technical detail behind `--verbose` or an explicit details option.
-- Show meaningful activity while work actually runs, for example `⠋ Checking Binance credentials...`, then a verified result such as `✓ Binance credentials added`. Never imply completion before success, invent progress percentages, or animate while waiting for terminal input. Clear an active indicator before prompts, results, or errors.
-- Apply semantic color to the entire message row, including its symbol and text, not only a label or error code. Use consistent success, warning, error, and activity styles. Respect `NO_COLOR`, `TERM=dumb`, and redirected output; keep text and symbols understandable without color.
-- Explain each password or biometric request immediately before it, including what it authorizes. Distinguish the Mac login password for installation from Touch ID for Fin configuration or a specific financial write. Keep approval summaries concise but retain material amounts, destinations, permissions, and warnings; expose exact technical bindings through details.
-- State what an approval timeout applies to and the remaining time. Expiry should explain what did not happen and give the correct retry action, rather than a generic terminal or credential warning. Do not automatically refresh consent or replay a financial write.
-- Treat `--json` as a stable agent execution contract, not merely a formatter: no terminal input prompts, animation, color, or human chatter; preserve structured results, errors, exit behavior, and explicit human handoffs. Required OS approvals still apply. Keep machine discovery, help, examples, and behavior aligned.
-- Reuse shared presentation and command patterns. Do not weaken terminal checks or redirect protected enrollment streams to hide output. Credentials remain hidden; approval and isolation requirements still apply.
-- Verify changed terminal behavior with focused synthetic tests, including relevant TTY, redirected, no-color, machine, cancellation, and expiry paths. Human Touch ID verification remains explicitly pending until observed.
-
-## Development cadence
-
-- Make the smallest correct change for the current issue. Keep unrelated improvements as follow-ups; handle small fixes directly and delegate only substantial independent work when it saves time.
-- Prefer the local development workflow and targeted tests. Batch packaging, installation updates, commits, and CI when practical; do not require a release bundle for ordinary CLI iteration.
-- Use the Make targets for ordinary isolated CLI/broker development from the worktree being changed: `make dev-env-start`, `make dev-env-cli ARGS='capabilities --json'`, and `make dev-env-stop`. `DEV_ENV` defaults to `local` and is scoped to that worktree; set `DEV_ENV=name` consistently when using multiple environments in one worktree. The scripts behind these targets are implementation details.
-- Start builds and snapshots that worktree's matching synthetic CLI/broker pair. After code edits, stop then start to adopt the new build; CLI invocation alone does not rebuild. Stop preserves synthetic configuration, journal and uncertain operations. Use `make dev-env-reset` only to explicitly discard the selected stopped environment's state. Use `DEV_FLAGS=--json` for lifecycle JSON and `ARGS='... --json'` for CLI JSON.
-- Run `make test-dev-env` for synthetic environment/recovery/ownership checks without Anvil. Run `make test-fork` explicitly for an independently owned Ethereum fork; it needs existing Anvil and archive access. Separate worktrees can run either workflow concurrently. See the [development environment guide](docs/testing/development-environments.md) for fixture commands and state lifetimes.
-- `make dev` runs the regular debug CLI and broker-backed commands use the installed protected service. Prefer `make dev-env-*` for synthetic iteration; do not use installation, update or uninstall targets as part of that loop. Synthetic tests do not establish Touch ID or live financial acceptance.
-- Keep progress updates brief: what was found, what remains, and when the user can test. If a small fix exceeds ten minutes, explain the concrete blocker and shortest remaining path.
-- Whenever task orchestration calls an exchange API or chain RPC directly outside Fin, record the operation and why Fin could not provide it, and raise it to the user as a possible Fin feature or discovery gap. Redact secrets and private request data. Treat the gap as a follow-up unless its implementation is already authorized; do not silently expand scope. Normal adapter-internal API/RPC transport is not a missing CLI feature by itself.
-
-## Implementation and verification
-
-Make routine stack, library, and code-structure decisions, record them briefly in the implementation plan, and build. Ask only when a decision materially changes product behavior or requires information unavailable from the repository or connected systems.
-
-The command examples are design proposals until implemented. Keep help, schemas, examples, and executable tests in sync. Reuse CCXT and maintained protocol tooling where appropriate, but route every supported write through Fin's approval and execution path.
-
-Use decimal-safe quantities and explicit units and networks. Persist a write's identity before submission. An uncertain result requires reconciliation, not a new financial action. Do not mark an operation complete merely because a submission returned successfully.
-
-Write meaningful tests for financial behavior, approvals, duplicate requests, and partial failures. Distinguish mocked, fork, read-only live, biometric, and live-write verification in reports. A mocked approval is useful for automated tests but cannot establish that Touch ID or credential isolation works.
+The isolated development environment is agent-controlled and separate from the installed service. Production enrollment and human-only policy-change rules do not prohibit its supported disposable-credential setup, finite policy configuration or automatic development approval. Keep those capabilities confined to the development examples. Default automated tests use synthetic credentials and isolated local fixtures.
 
 For live end-to-end verification, use the [$fin-e2e skill](skills/fin-e2e/SKILL.md) and follow its workflow. Keep live-verification instructions in that skill rather than duplicating them here.
 
-The Rust ledger consumes typed effects backed by application-specific verified evidence. Keep application-name branches out of shared financial accounting. Preserve exact quantities, request/submission identities, reservations, proof-before-terminal settlement, and unresolved records across migrations; upgrading or porting must never silently replay a financial write.
+## Development loop
 
-Never commit secrets, private account mappings, signed requests, or unredacted live logs. The existing ignored `.context/` directory can hold private test reports, but is not a protected credential store. Test-only keys and signing fixtures must be unmistakably synthetic and usable only in isolated local tests.
+- Choose routine implementation details autonomously. Ask only for missing information or decisions that materially change the requested behavior. Delegate substantial independent work when it saves time; keep small fixes local.
+- Use the current worktree's Make entrypoints:
 
-Update the README with actual setup and test commands as code is added. Report passed, failed, blocked, and unrun cases honestly; do not describe broad CCXT or protocol coverage as verified based on a single happy-path test.
+```sh
+make dev-env-start
+make dev-env-cli ARGS='capabilities --json'
+# After source edits, rebuild both binaries while retaining environment state:
+make dev-env-stop
+make dev-env-start
+make dev-env-stop
+```
+
+- `DEV_ENV` defaults to `local`, scoped to the worktree. Use the same explicit name on every command when selecting another environment. CLI invocation uses the existing binary snapshot and does not rebuild. Stop preserves state; reset only when intentionally discarding stopped synthetic state.
+- `make dev` uses the installed protected service for broker commands. Use `make dev-env-*` for isolated iteration; installation, updates, uninstall and release bundles are separate tasks.
+- Run the smallest meaningful regression while editing. When stable, run the affected suite and any necessary broader checks once. Use the [verification selection table](docs/testing/README.md#verification-selection); do not rerun expensive passing suites without relevant changes or new evidence.
+- Finish the affected workflow, including relevant failure/recovery paths. Keep implementation defects as work to fix; do not transfer ordinary debugging to human verification. Native Touch ID and installed isolation need separate observed evidence.
+
+## CLI experience
+
+- Keep Fin terminal-driven. Human output should state the action, result and useful next step; place technical detail behind explicit options. Use shared presentation helpers.
+- Show activity only while work runs and clear it before input/results. Use semantic color across the message row; respect `NO_COLOR`, `TERM=dumb` and redirection.
+- Explain password/approval requests, scope and expiry concisely. Keep material amounts, destinations, fees and permissions visible. Do not add custom approval or credential dialogs; production uses the OS approval prompt.
+- Treat `--json` as a stable execution contract: no terminal input, animation, color or human chatter; keep structured results, errors and exit behavior consistent. It does not bypass required authorization.
+- For changed terminal paths, test relevant TTY, redirected, machine-output, cancellation and expiry behavior using temporary homes and fixtures.
+
+## Completion and documentation
+
+Report what changed, exact relevant checks and their outcomes, and remaining limitations. Distinguish synthetic, fork, live-read, live-write and native-approval evidence; do not claim unobserved cases passed. Keep progress updates brief and explain concrete blockers.
+
+Update documentation when a public command, behavior or architectural contract changes. Record significant design choices in the relevant existing document, not a per-task implementation log. Small internal fixes need no documentation churn. Put private execution evidence in ignored `.context/` when needed; never commit secrets, private account mappings, signed requests or raw live logs.

@@ -86,10 +86,4 @@ reset, migrated or replayed.
 
 ## Verification limits
 
-Installation, credential isolation, biometric financial writes and production/mainnet
-settlement require separate observed results in the [human checklist](testing/onboarding.md).
-Synthetic tests and native availability probes do not establish those cases. Live tests retain the
-[$100 allocation/movement and complete restoration contract](testing/README.md#live-test-contract).
-
-The TypeScript runtime and installer have been removed. Its source remains in
-[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5), together with historical reports. Those results do not establish Rust verification.
+Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.

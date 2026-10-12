@@ -84,6 +84,5 @@ A live-write scenario passes only when its required effects and settlement are v
 - Comparable baseline and conditions, if measured:
 - What this run establishes:
 - What remains unverified or blocked:
-- Historical TS evidence referenced separately, without counting it as Rust verification:
 - Implementation/automated readiness versus human/production acceptance status:
 - Next implementation or verification step:
