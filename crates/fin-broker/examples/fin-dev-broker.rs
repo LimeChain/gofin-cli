@@ -321,6 +321,7 @@ impl Adapter for SyntheticAdapter {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         })
     }
 

@@ -206,7 +206,7 @@ pub(super) fn reject_unpriced_run(prepared: &PreparedOperation) -> Result<()> {
 
 impl Engine {
     pub fn allocation_unpriced_operations(&self) -> Result<u64> {
-        let instant = Utc::now();
+        let instant = self.clock.now();
         let mut count = 0;
         for record in self.operations()? {
             if counted(&record, instant)? {
@@ -220,7 +220,7 @@ impl Engine {
     }
     pub fn allocation_used_usd_micros(&self) -> Result<String> {
         let mut total = BigUint::zero();
-        let instant = Utc::now();
+        let instant = self.clock.now();
         let (owners, owner_operations, transfers, operations) = {
             let store = self
                 .store
@@ -280,7 +280,7 @@ impl Engine {
         replacement_parent: Option<&str>,
         recovery_parent: Option<&str>,
     ) -> Result<()> {
-        let instant = Utc::now();
+        let instant = self.clock.now();
         let movement_limit =
             fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?;
         let allocation_limit =
@@ -425,8 +425,8 @@ pub(super) fn validate_boundary_candidate_policy(
     operation_id: &str,
     options: &EngineOptions,
     store: &Store,
+    instant: DateTime<Utc>,
 ) -> Result<()> {
-    let instant = Utc::now();
     if unpriced(prepared) && !options.allow_unpriced_exchange_assets {
         return Err(budget_error(
             "UNPRICED_EXCHANGE_ASSET_DISABLED",

@@ -250,6 +250,13 @@ impl Ui {
             "36",
             output,
         )?;
+        if let Some(warnings) = review["timing_warnings"].as_array() {
+            for warning in warnings {
+                if let Some(message) = warning["message"].as_str() {
+                    self.message_to(message, "33", output)?;
+                }
+            }
+        }
         if let Some(revision) = review["replaces_revision_id"].as_str() {
             self.message_to(&format!("Revises: {revision}"), "33", output)?;
         }
@@ -275,6 +282,17 @@ impl Ui {
                     "36",
                     output,
                 )?;
+                if let Some(window) = step["action_deadline_seconds"].as_u64() {
+                    self.message_to(
+                        &format!(
+                            "Action window: {} from preparation; Fin assigns the absolute deadline",
+                            duration_label(window)
+                        ),
+                        "36",
+                        output,
+                    )?;
+                }
+
                 if let Some(input) = step.get("input") {
                     let display_input =
                         plan_input_for_display(input, &generated_fields).map_err(|_| {

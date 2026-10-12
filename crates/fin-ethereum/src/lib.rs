@@ -84,6 +84,7 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 fn carry_attempt_valuation(
     approved: &PreparedOperation,
     fresh: &mut PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     if approved
         .binding
@@ -96,7 +97,7 @@ fn carry_attempt_valuation(
     {
         let mut guarded = approved.clone();
         fin_domain::value_bounds::bind(&mut guarded);
-        fin_domain::value_bounds::carry(&guarded, fresh)?;
+        fin_domain::value_bounds::carry_at(&guarded, fresh, at)?;
         fresh
             .binding
             .as_object_mut()
@@ -105,26 +106,27 @@ fn carry_attempt_valuation(
         fresh.summary = approved.summary.clone();
         Ok(())
     } else {
-        fin_domain::value_bounds::carry(approved, fresh)
+        fin_domain::value_bounds::carry_at(approved, fresh, at)
     }
 }
 
 fn require_attempt_valuation(
     approved: &PreparedOperation,
     fresh: &PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     if approved
         .binding
         .get(fin_domain::value_bounds::KEY)
         .is_some()
     {
-        fin_domain::value_bounds::validate(fresh)
+        fin_domain::value_bounds::validate_at(fresh, at)
     } else if approved
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
         .is_some()
     {
-        carry_attempt_valuation(approved, &mut fresh.clone())
+        carry_attempt_valuation(approved, &mut fresh.clone(), at)
     } else {
         require_frozen_valuation(fresh.valuation.as_ref(), approved.valuation.as_ref())
     }
@@ -539,10 +541,18 @@ pub struct EthereumAdapter {
     pub wallets: Vec<WalletConnection>,
     pub runtime: Arc<EvmRuntime>,
     oracle_clock: Arc<dyn OracleObservationClock>,
+    clock: Arc<dyn fin_domain::clock::Clock>,
     wallet_valuation: Option<Arc<dyn WalletValuation>>,
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
 }
 impl EthereumAdapter {
+    /// Internal deterministic fixture composition. No production configuration switch.
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Internal dependency injection for a guarded isolated fork. Production
     /// broker composition always calls new(), whose clock is fixed system UTC.
     /// This affects oracle heartbeat observation only, never authorization expiry.
@@ -671,6 +681,7 @@ impl EthereumAdapter {
             wallets,
             runtime,
             oracle_clock: Arc::new(SystemOracleClock),
+            clock: Arc::new(fin_domain::clock::SystemClock),
             wallet_valuation: None,
             token_discovery: None,
         })
@@ -1052,7 +1063,7 @@ impl Adapter for EthereumAdapter {
             )
         })?;
         require(
-            prepared.expires_at > now(),
+            prepared.expires_at > self.clock.now().to_rfc3339(),
             "PREVIEW_EXPIRED",
             "Original preview has expired.",
         )?;
@@ -1070,7 +1081,7 @@ impl Adapter for EthereumAdapter {
                 &context,
             )
             .await?;
-        carry_attempt_valuation(prepared, &mut refreshed)?;
+        carry_attempt_valuation(prepared, &mut refreshed, self.clock.now())?;
         Ok(refreshed)
     }
     async fn submit(
@@ -1087,7 +1098,7 @@ impl Adapter for EthereumAdapter {
             "BINDING_CHANGED",
             "Current executable fields differ from approved envelope.",
         )?;
-        require_attempt_valuation(prepared, &fresh)?;
+        require_attempt_valuation(prepared, &fresh, self.clock.now())?;
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",

@@ -608,6 +608,7 @@ mod tests {
             valuation: None,
             intent: Default::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         assert_eq!(
             router.prepared(&prepared).err().unwrap().code,

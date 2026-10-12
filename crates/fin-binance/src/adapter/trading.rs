@@ -79,6 +79,10 @@ pub(super) fn definitions() -> Vec<Definition> {
         completion: "Terminal order status, complete matching trade/commission evidence, verified post-state and typed ledger settlement; an acceptance response is not completion.".into(),
         semantics: json!({"walletType":if futures {"USD_M"} else {"SPOT"},"quantity":"exact base decimal; all only for scoped cleanup","orderType":"LIMIT","timeInForce":["IOC","FOK"],"approval":"fresh per write","standingOrders":false,"scopedTimeInForce":if futures {vec!["IOC","FOK"]} else {vec!["FOK"]},"concurrentPositions":if futures {json!(1)} else {Value::Null}}),
     }).collect();
+    for definition in &mut result {
+        definition.semantics["plan_allowance_seconds"] =
+            json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS);
+    }
     if let Some(spot) = result
         .iter_mut()
         .find(|definition| definition.name == order_name(false))

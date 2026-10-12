@@ -1567,6 +1567,20 @@ pub fn compose_runtime(
     config: BrokerConfigV2,
     dependencies: RuntimeDependencies,
 ) -> fin_domain::Result<Arc<BrokerRuntime>> {
+    compose_runtime_with_clock(
+        config,
+        dependencies,
+        Arc::new(fin_domain::clock::SystemClock),
+    )
+}
+
+/// Internal deterministic composition. The protected entry point always uses system UTC.
+#[doc(hidden)]
+pub fn compose_runtime_with_clock(
+    config: BrokerConfigV2,
+    dependencies: RuntimeDependencies,
+    clock: Arc<dyn fin_domain::clock::Clock>,
+) -> fin_domain::Result<Arc<BrokerRuntime>> {
     config.validate()?;
     let options = EngineOptions {
         max_movement_and_cost_usd_micros: config.policy.max_movement_usd_micros.clone(),
@@ -1609,7 +1623,8 @@ pub fn compose_runtime(
             dependencies.authorizer,
             options,
         )?
-        .with_cost_origin_price_provider(price_provider),
+        .with_cost_origin_price_provider(price_provider)
+        .with_clock(clock),
     );
     if let Some(bridge) = &dependencies.bridge {
         bridge.attach_engine(Arc::downgrade(&engine))?;
@@ -5940,6 +5955,7 @@ mod tests {
                 version: 1,
                 name: "Synthetic snapshot read".into(),
                 steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: "snapshot".into(),
                     operation: "fin.snapshot".into(),
                     input: json!({}),
@@ -5961,7 +5977,7 @@ mod tests {
                     maximum_costs: vec![],
                 },
             },
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -6900,6 +6916,7 @@ mod tests {
                     valuation: None,
                     intent: fin_domain::FinancialIntent::default(),
                     operation_version: 1,
+                    action_deadline: None,
                 }),
                 approval: None,
                 submission: None,

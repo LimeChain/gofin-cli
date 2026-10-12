@@ -589,6 +589,7 @@ mod tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         }
     }
     #[async_trait]

@@ -97,10 +97,14 @@ fn invalid() -> FinError {
 }
 
 pub fn validate(prepared: &PreparedOperation) -> Result<()> {
-    check(prepared, true)
+    validate_at(prepared, Utc::now())
 }
 
-fn check(prepared: &PreparedOperation, fresh: bool) -> Result<()> {
+pub fn validate_at(prepared: &PreparedOperation, at: chrono::DateTime<Utc>) -> Result<()> {
+    check(prepared, true, at)
+}
+
+fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -> Result<()> {
     let Some(raw) = prepared.binding.get(KEY) else {
         return Ok(());
     };
@@ -137,7 +141,7 @@ fn check(prepared: &PreparedOperation, fresh: bool) -> Result<()> {
         }
     }
     for price in value.prices.iter().filter(|_| fresh) {
-        if !crate::price_freshness::is_fresh(&price.observed_at, &price.source, Utc::now())
+        if !crate::price_freshness::is_fresh(&price.observed_at, &price.source, at)
             || price.source.is_empty()
             || (price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_estimate(price))
         {
@@ -154,14 +158,22 @@ fn check(prepared: &PreparedOperation, fresh: bool) -> Result<()> {
 
 /// Retain approved ceilings/reservations and actual fresh quotes separately.
 pub fn carry(approved: &PreparedOperation, refreshed: &mut PreparedOperation) -> Result<()> {
+    carry_at(approved, refreshed, Utc::now())
+}
+
+pub fn carry_at(
+    approved: &PreparedOperation,
+    refreshed: &mut PreparedOperation,
+    at: chrono::DateTime<Utc>,
+) -> Result<()> {
     let Some(raw) = approved.binding.get(KEY) else {
         return Ok(());
     };
     // Original quote times can expire while consent is pending; their shape and
     // identities must still be intact. Only the refreshed evidence may settle.
-    check(approved, false)?;
+    check(approved, false, at)?;
     refreshed.binding[KEY] = raw.clone();
-    validate(refreshed)?;
+    validate_at(refreshed, at)?;
     let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
     let value = refreshed.valuation.as_mut().ok_or_else(invalid)?;
     value.movement_usd_micros = bounds.movement_usd_micros;
@@ -181,6 +193,7 @@ mod tests {
         PreparedOperation {
             operation: "synthetic.transfer".into(),
             operation_version: 1,
+            action_deadline: None,
             input: json!({"amount":"1"}),
             binding: json!({"amount":"1","destination":"SYNTHETIC-wallet"}),
             summary: "Send 1 SYNTHETIC to SYNTHETIC-wallet.".into(),

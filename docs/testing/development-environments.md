@@ -125,6 +125,12 @@ The aliases `BINANCE_MASTER_ACCOUNT_API_KEY`, `BINANCE_MASTER_ACCOUNT_API_PEM`,
 map to the corresponding inputs above. Duplicate aliases/canonical keys are
 rejected. No credential values appear in command arguments or output.
 
+A credential export may contain variables for other tools or connectors. The
+development importer reads only the supported Binance and EVM credential keys
+above and ignores all other assignments, without retaining or importing their
+values. It still rejects malformed assignment lines, duplicate supported keys,
+and files that contain no supported Fin credentials.
+
 Default import is offline and requires public Binance UIDs and the subaccount
 email. To discover UIDs and verify identity with authenticated read-only calls:
 

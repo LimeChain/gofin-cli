@@ -261,6 +261,41 @@ only scopes confirmed by `fin plans preview`; they support adapter-reviewed
 bridge steps and other eligible financial operations. Enrollment and policy
 changes have their own approval flow.
 
+Budget the complete sequential workflow before requesting plan approval. Allow
+5 minutes per onchain operation or immediate CEX trade, and 15 minutes per
+withdrawal or fast bridge. Count all required writes, including allowance/reset
+writes, and dependency waits; the fast-bridge allowance already includes its
+settlement wait. Increase allowances for longer route estimates. Sum them, add
+25% headroom with a minimum of 5 minutes, then round upward to a 5-minute boundary.
+Withdrawal → swap → fast bridge is 15 + 5 + 15 minutes and needs a **45-minute
+authorization** after headroom and rounding. These are planning budgets, not
+settlement guarantees, quote lifetimes, or transaction deadlines.
+
+Strongly prefer calculating and setting an explicit `--valid-for`, and state the
+chosen authorization duration during conversational review. Fin automatically
+budgets omitted durations for classified immediate workflows. Resting/trigger
+orders, TWAPs, delayed bridge stages and unclassified writes require an explicit
+full workflow horizon. Respect explicit user duration constraints and protected
+adapter limits; report conflicts instead of silently shortening the budget.
+
+For a future-funded Uniswap or Ramses step, omit `input.deadline` and set the
+step's `action_deadline_seconds` within its advertised maximum (at most 600).
+The approved relative window is separate from the parent lifetime. Submit the
+same deadline-free template; Fin resolves an absolute deadline only when the
+step becomes eligible. Before preparation, inspect authorization timing in
+`fin plans status`. Fin requires the entire approved action window to remain.
+`PLAN_INSUFFICIENT_AUTHORIZATION_TIME` means no candidate was prepared: reconcile
+unresolved work, preview a longer revision with `--replaces REVISION_ID`, and
+request fresh native approval. Never automatically renew consent or rewrite a
+prepared candidate's deadline, input or identity. Replace only an unsubmitted
+candidate through the supported explicit replacement path. Reconcile submitted
+or uncertain attempts after expiry using their original identities.
+
+The native approval challenge has its own short timeout. The client's 300-second
+transport wait limits one request, not the plan lifetime or settlement. A lost
+response requires recovery of the same request/attempt ID, never a new write.
+Quotes still expire independently and refresh only through supported paths.
+
 For a bounded sequence that should share one Touch ID approval, create one named
 plan. The name is a display label and is included in approval; changing it needs
 a revised approval. Keep step IDs stable and ordered, declare completion targets,
@@ -294,7 +329,7 @@ each step is prepared for execution.
 Neither preview reserves funds or approves:
 
 ```text
-fin plans preview --input PLAN_JSON --json
+fin plans preview --input PLAN_JSON --valid-for 45m --json
 ```
 
 Review the returned ordered permissions, variations, cumulative bounds, prior
@@ -304,7 +339,7 @@ authorization. For machine-driven review, carry that exact hash into authorizati
 a changed review is rejected before Touch ID:
 
 ```text
-fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-hash REVIEW_HASH --json
+fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 45m --review-hash REVIEW_HASH --json
 ```
 
 The human reviews the full plan in the terminal and approves one named revision
@@ -370,3 +405,9 @@ exact parent) or an approved revision of the same named plan (plan-owned parent)
 This read renews no authority and broadcasts nothing. Recovery must fit the
 original cumulative fee budgets. Empty bounded external-finalization discovery
 has partial coverage; it is not proof that no finalization exists.
+
+A full relative action window must be shorter than the parent lifetime, leaving
+time for orchestration. Fin reports `PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW`
+before approval if they cannot fit; choose an explicit longer duration or a
+shorter reviewed action window. For a single onchain step with an automatic
+10-minute parent, a 5-minute action window leaves the planned headroom.

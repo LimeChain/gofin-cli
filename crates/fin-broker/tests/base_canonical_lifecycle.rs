@@ -794,6 +794,7 @@ impl Harness {
                 .iter()
                 .enumerate()
                 .map(|(i, input)| FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: format!("stage-{i}"),
                     operation: "bridge.transfer".into(),
                     input: input.clone(),
@@ -851,7 +852,7 @@ impl Harness {
         let request = FinancialPlanAuthorizationRequest {
             request_id: format!("review-{request_id}"),
             plan: plan.clone(),
-            valid_for_seconds: seconds,
+            valid_for_seconds: Some(seconds),
             replaces_revision_id: replaces.clone(),
             expected_review_hash: None,
         };
@@ -860,7 +861,7 @@ impl Harness {
             .authorize_financial_plan(FinancialPlanAuthorizationRequest {
                 request_id: request_id.into(),
                 plan,
-                valid_for_seconds: seconds,
+                valid_for_seconds: Some(seconds),
                 replaces_revision_id: replaces,
                 expected_review_hash: Some(review.review_hash),
             })
@@ -1249,7 +1250,7 @@ async fn modeled_deferred_receipt_cannot_widen_quantity_or_financial_identity() 
         let request = FinancialPlanAuthorizationRequest {
             request_id: format!("invalid-target-review-{altered}"),
             plan: spec.clone(),
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -1264,7 +1265,7 @@ async fn modeled_deferred_receipt_cannot_widen_quantity_or_financial_identity() 
                     .authorize_financial_plan(FinancialPlanAuthorizationRequest {
                         request_id: format!("invalid-target-authorize-{altered}"),
                         plan: spec,
-                        valid_for_seconds: 600,
+                        valid_for_seconds: Some(600),
                         replaces_revision_id: None,
                         expected_review_hash: Some(review.review_hash),
                     })

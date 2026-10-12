@@ -104,6 +104,7 @@ fn plan() -> FinancialPlanSpec {
         name: "Synthetic USDC funding and dev-wallet withdrawal".into(),
         steps: vec![
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "fund-main".into(),
                 operation: "binance.transfer".into(),
                 input: transfer,
@@ -120,6 +121,7 @@ fn plan() -> FinancialPlanSpec {
                 funding_dependencies: vec![],
             },
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "withdraw-to-dev-wallet".into(),
                 operation: "binance.withdraw".into(),
                 input: withdraw,
@@ -164,7 +166,7 @@ fn request(plan: FinancialPlanSpec) -> FinancialPlanAuthorizationRequest {
     FinancialPlanAuthorizationRequest {
         request_id: "SYNTHETIC-plan-single-approval".into(),
         plan,
-        valid_for_seconds: 600,
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     }

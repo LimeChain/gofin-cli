@@ -225,6 +225,7 @@ fn two_step_plan() -> FinancialPlanSpec {
         name: "Synthetic ETH round trip".into(),
         steps: vec![
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "buy-eth".into(),
                 operation: "binance.spot.order-place".into(),
                 input: buy,
@@ -237,6 +238,7 @@ fn two_step_plan() -> FinancialPlanSpec {
                 funding_dependencies: vec![],
             },
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "sell-eth".into(),
                 operation: "binance.spot.order-place".into(),
                 input: sell,
@@ -271,7 +273,7 @@ fn plan_request() -> FinancialPlanAuthorizationRequest {
     FinancialPlanAuthorizationRequest {
         request_id: "SYNTHETIC-plan-approval".into(),
         plan: two_step_plan(),
-        valid_for_seconds: 600,
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     }
@@ -347,6 +349,7 @@ fn withdrawal_plan() -> FinancialPlanSpec {
         version: 1,
         name: "Synthetic named destination withdrawal".into(),
         steps: vec![FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "withdraw".into(),
             operation: "binance.withdraw".into(),
             input,
@@ -1094,7 +1097,7 @@ async fn expired_plan_recovers_duplicate_attempt_and_accepts_a_fresh_revision() 
     );
     let mut request = plan_request();
     request.request_id = "SYNTHETIC-plan-expiring-approval".into();
-    request.valid_for_seconds = 2;
+    request.valid_for_seconds = Some(2);
     let approved = engine.authorize_financial_plan(request).await.unwrap();
     let original = plan_operation_request("SYNTHETIC-plan-expired-original-attempt", "BUY", "0.02");
     let result = engine

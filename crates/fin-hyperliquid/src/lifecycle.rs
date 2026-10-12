@@ -463,6 +463,7 @@ mod delegated_plan_tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         };
 
         let planned = profile.plan_submission(&current).await.unwrap();
@@ -736,6 +737,7 @@ mod nonce_recovery_plan_tests {
                     ],
                 },
                 operation_version: 1,
+                action_deadline: None,
             }),
             approval: None,
             submission: Some(submission),

@@ -1,9 +1,11 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
 pub mod authority_expiry;
 pub mod boundaries;
+pub mod clock;
 pub mod execution_state;
 pub mod financial_plans;
 pub mod money;
+pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
 pub mod unpriced;
@@ -686,6 +688,9 @@ pub struct PreparedOperation {
     pub valuation: Option<Valuation>,
     pub intent: FinancialIntent,
     pub operation_version: u32,
+    /// Broker-resolved relative deadline, immutable for this plan attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_deadline: Option<plan_timing::ResolvedActionDeadline>,
 }
 pub type Preview = PreparedOperation;
 
@@ -1174,6 +1179,15 @@ pub trait Adapter: Send + Sync {
             "This integration does not support boundary-based authorization.",
             "Use the ordinary exact-operation approval flow.",
         ))
+    }
+    /// Trusted planning allowance; None requires an explicit parent duration. No network calls.
+    fn plan_step_allowance(&self, operation: &str, _input: &Value) -> Result<Option<u64>> {
+        let definition = self
+            .definitions()
+            .into_iter()
+            .find(|d| d.name == operation)
+            .ok_or_else(|| FinError::validation("Unknown plan operation."))?;
+        plan_timing::definition_allowance(&definition, _input)
     }
     /// Derive a reusable, balance-independent permission scope for one plan
     /// step. Implementations validate operation support, static identities,

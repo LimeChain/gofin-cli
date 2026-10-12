@@ -743,6 +743,7 @@ impl BinanceEthereumDepositAdapter {
             valuation: inner_preview.valuation.clone(),
             intent,
             operation_version: 2,
+            action_deadline: None,
         };
         // Compose the wallet's approved USD ceilings without changing its exact
         // principal or gas envelope. Legacy inner previews retain exact pricing.

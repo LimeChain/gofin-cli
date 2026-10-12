@@ -1772,6 +1772,7 @@ impl HyperliquidProfile {
             }),
             intent,
             operation_version: 1,
+            action_deadline: None,
         };
         if let Some(child) = self.nonces.recovery_child(&parent.id)? {
             let same_awaiting_candidate = child.operation == INVALIDATE_NONCE_OPERATION
@@ -1906,6 +1907,7 @@ impl HyperliquidProfile {
             valuation: Some(valuation),
             intent,
             operation_version: 1,
+            action_deadline: None,
         })
     }
 }

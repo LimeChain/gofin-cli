@@ -1299,6 +1299,7 @@ mod pre_dispatch_recovery_tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         });
         record
     }
@@ -1705,6 +1706,7 @@ mod nonce_invalidation_recovery_tests {
                     ],
                 },
                 operation_version: 1,
+                action_deadline: None,
             }),
             approval: None,
             submission: Some(submission),
@@ -1815,6 +1817,7 @@ mod nonce_invalidation_recovery_tests {
                     ..FinancialIntent::default()
                 },
                 operation_version: 1,
+                action_deadline: None,
             }),
             approval: None,
             submission: Some(child_submission.clone()),

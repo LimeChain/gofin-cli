@@ -998,7 +998,7 @@ python3 scripts/prepare-amm-touch-id-checklist.py --help
 
 ```sh
 fin plans preview --input PLAN_JSON --json
-fin plans authorize --input PLAN_JSON --id APPROVAL_REQUEST_ID --valid-for 10m
+fin plans authorize --input PLAN_JSON --id APPROVAL_REQUEST_ID --valid-for 45m
 fin plans status PLAN_ID --json
 fin execute binance.spot.order-place --input ORDER_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --dry-run --json
 # Remove --dry-run only when deliberately submitting that step.
@@ -1238,3 +1238,36 @@ fin schema pancakeswap.swap --json
 
 See [v3 fork verification](docs/testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
+
+### Plan timing
+
+Named plans automatically budget omitted durations from trusted operation and
+saved route metadata: 5 minutes per onchain write/immediate exchange action,
+15 minutes per withdrawal/fast bridge, plus 25% headroom (at least 5 minutes),
+rounded upward to 5 minutes. Bridge approval/reset writes count separately;
+bridge settlement is counted once. Longer saved arrival estimates increase the
+bridge allowance. Resting orders, TWAPs, delayed bridge stages and unclassified
+writes require an explicit `--valid-for`. Agents should calculate and disclose
+an explicit duration. Withdrawal → swap → fast bridge needs **45 minutes**.
+These allowances are planning budgets, not guarantees or transaction deadlines.
+
+For a future-funded Uniswap/Ramses plan step, set `action_deadline_seconds: 600`
+and omit `input.deadline`. Approval binds the relative window and financial
+scope; Fin resolves the concrete deadline when preparing an eligible attempt.
+The swap ceiling remains 600 seconds even under a 45-minute parent plan.
+Prepared deadlines and submission identities remain immutable. Quote freshness
+is independently enforced; the client's 300-second wait is a transport limit.
+
+`fin plans status PLAN_ID --json` reports remaining authority and whether the
+next action's full window fits. Insufficient time fails before preparation with
+`PLAN_INSUFFICIENT_AUTHORIZATION_TIME`. Reconcile unresolved attempts, preview a
+replacement with a suitable `--valid-for` and `--replaces REVISION_ID`, and obtain
+fresh Touch ID. A revision preserves completed progress and consumed authority.
+Expiry/cancellation blocks future dispatch while status continues reconciliation.
+See [timing verification and human checklist](docs/testing/plan-timing.md).
+
+A full relative action window must be shorter than the parent lifetime, leaving
+time for orchestration. Fin reports `PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW`
+before approval if they cannot fit; choose an explicit longer duration or a
+shorter reviewed action window. For a single onchain step with an automatic
+10-minute parent, a 5-minute action window leaves the planned headroom.

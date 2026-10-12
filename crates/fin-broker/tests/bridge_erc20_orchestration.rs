@@ -580,6 +580,7 @@ async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_o
             .zip(inputs.iter())
             .enumerate()
             .map(|(index, (_link, input))| FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: format!("bridge-step-{index}"),
                 operation: "bridge.transfer".into(),
                 input: input.clone(),
@@ -633,7 +634,7 @@ async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_o
         let request = FinancialPlanAuthorizationRequest {
             request_id: "synthetic-bridge-plan-preview".into(),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -708,6 +709,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             amount: bounds.minimum_net_receipt.clone().unwrap(),
         });
         plan.steps.push(FinancialPlanStepSpec {
+                action_deadline_seconds: None,
             step_id: "bridge-status-after-settlement".into(),
             operation: "bridge.status".into(),
             input: json!({"transferId":transfer}),
@@ -727,7 +729,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
         let preview_request = FinancialPlanAuthorizationRequest {
             request_id: format!("plan-preview-{transfer}"),
             plan: plan.clone(),
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -741,7 +743,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             .authorize_financial_plan(FinancialPlanAuthorizationRequest {
                 request_id: format!("plan-authorize-{transfer}"),
                 plan: plan.clone(),
-                valid_for_seconds: 600,
+                valid_for_seconds: Some(600),
                 replaces_revision_id: None,
                 expected_review_hash: Some(review.review_hash),
             })
@@ -950,7 +952,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
         let renewal = FinancialPlanAuthorizationRequest {
             request_id: format!("plan-renew-{transfer}"),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: Some(settled.revision.revision_id.clone()),
             expected_review_hash: None,
         };
@@ -975,6 +977,7 @@ fn bridge_plan_spec(h: &Harness, links: &[BridgeStepLink], inputs: &[Value]) -> 
         .zip(inputs)
         .enumerate()
         .map(|(index, (_, input))| FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: format!("bridge-step-{index}"),
             operation: "bridge.transfer".into(),
             input: input.clone(),

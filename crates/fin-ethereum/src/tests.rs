@@ -5926,6 +5926,7 @@ mod wallet_only_tests {
                 version: 1,
                 name: format!("Synthetic {operation} plan"),
                 steps: vec![FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: step_id.into(),
                     operation: operation.into(),
                     input: input.clone(),
@@ -5953,7 +5954,7 @@ mod wallet_only_tests {
             let mut authorization_request = FinancialPlanAuthorizationRequest {
                 request_id: format!("synthetic-plan-{operation}"),
                 plan,
-                valid_for_seconds: 600,
+                valid_for_seconds: Some(600),
                 replaces_revision_id: None,
                 expected_review_hash: None,
             };
@@ -6052,6 +6053,7 @@ mod wallet_only_tests {
             version: 1,
             name: "Synthetic wrap settlement".into(),
             steps: vec![FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "wrap".into(),
                 operation: "wallet.wrap".into(),
                 input: input.clone(),
@@ -6085,7 +6087,7 @@ mod wallet_only_tests {
         let mut request = FinancialPlanAuthorizationRequest {
             request_id: "synthetic-wrap-plan-approval".into(),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };

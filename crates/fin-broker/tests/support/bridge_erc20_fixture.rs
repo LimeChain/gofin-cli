@@ -390,6 +390,13 @@ impl Rpc {
         });
         *self.destination_override.lock().unwrap() = Some((transaction, receipt));
     }
+    #[allow(
+        dead_code,
+        reason = "Only the combined plan timing fixture advances its shared synthetic head."
+    )]
+    pub fn advance_head(&self) {
+        self.block_number.fetch_add(1, Ordering::SeqCst);
+    }
     pub fn broadcasts(&self) -> usize {
         self.broadcasts.load(Ordering::SeqCst)
     }

@@ -298,9 +298,9 @@ struct PlanInputArgs {
     /// Complete versioned named plan JSON.
     #[arg(long)]
     input: String,
-    /// Consent lifetime to include in the read-only review.
-    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
-    valid_for: u64,
+    /// Plan lifetime; omission calculates sequential allowances plus headroom.
+    #[arg(long, value_parser = parse_duration_seconds)]
+    valid_for: Option<u64>,
     /// Review a proposed replacement revision and its carried-forward usage.
     #[arg(long)]
     replaces: Option<String>,
@@ -314,9 +314,9 @@ struct PlanAuthorizeArgs {
     /// Stable request identity used to recover approval response loss.
     #[arg(long)]
     id: String,
-    /// Consent duration from successful approval (for example 10m; default 10m).
-    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
-    valid_for: u64,
+    /// Plan lifetime from successful approval (for example 45m); omission budgets the sequence.
+    #[arg(long, value_parser = parse_duration_seconds)]
+    valid_for: Option<u64>,
     /// Replace this active immutable plan revision.
     #[arg(long)]
     replaces: Option<String>,
@@ -1425,7 +1425,7 @@ fn boundary_authorization_request(
 fn financial_plan_request(
     input: &str,
     request_id: &str,
-    valid_for_seconds: u64,
+    valid_for_seconds: Option<u64>,
     replaces_revision_id: Option<String>,
     expected_review_hash: Option<String>,
 ) -> Result<fin_domain::financial_plans::FinancialPlanAuthorizationRequest, FinError> {
@@ -1526,7 +1526,9 @@ async fn review_plan_authorization(
     if preview["review_hash"].as_str().is_none_or(str::is_empty)
         || preview["plan"] != serde_json::to_value(&expected_plan).unwrap_or(Value::Null)
         || !valid_permissions
-        || preview["valid_for_seconds"].as_u64() != Some(args.valid_for)
+        || preview["valid_for_seconds"].as_u64().is_none_or(|seconds| {
+            seconds == 0 || args.valid_for.is_some_and(|expected| expected != seconds)
+        })
     {
         return Err(FinError::new(
             "PREVIEW_INVALID",
@@ -2245,7 +2247,7 @@ mod tests {
             .unwrap();
         assert!(
             matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::AuthorizePlan { request })
-            if request.request_id == "request-1" && request.valid_for_seconds == 600
+            if request.request_id == "request-1" && request.valid_for_seconds == Some(600)
                 && request.expected_review_hash.as_deref()
                     == Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         );
@@ -2328,7 +2330,7 @@ mod tests {
                     "review_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "plan":preview.plan,
                     "permissions":steps,
-                    "valid_for_seconds":preview.valid_for_seconds,
+                    "valid_for_seconds":preview.valid_for_seconds.unwrap_or(600),
                 });
                 self.0.lock().unwrap().push(request);
                 Ok(result)
@@ -3760,6 +3762,7 @@ mod tests {
                     locks: vec![],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 

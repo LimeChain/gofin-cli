@@ -253,6 +253,7 @@ impl Engine {
                 "boundary-authorization-check",
                 &self.options,
                 &store,
+                self.clock.now(),
             )?;
         }
 

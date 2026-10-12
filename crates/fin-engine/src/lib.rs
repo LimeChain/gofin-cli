@@ -266,6 +266,7 @@ pub struct Engine {
     cost_origin_price_provider: Option<Arc<dyn TrustedAssetPriceProvider>>,
     write_queue: AsyncMutex<()>,
     instance_id: uuid::Uuid,
+    clock: Arc<dyn fin_domain::clock::Clock>,
 }
 
 /// An observer capture bound to the engine that created it. The broker may
@@ -364,7 +365,15 @@ impl Engine {
             cost_origin_price_provider: None,
             write_queue: AsyncMutex::new(()),
             instance_id: uuid::Uuid::new_v4(),
+            clock: Arc::new(fin_domain::clock::SystemClock),
         })
+    }
+
+    /// Internal test composition only; production broker uses the system clock.
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Attach the trusted provider before the engine is shared with request
@@ -464,7 +473,7 @@ impl Engine {
         let required_origins = self.cost_origin_assets(&prepared, None)?;
         self.complete_cost_origin_prices(&mut prepared, &required_origins)
             .await?;
-        validate_prepared(&prepared, operation, Utc::now())?;
+        validate_prepared(&prepared, operation, self.clock.now())?;
         Ok(prepared)
     }
 
@@ -494,7 +503,7 @@ impl Engine {
         let required_origins = self.cost_origin_assets(&preview, run_id)?;
         self.complete_cost_origin_prices(&mut preview, &required_origins)
             .await?;
-        validate_prepared(&preview, operation, Utc::now())?;
+        validate_prepared(&preview, operation, self.clock.now())?;
         Ok(preview)
     }
 
@@ -616,7 +625,7 @@ impl Engine {
                 validate_price_rows(
                     std::slice::from_ref(&price),
                     &BTreeSet::from([asset.clone()]),
-                    Utc::now(),
+                    self.clock.now(),
                 )
                 .map_err(|error| {
                     if error.code == "COST_VALUATION_STALE" {
@@ -641,7 +650,7 @@ impl Engine {
         }
         let mut all_required = required_assets.clone();
         all_required.extend(prepared_cost_assets(&prepared.intent));
-        validate_cost_prices(prepared, &all_required, Utc::now())?;
+        validate_cost_prices(prepared, &all_required, self.clock.now())?;
         Ok(())
     }
 
@@ -1174,7 +1183,7 @@ impl Engine {
                 Ok(original)
             };
         }
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
         let initial = OperationRecord {
             id: id.clone(),
@@ -1287,7 +1296,7 @@ impl Engine {
                         status_for_error(&error)
                     };
                     record.error = Some(error);
-                    record.updated_at = now();
+                    record.updated_at = self.clock.now().to_rfc3339();
                     if record.status.terminal() {
                         let run = self.release_unsubmitted_reservation(&record)?;
                         self.commit_terminal(
@@ -1609,7 +1618,7 @@ impl Engine {
             self.cost_origin_assets(&prepared, request.run_id.as_deref())?;
         self.complete_cost_origin_prices(&mut prepared, &required_cost_origins)
             .await?;
-        validate_prepared(&prepared, &request.operation, Utc::now())?;
+        validate_prepared(&prepared, &request.operation, self.clock.now())?;
 
         let cancellation =
             self.validate_submission_cancellation(&prepared, request.run_id.as_deref())?;
@@ -1629,7 +1638,7 @@ impl Engine {
             plan.is_none() && boundary.is_none(),
         )?;
         record.preview = Some(prepared.clone());
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         let mut run_state = if cancellation {
             None
         } else if let Some(run_id) = &request.run_id {
@@ -1649,7 +1658,7 @@ impl Engine {
                     &to_value(record)?,
                     &run.id,
                     &to_value(run)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else if cancellation {
@@ -1673,7 +1682,7 @@ impl Engine {
         let approved_binding_hash = binding_hash(&approved_binding)?;
         let (audit, challenge) = if let Some(boundary) = &boundary {
             if boundary.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&boundary.authorization.expires_at)? <= Utc::now()
+                || parse_time(&boundary.authorization.expires_at)? <= self.clock.now()
             {
                 return Err(boundary_error(
                     "Boundary authorization expired or was revoked before dispatch.",
@@ -1685,14 +1694,19 @@ impl Engine {
             ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
             validate_future_expiry(
                 &plan.revision.expires_at,
-                Utc::now(),
+                self.clock.now(),
                 "PLAN_AUTHORIZATION_EXPIRED",
             )?;
             (plan.approval.clone(), None)
         } else {
             let challenge_expiry = std::cmp::min(
                 parse_time(&prepared.expires_at)?,
-                parse_time(&now())? + chrono::Duration::seconds(90),
+                parse_time(
+                    &self
+                        .clock
+                        .now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )? + chrono::Duration::seconds(90),
             );
             let challenge = AuthorizationChallenge {
                 purpose: match &route {
@@ -1713,11 +1727,11 @@ impl Engine {
                     authorizer.authorize_configuration(&challenge).await?
                 }
             };
-            validate_approval(&audit, &challenge, Utc::now())?;
+            validate_approval(&audit, &challenge, self.clock.now())?;
             (audit, Some(challenge))
         };
         record.approval = Some(audit.clone());
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
 
         let adapter_candidate = strip_plan_metadata(&prepared);
@@ -1735,9 +1749,10 @@ impl Engine {
             },
         )
         .await?;
+        financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
         self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
             .await?;
-        validate_prepared(&refreshed, &request.operation, Utc::now())?;
+        validate_prepared(&refreshed, &request.operation, self.clock.now())?;
         if let Some(boundary) = &boundary {
             let marker = refreshed
                 .binding
@@ -1828,12 +1843,12 @@ impl Engine {
             )?;
         }
         if let Some(challenge) = &challenge {
-            ensure_approval_fresh(&audit, challenge, Utc::now())?;
+            ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
         if let Some(boundary) = &boundary {
             let current = self.load_boundary_record(&boundary.authorization.id)?;
             if current.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&current.authorization.expires_at)? <= Utc::now()
+                || parse_time(&current.authorization.expires_at)? <= self.clock.now()
                 || current.active_attempt.as_deref() != Some(record.id.as_str())
             {
                 return Err(boundary_error(
@@ -1871,7 +1886,7 @@ impl Engine {
             let current = self.load_financial_plan(&plan.revision.plan_id)?;
             if current.revision.revision_id != plan.revision.revision_id
                 || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || parse_time(&current.revision.expires_at)? <= self.clock.now()
                 || current.active_attempt_id.as_deref() != Some(record.id.as_str())
                 || plan_attempt_hash.as_deref()
                     != plan
@@ -1920,7 +1935,7 @@ impl Engine {
                     &to_value(record)?,
                     run_id,
                     &to_value(run)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         }
@@ -1950,6 +1965,7 @@ impl Engine {
             financial_plan_snapshot: plan.clone(),
             adapter: Some(adapter.clone()),
             options: self.options.clone(),
+            clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
             record: Mutex::new(record.clone()),
@@ -1993,7 +2009,7 @@ impl Engine {
         }
         *record = persisted;
         record.status = Status::Pending;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
         self.reconcile_serial(record.id.clone()).await
     }
@@ -2080,13 +2096,22 @@ impl Engine {
                 ));
             }
             let permission = financial_plans::permission_for_step(&revision, &step_id)?;
-            if !permission.generated_input_fields.is_empty() {
-                let execution_input = financial_plans::plan_attempt_input(
+            if !permission.generated_input_fields.is_empty()
+                || step.action_deadline_seconds.is_some()
+            {
+                let mut execution_input = financial_plans::plan_attempt_input(
                     &revision,
                     &step_id,
                     &record.input,
                     &record.id,
                 )?;
+                if let Some(deadline) = record
+                    .preview
+                    .as_ref()
+                    .and_then(|p| p.action_deadline.as_ref())
+                {
+                    deadline.apply(&mut execution_input)?;
+                }
                 let prepared = record.preview.as_ref().ok_or_else(|| {
                     plan_error(
                         "PLAN_CANDIDATE_MISSING",
@@ -2115,7 +2140,7 @@ impl Engine {
                 if retained.error.is_none() || retained.submission.is_none() {
                     retained.error = Some(error);
                 }
-                retained.updated_at = now();
+                retained.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&retained)?;
                 return Ok(retained);
             }
@@ -2153,7 +2178,7 @@ impl Engine {
                         retained.error = Some(error);
                     }
                 }
-                retained.updated_at = now();
+                retained.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&retained)?;
                 Ok(retained)
             }
@@ -2180,7 +2205,7 @@ impl Engine {
                 if record.submission.is_none() {
                     record.error = None;
                 }
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&record)?;
                 Ok(record)
             }
@@ -2243,7 +2268,7 @@ impl Engine {
                 record.last_reconciliation_evidence = Some(reconciliation.evidence);
                 record.effects = Some(verified.clone());
                 record.error = None;
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 let cancellation = record
                     .preview
                     .as_ref()
@@ -2269,7 +2294,7 @@ impl Engine {
             Status::Cancelled | Status::Rejected | Status::Expired => {
                 record.status = reconciliation.status;
                 record.last_reconciliation_evidence = Some(reconciliation.evidence.clone());
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 if record.submission.is_some() {
                     return Err(FinError::new(
                         "INVALID_RECONCILIATION_STATUS",
@@ -2337,7 +2362,7 @@ impl Engine {
         record.last_reconciliation_evidence = Some(reconciliation.evidence);
         record.effects = Some(verified.clone());
         record.error = None;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
 
         let prepared = record
             .preview
@@ -2691,7 +2716,7 @@ impl Engine {
         transfer.applied_proofs.push(proof.proof_digest.clone());
         transfer.settlement_proofs.push(proof.clone());
         transfer.transit = None;
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         if let Some(scope) = transfer.plan_scope.as_ref() {
             let (expected_plan, updated_plan) = if proof.outcome
                 == fin_domain::BridgeSettlementOutcome::Destination
@@ -3006,7 +3031,11 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .create_run(&ledger.id, &to_value(&ledger)?, &now())
+            .create_run(
+                &ledger.id,
+                &to_value(&ledger)?,
+                &self.clock.now().to_rfc3339(),
+            )
             .map_err(map_store)?;
         Ok(run_result(&ledger))
     }
@@ -3254,7 +3283,7 @@ impl Engine {
                 &record.authorization.id,
                 &to_value(expected)?,
                 &to_value(record)?,
-                &now(),
+                &self.clock.now().to_rfc3339(),
             )
             .map_err(map_store)
     }
@@ -3262,7 +3291,7 @@ impl Engine {
     fn require_active_boundary(&self, id: &str) -> Result<BoundaryAuthorization> {
         let mut record = self.load_boundary_record(id)?;
         if record.authorization.status == BoundaryAuthorizationStatus::Active
-            && parse_time(&record.authorization.expires_at)? <= Utc::now()
+            && parse_time(&record.authorization.expires_at)? <= self.clock.now()
         {
             let before = record.clone();
             record.authorization.status = BoundaryAuthorizationStatus::Expired;
@@ -3888,7 +3917,7 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .save_run(&run.id, &to_value(run)?, &now())
+            .save_run(&run.id, &to_value(run)?, &self.clock.now().to_rfc3339())
             .map_err(map_store)
     }
 
@@ -3941,7 +3970,7 @@ impl Engine {
                 "Reconcile the original submission before another write.",
             ));
         }
-        validate_prepared(prepared, &record.operation, Utc::now())?;
+        validate_prepared(prepared, &record.operation, self.clock.now())?;
         reject_unpriced_run(prepared)?;
         let route_step_index =
             u32::try_from(run.settled_route_steps.len()).map_err(|_| route_proof_error())?;
@@ -3980,7 +4009,7 @@ impl Engine {
         validate_price_observation(
             &valuation.observed_at,
             &valuation.source,
-            Utc::now(),
+            self.clock.now(),
             "VALUATION_UNAVAILABLE",
         )?;
         let movement = parse_uint(valuation.movement_usd_micros.as_str())?;
@@ -3995,7 +4024,7 @@ impl Engine {
         }
         let borrowed = parse_uint(valuation.additional_allocation_usd_micros.as_str())?;
         let cost_assets = prepared_cost_assets(&prepared.intent);
-        validate_cost_prices(prepared, &cost_assets, Utc::now())?;
+        validate_cost_prices(prepared, &cost_assets, self.clock.now())?;
         if [
             fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?,
             fin_domain::policy::limit(&run.max_movement_usd_micros)?,
@@ -4285,6 +4314,7 @@ struct OperationSubmissionJournal {
     financial_plan_snapshot: Option<FinancialPlanAuthorizationRecord>,
     adapter: Option<Arc<dyn Adapter>>,
     options: EngineOptions,
+    clock: Arc<dyn fin_domain::clock::Clock>,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
     record: Mutex<OperationRecord>,
@@ -4304,7 +4334,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
             };
             if current.revision.revision_id != snapshot.revision.revision_id
                 || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || parse_time(&current.revision.expires_at)? <= self.clock.now()
                 || current.active_attempt_id.as_deref() != Some(self.operation_id.as_str())
             {
                 return Err(plan_error(
@@ -4378,6 +4408,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     &self.operation_id,
                     &self.options,
                     &store,
+                    self.clock.now(),
                 )?;
             }
             return Ok(());
@@ -4396,7 +4427,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             self.validate_boundary_candidate(&grant, &prepared)?;
             Ok(())
         } else {
-            validate_future_expiry(&self.approval.expires_at, Utc::now(), "APPROVAL_EXPIRED")
+            validate_future_expiry(
+                &self.approval.expires_at,
+                self.clock.now(),
+                "APPROVAL_EXPIRED",
+            )
         }
     }
 
@@ -4435,6 +4470,16 @@ impl SubmissionJournal for OperationSubmissionJournal {
                         "Reconcile the original attempt.",
                     )
                 })?;
+            let mut candidate = prepared.clone();
+            let original = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .preview
+                .clone()
+                .ok_or_else(|| internal("plan preview missing"))?;
+            financial_plans::carry_action_deadline(&original, &mut candidate)?;
+            let prepared = &candidate;
             let hash = binding_hash(
                 &fin_domain::financial_plans::financial_plan_attempt_binding(
                     prepared,
@@ -4466,6 +4511,13 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     .operation,
                 prepared,
                 &current.revision.expires_at,
+            )?;
+            financial_plans::validate_action_deadline(
+                adapter.as_ref(),
+                &current.revision,
+                &linkage.step_id,
+                &raw_input,
+                prepared,
             )?;
             let permission = permission_for_step(&current.revision, &linkage.step_id)?;
             if let Some(exact) = &permission.exact {
@@ -4512,7 +4564,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     .lock()
                     .map_err(|_| internal("journal record lock poisoned"))?;
                 record.preview = Some(durable_candidate.clone());
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 record.clone()
             };
             let mut store = self
@@ -4525,6 +4577,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 &self.operation_id,
                 &self.options,
                 &store,
+                self.clock.now(),
             )?;
             store
                 .update_financial_plan_candidate_preview(
@@ -4549,7 +4602,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 .lock()
                 .map_err(|_| internal("journal record lock poisoned"))?;
             current.preview = Some(prepared.clone());
-            current.updated_at = now();
+            current.updated_at = self.clock.now().to_rfc3339();
             current.clone()
         };
         self.store
@@ -4621,7 +4674,7 @@ impl OperationSubmissionJournal {
             .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
         let record: BoundaryAuthorizationRecord = from_value(raw)?;
         if record.authorization.status != BoundaryAuthorizationStatus::Active
-            || parse_time(&record.authorization.expires_at)? <= Utc::now()
+            || parse_time(&record.authorization.expires_at)? <= self.clock.now()
             || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
         {
             return Err(boundary_error(
@@ -4674,6 +4727,7 @@ impl OperationSubmissionJournal {
             &self.operation_id,
             &self.options,
             &store,
+            self.clock.now(),
         )
     }
 
@@ -4722,7 +4776,7 @@ impl OperationSubmissionJournal {
                     &to_value(snapshot)?,
                     &self.operation_id,
                     &submission_row,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else if let (Some(id), Some(snapshot)) =
@@ -4745,17 +4799,21 @@ impl OperationSubmissionJournal {
                     &self.operation_id,
                     &snapshot.revision.expires_at,
                     &submission_row,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else {
             store
-                .persist_submission(&self.operation_id, &submission_row, &now())
+                .persist_submission(
+                    &self.operation_id,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?;
         }
         record.submission = Some(submission.clone());
         record.status = Status::Submitted;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         Ok(())
     }
 }
@@ -11000,7 +11058,7 @@ fn validate_prepared(
     operation: &str,
     instant: DateTime<Utc>,
 ) -> Result<()> {
-    fin_domain::value_bounds::validate(prepared)?;
+    fin_domain::value_bounds::validate_at(prepared, instant)?;
     validate_trading_bounds(&prepared.intent)?;
 
     if prepared.operation != operation {
@@ -12000,6 +12058,7 @@ mod tests {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         };
         let audit = ApprovalAudit {
             mechanism: "synthetic-test-authorizer".into(),
@@ -12080,6 +12139,7 @@ mod tests {
             financial_plan_snapshot: None,
             adapter: None,
             options: EngineOptions::default(),
+            clock: Arc::new(fin_domain::clock::SystemClock),
             consumed: AtomicBool::new(true),
             store: Arc::new(Mutex::new(store)),
             record: Mutex::new(operation.clone()),
@@ -13060,6 +13120,7 @@ mod tests {
                     locks: vec![],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -18519,6 +18580,7 @@ mod tests {
                     ],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -18982,6 +19044,7 @@ mod tests {
                     locks: vec![resource("synthetic-parent-cash")],
                 },
                 operation_version: 1,
+                action_deadline: None,
             }
         }
     }
@@ -19044,6 +19107,7 @@ mod tests {
                 }),
                 intent,
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 

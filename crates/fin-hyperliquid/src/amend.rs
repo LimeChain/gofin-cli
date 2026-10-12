@@ -872,6 +872,7 @@ mod tests {
             valuation: None,
             intent: fin_domain::FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         fin_domain::OperationRecord {
             id: "parent-operation".into(),

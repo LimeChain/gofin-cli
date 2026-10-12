@@ -112,7 +112,7 @@ impl fin_amm::AmmDex for UniswapAmm<'_> {
     }
 
     async fn prepare_swap(&self, request: fin_amm::AmmSwapRequest) -> Result<PreparedOperation> {
-        fin_amm::validate_swap(&request, chrono::Utc::now())
+        fin_amm::validate_swap(&request, self.adapter.clock.now())
             .map_err(|err| swap_validation_error(err, &request))?;
         require(
             request.resource == self.resource
@@ -562,7 +562,7 @@ impl EthereumAdapter {
                     fee_cap: amm_quote.maximum_fee.clone(),
                     maximum_price_impact_bps: r.max_price_impact_bps.unwrap_or(10_000),
                 };
-                let validated = fin_amm::validate_swap(&amm_request, chrono::Utc::now())
+                let validated = fin_amm::validate_swap(&amm_request, self.clock.now())
                     .map_err(|err| swap_validation_error(err, &amm_request))?;
                 let fresh_minimum = u256(&validated)?;
                 shared_swap = Some(amm_request);
@@ -622,7 +622,7 @@ impl EthereumAdapter {
                     "Minimum output must respect the quoted slippage floor and remain achievable.",
                 )?;
                 let deadline = r.deadline.expect("schema");
-                let current = chrono::Utc::now().timestamp() as u64;
+                let current = self.clock.now().timestamp() as u64;
                 require(
                     deadline > current && deadline <= current + 600,
                     "DEADLINE_INVALID",
@@ -694,7 +694,7 @@ impl EthereumAdapter {
                             expiration: expiration.to::<u64>(),
                             nonce: nonce.to::<u64>(),
                         });
-                        let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
+                        let timestamp = self.clock.now().timestamp().max(0) as u64;
                         if U256::from(amount) >= qty
                             && amount < fin_evm::alloy::primitives::aliases::U160::MAX
                             && expiration.to::<u64>() > timestamp
@@ -1862,7 +1862,7 @@ impl EthereumAdapter {
                 source,
             });
         }
-        let observed = now();
+        let observed = self.clock.now().to_rfc3339();
         let additional_allocation = if operation == "aave.borrow" {
             let (value, _, observed_at) = self
                 .quote_usd_observed(
@@ -1885,7 +1885,7 @@ impl EthereumAdapter {
                     .expect("validated observation timestamp")
             })
             .expect("principal and fee observations");
-        let expires = (chrono::Utc::now() + chrono::Duration::seconds(120))
+        let expires = (self.clock.now() + chrono::Duration::seconds(120))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if matches!(
             operation,
@@ -1928,7 +1928,7 @@ impl EthereumAdapter {
             // Keep Fin's shared route and exact minimum-output contract as the
             // source for the typed conversion effect; protocol cash proof and
             // the finite gas reservation remain adapter-owned.
-            let generic = fin_amm::prepared_operation(&shared, chrono::Utc::now())?;
+            let generic = fin_amm::prepared_operation(&shared, self.clock.now())?;
             intent.expected = generic.intent.expected;
             // Generic conversion intent does not own protocol authority
             // transitions. Preserve the exact finite permit consumed by this
@@ -2071,6 +2071,7 @@ impl EthereumAdapter {
             }),
             intent,
             operation_version: 1,
+            action_deadline: None,
         })
     }
 }

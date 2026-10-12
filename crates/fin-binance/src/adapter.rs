@@ -2004,6 +2004,14 @@ fn definitions() -> Vec<Definition> {
         })
         .collect();
     for definition in &mut result {
+        if definition.kind == OperationKind::Write {
+            definition.semantics["plan_allowance_seconds"] =
+                json!(if definition.name == "binance.withdraw" {
+                    fin_domain::plan_timing::WITHDRAWAL_ALLOWANCE_SECONDS
+                } else {
+                    fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+                });
+        }
         if matches!(
             definition.name.as_str(),
             "binance.transfer" | "binance.withdraw" | "binance.spot-order"
@@ -2103,6 +2111,7 @@ fn prepared(
         valuation,
         intent,
         operation_version: 1,
+        action_deadline: None,
     };
     let unpriced = result
         .valuation

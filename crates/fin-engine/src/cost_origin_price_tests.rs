@@ -145,6 +145,7 @@ fn test_engine(path: &std::path::Path) -> Engine {
         cost_origin_price_provider: None,
         write_queue: AsyncMutex::new(()),
         instance_id: uuid::Uuid::new_v4(),
+        clock: Arc::new(fin_domain::clock::SystemClock),
     }
 }
 
@@ -263,6 +264,7 @@ fn prepared_cost(fee_asset: fin_domain::AssetId) -> PreparedOperation {
             locks: vec![],
         },
         operation_version: 1,
+        action_deadline: None,
     }
 }
 

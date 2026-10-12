@@ -23,10 +23,10 @@ pub fn parse(source: &str) -> Result<BTreeMap<String, Zeroizing<String>>, String
         })?;
         let raw_key = key.trim();
         let Some(key) = canonical_key(raw_key) else {
-            return Err(format!(
-                "credential file has an unsupported key on line {}",
-                line_number + 1
-            ));
+            // Credential exports can contain variables for unrelated tools or
+            // connectors. Import only the explicitly supported Fin keys and
+            // ignore everything else without parsing or retaining its value.
+            continue;
         };
         let value =
             parse_value(raw_value.trim(), key.ends_with("_PRIVATE_KEY_PEM")).ok_or_else(|| {
@@ -129,7 +129,10 @@ mod tests {
         assert_eq!(values["FIN_DEV_BINANCE_API_KEY"].as_str(), "abc");
         assert_eq!(values["FIN_DEV_BINANCE_SECRET"].as_str(), "a=b");
         assert!(parse("FIN_DEV_BINANCE_API_KEY=$(touch /tmp/nope)").is_err());
-        assert!(parse("PATH=/tmp").is_err());
+        assert!(
+            parse("FIN_DEV_BINANCE_API_KEY=abc\nPATH=/tmp\nOTHER_TOOL_TOKEN=opaque value #1\n")
+                .is_ok()
+        );
         assert!(parse("FIN_DEV_BINANCE_API_KEY=x\nFIN_DEV_BINANCE_API_KEY=y").is_err());
         let aliases = parse("BINANCE_MASTER_ACCOUNT_API_KEY=master\nBINANCE_MASTER_ACCOUNT_API_PEM=-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\nETH_WALLET_PK=1111111111111111111111111111111111111111111111111111111111111111").unwrap();
         assert_eq!(aliases["FIN_DEV_BINANCE_API_KEY"].as_str(), "master");
@@ -156,5 +159,20 @@ mod tests {
             parse("FIN_DEV_BINANCE_API_KEY=topsecret\nFIN_DEV_BINANCE_API_KEY=other").unwrap_err();
         assert!(!error.contains("topsecret"));
         assert!(!error.contains("other"));
+    }
+
+    #[test]
+    fn ignores_unrelated_export_fields_without_importing_them() {
+        let values = parse(
+            "FIN_DEV_EVM_PRIVATE_KEY=synthetic\nKRAKEN_MASTER_API_KEY=ignored\nKRAKEN_PRIVATE_KEY=ignored-too\nKRAKEN_ACCOUNT_ID=account\nNEW_TOOL_TOKEN=opaque value\nPATH=/tmp/custom\n",
+        )
+        .unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values["FIN_DEV_EVM_PRIVATE_KEY"].as_str(), "synthetic");
+        assert!(!values.contains_key("KRAKEN_MASTER_API_KEY"));
+        assert!(!values.contains_key("NEW_TOOL_TOKEN"));
+        assert!(!values.contains_key("PATH"));
+        assert!(parse("KRAKEN_MASTER_API_KEY=value").is_err());
+        assert!(parse("NEW_TOOL_TOKEN=value").is_err());
     }
 }

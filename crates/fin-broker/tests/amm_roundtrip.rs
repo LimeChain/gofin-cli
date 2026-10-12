@@ -558,7 +558,7 @@ async fn native_swaps_v3_and_v4_restore_assets_and_permissions() -> Result<()> {
                 fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
                     request_id: format!("owned-{dex}-reverse-plan"),
                     plan,
-                    valid_for_seconds: 600,
+                    valid_for_seconds: Some(600),
                     replaces_revision_id: None,
                     expected_review_hash: None,
                 };

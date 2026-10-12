@@ -770,6 +770,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -856,6 +884,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -965,6 +1004,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -1751,6 +1791,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -1837,6 +1905,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -1945,6 +2024,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -2922,6 +3002,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -3008,6 +3116,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -3126,6 +3245,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -4065,6 +4185,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -4151,6 +4299,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -4259,6 +4418,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -5090,6 +5250,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -5176,6 +5364,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -5296,6 +5495,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -7160,6 +7360,7 @@
       ],
       "concurrentPositions": 1,
       "orderType": "LIMIT",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -8218,6 +8419,7 @@
         "/requestId"
       ],
       "credentialValues": "never exposed",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -9176,6 +9378,7 @@
         "separate_asset": "A separately paid BNB commission is additional_debit."
       },
       "orderType": "LIMIT",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -9764,6 +9967,7 @@
         "/requestId"
       ],
       "credentialValues": "never exposed",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -10270,6 +10474,7 @@
         "treatment": "included_in_debit"
       },
       "ordinaryExecution": "no run or restoration plan required; exact bounds, fresh approval, reservations and independent receipt checks remain enforced",
+      "plan_allowance_seconds": 900,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -12796,6 +13001,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13016,6 +13222,7 @@
       "asset": "native USDC only",
       "cctp": "deferred",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13128,6 +13335,7 @@
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
       "failure": "native rejection, timeout or lost response keeps the parent unresolved and blocks another Noop; only terminal confirmed non-dispatch without any submission, effects or dispatch evidence permits a fresh approved child; never replay the parent",
       "nonce": "loaded from the immutable original Fin submission; caller cannot supply a nonce",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13267,6 +13475,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13386,6 +13595,7 @@
       "approval": "no financial movement; rate-limit reservation only",
       "destination": "optional existing Hyperliquid user; exact userRole is verified before dispatch",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13815,6 +14025,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -13998,6 +14209,7 @@
       "approval": "fresh per-write approval",
       "destination": "closed enum",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -14126,6 +14338,7 @@
       "approval": "fresh per-write approval",
       "destination": "exact address bound in approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 900,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -17015,7 +17228,8 @@
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
-      }
+      },
+      "plan_immediate_orders": true
     }
   },
   {
@@ -17108,6 +17322,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -17251,6 +17466,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -17439,6 +17655,7 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
+      "plan_immediate_orders": true,
       "replacement": {
         "version": 1
       }
@@ -17630,6 +17847,7 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
+      "plan_immediate_orders": true,
       "replacement": {
         "version": 1
       }
@@ -17939,6 +18157,7 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
+      "plan_immediate_orders": true,
       "precision": "native market metadata required"
     }
   },
@@ -18367,6 +18586,7 @@
       "approval": "fresh per-write approval",
       "effect": "stops remaining schedule only; completed slices remain executed",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -19410,6 +19630,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -19532,6 +19753,7 @@
     "semantics": {
       "approval": "fresh per-write approval",
       "example_inputs": "Examples use synthetic account aliases, request IDs, and where applicable addresses/order IDs; replace them only after independently selecting the real reviewed scope.",
+      "plan_allowance_seconds": 900,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -20741,6 +20963,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -20827,6 +21077,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -21147,6 +21408,7 @@
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -22221,6 +22483,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -22307,6 +22597,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -22636,6 +22937,7 @@
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -22655,6 +22957,10 @@
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
+      },
+      "plan_relative_deadline": {
+        "field": "deadline",
+        "maximum_seconds": 600
       },
       "pool_fee_semantics": "fee is read from the selected pool at the quote block and may change before inclusion; max_pool_fee_ppm limits the quote observation only, not the in-transaction fee.",
       "retry": "Reconcile the original persisted hash, never blind replay."
@@ -23711,6 +24017,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -23797,6 +24131,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -24117,6 +24462,7 @@
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -25276,6 +25622,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -25362,6 +25736,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -25691,6 +26076,7 @@
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "example_token_addresses": "Illustrative token contract addresses only; resolve exact deployed identities before use.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -25710,6 +26096,10 @@
         ],
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
+      },
+      "plan_relative_deadline": {
+        "field": "deadline",
+        "maximum_seconds": 600
       },
       "retry": "Reconcile the original persisted hash, never blind replay."
     }
@@ -26645,6 +27035,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -26731,6 +27149,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -26840,6 +27269,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -27951,6 +28381,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -28037,6 +28495,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -28147,6 +28616,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -29243,6 +29713,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -29329,6 +29827,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -29438,6 +29947,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -30252,6 +30762,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -30338,6 +30876,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -30454,6 +31003,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [
@@ -31230,6 +31780,34 @@
           "description": "Canonical arbitrary-precision unsigned atomic units, serialized as a string.",
           "type": "string"
         },
+        "ResolvedActionDeadline": {
+          "additionalProperties": false,
+          "properties": {
+            "deadline_unix_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "field": {
+              "type": "string"
+            },
+            "resolved_at": {
+              "type": "string"
+            },
+            "window_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "field",
+            "window_seconds",
+            "resolved_at",
+            "deadline_unix_seconds"
+          ],
+          "type": "object"
+        },
         "ResourceAmount": {
           "additionalProperties": false,
           "properties": {
@@ -31316,6 +31894,17 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
+        "action_deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolvedActionDeadline"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Broker-resolved relative deadline, immutable for this plan attempt."
+        },
         "binding": {
           "description": "Frozen exact execution fields and enforceable bounds, excluding observation times."
         },
@@ -31423,6 +32012,7 @@
       "bounded_all": "Supported full-balance operations require finite max_amount. Cash sweeps freeze observed units; full Aave repayment/withdrawal proves zero remaining scaled debt/claim. Every actual write receives a fresh preview and authorization.",
       "deadline_example": "Fixed schema illustration; replace with the current Unix timestamp plus 120 seconds before preview.",
       "network": "explicit immutable chain/deployment identity",
+      "plan_allowance_seconds": 300,
       "plan_authorization": {
         "approval_requires_future_balances": false,
         "binds": [

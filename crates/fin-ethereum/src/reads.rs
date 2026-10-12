@@ -166,7 +166,7 @@ impl EthereumAdapter {
                 "error_code":"VALUATION_UNAVAILABLE"
             });
         };
-        let current = chrono::Utc::now();
+        let current = self.clock.now();
         if observed > current + chrono::Duration::seconds(5)
             || current.signed_duration_since(observed) > chrono::Duration::seconds(120)
         {
@@ -308,7 +308,7 @@ impl EthereumAdapter {
                 && let Ok(state) = Permit2::allowanceCall::abi_decode_returns(&bytes)
                 && U256::from(state.amount) >= u256(&quote.input)?
                 && state.amount < fin_evm::alloy::primitives::aliases::U160::MAX
-                && state.expiration.to::<u64>() > chrono::Utc::now().timestamp().max(0) as u64
+                && state.expiration.to::<u64>() > self.clock.now().timestamp().max(0) as u64
             {
                 return Ok(NoPermission);
             }
@@ -861,7 +861,7 @@ impl EthereumAdapter {
                     "Price observation timestamp is malformed.",
                 )
             })?;
-            let current = chrono::Utc::now();
+            let current = self.clock.now();
             require(
                 observed <= current + chrono::Duration::seconds(5)
                     && current.signed_duration_since(observed) <= chrono::Duration::seconds(120),
@@ -876,7 +876,7 @@ impl EthereumAdapter {
             "No trusted wallet valuation provider is configured on this network.",
         )?;
         let (value, source) = self.quote_protocol_usd(reference, units).await?;
-        Ok((value, source, now()))
+        Ok((value, source, self.clock.now().to_rfc3339()))
     }
     // Aave collateral/debt risk uses the protocol's own oracle. The same helper
     // preserves isolated legacy policy fixtures when no provider is injected.
@@ -1020,7 +1020,7 @@ impl EthereumAdapter {
             )
         })?;
         fin_evm::hash(&block_hash)?;
-        let observed_at = now();
+        let observed_at = self.clock.now().to_rfc3339();
         let protocol = super::uniswap::Protocol::parse(protocol)?;
         require(
             dex == "uniswap" || protocol == super::uniswap::Protocol::V3,
@@ -1534,7 +1534,7 @@ impl EthereumAdapter {
                 zero_for_one,
                 swap_fee_ppm,
             ),
-            observed_at: now(),
+            observed_at: self.clock.now().to_rfc3339(),
             block_number: block,
             block_hash: None,
             router: None,
@@ -1736,7 +1736,7 @@ impl EthereumAdapter {
             }
             _ => return Err(FinError::validation("Unsupported read.")),
         };
-        let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data,"discovery":discovery});
+        let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":self.clock.now().to_rfc3339(),"block":block,"data":data,"discovery":discovery});
         if let Some(summary) = summary {
             result["summary"] = json!(summary);
         }

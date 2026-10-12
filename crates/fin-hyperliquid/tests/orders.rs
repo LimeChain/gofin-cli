@@ -1562,6 +1562,7 @@ async fn exact_plan_orders_are_sequenced_and_revocation_still_allows_pending_rec
         "possible_credits":possible_credits
     });
     let step = |step_id: &str, input: Value| FinancialPlanStepSpec {
+        action_deadline_seconds: None,
         step_id: step_id.into(),
         operation: "hyperliquid.orders.place".into(),
         input,
@@ -1588,10 +1589,44 @@ async fn exact_plan_orders_are_sequenced_and_revocation_still_allows_pending_rec
     let mut authorization = FinancialPlanAuthorizationRequest {
         request_id: "plan-authorization".into(),
         plan,
-        valid_for_seconds: 600,
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     };
+    let mut automatic = authorization.clone();
+    automatic.valid_for_seconds = None;
+    assert_eq!(
+        engine
+            .preview_financial_plan(automatic.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_DURATION_REQUIRED",
+        "resting orders need an explicit horizon"
+    );
+    for step in &mut automatic.plan.steps {
+        step.input["time_in_force"] = json!("ioc");
+    }
+    assert_eq!(
+        engine
+            .preview_financial_plan(automatic)
+            .await
+            .unwrap()
+            .valid_for_seconds,
+        900,
+        "two immediate trades plus minimum headroom"
+    );
+    let mut longer = authorization.clone();
+    longer.valid_for_seconds = Some(3600);
+    assert_eq!(
+        engine
+            .preview_financial_plan(longer)
+            .await
+            .unwrap()
+            .valid_for_seconds,
+        3600,
+        "explicit resting-order horizon remains authoritative"
+    );
     authorization.expected_review_hash = Some(
         engine
             .preview_financial_plan(authorization.clone())

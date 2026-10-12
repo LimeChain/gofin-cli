@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 const DEFAULT_DEADLINE_SECONDS: u64 = 600;
-const MAX_DEADLINE_SECONDS: u64 = 600;
+pub(crate) const MAX_DEADLINE_SECONDS: u64 = 600;
 const V3_FEE_TIERS: &[u32] = &[100, 500, 3_000, 10_000];
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -303,7 +303,7 @@ async fn request_identity(
 )> {
     let config = adapter.config.uniswap.as_ref();
     let is_ramses = operation == "ramses.swap";
-    let request = request::parse(operation, input)?;
+    let request = request::parse_plan_template(operation, input)?;
     let wallet = adapter.resolve(&request, true)?;
     let owner = address(&wallet.address)?;
     let resource = resource(adapter.config.chain_id, owner);
@@ -887,9 +887,10 @@ impl EthereumAdapter {
                 "Initial swap minimum output is below its plan rate or absolute floor.",
             ));
         }
-        let current = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-        let deadline = request.deadline.expect("required deadline");
-        if deadline <= current || deadline > current.saturating_add(bounds.max_deadline_seconds) {
+        let current = u64::try_from(self.clock.now().timestamp()).unwrap_or_default();
+        if request.deadline.is_some_and(|deadline| {
+            deadline <= current || deadline > current.saturating_add(bounds.max_deadline_seconds)
+        }) {
             return Err(FinError::validation(
                 "Initial swap deadline exceeds the approved relative deadline bound.",
             ));
@@ -946,12 +947,8 @@ impl EthereumAdapter {
                 reference: "native".into(),
                 decimals: 18,
             }],
-            // AMM attempts bind short-lived quotes and deadlines, so one
-            // parent plan authorization must not outlive the reviewed
-            // six-hundred-second operation horizon. Per-step fixed identity,
-            // debit and cost bounds remain in `spec`; the plan engine applies
-            // its aggregate quantity limits across the plan's steps.
-            authorization_seconds: Some(MAX_DEADLINE_SECONDS),
+            // The action horizon bounds each concrete swap, not its parent workflow.
+            authorization_seconds: None,
             cumulative_scope: None,
         })
     }
@@ -1011,11 +1008,20 @@ impl EthereumAdapter {
         spec: &BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
-        validate_candidate(spec, prepared)
+        validate_candidate_at(spec, prepared, self.clock.now())
     }
 }
 
+#[cfg(test)]
 fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Result<()> {
+    validate_candidate_at(spec, prepared, chrono::Utc::now())
+}
+
+fn validate_candidate_at(
+    spec: &BoundarySpec,
+    prepared: &PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let mut fixed = fixed_from_prepared(prepared)?;
     if let Some(raw_pools) = spec.fixed.get("approved_pools") {
         if spec.fixed.get("pool").is_some()
@@ -1299,7 +1305,7 @@ fn validate_candidate(spec: &BoundarySpec, prepared: &PreparedOperation) -> Resu
     if request.deadline != Some(deadline) {
         return Err(fail("deadline", json!(deadline), json!(request.deadline)));
     }
-    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
+    let now = u64::try_from(at.timestamp()).unwrap_or_default();
     if deadline <= now || deadline > now.saturating_add(bounds.max_deadline_seconds) {
         return Err(fail(
             "max_deadline_seconds",
@@ -1624,6 +1630,7 @@ mod tests {
                 locks: vec![resource],
             },
             operation_version: 1,
+            action_deadline: None,
         }
     }
     fn bounds() -> Value {

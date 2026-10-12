@@ -327,7 +327,7 @@ Administration retains its separate protected human path. See the
 
 A separate versioned financial-plan contract binds a name, ordered step identities,
 exact registry input scopes or adapter variation scopes, completion conditions, funding dependencies,
-aggregate asset/fee caps and duration. The default lifetime is 600 seconds from
+aggregate asset/fee caps and duration. The omitted lifetime uses the shared sequential planning budget from
 successful approval; the native challenge has its separate short lifetime.
 The prompt identifies the plan by its bound name while terminal review presents
 all permissions. Names are labels, never authority or unique identifiers.
@@ -654,3 +654,25 @@ full final cumulative effects, including fills already observed during progress,
 and releases the remaining liability once. A terminal failed order preserves
 its proved partial fills and attributable costs. Adapters must not report
 incremental deltas as though they were cumulative snapshots.
+
+## Independent plan clocks
+
+Parent plan lifetimes begin at successful native approval. Omitted durations are
+resolved by the broker from trusted adapter timing metadata and persisted routes;
+explicit durations retain their exact value. Shared domain arithmetic adds 25%
+headroom (minimum five minutes) and rounds upward to five minutes. Review hashes
+bind the resolved duration. Revisions budget incomplete steps and retain usage.
+
+Relative `action_deadline_seconds` is a plan-template field, initially supported
+by reviewed AMM definitions. Template schema projection removes only the trusted
+absolute deadline requirement. Concrete preparation reinstates the original
+schema. The broker binds one resolved instant and deadline to each attempt;
+revalidation and reconciliation reuse it. AMM maximum action horizon remains
+600 seconds without limiting parent lifetime. Adapter-specific consent ceilings
+continue to limit the parent. Historical records omit new optional fields and
+retain their original hashes and deadline behavior.
+
+An internal Clock dependency supplies deterministic expiry/freshness fixtures.
+Production constructors select system UTC; no public clock-selection or approval
+bypass exists. Planning budgets, action windows, native challenge expiry, quote
+freshness and client transport deadlines remain distinct.

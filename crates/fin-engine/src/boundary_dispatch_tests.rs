@@ -64,6 +64,7 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
     let mut prepared = PreparedOperation {
         operation: "synthetic.debit".into(),
         operation_version: 1,
+        action_deadline: None,
         input: json!({"amount":"1"}),
         binding: json!({"amount":"1"}),
         summary: "SYNTHETIC debit".into(),
@@ -148,6 +149,7 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         financial_plan_snapshot: None,
         adapter: None,
         options: EngineOptions::default(),
+        clock: Arc::new(fin_domain::clock::SystemClock),
         consumed: AtomicBool::new(false),
         store: store.clone(),
         record: Mutex::new(record),

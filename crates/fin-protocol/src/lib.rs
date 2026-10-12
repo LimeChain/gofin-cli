@@ -346,7 +346,7 @@ mod tests {
             Some(BrokerRequest::AuthorizePlan { request })
                 if request.request_id == "request-1"
                     && request.plan.name == "sample two step plan"
-                    && request.valid_for_seconds == 600
+                    && request.valid_for_seconds == Some(600)
         ));
 
         let attempt = serde_json::json!({

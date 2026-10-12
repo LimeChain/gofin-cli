@@ -18,8 +18,10 @@ impl Engine {
         self.validate_plan_request(&request)?;
         let permissions = self.prepare_plan_permissions(&request.plan).await?;
         validate_plan_permissions(&request.plan, &permissions)?;
-        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let (valid_for_seconds, timing_warnings) =
+            self.resolve_plan_duration(&request, prior.as_ref())?;
+        validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
         let carried_forward_usage = prior
             .as_ref()
             .map(|record| record.usage.clone())
@@ -40,7 +42,7 @@ impl Engine {
         let review_hash = financial_plans::financial_plan_review_hash(
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_forward_usage,
         )?;
@@ -56,12 +58,13 @@ impl Engine {
             plan: request.plan,
             permissions,
             review_hash,
-            valid_for_seconds: request.valid_for_seconds,
+            valid_for_seconds,
             replaces_revision_id: request.replaces_revision_id,
             plan_id: prior.as_ref().map(|record| record.revision.plan_id.clone()),
             carried_forward_usage,
             remaining_debits,
             remaining_costs,
+            timing_warnings,
         })
     }
 
@@ -119,8 +122,10 @@ impl Engine {
 
         let permissions = self.prepare_plan_permissions(&request.plan).await?;
         validate_plan_permissions(&request.plan, &permissions)?;
-        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let (valid_for_seconds, _timing_warnings) =
+            self.resolve_plan_duration(&request, prior.as_ref())?;
+        validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
         let carried_usage = prior
             .as_ref()
             .map(|record| record.usage.clone())
@@ -128,7 +133,7 @@ impl Engine {
         let review_hash = financial_plans::financial_plan_review_hash(
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_usage,
         )?;
@@ -173,12 +178,12 @@ impl Engine {
             &revision_id,
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_usage,
         );
         let approved_binding_hash = binding_hash(&binding)?;
-        plan_duration(request.valid_for_seconds)?;
+        plan_duration(valid_for_seconds)?;
         let challenge = AuthorizationChallenge {
             purpose: "financial_plan".into(),
             operation_id: plan_id.clone(),
@@ -188,10 +193,10 @@ impl Engine {
                 "Approve the plan “{}” with {} ordered steps for {} seconds.",
                 request.plan.name,
                 request.plan.steps.len(),
-                request.valid_for_seconds
+                valid_for_seconds
             ),
             nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339(),
+            expires_at: (self.clock.now() + chrono::Duration::seconds(90)).to_rfc3339(),
         };
         {
             let mut store = self
@@ -199,7 +204,12 @@ impl Engine {
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
             if !store
-                .begin_financial_plan_request(&request.request_id, &fingerprint, &plan_id, &now())
+                .begin_financial_plan_request(
+                    &request.request_id,
+                    &fingerprint,
+                    &plan_id,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?
             {
                 return Err(plan_error(
@@ -215,21 +225,29 @@ impl Engine {
                 self.store
                     .lock()
                     .map_err(|_| internal("store lock poisoned"))?
-                    .fail_financial_plan_request(&request.request_id, &fingerprint, &now())
+                    .fail_financial_plan_request(
+                        &request.request_id,
+                        &fingerprint,
+                        &self.clock.now().to_rfc3339(),
+                    )
                     .map_err(map_store)?;
                 return Err(error);
             }
         };
-        if let Err(error) = validate_approval(&approval, &challenge, Utc::now()) {
+        if let Err(error) = validate_approval(&approval, &challenge, self.clock.now()) {
             self.store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?
-                .fail_financial_plan_request(&request.request_id, &fingerprint, &now())
+                .fail_financial_plan_request(
+                    &request.request_id,
+                    &fingerprint,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?;
             return Err(error);
         }
         let approved_at = parse_time(&approval.approved_at)?;
-        let seconds = i64::try_from(request.valid_for_seconds).map_err(|_| {
+        let seconds = i64::try_from(valid_for_seconds).map_err(|_| {
             plan_error(
                 "PLAN_DURATION_INVALID",
                 "Plan duration is too large.",
@@ -261,7 +279,7 @@ impl Engine {
             approval_binding_hash: approved_binding_hash,
             approved_at: approval.approved_at.clone(),
             expires_at,
-            valid_for_seconds: request.valid_for_seconds,
+            valid_for_seconds,
             status: FinancialPlanAuthorizationStatus::Active,
             replaces_revision_id: request.replaces_revision_id.clone(),
         };
@@ -279,7 +297,7 @@ impl Engine {
         record.approval = approval;
         record.request_fingerprint = fingerprint.clone();
         record.usage = carried_usage;
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut store = self
             .store
             .lock()
@@ -333,7 +351,7 @@ impl Engine {
                     plan_id,
                     &to_value(&expected)?,
                     &to_value(&record)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         }
@@ -392,24 +410,34 @@ impl Engine {
                 summary: format!("Read-only plan step `{step_id}`."),
                 checks: vec![],
                 warnings: vec![],
-                observed_at: now(),
-                expires_at: now(),
+                observed_at: self.clock.now().to_rfc3339(),
+                expires_at: self.clock.now().to_rfc3339(),
                 valuation: None,
                 intent: fin_domain::FinancialIntent::default(),
                 operation_version: 1,
+                action_deadline: None,
             });
         }
         let preview_attempt_id = Uuid::new_v4().to_string();
-        let execution_input =
+        let action_deadline =
+            self.prepare_action_deadline(&*adapter, &record.revision, step_id, input)?;
+        let mut execution_input =
             plan_attempt_input(&record.revision, step_id, input, &preview_attempt_id)?;
+        if let Some(deadline) = &action_deadline {
+            deadline.apply(&mut execution_input)?;
+        }
         let context = self.preparation_context(None)?;
-        let prepared = bounded_evidence(
+        let mut prepared = bounded_evidence(
             operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(operation, &execution_input, &context),
         )
         .await?;
+        if prepared.action_deadline.is_some() {
+            return Err(internal("adapter supplied broker timing"));
+        }
+        prepared.action_deadline = action_deadline;
         self.validate_plan_candidate(
             &*adapter,
             &record.revision,
@@ -425,7 +453,7 @@ impl Engine {
                 .map_err(|_| internal("store lock poisoned"))?;
             validate_candidate_plan_caps(&record, step_id, &prepared, &store)?;
         }
-        validate_prepared(&prepared, operation, Utc::now())?;
+        validate_prepared(&prepared, operation, self.clock.now())?;
         Ok(prepared)
     }
 
@@ -548,7 +576,7 @@ impl Engine {
                 ));
             }
             if plan.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&plan.revision.expires_at)? <= Utc::now()
+                || parse_time(&plan.revision.expires_at)? <= self.clock.now()
             {
                 return Err(plan_error(
                     "PLAN_AUTHORIZATION_INACTIVE",
@@ -584,7 +612,12 @@ impl Engine {
                 .await;
         }
         let id = Uuid::new_v4().to_string();
-        let execution_input = plan_attempt_input(&plan.revision, step_id, &request.input, &id)?;
+        let action_deadline =
+            self.prepare_action_deadline(&*adapter, &plan.revision, step_id, &request.input)?;
+        let mut execution_input = plan_attempt_input(&plan.revision, step_id, &request.input, &id)?;
+        if let Some(deadline) = &action_deadline {
+            deadline.apply(&mut execution_input)?;
+        }
         let mut execution_request = request.clone();
         execution_request.input = execution_input.clone();
         let context = self.preparation_context(None)?;
@@ -595,10 +628,14 @@ impl Engine {
             adapter.prepare_with_context(&request.operation, &execution_input, &context),
         )
         .await?;
+        if prepared.action_deadline.is_some() {
+            return Err(internal("adapter supplied broker timing"));
+        }
+        prepared.action_deadline = action_deadline;
         let required_origins = self.cost_origin_assets(&prepared, None)?;
         self.complete_cost_origin_prices(&mut prepared, &required_origins)
             .await?;
-        validate_prepared(&prepared, &request.operation, Utc::now())?;
+        validate_prepared(&prepared, &request.operation, self.clock.now())?;
         self.validate_plan_candidate(
             &*adapter,
             &plan.revision,
@@ -623,7 +660,7 @@ impl Engine {
         validate_plan_aggregate_remaining(&plan, &prepared)?;
         validate_plan_funding(&plan, step_id, &prepared)?;
 
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut operation = OperationRecord {
             id: id.clone(),
             request_id: request.request_id.clone(),
@@ -789,7 +826,7 @@ impl Engine {
                         status_for_error(&error)
                     };
                     operation.error = Some(error);
-                    operation.updated_at = now();
+                    operation.updated_at = self.clock.now().to_rfc3339();
                     if operation.status.terminal() {
                         self.commit_terminal(
                             operation.clone(),
@@ -875,7 +912,7 @@ impl Engine {
             "request": request_fingerprint(&request)?,
         }))?;
         let id = Uuid::new_v4().to_string();
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut operation = OperationRecord {
             id: id.clone(),
             request_id: request.request_id.clone(),
@@ -991,7 +1028,7 @@ impl Engine {
                 operation.error = Some(error);
             }
         }
-        operation.updated_at = now();
+        operation.updated_at = self.clock.now().to_rfc3339();
         loop {
             // Hold the process-local store mutex across the final CAS so a
             // concurrent revoke on this Engine cannot slip between reading
@@ -1061,22 +1098,144 @@ impl Engine {
 
     fn validate_plan_request(&self, request: &FinancialPlanAuthorizationRequest) -> Result<()> {
         request.validate()?;
-        if request.request_id.trim().is_empty() || request.valid_for_seconds == 0 {
+        if request.request_id.trim().is_empty() || request.valid_for_seconds == Some(0) {
             return Err(plan_error(
                 "PLAN_REQUEST_INVALID",
                 "A request ID and positive plan duration are required.",
                 "Supply a stable request ID and a positive representable duration.",
             ));
         }
-        let duration = plan_duration(request.valid_for_seconds)?;
-        Utc::now().checked_add_signed(duration).ok_or_else(|| {
-            plan_error(
-                "PLAN_DURATION_INVALID",
-                "Plan expiry cannot be represented from the current time.",
-                "Choose a shorter consent duration.",
-            )
-        })?;
+        if let Some(seconds) = request.valid_for_seconds {
+            let duration = plan_duration(seconds)?;
+            self.clock
+                .now()
+                .checked_add_signed(duration)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_DURATION_INVALID",
+                        "Plan expiry cannot be represented from the current time.",
+                        "Choose a shorter consent duration.",
+                    )
+                })?;
+        }
         Ok(())
+    }
+
+    fn resolve_plan_duration(
+        &self,
+        request: &FinancialPlanAuthorizationRequest,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+    ) -> Result<(u64, Vec<FinError>)> {
+        let prior_status = prior
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?;
+        let mut allowances = Vec::new();
+        let mut unclassified = Vec::new();
+        for step in &request.plan.steps {
+            if prior_status.as_ref().is_some_and(|status| {
+                status.steps.iter().any(|progress| {
+                    progress.step_id == step.step_id
+                        && progress.state == FinancialPlanStepProgressState::Completed
+                })
+            }) {
+                continue;
+            }
+            let (adapter, _) = self.resolve(&step.operation)?;
+            match adapter.plan_step_allowance(&step.operation, &step.input)? {
+                Some(seconds) => allowances.push(seconds),
+                None => unclassified.push(step.step_id.clone()),
+            }
+        }
+        if !unclassified.is_empty() && request.valid_for_seconds.is_none() {
+            return Err(plan_error("PLAN_DURATION_REQUIRED", "This plan includes a resting, delayed, or unclassified stage whose lifetime must be selected explicitly.",
+                "Supply --valid-for with a horizon covering the entire remaining sequence, including dependency settlement.")
+                .with_details(json!({"step_ids":unclassified,"explicit_duration_required":true})));
+        }
+        let budget = fin_domain::plan_timing::sequential_budget(allowances)?;
+        let seconds = request.valid_for_seconds.unwrap_or(budget);
+        for step in &request.plan.steps {
+            let completed = prior_status.as_ref().is_some_and(|status| {
+                status.steps.iter().any(|progress| {
+                    progress.step_id == step.step_id
+                        && progress.state == FinancialPlanStepProgressState::Completed
+                })
+            });
+            if !completed
+                && step
+                    .action_deadline_seconds
+                    .is_some_and(|window| window >= seconds)
+            {
+                return Err(plan_error("PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW", "The plan lifetime leaves no orchestration time around a full approved action window.",
+                    "Select an explicit longer --valid-for or review a shorter relative action window before requesting native approval.")
+                    .with_details(json!({"step_id":step.step_id,"authorization_seconds":seconds,"required_action_window_seconds":step.action_deadline_seconds,"automatic_duration":request.valid_for_seconds.is_none()})));
+            }
+        }
+        plan_duration(seconds)?;
+        let warnings = if seconds < budget {
+            vec![plan_error("PLAN_DURATION_BELOW_BUDGET", "The explicit duration is shorter than the known sequential planning allowance.",
+                "Review the full workflow horizon; keep the explicit constraint or choose a longer duration before approval.")
+                .with_details(json!({"requested_seconds":seconds,"known_budget_seconds":budget,"unclassified_step_ids":unclassified}))]
+        } else {
+            Vec::new()
+        };
+        Ok((seconds, warnings))
+    }
+
+    fn prepare_action_deadline(
+        &self,
+        adapter: &dyn Adapter,
+        revision: &FinancialPlanRevision,
+        step_id: &str,
+        input: &Value,
+    ) -> Result<Option<fin_domain::plan_timing::ResolvedActionDeadline>> {
+        let step = revision
+            .spec
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .ok_or_else(|| internal("plan step missing"))?;
+        let definition = adapter
+            .definitions()
+            .into_iter()
+            .find(|d| d.name == step.operation)
+            .ok_or_else(|| internal("plan operation missing"))?;
+        fin_domain::plan_timing::plan_input_schema(
+            &definition,
+            input,
+            step.action_deadline_seconds,
+        )?;
+        let Some(policy) = fin_domain::plan_timing::relative_deadline_policy(
+            &definition,
+            step.action_deadline_seconds,
+        )?
+        else {
+            fin_domain::authority_expiry::validate_plan_input_deadlines(
+                &definition,
+                input,
+                &revision.expires_at,
+                self.clock.now(),
+            )?;
+            return Ok(None);
+        };
+        fin_domain::plan_timing::resolve_action_deadline(
+            &policy,
+            step.action_deadline_seconds.expect("relative policy"),
+            self.clock.now(),
+            &revision.expires_at,
+        )
+        .map(Some)
+        .map_err(|mut error| {
+            if let Some(details) = error
+                .details
+                .as_mut()
+                .and_then(|details| details.as_object_mut())
+            {
+                details.insert("plan_id".into(), json!(revision.plan_id));
+                details.insert("revision_id".into(), json!(revision.revision_id));
+                details.insert("step_id".into(), json!(step_id));
+            }
+            error
+        })
     }
 
     async fn prepare_plan_permissions(
@@ -1106,11 +1265,16 @@ impl Engine {
                     "Choose an agent-readable read or agent-invocable financial write.",
                 ));
             }
-            validate_plan_json_schema(&definition.input_schema, &step.input)?;
+            let template_schema = fin_domain::plan_timing::plan_input_schema(
+                &definition,
+                &step.input,
+                step.action_deadline_seconds,
+            )?;
+            validate_plan_json_schema(&template_schema, &step.input)?;
             let generated_input_fields =
                 generated_attempt_input_fields(&definition, &step.input, is_read)?;
             validate_generated_attempt_input_schema(
-                &definition.input_schema,
+                &template_schema,
                 &step.input,
                 &generated_input_fields,
                 &generated_attempt_input_value(
@@ -1123,7 +1287,7 @@ impl Engine {
             let exact_requested =
                 step.permitted_variations.get("mode") == Some(&Value::String("exact".into()));
             if exact_requested {
-                validate_plan_json_schema(&definition.input_schema, &step.input)?;
+                validate_plan_json_schema(&template_schema, &step.input)?;
                 let scope: FinancialPlanExactScope = serde_json::from_value(
                     step.permitted_variations.clone(),
                 )
@@ -1187,6 +1351,20 @@ impl Engine {
                     ),
                 )
                 .await?;
+                if let Some(window) = step.action_deadline_seconds
+                    && permission
+                        .spec
+                        .parameters
+                        .get("max_deadline_seconds")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|limit| window > limit)
+                {
+                    return Err(plan_error(
+                        "PLAN_ACTION_DEADLINE_INVALID",
+                        "Relative action window exceeds the approved adapter deadline bound.",
+                        "Use an action window within max_deadline_seconds.",
+                    ));
+                }
                 if permission.spec.summary.trim().is_empty()
                     || permission.spec.fixed.is_null()
                     || permission.spec.parameters.is_null()
@@ -1235,6 +1413,7 @@ impl Engine {
             prepared,
             &revision.expires_at,
         )?;
+        validate_action_deadline(adapter, revision, step_id, raw_input, prepared)?;
         let permission = permission_for_step(revision, step_id)?;
         if let Some(exact) = &permission.exact {
             validate_exact_plan_candidate(
@@ -1343,13 +1522,15 @@ impl Engine {
         input: &Value,
     ) -> Result<()> {
         if record.revision.status != FinancialPlanAuthorizationStatus::Active
-            || parse_time(&record.revision.expires_at)? <= Utc::now()
+            || parse_time(&record.revision.expires_at)? <= self.clock.now()
         {
             return Err(plan_error(
                 "PLAN_AUTHORIZATION_INACTIVE",
                 "Plan authorization is expired or revoked.",
-                "Obtain fresh authorization before starting another step.",
-            ));
+                "Reconcile unresolved attempts, preview a replacement revision with --replaces REVISION_ID, and obtain fresh native approval before starting another step.",
+            ).with_details(json!({"plan_id":record.revision.plan_id,"revision_id":record.revision.revision_id,"expires_at":record.revision.expires_at,
+                "observed_at":self.clock.now().to_rfc3339(),"authorization_status":record.revision.status,
+                "reauthorization_required":true,"reconciliation_required":record.active_attempt_id.is_some()})));
         }
         let step = record
             .revision
@@ -1582,7 +1763,7 @@ impl Engine {
             blockers.push("A plan attempt is unresolved.".into());
         }
         let authorization_active = revision.status == FinancialPlanAuthorizationStatus::Active
-            && parse_time(&revision.expires_at)? > Utc::now();
+            && parse_time(&revision.expires_at)? > self.clock.now();
         let pending_bridge_settlements = bridge_transfers
             .iter()
             .filter(|transfer| {
@@ -1622,7 +1803,26 @@ impl Engine {
         if !authorization_active && next.is_some() {
             blockers.push("Plan authorization is expired, revoked, or superseded.".into());
         }
+        let at = self.clock.now();
+        let remaining_seconds = parse_time(&revision.expires_at)?
+            .signed_duration_since(at)
+            .num_seconds()
+            .max(0) as u64;
+        let required_window = next
+            .as_ref()
+            .and_then(|id| revision.spec.steps.iter().find(|step| &step.step_id == id))
+            .and_then(|step| step.action_deadline_seconds);
+        let authorization_timing = Some(fin_domain::plan_timing::PlanAuthorizationTiming {
+            observed_at: at.to_rfc3339(),
+            expires_at: revision.expires_at.clone(),
+            remaining_seconds,
+            required_action_window_seconds: required_window,
+            can_prepare_next_action: authorization_active
+                && next.is_some()
+                && required_window.is_none_or(|window| window <= remaining_seconds),
+        });
         Ok(FinancialPlanStatus {
+            authorization_timing,
             plan_id: revision.plan_id.clone(),
             revision: revision.clone(),
             usage: record.usage.clone(),
@@ -1659,7 +1859,12 @@ pub(super) fn validate_exact_plan_candidate(
         .into_iter()
         .find(|definition| definition.name == operation)
         .ok_or_else(|| internal("registry definition disappeared"))?;
-    validate_plan_json_schema(&definition.input_schema, raw_input)?;
+    let seconds = prepared
+        .action_deadline
+        .as_ref()
+        .map(|deadline| deadline.window_seconds);
+    let schema = fin_domain::plan_timing::plan_input_schema(&definition, raw_input, seconds)?;
+    validate_plan_json_schema(&schema, raw_input)?;
     validate_exact_plan_identity(adapter, operation, exact)
 }
 
@@ -1909,6 +2114,80 @@ fn validate_plan_permissions(
     validate_aggregate_permission_bounds(spec, permissions)
 }
 
+pub(super) fn carry_action_deadline(
+    original: &PreparedOperation,
+    candidate: &mut PreparedOperation,
+) -> Result<()> {
+    if candidate.action_deadline.is_some() && candidate.action_deadline != original.action_deadline
+    {
+        return Err(plan_error(
+            "PLAN_CANDIDATE_CHANGED",
+            "The immutable action deadline resolution changed.",
+            "Reconcile the original attempt; do not rewrite it.",
+        ));
+    }
+    candidate
+        .action_deadline
+        .clone_from(&original.action_deadline);
+    Ok(())
+}
+
+pub(super) fn validate_action_deadline(
+    adapter: &dyn Adapter,
+    revision: &FinancialPlanRevision,
+    step_id: &str,
+    raw_input: &Value,
+    prepared: &PreparedOperation,
+) -> Result<()> {
+    let step = revision
+        .spec
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .ok_or_else(|| internal("step missing"))?;
+    let definition = adapter
+        .definitions()
+        .into_iter()
+        .find(|d| d.name == step.operation)
+        .ok_or_else(|| internal("definition missing"))?;
+    let policy = fin_domain::plan_timing::relative_deadline_policy(
+        &definition,
+        step.action_deadline_seconds,
+    )?;
+    match (policy, &prepared.action_deadline) {
+        (None, None) => Ok(()),
+        (Some(policy), Some(resolved)) => {
+            fin_domain::plan_timing::plan_input_schema(
+                &definition,
+                raw_input,
+                step.action_deadline_seconds,
+            )?;
+            let at = parse_time(&resolved.resolved_at)?;
+            let expected = fin_domain::plan_timing::resolve_action_deadline(
+                &policy,
+                step.action_deadline_seconds.expect("relative deadline"),
+                at,
+                &revision.expires_at,
+            )?;
+            if resolved != &expected
+                || prepared.input.get(&policy.field) != Some(&json!(expected.deadline_unix_seconds))
+            {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The concrete deadline differs from its immutable resolution or approved window.",
+                    "Reconcile the original attempt; use candidate replacement only while unsubmitted.",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(plan_error(
+            "PLAN_CANDIDATE_CHANGED",
+            "The candidate lacks or changes its approved deadline policy.",
+            "Preserve the original prepared candidate.",
+        )),
+    }
+}
+
 fn validate_plan_authorization_duration(
     requested_seconds: u64,
     permissions: &[FinancialPlanStepPermission],
@@ -1925,8 +2204,8 @@ fn validate_plan_authorization_duration(
             return Err(plan_error(
                 "PLAN_AUTHORIZATION_DURATION_EXCEEDED",
                 "The requested plan authorization lasts longer than an adapter-reviewed step allows.",
-                "Choose a plan duration within every step's approved authorization limit and review again.",
-            ));
+                "Review the workflow duration and the adapter's intentional authorization limit; revise the approved scope or workflow rather than truncating consent.",
+            ).with_details(json!({"step_id":permission.step_id,"requested_seconds":requested_seconds,"maximum_authorization_seconds":maximum})));
         }
     }
     Ok(())
@@ -2180,7 +2459,10 @@ pub(super) fn validate_generated_plan_candidate(
             "Review and authorize a fresh plan revision.",
         ));
     }
-    let expected_input = plan_attempt_input(revision, step_id, raw_input, attempt_id)?;
+    let mut expected_input = plan_attempt_input(revision, step_id, raw_input, attempt_id)?;
+    if let Some(deadline) = &prepared.action_deadline {
+        deadline.apply(&mut expected_input)?;
+    }
     validate_plan_json_schema(&definition.input_schema, &expected_input)?;
     validate_prepared_generated_input(
         &permission.generated_input_fields,
@@ -3762,6 +4044,7 @@ fn validate_revision_transition(
                 || old.operation != new.operation
                 || old.completion != new.completion
                 || old.funding_dependencies != new.funding_dependencies
+                || old.action_deadline_seconds != new.action_deadline_seconds
             {
                 return Err(plan_error(
                     "PLAN_REVISION_HISTORY_CONFLICT",
@@ -4066,7 +4349,7 @@ fn expire_plan_if_needed(
     record: &mut FinancialPlanAuthorizationRecord,
 ) -> Result<()> {
     if record.revision.status == FinancialPlanAuthorizationStatus::Active
-        && parse_time(&record.revision.expires_at)? <= Utc::now()
+        && parse_time(&record.revision.expires_at)? <= engine.clock.now()
     {
         let expected = record.clone();
         record.revision.status = FinancialPlanAuthorizationStatus::Expired;
@@ -4078,7 +4361,7 @@ fn expire_plan_if_needed(
                 &record.revision.plan_id,
                 &to_value(&expected)?,
                 &to_value(record)?,
-                &now(),
+                &engine.clock.now().to_rfc3339(),
             )
             .map_err(map_store)?;
     }
@@ -4321,6 +4604,7 @@ mod tests {
                 version: financial_plans::FINANCIAL_PLAN_VERSION,
                 name: "Generic exact read".into(),
                 steps: vec![financial_plans::FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: "read-account".into(),
                     operation: "future.read".into(),
                     input: json!({"account":"account-1"}),
@@ -4342,7 +4626,7 @@ mod tests {
                     maximum_costs: vec![],
                 },
             },
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         }
@@ -4814,6 +5098,7 @@ mod tests {
         assert!(!completion_met(&insufficient_spend, &effects, false).unwrap());
 
         let already_spent_but_short_receipt = financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "step".into(),
             operation: "synthetic.write".into(),
             input: json!({}),
@@ -4847,6 +5132,7 @@ mod tests {
         scope.spec.maximum_debits.clear();
         scope.deferred_receipt = Some(resource_amount("destination", "ETH", "100"));
         let mut step = financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "claim".into(),
             operation: "synthetic.claim".into(),
             input: json!({}),
@@ -5302,6 +5588,7 @@ mod tests {
 
     fn step_spec() -> financial_plans::FinancialPlanStepSpec {
         financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "step-1".into(),
             operation: "synthetic.write".into(),
             input: json!({"request_id": "seed-a"}),
@@ -5517,6 +5804,7 @@ mod tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         let error = engine
             .validate_plan_candidate(
@@ -6052,6 +6340,7 @@ mod tests {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         }
     }
     #[test]

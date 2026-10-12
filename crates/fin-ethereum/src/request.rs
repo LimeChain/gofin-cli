@@ -200,6 +200,14 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
     }
 }
 pub fn parse(operation: &str, input: &Value) -> Result<Request> {
+    parse_input(operation, input, false)
+}
+
+pub(crate) fn parse_plan_template(operation: &str, input: &Value) -> Result<Request> {
+    parse_input(operation, input, true)
+}
+
+fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Request> {
     if !OPERATIONS.contains(&operation) {
         return Err(FinError::validation(
             "This EVM operation is not implemented.",
@@ -220,6 +228,12 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
         }
     }
     for field in required {
+        if plan_template
+            && *field == "deadline"
+            && matches!(operation, "uniswap.swap" | "ramses.swap")
+        {
+            continue;
+        }
         if object.get(*field).is_none_or(Value::is_null) {
             return Err(FinError::validation(format!(
                 "Required operation field {field} is missing."
@@ -424,6 +438,10 @@ pub fn definitions() -> Vec<Definition> {
                 example["chain_id"] = json!(4663);
                 example["tick_spacing"] = json!(1);
             }
+        }
+        if !read { semantics["plan_allowance_seconds"] = json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS); }
+        if matches!(*operation, "uniswap.swap" | "ramses.swap") {
+            semantics["plan_relative_deadline"] = json!({"field":"deadline","maximum_seconds":super::amm_permissions::MAX_DEADLINE_SECONDS});
         }
         Definition {
             name: (*operation).into(),

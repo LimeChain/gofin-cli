@@ -343,6 +343,7 @@ pub fn prepared_operation(
         valuation: None,
         intent,
         operation_version: 1,
+        action_deadline: None,
     })
 }
 

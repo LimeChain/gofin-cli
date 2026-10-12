@@ -135,6 +135,7 @@ impl EthereumAdapter {
             wallets,
             runtime: self.runtime.clone(),
             oracle_clock: self.oracle_clock.clone(),
+            clock: self.clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
         };
@@ -209,6 +210,7 @@ impl EthereumAdapter {
                 None,
             )),
             oracle_clock: self.oracle_clock.clone(),
+            clock: self.clock.clone(),
             wallet_valuation: self.wallet_valuation.clone(),
             token_discovery: self.token_discovery.clone(),
         });
