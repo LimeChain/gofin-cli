@@ -6,7 +6,7 @@ First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28,
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 44% complete (11/25 items)
+## First release — 48% complete (12/25 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 22 | [At least two bridges to Solana](integration-roadmap.md#22-at-least-two-bridges-to-solana) | First release — requested; bridge providers, source networks and assets to select |
 | 23 | [General release preparedness](release-preparedness.md) | First release — requested; license, contribution guide, docs grooming and general audit |
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
-| 33 | [Action duration and completion estimates](action-duration-estimates.md) | In progress — first release; user reported; major UX hurdle |
+| 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 
 ## Next release — 0% complete (0/8 items)
 
