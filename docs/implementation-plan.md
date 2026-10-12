@@ -658,3 +658,78 @@ serialization is unchanged when the field is omitted, and started-step revisions
 cannot alter the declaration. Accounting remains application-independent.
 Independent public-CLI fork rehearsal and human observation are recorded
 separately; a successful plan preview alone is not execution evidence.
+
+## Aave V3 completion
+
+Reviewed market profiles are pinned to address-book commit
+`6a83d11893d6687bf6b9fd091a2a5320b3e1966e`. Protected additive configuration keeps
+custom defaults, legacy chain scope, credential references and pending bindings.
+Explicit pool selection is application-owned; cash snapshots remain unique while
+all enabled markets use one pinned capture and market-qualified position keys.
+
+Aave adapter modules own deployment selection, exact revision-specific math,
+ordered bounded reads, risk checks and balance-independent plan permissions.
+Horizon half-up kernels use source commit
+`311a59fb1cec23ee254e84b28759fd1faf9c3711`; revision-5 proofs are unchanged.
+Legacy mint/burn gains and losses are exact effects, never dust tolerances.
+External positions use independently validated original-preview observations only
+when no prior Fin lineage exists; observations never manufacture wallet cash or
+historical profit. Actual prior journal anchors always take precedence.
+
+Named plan cumulative scopes add optional `maximum_obligations`, consuming typed
+positive debt effects and retaining original-preview reservations while uncertain.
+Debt decreases cannot refund borrowing authority. Existing named-plan SQLite tables
+and immutable operation records need no SQL change: the existing version-1 JSON
+contract defaults absent obligation caps to empty and omits empty fields on output.
+Old scope round trips and restart are covered by focused tests; no credentials,
+financial state or pending writes are reset or replayed.
+
+Collateral-removal risk uses exact scaled burn/backing and per-reserve/eMode
+thresholds at a pinned block. Borrow checks isolate/siloed eligibility and ceiling
+state independently of reported borrowing capacity. Fresh dispatch and normal
+simulation remain required. Fee headroom now clips padded priority tips while
+retaining enough room for the observed base fee; frozen approved bids remain exact.
+See [Aave verification](testing/aave.md) for evidence classes and limitations.
+
+Historical Aave reserve/position reads now accept an explicit positive block
+number and bracket all observations with canonical hash checks. This enables
+inclusion-block risk verification through Fin; historical state cannot select
+a write state or supply financial authority. Borrowing advertises the neutral
+`requires_adapter_scope` contract so generic exact plan mode cannot omit its
+portfolio risk or cumulative borrowing limits. Submitted legacy recovery remains
+immutable; unsubmitted exact scopes bind the operation definition hash.
+
+Live verification exposed mixed quote timestamps during long preparation. EVM
+USD movement, fee and additional-debt scalars now derive upward from their same
+final per-asset micro-USD unit observations. All original timestamps remain
+attributed; the two-minute freshness rule is unchanged. This reduces repeated
+pricing calls and never restamps an expired earlier quote. Oracle USD units are
+independently checked for dollar debt ceilings.
+
+Main integration (11 October): retained the new Hyperliquid/AMM contracts and
+configuration authorization method alongside Aave. Required evidence stage deadlines are 120 seconds after the user-requested
+increase during live testing. Aave risk now reads every reserve through eight bounded
+workers at one block, a capture-local exact read cache and a final uncached hash
+check. Required failure drains workers; cancellation aborts children. No signer
+or cache survives a read capture. Public CLI named-plan fork rehearsals include
+future-funded supply, fixed borrowing risk, immutable duplicates, restart with
+outstanding debt, full scaled closure and revocation persistence.
+
+Closed-position reopening keeps prior proofs immutable but permits a new zero
+observation for a genuinely closed lineage after canonical identity checks.
+Nonzero and frozen attempts keep strict historical backing validation. This
+removes an unnecessary perpetual archive dependency without inventing principal,
+profit or authority; tests cover pruned state and malformed/reorganized evidence.
+
+At the user's request after observed live read-evidence delays, required
+preparation/revalidation and external-read stage deadlines are 120 seconds.
+Evidence freshness, approval expiry, immutable submissions and reservations
+retain their independent checks; submission/reconciliation is not cancelled
+by this evidence timer.
+
+Latest-main readiness verification passed: CLI named-plan owned forks on
+Ethereum/Base/Arbitrum, 45 fresh disposable-wallet live writes, full restoration
+and exact cash conservation, and restart preservation of 97 records including
+all 49 earlier records. Required read evidence uses 120-second stage deadlines.
+The signed bundle is prepared; human make update and the subsequently supplied
+protected-runtime/Touch ID scenario are pending. No installation, commit or push.

@@ -98,7 +98,32 @@ sol! {
     interface V4StateView {
         function getSlot0(bytes32 poolId) external view returns (uint160 sqrtPriceX96,int24 tick,uint24 protocolFee,uint24 lpFee);
     }
+    struct PoolReserveData {
+        uint256 configuration;
+        uint128 liquidityIndex;
+        uint128 currentLiquidityRate;
+        uint128 variableBorrowIndex;
+        uint128 currentVariableBorrowRate;
+        uint128 currentStableBorrowRate;
+        uint40 lastUpdateTimestamp;
+        uint16 id;
+        address aTokenAddress;
+        address stableDebtTokenAddress;
+        address variableDebtTokenAddress;
+        address interestRateStrategyAddress;
+        uint128 accruedToTreasury;
+        uint128 unbacked;
+        uint128 isolationModeTotalDebt;
+    }
+    struct EModeCollateralConfig { uint16 ltv; uint16 liquidationThreshold; uint16 liquidationBonus; }
     interface Pool {
+        function POOL_REVISION() external view returns (uint256 value);
+        function getConfiguration(address asset) external view returns (uint256 value);
+        function getReserveData(address asset) external view returns (PoolReserveData value);
+        function getUserEMode(address user) external view returns (uint256 value);
+        function getEModeCategoryCollateralConfig(uint8 id) external view returns (EModeCollateralConfig value);
+        function getEModeCategoryCollateralBitmap(uint8 id) external view returns (uint128 value);
+        function getEModeCategoryBorrowableBitmap(uint8 id) external view returns (uint128 value);
         function ADDRESSES_PROVIDER() external view returns (address value);
         function getReservesList() external view returns (address[] value);
         function getReserveNormalizedIncome(address asset) external view returns (uint256 value);
@@ -117,6 +142,8 @@ sol! {
         event ReserveUsedAsCollateralDisabled(address indexed reserve,address indexed user);
     }
     interface AToken {
+        function POOL() external view returns (address value);
+        function UNDERLYING_ASSET_ADDRESS() external view returns (address value);
         function ATOKEN_REVISION() external view returns (uint256 value);
         function DEBT_TOKEN_REVISION() external view returns (uint256 value);
         function scaledBalanceOf(address user) external view returns (uint256 value);

@@ -563,17 +563,14 @@ fn expand_reviewed_evm_coverage_with(
             .position(|existing| existing.network == reviewed.network)
         else {
             config.deployments.push(DeploymentConfig {
+                aave_markets: reviewed.aave_markets.clone(),
                 network: reviewed.network.clone(),
                 weth: reviewed.weth.clone(),
                 snapshot_tokens: Vec::new(),
                 uniswap: reviewed.uniswap.clone(),
                 ramses: reviewed.ramses.clone(),
                 v3_deployments: reviewed.v3_deployments.clone(),
-                aave: if reviewed.network == "ethereum:8453" {
-                    reviewed.aave.clone()
-                } else {
-                    None
-                },
+                aave: reviewed.aave.clone(),
             });
             if reviewed.uniswap.is_some() {
                 warnings.push(format!(
@@ -598,6 +595,18 @@ fn expand_reviewed_evm_coverage_with(
         };
 
         let existing = &mut config.deployments[index];
+        for market in &reviewed.aave_markets {
+            if !existing
+                .aave_markets
+                .iter()
+                .any(|m| m.pool.eq_ignore_ascii_case(&market.pool))
+            {
+                existing.aave_markets.push(market.clone());
+            }
+        }
+        if reviewed.network != "ethereum:8453" && existing.aave.is_none() {
+            existing.aave = reviewed.aave.clone();
+        }
         if reviewed.network == "ethereum:8453" {
             if existing.weth.is_none() {
                 existing.weth = reviewed.weth.clone();
@@ -1636,6 +1645,7 @@ mod tests {
             oracle: "0x5555555555555555555555555555555555555555".into(),
         };
         let deployment = DeploymentConfig {
+            aave_markets: vec![],
             network: "ethereum:1".into(),
             weth: Some("0x6666666666666666666666666666666666666666".into()),
             snapshot_tokens: vec!["0x7777777777777777777777777777777777777777".into()],
@@ -1846,6 +1856,7 @@ mod tests {
             vec![custom_mainnet.clone(), custom_rh.clone()],
             vec![
                 DeploymentConfig {
+                    aave_markets: vec![],
                     network: "ethereum:1".into(),
                     weth: Some("0x8888888888888888888888888888888888888888".into()),
                     snapshot_tokens: vec!["0x9999999999999999999999999999999999999999".into()],
@@ -1855,6 +1866,7 @@ mod tests {
                     aave: Some(fin_ethereum::EthereumConfig::default().aave.unwrap()),
                 },
                 DeploymentConfig {
+                    aave_markets: vec![],
                     network: "ethereum:4663".into(),
                     weth: None,
                     snapshot_tokens: vec![],
@@ -2188,6 +2200,7 @@ mod tests {
         );
         config.connections.push(reusable_read_only_wallet());
         let dangling = DeploymentConfig {
+            aave_markets: vec![],
             network: "ethereum:999999".into(),
             weth: None,
             snapshot_tokens: vec![],

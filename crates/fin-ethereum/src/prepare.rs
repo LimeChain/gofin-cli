@@ -362,6 +362,7 @@ impl EthereumAdapter {
             scaled_before: None,
             repay_all,
             all_amount,
+            aave_emode: None,
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,
@@ -1074,6 +1075,7 @@ impl EthereumAdapter {
                 let user = self.user_reserve(&token, owner, None).await?;
                 let pool = address(&self.aave()?.pool)?;
                 to = pool;
+                b.aave_emode = Some(quantity(self.aave_mode(owner, None).await?));
                 b.pool = Some(self.aave()?.pool.clone());
                 b.spender = Some(self.aave()?.pool.clone());
                 b.a_token = Some(reserve.a_token.clone());
@@ -1091,7 +1093,7 @@ impl EthereumAdapter {
                                 None,
                             )
                             .await?
-                            == U256::from(5),
+                            == self.supply_revision(),
                         "ATOKEN_REVISION_UNSUPPORTED",
                         "Selected supply writes require reviewed aToken revision 5 backing math.",
                     )?;
@@ -1105,11 +1107,12 @@ impl EthereumAdapter {
                                 None,
                             )
                             .await?
-                            == U256::from(5),
+                            == self.debt_revision(),
                         "DEBT_REVISION_UNSUPPORTED",
-                        "Selected debt writes require reviewed variable debt token revision 5 backing math.",
+                        "Selected debt writes require the selected reviewed debt token backing math.",
                     )?;
                 }
+                self.verify_receipt_identity(&token, &reserve, None).await?;
                 b.supply_anchor = Some(
                     self.context_anchor(
                         context,
@@ -1117,6 +1120,7 @@ impl EthereumAdapter {
                         owner,
                         address(&reserve.a_token)?,
                         PositionKind::Supply,
+                        original.is_none(),
                     )
                     .await?,
                 );
@@ -1127,6 +1131,7 @@ impl EthereumAdapter {
                         owner,
                         address(&reserve.variable_debt_token)?,
                         PositionKind::VariableDebt,
+                        original.is_none(),
                     )
                     .await?,
                 );
@@ -1182,9 +1187,9 @@ impl EthereumAdapter {
                             self.runtime
                                 .call(a_token, &AToken::ATOKEN_REVISIONCall {}, None)
                                 .await?
-                                == U256::from(5),
+                                == self.supply_revision(),
                             "ATOKEN_REVISION_UNSUPPORTED",
-                            "Exact supply backing proof supports reviewed aToken revision 5 only.",
+                            "Exact supply backing proof supports the selected reviewed aToken revision.",
                         )?;
                         b.scaled_before = Some(quantity(
                             self.runtime
@@ -1256,25 +1261,19 @@ impl EthereumAdapter {
                             U256::from(2),
                         )?;
                         b.debt_rounding_maximum = Some(quantity(rounding_limit));
-                        let (usd, _) = self
-                            .quote_protocol_usd(
-                                &token.reference,
-                                quantity(add(qty, rounding_limit)?),
+                        self.aave_borrow_restrictions(owner, &token, add(qty, rounding_limit)?)
+                            .await?;
+                        let (collateral_base, debt, projected) = self
+                            .aave_health_projection(
+                                owner,
+                                &token,
+                                None,
+                                false,
+                                add(qty, rounding_limit)?,
                             )
                             .await?;
-                        let added = mul(u256(&usd)?, U256::from(100))?;
-                        let debt = add(account.totalDebtBase, added)?;
-                        let projected = if debt.is_zero() {
-                            U256::MAX
-                        } else {
-                            mul(
-                                mul(
-                                    account.totalCollateralBase,
-                                    account.currentLiquidationThreshold,
-                                )?,
-                                pow10(18)?,
-                            )? / mul(U256::from(10000), debt)?
-                        };
+                        self.aave_debt_limits(&r, collateral_base, debt)?;
+                        let added = debt.saturating_sub(account.totalDebtBase);
                         let minimum = exact(r.min_health_factor.as_deref().expect("schema"), 18)?;
                         require(
                             minimum > pow10(18)?
@@ -1400,6 +1399,15 @@ impl EthereumAdapter {
                         } else {
                             None
                         };
+                        if user.collateral_enabled {
+                            self.aave_removal_risk(
+                                owner,
+                                &token,
+                                Some(if withdraw_all { claim } else { qty }),
+                                r.min_health_factor.as_deref(),
+                            )
+                            .await?;
+                        }
                         let recipient = address(r.recipient.as_deref().expect("schema"))?;
                         require(
                             recipient != Address::ZERO,
@@ -1412,7 +1420,17 @@ impl EthereumAdapter {
                             position: supply_position.clone(),
                             asset: principal_asset.clone(),
                             direction: Direction::Decrease,
-                            maximum_change: quantity(qty),
+                            maximum_change: quantity(if withdraw_all {
+                                qty
+                            } else {
+                                add(
+                                    qty,
+                                    (u256(&reserve.normalized_income)? + pow10(27)?
+                                        - U256::from(1))
+                                        / pow10(27)?
+                                        + U256::from(2),
+                                )?
+                            }),
                         });
                         intent.expected.push(EffectConstraint::Credit {
                             to: super::resource(self.config.chain_id, recipient),
@@ -1439,6 +1457,15 @@ impl EthereumAdapter {
                             "COLLATERAL_UNAVAILABLE",
                             "Reserve is ineligible for collateral use.",
                         )?;
+                        if !enabled && user.collateral_enabled {
+                            self.aave_removal_risk(
+                                owner,
+                                &token,
+                                None,
+                                r.min_health_factor.as_deref(),
+                            )
+                            .await?;
+                        }
                         b.enabled = Some(enabled);
                         intent.expected.push(EffectConstraint::Authority {
                             resource: resource.clone(),
@@ -1718,11 +1745,18 @@ impl EthereumAdapter {
                     resource: resource.clone(),
                     authority: collateral(&self.aave()?.pool, &token.reference),
                     before: before.clone(),
-                    allowed_after: if operation == "aave.supply" {
-                        vec![before, "true".into()]
-                    } else {
-                        vec![before, "false".into()]
-                    },
+                    allowed_after: vec![
+                        before,
+                        if operation == "aave.supply" {
+                            "true".into()
+                        } else {
+                            "false".into()
+                        },
+                    ]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
                 });
             }
             if matches!(operation, "aave.borrow" | "aave.repay") {
@@ -1836,11 +1870,10 @@ impl EthereumAdapter {
         } else {
             quantity(qty)
         };
-        let (movement_usd, source, movement_observed) = self
-            .quote_usd_observed(&principal_asset.reference, movement)
-            .await?;
-        let (fee_usd, _, fee_observed) = self.quote_usd_observed("native", quantity(gas)).await?;
-        let mut price_observations = vec![movement_observed, fee_observed];
+        // Derive all USD scalars from the same attributable final unit rows.
+        // Separate amount quotes can expire or change during preparation;
+        // old quote timestamps are never restamped or silently discarded.
+        let mut price_observations = Vec::new();
         let mut prices = Vec::new();
         for asset in [&principal_asset, &self.native_asset()]
             .into_iter()
@@ -1863,18 +1896,29 @@ impl EthereumAdapter {
             });
         }
         let observed = now();
+        let usd_from_row = |asset: &AssetId, units: Quantity| -> Result<Quantity> {
+            let row = prices
+                .iter()
+                .find(|p| p.asset == *asset)
+                .ok_or_else(|| FinError::validation("Exact valuation row missing."))?;
+            units.mul_div_ceil(&row.usd_micros_per_unit, &row.unit_atoms)
+        };
+        let movement_usd = usd_from_row(&principal_asset, movement)?;
+        let fee_usd = usd_from_row(&self.native_asset(), quantity(gas))?;
+        let source = prices
+            .iter()
+            .find(|p| p.asset == principal_asset)
+            .expect("principal row")
+            .source
+            .clone();
         let additional_allocation = if operation == "aave.borrow" {
-            let (value, _, observed_at) = self
-                .quote_usd_observed(
-                    &principal_asset.reference,
-                    quantity(add(
-                        qty,
-                        u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
-                    )?),
-                )
-                .await?;
-            price_observations.push(observed_at);
-            value
+            usd_from_row(
+                &principal_asset,
+                quantity(add(
+                    qty,
+                    u256(b.debt_rounding_maximum.as_ref().expect("borrow rounding"))?,
+                )?),
+            )?
         } else {
             Quantity::zero()
         };
@@ -2041,6 +2085,55 @@ impl EthereumAdapter {
                 r.max_price_impact_bps.unwrap_or(10_000),
                 b.deadline.expect("swap deadline"),
                 quantity(gas).to_decimal(18),
+            )
+        } else if operation.starts_with("aave.") {
+            let quantity = quantity(qty).to_decimal(token.decimals);
+            let label = super::amm_permissions::safe_display_label(Some(&token.symbol));
+            let recipient = if operation == "aave.withdraw" {
+                format!("; recipient {}", r.recipient.as_deref().unwrap_or(""))
+            } else {
+                String::new()
+            };
+            let risk = r
+                .min_health_factor
+                .as_deref()
+                .map(|hf| format!("; minimum health factor {hf}"))
+                .unwrap_or_default();
+            let debt_limit = r
+                .max_debt_usd
+                .as_deref()
+                .map(|v| format!("; maximum outstanding debt ${v}"))
+                .unwrap_or_default();
+            let ratio = r
+                .max_debt_to_collateral_bps
+                .map(|v| format!("; maximum debt/collateral {v} bps"))
+                .unwrap_or_default();
+            let action = if operation == "aave.collateral" {
+                format!(
+                    "{} {} collateral",
+                    if r.enabled == Some(true) {
+                        "Enable"
+                    } else {
+                        "Disable"
+                    },
+                    label
+                )
+            } else {
+                format!(
+                    "{} {} {}",
+                    operation.strip_prefix("aave.").unwrap_or(operation),
+                    if all_amount {
+                        format!("all, capped at {quantity}")
+                    } else {
+                        quantity
+                    },
+                    label
+                )
+            };
+            format!(
+                "{action} on Aave V3, chain {}; maximum fee {} ETH{recipient}{risk}{debt_limit}{ratio}. Supplied assets and borrowed debt remain separate from wallet cash.",
+                self.config.chain_id,
+                r.max_fee_eth.as_deref().unwrap_or("")
             )
         } else {
             format!(

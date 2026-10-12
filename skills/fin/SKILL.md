@@ -36,7 +36,7 @@ Setup and credential changes belong to the human's fresh Terminal. Explain the s
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
 
-EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Base supports WETH and reviewed Aave V3 operations. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
+EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
 Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
 through the protected broker after updating Fin. Use `fin connections list --json`
@@ -370,3 +370,27 @@ exact parent) or an approved revision of the same named plan (plan-owned parent)
 This read renews no authority and broadcasts nothing. Recovery must fit the
 original cumulative fee budgets. Empty bounded external-finalization discovery
 has partial coverage; it is not proof that no finalization exists.
+
+### Aave V3
+
+Inspect `aave.markets`, `aave.reserves`, `aave.positions` and their current schemas.
+Select exact chain, pool (`market`), reserve contract and spender; omission of
+market retains the configured legacy default. Keep wallet funds, supplied claims,
+collateral and variable debt separate. Current position balances include interest;
+historical external principal is not inferred from current quantities.
+
+Use separately approved finite `wallet.approve` and native wrap/unwrap steps.
+Borrow with fixed health-factor, outstanding-debt and debt/collateral bounds.
+Withdraw/collateral-disable with debt require an explicit health-factor floor.
+Review these point-in-time constraints without promising future liquidation safety.
+For named plan variations, use the operation's `semantics.plan_permission` bounds
+schema. Gross borrowing ceilings include finite rounding and never reset on repayment.
+Only amount and fee variations are allowed; market, assets, spender, recipient,
+collateral/eMode and risk fields remain fixed. Future funds are usable only after
+prior steps settle. Bounded `all` repayment/withdrawal must prove zero residual
+scaled debt/claim; reconcile original operations instead of resubmitting.
+
+Horizon uses a separately reviewed backing kernel and issuer-dependent RWA
+eligibility. EtherFi caps may prevent new positions. Unsupported versions/modes,
+missing permissions, unpriced assets and unavailable liquidity are explicit limits;
+never substitute another market, asset or mode without reviewing changed intent.

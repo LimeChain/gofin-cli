@@ -55,7 +55,7 @@ fn validate_frozen_fee_bid(transaction: &FrozenTransaction, base_fee: U256) -> R
             "FEE_BOUND_CHANGED",
             "submission",
             "Current base fee exceeds the approved frozen fee bid and full priority tip.",
-        ));
+        ).with_details(json!({"current_base_fee_wei":quantity(base_fee),"approved_max_fee_per_gas_wei":transaction.max_fee_per_gas,"approved_priority_fee_per_gas_wei":transaction.max_priority_fee_per_gas})));
     }
     Ok(())
 }
@@ -404,6 +404,15 @@ pub struct HttpRpc {
 struct RpcAttemptFailure {
     error: FinError,
     retryable: bool,
+}
+
+fn endpoint_access_failure(error: &FinError) -> bool {
+    error
+        .details
+        .as_deref()
+        .and_then(|details| details.get("http_status"))
+        .and_then(Value::as_u64)
+        .is_some_and(|status| matches!(status, 401 | 403 | 404 | 405))
 }
 
 const RPC_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -846,7 +855,7 @@ impl EvmRpc for HttpRpc {
                     .map_err(|_| self.read_timeout_error("eth_chainId"))?
                 {
                     Ok(()) => (),
-                    Err(e) if e.retryable => {
+                    Err(e) if e.retryable || endpoint_access_failure(&e.error) => {
                         failure = e.error;
                         continue;
                     }
@@ -868,7 +877,7 @@ impl EvmRpc for HttpRpc {
                     .await
                 {
                     Ok(value) => return Ok(value),
-                    Err(e) if e.retryable => failure = e.error,
+                    Err(e) if e.retryable || endpoint_access_failure(&e.error) => failure = e.error,
                     Err(e) => return Err(e.error),
                 }
             }
@@ -1566,7 +1575,11 @@ impl EvmRuntime {
             ));
         }
         transaction.max_fee_per_gas = quantity(max);
-        transaction.max_priority_fee_per_gas = quantity(max_priority.min(max));
+        // Padded tips must leave room for the observed base fee when the
+        // caller's total budget clips fee headroom. Existing frozen envelopes
+        // retain their exact bid and are never silently repriced.
+        let observed_base = (required - priority) / U256::from(2);
+        transaction.max_priority_fee_per_gas = quantity(max_priority.min(max - observed_base));
         transaction.consensus()?;
         let cost = transaction.maximum_cost()?;
         if cost > maximum_total_fee {
@@ -1702,7 +1715,9 @@ impl EvmRuntime {
             ));
         }
         transaction.max_fee_per_gas = quantity(max_fee.min(affordable));
-        transaction.max_priority_fee_per_gas = quantity(max_priority.min(max_fee.min(affordable)));
+        let observed_base = (required - priority) / U256::from(2);
+        transaction.max_priority_fee_per_gas =
+            quantity(max_priority.min(max_fee.min(affordable) - observed_base));
         transaction.consensus()?;
         let cost = transaction.maximum_cost()?;
         if cost > maximum_total_fee
@@ -2654,6 +2669,19 @@ mod http_rpc_tests {
     }
 
     #[tokio::test]
+    async fn endpoint_access_failure_fails_over_for_reads() {
+        let (rpc, first, second) = two_endpoint_rpc(FixtureResponse::Http(403));
+        assert_eq!(
+            rpc.request("eth_call", json!([{}, "latest"]))
+                .await
+                .unwrap(),
+            "0xbeef"
+        );
+        assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_call"]);
+    }
+
+    #[tokio::test]
     async fn explicitly_transient_rpc_error_retries_but_contract_revert_does_not() {
         let (rpc, worker) = fixture_rpc(vec![
             FixtureResponse::Json(json!("0x1")),
@@ -3013,6 +3041,64 @@ mod http_rpc_tests {
         assert_eq!(
             worker.join().unwrap(),
             vec!["eth_chainId", "eth_sendRawTransaction"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod clipped_tip_tests {
+    use super::*;
+    struct FeeRpc;
+    #[async_trait]
+    impl EvmRpc for FeeRpc {
+        async fn request(&self, method: &str, _: Value) -> Result<Value> {
+            Ok(match method {
+                "eth_chainId" => json!("0x1"),
+                "eth_call" | "eth_getCode" => json!("0x"),
+                "eth_estimateGas" => json!("0x5208"),
+                "eth_getBlockByNumber" => json!({"baseFeePerGas":"0x3b9aca00"}),
+                "eth_maxPriorityFeePerGas" => json!("0x2540be400"),
+                "eth_getTransactionCount" => json!("0x0"),
+                "eth_getBalance" => json!("0xde0b6b3a7640000"),
+                _ => {
+                    return Err(error(
+                        "SYNTHETIC_METHOD",
+                        "test",
+                        "Unreviewed fixture method.",
+                    ));
+                }
+            })
+        }
+    }
+    #[tokio::test]
+    async fn clipped_quote_preserves_base_fee_room_and_frozen_bid_stays_strict() {
+        let runtime = EvmRuntime::new(Arc::new(FeeRpc), 1, None);
+        let cap = U256::from(25_200) * U256::from(13_000_000_000u64);
+        let prepared = runtime
+            .prepare(
+                address("0x1111111111111111111111111111111111111111").unwrap(),
+                address("0x2222222222222222222222222222222222222222").unwrap(),
+                U256::ZERO,
+                Bytes::new(),
+                cap,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.transaction.max_fee_per_gas,
+            quantity(U256::from(13_000_000_000u64))
+        );
+        assert_eq!(
+            prepared.transaction.max_priority_fee_per_gas,
+            quantity(U256::from(12_000_000_000u64))
+        );
+        runtime.revalidate(&prepared.transaction).await.unwrap();
+        assert!(prepared.transaction.maximum_cost().unwrap() <= cap);
+        assert_eq!(
+            validate_frozen_fee_bid(&prepared.transaction, U256::from(2_000_000_000u64))
+                .unwrap_err()
+                .code,
+            "FEE_BOUND_CHANGED"
         );
     }
 }

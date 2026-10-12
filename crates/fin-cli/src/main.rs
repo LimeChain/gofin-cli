@@ -3053,6 +3053,7 @@ mod tests {
             fin_broker::operation_definitions().len()
         );
         for name in [
+            "aave.markets",
             "wallet.permit2.allowance",
             "wallet.permit2.approve",
             "ramses.quote",

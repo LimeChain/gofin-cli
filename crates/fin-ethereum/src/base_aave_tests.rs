@@ -51,6 +51,14 @@ fn base_fixture() -> (Arc<Fixture>, EthereumAdapter) {
     let config = EthereumConfig::base_aave(vec![lower_address(addr(101))]);
     let profile = config.aave.as_ref().unwrap();
     rpc.call_overrides.lock().unwrap().insert(
+        AToken::POOLCall::SELECTOR,
+        abi_value(address(&profile.pool).unwrap()),
+    );
+    rpc.call_overrides.lock().unwrap().insert(
+        Pool::ADDRESSES_PROVIDERCall::SELECTOR,
+        abi_value(address(&aave::reviewed_markets(8453)[0].addresses_provider).unwrap()),
+    );
+    rpc.call_overrides.lock().unwrap().insert(
         AddressesProvider::getPoolCall::SELECTOR,
         abi_value(address(&profile.pool).unwrap()),
     );
@@ -348,6 +356,8 @@ async fn opening_borrow_accounts_complete_new_debt_and_preserves_existing_accrua
         rpc.states.lock().unwrap().insert(
             20,
             AtBlock {
+                scaled_supply: U256::from(10_000_000),
+                collateral: true,
                 scaled_debt: before,
                 income: ray() + U256::from(1),
                 debt_index: ray() + U256::from(1),

@@ -1123,6 +1123,13 @@ impl Engine {
             let exact_requested =
                 step.permitted_variations.get("mode") == Some(&Value::String("exact".into()));
             if exact_requested {
+                if definition.semantics["plan_permission"]["requires_adapter_scope"] == true {
+                    return Err(plan_error(
+                        "PLAN_APPLICATION_SCOPE_REQUIRED",
+                        "This operation requires its application-reviewed plan bounds, including risk and cumulative authority.",
+                        "Use the operation's discovered plan_permission bounds instead of generic exact mode.",
+                    ));
+                }
                 validate_plan_json_schema(&definition.input_schema, &step.input)?;
                 let scope: FinancialPlanExactScope = serde_json::from_value(
                     step.permitted_variations.clone(),
@@ -1413,6 +1420,13 @@ impl Engine {
         record: &FinancialPlanAuthorizationRecord,
         revision: &FinancialPlanRevision,
     ) -> Result<FinancialPlanStatus> {
+        let consumed_obligations_by_scope = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            cumulative_obligation_usage_by_scope(record, revision, &store)?
+        };
         let mut steps = Vec::new();
         let mut reserved_debits = record.usage.consumed_debits.clone();
         let mut reserved_costs = record.usage.consumed_costs.clone();
@@ -1546,6 +1560,13 @@ impl Engine {
                 });
             }
             let permission = permission_for_step(revision, &step.step_id)?;
+            let consumed_obligations = permission
+                .permission
+                .as_ref()
+                .and_then(|adapter| adapter.cumulative_scope.as_ref())
+                .and_then(|scope| consumed_obligations_by_scope.get(&scope.scope_id))
+                .cloned()
+                .unwrap_or_default();
             let exhausted = !completed
                 && !unresolved
                 && step_authority_cannot_complete(
@@ -1553,6 +1574,7 @@ impl Engine {
                     permission,
                     &consumed_debits,
                     &remaining_debits,
+                    &consumed_obligations,
                 )?;
             if exhausted {
                 blockers
@@ -1963,6 +1985,17 @@ fn validate_cumulative_plan_scopes(
                 "PLAN_CUMULATIVE_SCOPE_INVALID",
                 "An adapter cumulative scope must contain valid positive unique debit and cost caps.",
                 "Regenerate the plan review with exact parent limits.",
+            ));
+        }
+        let mut obligation_ids = std::collections::BTreeSet::new();
+        if scope.maximum_obligations.iter().any(|cap| {
+            cap.amount.atoms.is_zero()
+                || !obligation_ids.insert((cap.resource.clone(), cap.amount.asset.clone()))
+        }) {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_INVALID",
+                "Debt obligation caps must be positive and unique by resource and asset.",
+                "Regenerate the plan with exact borrowing limits.",
             ));
         }
         let mut cost_ids = Vec::new();
@@ -2851,6 +2884,48 @@ fn bridge_expectation_preserves_quote_targets(
         && targets_match(&quote.refund, &selected.refund)
 }
 
+fn reserved_obligations(intent: &fin_domain::FinancialIntent) -> Vec<ResourceAmount> {
+    intent
+        .expected
+        .iter()
+        .filter_map(|effect| match effect {
+            EffectConstraint::Debt {
+                resource,
+                asset,
+                direction: Direction::Increase,
+                maximum_change,
+                ..
+            } => Some(ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: asset.clone(),
+                    atoms: maximum_change.clone(),
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
+fn verified_obligations(effects: &[FinancialEffect]) -> Vec<ResourceAmount> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            FinancialEffect::DebtChange {
+                resource,
+                asset,
+                delta,
+                ..
+            } if !delta.is_negative() && !delta.magnitude().is_zero() => Some(ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: asset.clone(),
+                    atoms: delta.magnitude(),
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
 fn validate_cumulative_scope_caps(
     record: &FinancialPlanAuthorizationRecord,
     step_id: &str,
@@ -2878,6 +2953,7 @@ fn validate_cumulative_scope_caps(
     }
     let mut spent_debits = Vec::new();
     let mut spent_costs = Vec::new();
+    let mut incurred = Vec::new();
     for attempt in &record.attempts {
         if record.active_attempt_id.as_deref() == Some(attempt.attempt_id.as_str()) {
             continue;
@@ -2906,6 +2982,7 @@ fn validate_cumulative_scope_caps(
         };
         let operation: OperationRecord = from_value(raw)?;
         if let Some(verified) = operation.effects {
+            incurred = add_amounts(&incurred, &verified_obligations(&verified.effects))?;
             let (debits, costs, _) =
                 summarize_plan_effects(&verified.effects, &attempt.step_id, &record.usage)?;
             spent_debits = add_amounts(&spent_debits, &debits)?;
@@ -2916,8 +2993,30 @@ fn validate_cumulative_scope_caps(
             .iter()
             .find(|reservation| reservation.attempt_id == attempt.attempt_id)
         {
+            if let Some(preview) = operation.preview.as_ref() {
+                incurred = add_amounts(&incurred, &reserved_obligations(&preview.intent))?;
+            } else {
+                return Err(internal("Reserved attempt lacks its durable preview."));
+            }
             spent_debits = add_amounts(&spent_debits, &reservation.debits)?;
             spent_costs = add_cost_bounds(&spent_costs, &reservation.costs)?;
+        }
+    }
+    let proposed = add_amounts(&incurred, &reserved_obligations(&prepared.intent))?;
+    for obligation in proposed
+        .iter()
+        .filter(|_| !scope.maximum_obligations.is_empty())
+    {
+        if !scope.maximum_obligations.iter().any(|cap| {
+            cap.resource == obligation.resource
+                && cap.amount.asset == obligation.amount.asset
+                && cap.amount.atoms >= obligation.amount.atoms
+        }) {
+            return Err(plan_error(
+                "PLAN_OBLIGATION_CAP_EXCEEDED",
+                "Cumulative incurred debt exceeds the approved scope; repayment does not replenish borrowing authority.",
+                "Reduce the borrowing candidate or approve a revised finite borrowing scope.",
+            ));
         }
     }
     let remaining_debits = remaining_debits(&scope.maximum_debits, Some(&spent_debits))?;
@@ -2972,6 +3071,7 @@ fn step_authority_cannot_complete(
     permission: &FinancialPlanStepPermission,
     consumed_debits: &[ResourceAmount],
     aggregate_remaining_debits: &[ResourceAmount],
+    consumed_obligations: &[ResourceAmount],
 ) -> Result<bool> {
     let remaining = remaining_debits(
         permission_debits(permission),
@@ -3011,7 +3111,7 @@ fn step_authority_cannot_complete(
             return Ok(true);
         }
     }
-    if step.completion.minimum_net_receipt.is_some() {
+    if let Some(target) = step.completion.minimum_net_receipt.as_ref() {
         let any_principal_capacity = remaining.iter().any(|item| {
             !item.amount.atoms.is_zero()
                 && aggregate_remaining_debits.iter().any(|aggregate| {
@@ -3020,21 +3120,115 @@ fn step_authority_cannot_complete(
                         && !aggregate.amount.atoms.is_zero()
                 })
         });
-        let deferred_capacity = permission
+        let receipt_capacity = permission
             .permission
             .as_ref()
             .and_then(|value| value.deferred_receipt.as_ref())
-            .zip(step.completion.minimum_net_receipt.as_ref())
-            .is_some_and(|(capacity, target)| {
+            .is_some_and(|capacity| {
                 capacity.resource == target.resource
                     && capacity.amount.asset == target.amount.asset
                     && capacity.amount.atoms >= target.amount.atoms
             });
-        if !any_principal_capacity && !deferred_capacity {
+        let obligation_receipt_capacity =
+            obligation_receipt_capacity(permission, target, consumed_obligations)?;
+        if !any_principal_capacity && !receipt_capacity && !obligation_receipt_capacity {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn obligation_receipt_capacity(
+    permission: &FinancialPlanStepPermission,
+    target: &ResourceAmount,
+    consumed_obligations: &[ResourceAmount],
+) -> Result<bool> {
+    let Some(adapter) = permission.permission.as_ref() else {
+        return Ok(false);
+    };
+    let Some(scope) = adapter.cumulative_scope.as_ref() else {
+        return Ok(false);
+    };
+    let credit_is_scoped = adapter
+        .possible_credits
+        .iter()
+        .any(|credit| credit.resource == target.resource && credit.asset == target.amount.asset);
+    if !credit_is_scoped {
+        return Ok(false);
+    }
+    let remaining = remaining_debits(
+        &scope.maximum_obligations,
+        Some(&consumed_obligations.to_vec()),
+    )?;
+    Ok(remaining.iter().any(|cap| {
+        cap.resource == target.resource
+            && cap.amount.asset == target.amount.asset
+            && cap.amount.atoms >= target.amount.atoms
+    }))
+}
+
+fn cumulative_obligation_usage_by_scope(
+    record: &FinancialPlanAuthorizationRecord,
+    revision: &FinancialPlanRevision,
+    store: &Store,
+) -> Result<BTreeMap<String, Vec<ResourceAmount>>> {
+    let mut revisions = store
+        .financial_plan_revisions(&revision.plan_id)
+        .map_err(map_store)?
+        .into_iter()
+        .map(from_value::<FinancialPlanRevision>)
+        .collect::<Result<Vec<_>>>()?;
+    if !revisions
+        .iter()
+        .any(|candidate| candidate.revision_id == revision.revision_id)
+    {
+        revisions.push(revision.clone());
+    }
+
+    let mut usage = BTreeMap::<String, Vec<ResourceAmount>>::new();
+    for attempt in &record.attempts {
+        let Some(scope_id) = revisions
+            .iter()
+            .find(|candidate| candidate.revision_id == attempt.revision_id)
+            .and_then(|candidate| {
+                candidate
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == attempt.step_id)
+            })
+            .and_then(|permission| permission.permission.as_ref())
+            .and_then(|permission| permission.cumulative_scope.as_ref())
+            .map(|scope| scope.scope_id.clone())
+        else {
+            continue;
+        };
+        let Some(raw) = store.get_record(&attempt.attempt_id).map_err(map_store)? else {
+            return Err(plan_error(
+                "PLAN_ATTEMPT_MISSING",
+                "A cumulative-scope attempt record is missing.",
+                "Restore the original plan attempt before continuing.",
+            ));
+        };
+        let operation: OperationRecord = from_value(raw)?;
+        let obligations = if let Some(verified) = operation.effects {
+            verified_obligations(&verified.effects)
+        } else if record
+            .usage
+            .reservations
+            .iter()
+            .any(|reservation| reservation.attempt_id == attempt.attempt_id)
+        {
+            let Some(preview) = operation.preview.as_ref() else {
+                return Err(internal("Reserved attempt lacks its durable preview."));
+            };
+            reserved_obligations(&preview.intent)
+        } else {
+            Vec::new()
+        };
+        let current = usage.entry(scope_id).or_default();
+        *current = add_amounts(current, &obligations)?;
+    }
+    Ok(usage)
 }
 
 fn validate_plan_aggregate_remaining(
@@ -4835,6 +5029,7 @@ mod tests {
                 &step_permission,
                 &progress.0,
                 &aggregate_remaining,
+                &[],
             )
             .unwrap()
         );
@@ -4858,7 +5053,7 @@ mod tests {
             },
             funding_dependencies: vec![],
         };
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
         assert!(permission_debits(&approved).is_empty());
         for target in [
             resource_amount("other", "ETH", "100"),
@@ -4866,11 +5061,306 @@ mod tests {
             resource_amount("destination", "ETH", "101"),
         ] {
             step.completion.minimum_net_receipt = Some(target);
-            assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+            assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
         }
         step.completion.minimum_net_receipt = Some(resource_amount("destination", "ETH", "100"));
         approved.permission.as_mut().unwrap().deferred_receipt = None;
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn obligation_bounded_credit_can_satisfy_receipt_completion_only_with_matching_scope() {
+        let mut approved = permission(json!({"borrow":"fixed"}), json!({}), "1");
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![resource_amount("wallet:one", "WETH", "400")],
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+            });
+        }
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "borrow".into(),
+            operation: "synthetic.borrow".into(),
+            input: json!({}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+        };
+
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(
+                &step,
+                &approved,
+                &[],
+                &[],
+                &[resource_amount("wallet:one", "WETH", "200")],
+            )
+            .unwrap()
+        );
+        assert!(
+            step_authority_cannot_complete(
+                &step,
+                &approved,
+                &[],
+                &[],
+                &[resource_amount("wallet:one", "WETH", "400")],
+            )
+            .unwrap()
+        );
+
+        approved.permission.as_mut().unwrap().possible_credits[0].resource =
+            ResourceId("wallet:other".into());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        approved.permission.as_mut().unwrap().possible_credits[0] = FinancialPlanFundingIdentity {
+            resource: ResourceId("wallet:one".into()),
+            asset: asset("USDC"),
+        };
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        approved
+            .permission
+            .as_mut()
+            .unwrap()
+            .possible_credits
+            .clear();
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn plan_status_keeps_borrow_receipt_step_eligible_when_obligation_cap_covers_it() {
+        let mut record = prior_record();
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "borrow".into(),
+            operation: "synthetic.borrow".into(),
+            input: json!({"wallet":"synthetic-wallet"}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+        };
+        let mut approved = permission(json!({"borrow":"fixed"}), json!({}), "1");
+        approved.step_id = "borrow".into();
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![resource_amount("wallet:one", "WETH", "400")],
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+            });
+        }
+        record.revision.spec.steps = vec![step];
+        record.revision.spec.aggregate_bounds.maximum_debits.clear();
+        record.revision.spec.aggregate_bounds.maximum_costs.clear();
+        record.revision.permissions = vec![approved];
+        record.revision.status = FinancialPlanAuthorizationStatus::Active;
+        record.usage = FinancialPlanUsage::default();
+        record.attempts.clear();
+        record.active_attempt_id = None;
+
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let status = engine.build_plan_status(&record, &record.revision).unwrap();
+        assert_eq!(
+            status.steps[0].state,
+            FinancialPlanStepProgressState::NotStarted
+        );
+        assert_eq!(status.next_eligible_step_id.as_deref(), Some("borrow"));
+        assert!(status.steps[0].blockers.is_empty());
+    }
+
+    #[test]
+    fn plan_status_keeps_position_withdrawal_receipt_step_eligible() {
+        let mut record = prior_record();
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "withdraw-position".into(),
+            operation: "aave.withdraw".into(),
+            input: json!({"amount":"all"}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+        };
+        let mut approved = permission(json!({"withdraw":"fixed"}), json!({}), "1");
+        approved.step_id = "withdraw-position".into();
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.spec.maximum_costs.push(CostBound {
+                location: AccountingLocation::Position {
+                    resource: ResourceId("wallet:one".into()),
+                    position: "aave:pool:weth:supply".into(),
+                    position_kind: fin_domain::PositionKind::Supply,
+                },
+                amount: Amount {
+                    asset: asset("WETH"),
+                    atoms: Quantity::new("400").unwrap(),
+                },
+                treatment: CostTreatment::IncludedInDebit,
+            });
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.deferred_receipt = Some(resource_amount("wallet:one", "WETH", "400"));
+        }
+        record.revision.spec.steps = vec![step];
+        record.revision.spec.aggregate_bounds.maximum_debits.clear();
+        record.revision.spec.aggregate_bounds.maximum_costs.clear();
+        record.revision.permissions = vec![approved];
+        record.revision.status = FinancialPlanAuthorizationStatus::Active;
+        record.usage = FinancialPlanUsage::default();
+        record.attempts.clear();
+        record.active_attempt_id = None;
+
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let status = engine.build_plan_status(&record, &record.revision).unwrap();
+        assert_eq!(
+            status.steps[0].state,
+            FinancialPlanStepProgressState::NotStarted
+        );
+        assert_eq!(
+            status.next_eligible_step_id.as_deref(),
+            Some("withdraw-position")
+        );
+        assert!(status.steps[0].blockers.is_empty());
+    }
+
+    #[test]
+    fn cumulative_obligation_usage_counts_verified_and_uncertain_attempts() {
+        for verified in [true, false] {
+            let mut plan = prior_record();
+            plan.revision.permissions[0]
+                .permission
+                .as_mut()
+                .unwrap()
+                .cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+                maximum_obligations: vec![resource_amount("acct", "WETH", "10")],
+            });
+
+            let operation = if verified {
+                settled_effect_record(vec![FinancialEffect::DebtChange {
+                    resource: ResourceId("acct".into()),
+                    debt: "synthetic-liability".into(),
+                    asset: asset("WETH"),
+                    delta: fin_domain::SignedQuantity::new("6").unwrap(),
+                    anchor: None,
+                }])
+            } else {
+                let timestamp = now();
+                let prepared = PreparedOperation {
+                    operation: "synthetic.borrow".into(),
+                    input: json!({}),
+                    binding: json!({}),
+                    summary: "synthetic borrow reservation".into(),
+                    checks: vec![],
+                    warnings: vec![],
+                    observed_at: timestamp.clone(),
+                    expires_at: timestamp.clone(),
+                    valuation: None,
+                    intent: fin_domain::FinancialIntent {
+                        expected: vec![EffectConstraint::Debt {
+                            resource: ResourceId("acct".into()),
+                            debt: "synthetic-liability".into(),
+                            asset: asset("WETH"),
+                            direction: Direction::Increase,
+                            maximum_change: Quantity::new("6").unwrap(),
+                        }],
+                        ..fin_domain::FinancialIntent::default()
+                    },
+                    operation_version: 1,
+                };
+                OperationRecord {
+                    id: "attempt-1".into(),
+                    request_id: "request-1".into(),
+                    fingerprint: "fingerprint".into(),
+                    fingerprint_version: 1,
+                    operation: "synthetic.borrow".into(),
+                    input: json!({}),
+                    status: Status::Unknown,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                    preview: Some(prepared),
+                    approval: None,
+                    submission: Some(fin_domain::Submission {
+                        kind: "synthetic".into(),
+                        reference: "synthetic-submission".into(),
+                        data: json!({}),
+                    }),
+                    dispatch_evidence: None,
+                    effects: None,
+                    last_reconciliation_evidence: None,
+                    error: None,
+                    run_id: None,
+                }
+            };
+            let mut store = Store::in_memory().unwrap();
+            store
+                .create_request(
+                    &operation.id,
+                    &operation.request_id,
+                    &operation.fingerprint,
+                    &operation.operation,
+                    None,
+                    if verified { "completed" } else { "unknown" },
+                    &to_value(&operation).unwrap(),
+                    &now(),
+                )
+                .unwrap();
+            if !verified {
+                plan.usage
+                    .reservations
+                    .push(financial_plans::FinancialPlanReservation {
+                        attempt_id: "attempt-1".into(),
+                        step_id: "step-1".into(),
+                        debits: vec![],
+                        costs: vec![],
+                    });
+            }
+
+            let usage =
+                cumulative_obligation_usage_by_scope(&plan, &plan.revision, &store).unwrap();
+            assert_eq!(
+                usage.get("synthetic-borrow-scope"),
+                Some(&vec![resource_amount("acct", "WETH", "6")])
+            );
+        }
     }
 
     #[test]
@@ -5338,11 +5828,146 @@ mod tests {
     }
 
     #[test]
+    fn incurred_debt_caps_ignore_repayment_and_retain_uncertain_reservations_after_restart() {
+        for verified in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("SYNTHETIC-obligation.sqlite");
+            let mut store = Store::open(&path).unwrap();
+            let mut plan = prior_record();
+            let asset = resource_amount("acct", "USDT", "6").amount.asset;
+            plan.revision.permissions[0]
+                .permission
+                .as_mut()
+                .unwrap()
+                .cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                scope_id: "SYNTHETIC-debt".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+                maximum_obligations: vec![resource_amount("acct", "USDT", "10")],
+            });
+            let candidate = |units: &str| PreparedOperation {
+                operation: "synthetic.borrow".into(),
+                input: json!({}),
+                binding: json!({}),
+                summary: "synthetic debt".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: now(),
+                expires_at: now(),
+                valuation: None,
+                operation_version: 1,
+                intent: fin_domain::FinancialIntent {
+                    expected: vec![EffectConstraint::Debt {
+                        resource: ResourceId("acct".into()),
+                        debt: "SYNTHETIC-liability".into(),
+                        asset: asset.clone(),
+                        direction: Direction::Increase,
+                        maximum_change: Quantity::new(units).unwrap(),
+                    }],
+                    ..Default::default()
+                },
+            };
+            let submission = Submission {
+                kind: "synthetic".into(),
+                reference: "SYNTHETIC-submission".into(),
+                data: json!({}),
+            };
+            let effects = if verified {
+                Some(fin_domain::VerifiedEffects {
+                    evidence_version: 1,
+                    submission: submission.clone(),
+                    effects: vec![
+                        FinancialEffect::DebtChange {
+                            resource: ResourceId("acct".into()),
+                            debt: "SYNTHETIC-liability".into(),
+                            asset: asset.clone(),
+                            delta: fin_domain::SignedQuantity::new("6").unwrap(),
+                            anchor: None,
+                        },
+                        FinancialEffect::DebtChange {
+                            resource: ResourceId("acct".into()),
+                            debt: "SYNTHETIC-liability".into(),
+                            asset: asset.clone(),
+                            delta: fin_domain::SignedQuantity::new("-6").unwrap(),
+                            anchor: None,
+                        },
+                    ],
+                    evidence: json!({"synthetic":"gross accounting test only"}),
+                    observed_at: now(),
+                    proof_digest: "SYNTHETIC".into(),
+                })
+            } else {
+                None
+            };
+            let operation = OperationRecord {
+                id: "attempt-1".into(),
+                request_id: "SYNTHETIC-request".into(),
+                fingerprint: "SYNTHETIC".into(),
+                fingerprint_version: 1,
+                operation: "synthetic.borrow".into(),
+                input: json!({}),
+                status: if verified {
+                    Status::Completed
+                } else {
+                    Status::Unknown
+                },
+                created_at: now(),
+                updated_at: now(),
+                preview: Some(candidate("6")),
+                approval: None,
+                submission: Some(submission),
+                dispatch_evidence: None,
+                effects,
+                last_reconciliation_evidence: None,
+                error: None,
+                run_id: None,
+            };
+            store
+                .create_request(
+                    &operation.id,
+                    &operation.request_id,
+                    &operation.fingerprint,
+                    &operation.operation,
+                    None,
+                    if verified { "completed" } else { "unknown" },
+                    &to_value(&operation).unwrap(),
+                    &now(),
+                )
+                .unwrap();
+            if !verified {
+                plan.usage
+                    .reservations
+                    .push(financial_plans::FinancialPlanReservation {
+                        attempt_id: "attempt-1".into(),
+                        step_id: "step-1".into(),
+                        debits: vec![],
+                        costs: vec![],
+                    });
+            }
+            drop(store);
+            let reopened = Store::open(path).unwrap();
+            validate_cumulative_scope_caps(&plan, "step-1", &candidate("4"), &reopened).unwrap();
+            assert_eq!(
+                validate_cumulative_scope_caps(&plan, "step-1", &candidate("5"), &reopened)
+                    .unwrap_err()
+                    .code,
+                "PLAN_OBLIGATION_CAP_EXCEEDED"
+            );
+        }
+        let legacy: financial_plans::FinancialPlanCumulativeScope = serde_json::from_value(
+            json!({"scope_id":"legacy","maximum_debits":[],"maximum_costs":[]}),
+        )
+        .unwrap();
+        assert!(legacy.maximum_obligations.is_empty());
+    }
+
+    #[test]
     fn cumulative_parent_scope_cannot_be_widened_by_a_plan_revision() {
         let mut prior = prior_record();
         let mut scoped = permission(json!({"route":"fixed"}), json!({}), "20");
         scoped.permission.as_mut().unwrap().cumulative_scope =
             Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![],
                 scope_id: "SYNTHETIC-bridge-parent".into(),
                 maximum_debits: vec![resource_amount("acct", "USDT", "20")],
                 maximum_costs: vec![],

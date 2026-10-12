@@ -357,6 +357,19 @@ impl Adapter for EvmNetworkRouter {
     ) -> fin_domain::Result<Submission> {
         self.prepared(prepared)?.submit(prepared, journal).await
     }
+    async fn verified_position_baselines(
+        &self,
+        record: &OperationRecord,
+    ) -> fin_domain::Result<Vec<fin_domain::PositionAnchor>> {
+        self.prepared(
+            record
+                .preview
+                .as_ref()
+                .ok_or_else(|| FinError::validation("Original preview missing."))?,
+        )?
+        .verified_position_baselines(record)
+        .await
+    }
     async fn reconcile(&self, record: &OperationRecord) -> fin_domain::Result<Reconciliation> {
         self.prepared(
             record
@@ -525,7 +538,7 @@ mod tests {
     async fn shared_names_route_to_explicit_chain_and_return_one_reusable_wallet() {
         let router = router();
         let definitions = router.definitions();
-        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions.len(), 6);
         assert_eq!(
             definitions
                 .iter()

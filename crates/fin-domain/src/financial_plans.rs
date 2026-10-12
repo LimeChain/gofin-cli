@@ -136,9 +136,11 @@ pub struct PlanPermission {
     pub spec: BoundarySpec,
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
     pub fee_assets: Vec<AssetId>,
-    /// Receipt capacity for a deferred claim of already committed principal.
-    /// This grants no new debit authority; the adapter independently verifies
-    /// the original backing and the exact claim before dispatch.
+    /// Bounded receipt capacity backed by an existing claim or other
+    /// adapter-verified source that is not a plan debit, such as a deferred
+    /// claim or withdrawal from an existing position. This grants no new debit
+    /// authority; the adapter independently verifies the backing and exact
+    /// receipt before settlement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_receipt: Option<ResourceAmount>,
     /// Optional adapter-imposed upper bound on the parent plan consent life.
@@ -156,6 +158,10 @@ pub struct PlanPermission {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinancialPlanCumulativeScope {
+    /// Gross newly incurred debt, independent of wallet debits. Verified debt
+    /// decreases never replenish this authority. Older JSON scopes omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maximum_obligations: Vec<ResourceAmount>,
     pub scope_id: String,
     pub maximum_debits: Vec<ResourceAmount>,
     pub maximum_costs: Vec<CostBound>,

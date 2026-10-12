@@ -56,8 +56,8 @@ fn legacy_movement_limit() -> String {
     fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
 }
 const MAX_OBSERVATION_AGE_SECONDS: i64 = 120;
-const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // Bound evidence collection only. Financial dispatch and reconciliation keep
 // their durable identity even after the caller stops waiting.
@@ -2120,7 +2120,16 @@ impl Engine {
                 return Ok(retained);
             }
         };
-        match self.apply_reconciliation(record.clone(), reconciliation.clone()) {
+        let baselines = if reconciliation.status == Status::Completed {
+            adapter.verified_position_baselines(&adapter_record).await?
+        } else {
+            vec![]
+        };
+        match self.apply_reconciliation_with_baselines(
+            record.clone(),
+            reconciliation.clone(),
+            baselines,
+        ) {
             Ok(record) => Ok(record),
             Err(error) if error.stage == "reconciliation" || error.stage == "budget" => {
                 let mut retained = record;
@@ -2161,10 +2170,19 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     fn apply_reconciliation(
+        &self,
+        record: OperationRecord,
+        reconciliation: Reconciliation,
+    ) -> Result<OperationRecord> {
+        self.apply_reconciliation_with_baselines(record, reconciliation, vec![])
+    }
+    fn apply_reconciliation_with_baselines(
         &self,
         mut record: OperationRecord,
         reconciliation: Reconciliation,
+        baselines: Vec<PositionAnchor>,
     ) -> Result<OperationRecord> {
         match reconciliation.status.clone() {
             Status::Pending | Status::Submitted | Status::Unknown => {
@@ -2236,7 +2254,17 @@ impl Engine {
                 let accounting_delta =
                     cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
                 if reconciliation.status == Status::Completed {
-                    let prior = self.preparation_context(record.run_id.as_deref())?;
+                    let mut prior = self.preparation_context(record.run_id.as_deref())?;
+                    for baseline in baselines {
+                        let key = position_anchor_key(&baseline)?;
+                        if !prior
+                            .positions
+                            .iter()
+                            .any(|anchor| position_anchor_key(anchor).as_ref() == Ok(&key))
+                        {
+                            prior.positions.push(baseline);
+                        }
+                    }
                     validate_anchor_transitions(&verified, &prior)?;
                 }
                 record.status = reconciliation.status;
@@ -5462,7 +5490,7 @@ fn validate_effects_mode(
                 "reconciliation",
                 "A verified financial effect does not satisfy the approved expectation or cost reserve.",
                 "Preserve the operation as unresolved and review its typed proof.",
-            ));
+            ).with_details(json!({"unmatched_effect_kind":serde_json::to_value(effect).ok().and_then(|v|v["kind"].as_str().map(str::to_owned))})));
         }
     }
     if !confirmed_failure && !allow_incomplete && matched.iter().any(|value| !value) {
@@ -13198,6 +13226,35 @@ mod tests {
         );
         assert_eq!(result.status, Status::Pending);
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn required_read_evidence_allows_ninety_seconds_and_bounds_stalls_at_one_twenty() {
+        for deadline in [PREFLIGHT_TIMEOUT, EXTERNAL_READ_TIMEOUT] {
+            assert_eq!(deadline, std::time::Duration::from_secs(120));
+            let result = bounded_evidence("synthetic.read", "preflight", deadline, async {
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                Ok(7)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result, 7);
+            let started = tokio::time::Instant::now();
+            let error = bounded_evidence(
+                "synthetic.read",
+                "preflight",
+                deadline,
+                std::future::pending::<Result<()>>(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(tokio::time::Instant::now() - started, deadline);
+            assert_eq!(error.code, "EVIDENCE_TIMEOUT");
+            assert_eq!(
+                error.details.as_ref().unwrap()["timeout_seconds"],
+                json!(120)
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -7,11 +7,11 @@ operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, Hyperliquid REST spot/perpetual trading and account actions, reusable
-EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
+EVM wallets on Ethereum, Base, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
 EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood,
 Sushi v3 on Ethereum/Arbitrum and PancakeSwap v3 on Ethereum/Arbitrum/Robinhood;
-and Ethereum mainnet Aave.
+and reviewed Aave V3 markets on Ethereum, Base and Arbitrum.
 The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
 bridge providers follow later. Fin is open source; license selection is pending.
@@ -290,7 +290,8 @@ Read-only broker requests and independent observers run with bounded concurrency
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
 RPC reads have one 10-second deadline across retries and fallback. Required
-preparation and post-approval evidence collection have 30-second stage deadlines.
+preparation, post-approval evidence collection and required external reads have
+120-second stage deadlines.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -1249,3 +1250,48 @@ fin schema pancakeswap.swap --json
 
 See [v3 fork verification](docs/testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
+
+## Aave V3 markets and positions
+
+Discover reviewed deployments before enrollment with `fin schema aave.markets --json`.
+Read current compatibility, reserves and positions through an enrolled wallet:
+
+```sh
+fin read aave.markets --input '{"wallet":"wallet","network":"evm","chain_id":1}' --json
+fin read aave.reserves --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
+fin read aave.positions --input '{"wallet":"wallet","network":"evm","chain_id":8453}' --json
+```
+
+For a read-only historical observation, `aave.reserves` and `aave.positions`
+accept optional `block_number` and return the canonical `block_hash`. Writes
+always use fresh state and reject that field.
+
+Aave operations accept optional `market` with an enabled exact pool address;
+omitting it preserves the configured default. The broker validates pool/provider,
+oracle, reserve identities and deployed backing revisions. Ethereum Core, Lido,
+EtherFi and Horizon are distinct markets. EtherFi's current reserve caps may
+prevent new positions; Horizon RWA token eligibility, transfer restrictions and
+trusted valuation remain prerequisites. Robinhood reports no reviewed Aave V3
+market. V2/V4, stable-rate writes, eMode changes, delegation and gateways are
+explicitly outside this integration. Native ETH uses separate wrap/unwrap steps.
+
+Supply, collateral, variable borrow, repay and withdraw use normal previews and
+execution, or named plans. Partial/full repay and withdraw retain exact quantity
+contracts; `amount: "all"` requires finite `max_amount` and proves zero residual
+scaled debt/claim. Borrowing requires `min_health_factor`; optional `max_debt_usd`
+and `max_debt_to_collateral_bps` constrain the total resulting position. Removing
+collateral with debt requires `min_health_factor > 1`, even when the protocol
+itself would permit the change. These are execution constraints, not protection
+against later price changes, interest or liquidation.
+
+Named Aave plan variations use `min_amount`, `max_amount`, `max_fee_eth` and, for
+borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
+also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only
+quantity and fee selections vary; market, asset, spender, recipient, collateral
+setting, eMode and risk limits stay bound. Repayment never replenishes gross
+borrowing authority. Future scopes need no projected balances; each dispatch
+uses current state and verified prior steps.
+
+Run the owned deployed-state fork checks with `make test-aave-fork` and
+`make test-aave-cli-fork`; select the network with `AAVE_FORK_CHAIN=1`, `8453`
+or `42161`.
