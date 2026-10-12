@@ -379,7 +379,7 @@ access to those development keys and same-user execution without password or
 Touch ID prompts. This is a different trust model from installed Fin; it does not
 claim to protect these keys from the developing agent.
 
-`make dev-env-import DEV_CREDENTIALS_FILE=/absolute/path/to/.env.fin-dev` builds
+`make dev-env-import DEV_CREDENTIALS_FILE=/absolute/path/to/.env` builds
 the worktree pair and imports the allowlisted file into the selected stopped
 environment. Import is local and does not establish venue permissions or account
 identity. `make dev-env-start DEV_MODE=live` selects real Binance/EVM adapters;
@@ -421,15 +421,13 @@ fixture verified concurrent identical credentials and independent stop/restart;
 Clippy passed without remote account calls.
 Stop preserves configuration, credentials and financial
 history. Import refuses running environments and rotation with unresolved
-operations; synthetic reset refuses live environments. Existing test allocation,
-baseline and restoration obligations remain applicable to authorized real-fund
-tests, including cleanup without biometric prompts in this explicit mode.
+operations; synthetic reset refuses live environments. The current live-test contract governs allocation and baseline/final-state verification. Restoration is optional; chosen cleanup uses the same automatic development approval.
 
 Verification combines bounded dotenv and credential-provider fixtures, import/
 restart/mode-isolation tests using real binaries with synthetic keys, approval
 binding and policy tests, and existing broker/engine/adapter suites. Management
 checks do not submit remote transactions. Any live financial result must still
-name the selected account, route, amounts, outcome and restoration evidence;
+name the selected account, route, amounts, verified outcome and optional restoration status;
 synthetic tests do not establish live settlement or native authorization. Automated verification passed 36
 Make environment/workflow tests, 83 development-example tests, the full workspace
 suite and strict Clippy/format checks. Disposable master/subaccount PEM and
@@ -519,6 +517,12 @@ observations and credential isolation remain pending until independently
 observed. Engineering and owned-fork verification run in isolated Make
 environments and never update the installed protected runtime.
 
+## Agent-led build and live E2E skill
+
+`skills/fin-e2e/` owns the development live-verification workflow previously repeated in `AGENTS.md`. The goal is verified end-to-end live writes before human verification. Invocation authorizes disposable credentials from `.env`, automatic development approval, agent-derived scenarios/parameters, repairs and retesting. Defaults are $20 per movement and $200 total; agents may record finite overrides for complex actions. Restoration is optional and difficult or impossible restoration does not block a verified scenario. Explicitly requested reverse/repayment steps remain required test behavior.
+
+Existing Make lifecycle, authorization commands, real adapters, enforced financial policy and settlement checks remain unchanged; no runtime bypass, new CLI command or migration is introduced. The worktree's repository skill is authoritative and linked by AGENTS/testing guides; environment setup is a supporting reference. The bundled `fin` companion skill retains its production financial-use contract. Skill validation does not itself execute or verify a funded scenario.
+
 ## Verification and delivery
 
 Follow the [testing guide](testing/README.md), [onboarding acceptance
@@ -527,9 +531,7 @@ fork, public read-only, biometric, isolation and live-write evidence are distinc
 Store run-specific results in CI artifacts or ignored private session records;
 maintained docs contain contracts, commands and reusable procedures.
 
-Live acceptance needs explicit authorization and the [$100 limits and complete
-restoration contract](testing/README.md#live-test-contract). Ordinary intentional
-portfolio changes do not require a test run or baseline restoration.
+Live acceptance needs explicit authorization and follows the [current test-budget and optional-restoration contract](testing/README.md#live-test-contract). Ordinary intentional portfolio changes do not require a test run or baseline restoration.
 
 Keep release packaging and updates aligned with [release maintenance](releases.md).
 Never include secrets, private account mappings, signed requests or unredacted

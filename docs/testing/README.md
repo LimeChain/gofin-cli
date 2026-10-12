@@ -79,8 +79,7 @@ discovery, explicit snapshot scope, canonical rollup sequencer-inclusion checks 
 human test sequence. New network implementation is not a live acceptance pass.
 Public no-secret RPC/indexer probes, human enrollment/Touch ID and funded transfer
 round trips must each be reported separately when observed; this guide marks no
-unrun case passed. Existing $100 allocation, per-write approval and complete
-restoration requirements also apply to any separately authorized L2 live test.
+unrun case passed. The current [live-test contract](#live-test-contract) applies to separately authorized L2 tests; skill-driven development uses automatic approval and optional restoration.
 For the implemented Uniswap swap/permit path and its separate human Touch ID
 handoff, see [Uniswap verification](uniswap-amm.md).
 
@@ -110,6 +109,14 @@ precision, omitted/null optional fields, zero fee/loss limits where supported,
 and the scoped order `all` sentinel. Runtime balances, fees and closing
 eligibility remain separate execution checks.
 
+## Agent-led live E2E verification
+
+Use the repository's [fin-e2e skill](../../skills/fin-e2e/SKILL.md) to verify live-write scenarios end to end before human verification. Invocation authorizes setup with disposable credentials from `.env`, scenario/parameter selection when omitted, automatic development approval, repairs, retesting and optional restoration. No additional per-step conversational approval is needed in this mode. Ordinary coding, skill authoring and offline tests grant no live-write authority.
+
+The agent reuses imported `dev-wallet` credentials, builds this worktree's matching CLI/broker, rehearses the intended authorization mode, and fixes defects until the live-write scenario's effects and settlement are verified or a concrete external constraint blocks progress. Follow its [environment setup](../../skills/fin-e2e/references/environment.md). Read-only checks, previews and synthetic/fork evidence support the workflow but cannot establish a live-write pass. Live verification uses production venues and the feature's reviewed mainnet network.
+
+For skill-driven development, this workflow and the [current live-test contract](#live-test-contract) supersede older integration-recipe requirements for $100 limits or mandatory baseline restoration. Defaults are $20 per movement and $200 total allocation, with documented finite agent overrides for complex actions. Restoration is optional and must not block a successful live-write scenario merely because it is hard or impossible. Preserve the actual behavior requested: a scenario explicitly testing repayment or a return transfer still needs that step to pass. Keep the exact/boundary/plan authorization commands and recovery semantics. Protected installation, isolation and native Touch ID remain separate human-operated checks.
+
 ## Local development loop
 
 Use [isolated development environments](development-environments.md) to run
@@ -138,7 +145,7 @@ Touch ID. This is an explicit development-only exception to the protected
 production approval contract; it does not change production acceptance or prove
 credential isolation. Default tests of this mode use synthetic keys and do not
 contact remote accounts. Real-fund development still requires the budget,
-selected operation scope and restoration evidence below.
+selected operation scope and settlement evidence below; restoration is optional.
 
 Daemon lifecycle tests use an injected service manager/client plus temporary
 stop-marker paths: `cargo test --locked -p fin-cli daemon` and
@@ -301,33 +308,26 @@ Until observed, mark human installation/onboarding, actual biometric checks, cre
 
 ## Live-test contract
 
-**The acceptance target is production exchange accounts and Ethereum mainnet, using real funds.** Testnets, mocks, and forks support development and failure injection; they do not count as a completed live flow.
+**The live acceptance target is production venues and the scenario's reviewed mainnet network, using real funds. Ethereum mainnet remains the target for the Ethereum reference journey.** Testnets, mocks, and forks support development and failure injection; they do not count as a completed live flow.
 
-### $100 limits
+### Test budget defaults and overrides
 
-These are LLM/test-operator obligations for explicitly authorized live acceptance,
-not Fin runtime policy. There is no runtime verification purpose or verification
-run command. Ordinary portfolio changes need no restoration. Personal policy
-still applies independently and can be stricter; raising it or setting it to zero
-does not authorize exceeding this live-test contract. Record and check the test
-budget outside runtime run records before every live write.
+These are test-operator planning limits, not Fin runtime policy. There is no runtime verification purpose or public verification-run command. Record and check the test budget before every live write. For skill-driven development, the agent aligns the isolated environment's finite financial policy and automatically approved operation/plan bounds with the scenario, including documented overrides. This is environment preparation, not a human approval gate. Fin's rolling gross-movement budget includes cumulative movements and prior usage/reservations, so it need not numerically equal the test's capital allocation. Production policy remains unchanged.
 
-- Never execute an individual asset movement above **$100 equivalent**. Check the gross debit and applicable maximum fee/gas bounds before approval and again before submission. Transfers, swaps, supply, borrowing, repayment, withdrawal, and cleanup are all covered.
-- Keep the **total allocation to the run at or below $100**, including funds reserved for gas, fees, interest, and returning to the baseline. Reusing the same funds through a round trip does not make cumulative turnover the budget. Count collateral and borrowed proceeds separately as assets controlled by the test; do not inflate the available allowance by netting off debt or count a receipt token twice.
-- Select amounts comfortably below the ceiling. Use fresh, recorded USD price/quote information and conservative execution bounds; do not assume a stablecoin is worth exactly $1. If valuation is unavailable or a required minimum/cost exceeds the remaining allocation, block the write and report the reason.
-- Recheck after price changes. Never increase the budget, draw on unrelated holdings, or perform an extra borrow to rescue a test. Bound token allowances/spending permits to what the test needs, within the same value limit; no unlimited approvals in live verification.
+- Default maximum **$20 per asset movement**. Check gross debit and applicable maximum fee/gas bounds before approval and submission. Transfers, swaps, supply, borrowing, repayment, withdrawal and optional cleanup are covered.
+- Default **$200 total test allocation**, including execution, retries, fees, gas, interest and any chosen restoration. Track prior costs across retries/rebuilds/environments. Reusing principal does not make cumulative turnover the allocation; count collateral and borrowed proceeds separately without double-counting receipt tokens or netting debt off assets.
+- For complex actions under `fin-e2e`, the agent may override either default without asking again. Before the affected write, record the concrete need, fresh valuation, smallest sufficient revised finite limits and available disposable funding, and disclose the adjustment in progress and final reports. Explicit task-specific limits remain binding unless their override is authorized. An override never grants unlimited spending or access to unrelated holdings.
+- Use fresh USD valuations and conservative execution bounds; never assume a stablecoin equals $1. Unknown valuation, insufficient disposable funding or an enforced Fin limit still blocks the affected write. Keep allowances/spending permits bounded to the scenario; do not grant unlimited approvals.
 
-The LLM conducting the test must explicitly calculate and record these checks, including fresh valuation and the complete return path, before requesting each write. Any test harness must enforce the same contract. Product execution does not enforce a separate development budget. Existing per-write human approval remains required for the protected production runtime. The explicitly selected disposable-credential development mode records automatic approval instead; it does not establish biometric acceptance. A market can move after submission, so record the valuation time and executable bounds without promising control over future market value.
+Use the normal Fin authorization path for every write. Disposable development records automatic approval; the protected runtime retains its normal human authorization requirements. Neither mode proves the other's authorization properties. Record valuation time and executable bounds without promising control over future market value.
 
-### Return to the initial financial state
+### Baseline and optional restoration
 
-Before the first live write, capture the relevant account allocations, token balances, supplied collateral, debt, open positions/orders, and allowances. Plan the inverse operations and confirm the required permissions, deposit/withdrawal routes, minimums, gas, and funds for the entire return path. Prefer isolated test holdings/positions so unrelated activity can remain untouched.
+Before live writes, snapshot relevant allocations, balances, collateral/debt, positions/orders and permissions so the scenario's actual financial effects can be verified. Define the intended final state. A complete return path is not a prerequisite unless returning funds is itself part of the requested scenario.
 
-The run must restore the original account destinations and asset exposure, remove test-created debt/positions/orders, return supplied collateral and displaced funds, and restore test-modified allowances where applicable. Reverse swaps, unwrapping, repayment, exchange deposits, and redistribution are part of the test, not an optional later task. Every cleanup write through the protected production runtime still requires fresh Touch ID. Explicit disposable-credential development runs retain their automatic approval mode for cleanup and must report that distinction.
+Financial baseline restoration is optional. Restore when practical and useful; if it is hard, impossible or disproportionate, skip or stop restoration and report the retained funds, exposure, permissions and costs. This alone must not block initiation or turn a successfully verified live-write scenario into a failure. If restoration is chosen, check its permissions, routes, minimums, gas and funding, and execute through Fin with the applicable approval mode. Do not drop an explicitly requested repayment, withdrawal or return-transfer test by calling it optional restoration.
 
-Exact numerical restoration is not possible after gas, fees, interest, or round-trip execution differences, and transaction history/nonces cannot be erased. Record these differences explicitly; unexplained losses or residual test positions are not successful restoration. Check for dust and use the asset's actual precision; report any remaining unreturnable amount rather than silently treating it as zero.
-
-If an external failure prevents restoration, stop new risk-increasing actions, reconcile pending operations, and perform the available authorized recovery steps. Report the run as **incomplete/failed with cleanup outstanding**, including exact remaining state and the next recovery action. Never claim an unconditional rollback guarantee across exchanges and protocols or mark a run passed merely because its outward leg succeeded.
+Verify the final state and explain gas, fees, interest, execution differences and dust. A changed baseline is not an unexplained outcome. Uncertain submissions and unverified required effects still prevent a pass for the affected scenario; preserve identities and reconcile rather than resubmit. Report optional restoration separately as performed, partial or skipped, including any unresolved restoration attempts and next recovery action. Never claim rollback or restoration that has not been verified.
 
 ## Environments and what a pass means
 
@@ -338,16 +338,27 @@ If an external failure prevents restoration, stop new risk-increasing actions, r
 | Ethereum fork at a recorded block                     | Real deployed contract behavior against reproducible local chain state, with test funding.                                                         | Current mainnet liquidity/state, live RPC behavior, or exchange funding.                         |
 | Live read-only connections                            | Current account permissions and balances where exposed, networks, markets, quotes, and RPC access.                                                 | That a write will succeed or has been approved.                                                  |
 | Human-operated macOS approval checks                  | Actual approval display, acceptance/decline, binding to a request, and tested credential boundary.                                                 | Venue settlement without a submitted operation.                                                  |
-| Explicit live-write run                               | The exact submitted route and outcome, with real approvals and recorded evidence.                                                                  | Untested assets, account types, markets, chains, or protocols.                                   |
+| Explicit protected-runtime live-write run             | The exact submitted route and outcome, with real approvals and recorded evidence.                                                                  | Untested assets, account types, markets, chains, or protocols.                                   |
+| Disposable live-development run | Actual selected venue/network behavior, financial policy, verified live-write effects and durable settlement under automatic development approval; optional restoration is reported separately. | Installed credential isolation or native Touch ID. |
 
 Binance Spot Testnet supports `/api`, not the `/sapi` operations used by the funding journey, and its virtual assets cannot be withdrawn to a real wallet. Use fixtures for automated Binance funding tests and separately configured live accounts for real funding acceptance. Do not describe a Spot Testnet order test as verification of subaccount consolidation or withdrawals. [Binance's official testnet guide](https://github.com/binance/binance-spot-api-docs/blob/master/testnet/general-info.md)
 
-## Inputs needed from a live tester
+## Inputs needed for live verification
+
+For agent-led development, use the [fin-e2e setup procedure](../../skills/fin-e2e/references/environment.md).
+An existing import or a supplied disposable credential file, suitable funded
+accounts and working venue/RPC access suffice. The agent derives omitted test
+parameters within the skill's finite budget and scope. No person or Touch ID is
+needed for development approval, including cleanup. Ask only for prerequisites
+that cannot be obtained from existing context, discovery or the supplied file.
+
+For an explicitly requested **protected-runtime human session**, the following
+additional prerequisites apply:
 
 - An interactive macOS machine with working Touch ID and the implemented Fin approval component.
 - Named exchange connections, their main/subaccount relationships, and sufficient permissions for the selected operations.
 - A configured Ethereum wallet/signer and RPC access, with network and addresses independently checked by the tester during setup.
-- Selected assets and quantities that fit the $100 limits and actual venue minimums, reserved gas/fees/interest, fee/slippage bounds, and a complete return plan. Account for required native gas in both the sender and any receiving wallet that must send funds back.
+- Selected assets and quantities that fit the applicable test limits and venue minimums, reserved gas/fees/interest and finite fee/slippage bounds. If a return is selected, account for native gas in every sending wallet.
 - A person available to inspect and authorize every write. A passed automated test is not permission for a live write.
 
 Credentials are supplied through the implemented protected setup. No secret values are required in a report or committed fixture. Keep raw live evidence private; share only a sanitized report. User-provided account identifiers, wallet balances, and transaction histories may be sensitive even when they are not credentials.
@@ -366,7 +377,7 @@ Credentials are supplied through the implemented protected setup. No secret valu
 | C08 | Process/agent restart and partial completion                        | Prior successful steps remain recorded. A new conversation can inspect and continue without repeating them.                                                                                                                                                                          |
 | C09 | Secret or approval bypass attempted with the intended agent tooling | Test that agent-visible files, environment, credential access, configuration, and signing/execution APIs do not permit an unapproved write or expose an unrestricted execution secret. Record the actual boundary tested.                                                            |
 | C10 | Structured output and logs                                          | Stable error/status fields, explicit missing/stale data, no secrets, and identifiers that connect request, approval, submission, and outcome.                                                                                                                                        |
-| C11 | Live-test value limit and restoration                               | Movement/allocation checks pass before each live write; the full round trip restores the financial baseline with costs explained. Unknown valuation, excessive minimums, or unavailable return routes block initiation; incomplete cleanup prevents a pass.                          |
+| C11 | Live-test limits and final state | Movement/allocation checks use the recorded limits and any permitted overrides. Required financial effects and settlement are verified. Optional restoration and retained exposure are reported separately; an unavailable optional return route does not prevent a pass. |
 | C12 | Setup discovery before configuration                                | Help/explain/input-output-error schemas and examples cover actual setup, daemon, and connection commands without credentials, administrator permission, a broker, or the skill. Proposed/unsupported behavior is explicit.                                                           |
 | C13 | Human terminal enrollment contract                                  | Safe metadata prompts/flags and hidden protected input work; no-TTY or agent-tool attempts cannot collect secrets through normal CLI/JSON input and return a concrete human action. Synthetic tests are identified separately.                                                       |
 | C14 | Real human installation and enrollment                              | The human runs bundled setup and connection enrollment in their own terminal, authorizes installation/configuration, observes read-only checks, and receives safe results. No funds move or future financial approval is granted.                                                    |
@@ -387,9 +398,9 @@ Each implementation milestone should leave:
 1. Reproducible install/build/test commands in the repository, with non-live tests as the default.
 2. Meaningful automated cases and the exact fork configuration where applicable.
 3. A run report identifying the commit, versions, scenario inputs, expected/actual results, and unresolved cases.
-4. For completed live flows, evidence of both the outward outcome and the final restored balances/positions, with all costs reconciled. HTTP success, a transaction hash, or success of only the outward leg is insufficient.
+4. For completed live flows, evidence of every required live-write outcome and the final balances/positions, with costs reconciled. Report optional restoration separately. HTTP success or a transaction hash is insufficient; success of an outward leg cannot substitute for an explicitly requested multi-leg scenario.
 
-Use [the report template](report-template.md). Automated testing may use a fake authorizer injected into an isolated harness; live tests must use the real component. Missing credentials, funds, or biometric access block the relevant live cases, not unrelated implementation or automated testing.
+Use [the report template](report-template.md). Synthetic tests use isolated approval fixtures; disposable live development uses automatic development approval; protected-runtime tests use actual OS authorization. Missing credentials or funds block affected live cases. Missing biometric access blocks human authorization cases, not disposable live development or independent engineering.
 
 ## End-to-end checkpoints
 

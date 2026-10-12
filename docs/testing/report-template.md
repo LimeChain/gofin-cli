@@ -5,16 +5,16 @@ Copy this template for a real run. Store private raw reports under the ignored `
 ## Run identity
 
 - Date/time and timezone:
-- Fin commit/version:
+- Fin commit/version, dirty diff identity, worktree, development environment and build ID:
 - Runtime, CCXT, adapter, and test-tool versions:
 - Implementation: Rust; Rust toolchain, artifact/helper versions and OS provider, where applicable:
 - Delivery stage: implementation/automated handoff / human onboarding and approval / production live acceptance:
 - Cases and journey selected:
-- Environment: mocked / fork / live read-only / real biometric / live write
-- Production exchange host and Ethereum mainnet confirmation for live acceptance:
+- Environment: mocked / fork / live read-only / disposable live development / real biometric / protected live write
+- Production venue and selected mainnet network confirmation for live acceptance:
 - Network/chain ID, protocol versions, market/router:
 - Fork block number/hash and fixture setup, if applicable:
-- Approval mechanism: fake test authorizer / actual Touch ID
+- Approval mechanism: fake test authorizer / automatic development approval / actual Touch ID
 - Operator and evidence location (private if needed):
 
 ## Inputs and expected result
@@ -22,11 +22,11 @@ Copy this template for a real run. Store private raw reports under the ignored `
 - Named connections and source/destination account types:
 - Asset identities and units:
 - Requested amounts and allowed execution bounds:
-- Total test allocation (maximum $100), USD valuation sources/timestamps, and gas/fee/interest/return reserves:
+- Test limits (defaults $20 per movement / $200 total), any revised finite limits and rationale, fresh USD valuations, gas/fee/interest and optional restoration reserves:
 - Baseline wallet/account balances, protocol collateral/debt, and timestamps:
 - Funding or setup performed outside Fin:
-- Full inverse/return plan, including minimums and permissions checked before initiation:
-- Expected restored financial state and permitted cost differences:
+- Intended final state and optional restoration decision; if chosen, return steps, minimums, permissions and funding:
+- Expected financial effects, retained exposure and permitted cost differences:
 - User-specific prerequisites missing, if any:
 
 ## Onboarding and human handoff
@@ -63,16 +63,16 @@ Record the exact implemented commands and test commands here, after removing sen
 
 - Source debits, main-account credits, destination receipts, and exchange credit:
 - Final wallet balances and remaining protocol collateral/debt:
-- Starting versus restored account allocations, asset exposure, positions/orders, and test-modified allowances:
+- Starting versus actual final account allocations, exposure, positions/orders and test-modified allowances:
 - Gas, fees, swap differences, accrued interest, and rounding:
 - Confirmation/settlement evidence:
 - Remaining allowances, pending requests, or unresolved outcomes:
 - How uncertainty, retries, and restart recovery were exercised:
 - Any unauthorized or duplicate financial action observed:
-- Maximum movement value and total allocation observed; any limit violation:
-- Restoration complete: yes / no. If no, outstanding funds/debt/positions and exact next recovery action:
+- Maximum movement value and total allocation observed; documented overrides or any breach of the applicable limits:
+- Optional restoration: performed / partial / skipped, with reason, retained funds/debt/positions, any unresolved attempts and useful next action:
 
-A live run cannot be marked passed with unresolved cleanup, test-created debt/positions, or displaced funds. Record costs explicitly; do not report exact balance equality when fees or interest changed the quantities.
+A live-write scenario passes only when its required effects and settlement are verified. Optional restoration is reported separately and may be partial or skipped without failing the scenario. Disclose retained assets/exposure and unresolved optional restoration attempts; never report those attempts as settled. Record actual costs and do not claim balance equality or restoration without evidence.
 
 ## User effort and conclusion
 

@@ -711,10 +711,7 @@ remain intact; an unrestored historical portfolio does not block normal use.
 Policy changes refuse nonterminal operations: reconcile the original work first.
 A change never expands an already approved operation or replays a write.
 
-The independent **$100 live-test budget and full restoration requirement are
-instructions for the LLM conducting explicitly authorized acceptance tests**,
-not runtime policy. They still apply even when personal limits are larger or
-zero. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
+Live E2E test defaults are **$20 per movement and $200 total allocation**. Under `fin-e2e`, agents may document finite overrides for complex actions; baseline restoration is optional. These test-planning rules do not alter enforced personal policy or existing grants. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
 
 New installations select these limits during `fin setup`, before configuration
 Touch ID. Enter retains the $100 defaults; zero requires the same explicit review
@@ -782,6 +779,12 @@ nodes but failed at Aave borrow reconciliation (`PRIOR_POSITION_ANCHOR_REQUIRED`
 neither completed restoration. The linked verification record separates these
 results from pending human Touch ID and live acceptance.
 
+For **agent-led live E2E verification**, invoke `$fin-e2e` or ask the agent to use [the repository skill](skills/fin-e2e/SKILL.md), for example:
+
+> Use $fin-e2e to verify the live-write workflow before human verification. Choose a scenario if needed, fix failures, and verify its effects and settlement with automatic development approval.
+
+Invocation authorizes scenario selection, repairs, retries and optional restoration. Defaults are $20 per movement and $200 total, with documented finite overrides when the agent needs them for complex actions. The agent reuses imported `dev-wallet` credentials or imports development credentials from `.env`. It completes live-write verification before handing off human-only installation or Touch ID checks; hard or impossible restoration does not block a pass. Ordinary development remains synthetic. This developer skill is separate from the bundled `fin` user skill and is linked from `AGENTS.md`; no Fin installation/update is needed.
+
 For **real-adapter development**, provide disposable, noncritical credentials in
 a gitignored dotenv file using [.env.fin-dev.example](.env.fin-dev.example). These
 keys are intentionally accessible to the agent. Import and execution run as your
@@ -789,10 +792,10 @@ user, with **no sudo, password or Touch ID prompts**:
 
 ```sh
 # Human: copy the template, fill in dedicated development keys, then restrict the file.
-cp .env.fin-dev.example .env.fin-dev
-chmod 600 .env.fin-dev
+cp -n .env.fin-dev.example .env  # preserve any existing development credentials
+chmod 600 .env
 # Agent: import once into a separate named environment, then use the normal CLI.
-make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env.fin-dev"
+make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env"
 make dev-env-start DEV_ENV=live DEV_MODE=live
 make dev-env-cli DEV_ENV=live ARGS='connections --json'
 make dev-env-cli DEV_ENV=live ARGS='capabilities --json'
@@ -856,11 +859,7 @@ establish Rust verification.
 
 Human installation, credential isolation, real Touch ID and live settlement need
 separate observed results; use the [human checklist](docs/testing/onboarding.md).
-Live acceptance requires explicit authorization, production accounts and Ethereum
-mainnet. Each movement and the total allocation are capped at **$100 equivalent**,
-including costs; capture the baseline and fund the complete return path before
-writing. Restoration must finish before a run can pass. These are test limits,
-not global product limits. Follow the [live-test contract](docs/testing/README.md#live-test-contract).
+Live acceptance requires explicit authorization (including `fin-e2e` invocation for disposable development), production venues and the selected reviewed mainnet network. Verify the required live-write effects and settlement against the initial/final state; optional restoration is separate. Apply the $20 movement / $200 allocation defaults and any documented permitted overrides from the [live-test contract](docs/testing/README.md#live-test-contract). These are test rules, not global product limits.
 
 ## Exchange architecture and local verification
 
