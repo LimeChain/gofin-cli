@@ -36,7 +36,7 @@ use fin_engine::{Engine, EngineOptions};
 use fin_engine::{RunAllocation, RunPlan, RunResult};
 #[cfg(test)]
 use fin_protocol::RunBeginRequest;
-use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request};
+use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_with_progress};
 use fin_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -3246,9 +3246,9 @@ async fn serve_connection_with_timeouts(
             "Connect from the enrolled human account.",
         ));
     }
-    let request = {
+    let (request, progress) = {
         let mut reader = BufReader::new(&mut stream);
-        tokio::time::timeout(timeouts.frame_read, read_request(&mut reader))
+        tokio::time::timeout(timeouts.frame_read, read_request_with_progress(&mut reader))
             .await
             .map_err(|_| {
                 error(
@@ -3318,7 +3318,8 @@ async fn serve_connection_with_timeouts(
     // Keep this runtime revision pinned throughout dispatch. A reload waits for
     // active reads/writes and swaps only after protected composition succeeds.
     let runtime = shared_runtime.read().await;
-    let response = runtime.handle(request).await;
+    let response =
+        fin_protocol::progress::observe(&mut stream, progress, runtime.handle(request)).await;
     write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
     Ok(())
 }
@@ -3326,9 +3327,16 @@ async fn serve_connection_with_timeouts(
 async fn acquire_request_configuration_lock(
     timeout: Duration,
 ) -> fin_domain::Result<ConfigurationLock> {
+    acquire_configuration_lock(false, timeout).await
+}
+
+async fn acquire_configuration_lock(
+    exclusive: bool,
+    timeout: Duration,
+) -> fin_domain::Result<ConfigurationLock> {
     tokio::time::timeout(timeout, async {
         loop {
-            if let Some(lock) = try_lock_protected_configuration(false)? {
+            if let Some(lock) = try_lock_protected_configuration(exclusive)? {
                 return Ok(lock);
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -3419,6 +3427,18 @@ fn peer_local_error(error: &FinError) -> bool {
 }
 
 async fn serve_listener_with_timeouts(
+    listener: UnixListener,
+    runtime: Arc<BrokerRuntime>,
+    expected_uid: u32,
+    timeouts: IpcTimeouts,
+) -> fin_domain::Result<()> {
+    // Synthetic listeners own their isolated journal. Production performs this
+    // step after launchd activation, under the protected configuration lock.
+    runtime.engine.recover_interrupted()?;
+    serve_started_listener(listener, runtime, expected_uid, timeouts).await
+}
+
+async fn serve_started_listener(
     listener: UnixListener,
     runtime: Arc<BrokerRuntime>,
     expected_uid: u32,
@@ -3522,7 +3542,14 @@ pub async fn serve_protected(runtime: Arc<BrokerRuntime>) -> fin_domain::Result<
                 "Check the installed Broker socket activation service.",
             )
         })?;
-        serve_listener(listener, runtime, approver_uid).await
+        // Socket ownership must be established before recovery can declare any
+        // previous work interrupted. Exclude separate configuration processes;
+        // ordinary composition and reload must never cancel active attempts.
+        let startup_guard =
+            acquire_configuration_lock(true, IPC_CONFIGURATION_LOCK_TIMEOUT).await?;
+        runtime.engine.recover_interrupted()?;
+        drop(startup_guard);
+        serve_started_listener(listener, runtime, approver_uid, IpcTimeouts::PRODUCTION).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -5970,6 +5997,7 @@ mod tests {
             plan: fin_domain::financial_plans::FinancialPlanSpec {
                 version: 1,
                 name: "Synthetic snapshot read".into(),
+                summary: None,
                 steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
                     action_deadline_seconds: None,
                     step_id: "snapshot".into(),
@@ -6245,6 +6273,154 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn listener_recovers_orphans_but_parallel_composition_cannot_cancel_active_preparation() {
+        struct PausedPreparation {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl Adapter for PausedPreparation {
+            fn definitions(&self) -> Vec<Definition> {
+                vec![Definition {
+                    name: "synthetic.write".into(),
+                    description: "Isolated paused preparation".into(),
+                    kind: OperationKind::Write,
+                    execution_actor: ExecutionActor::AgentInvocable,
+                    input_schema: json!({"type":"object"}),
+                    output_schema: json!({}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "Synthetic only".into(),
+                    completion: "Never submits".into(),
+                    semantics: json!({}),
+                }]
+            }
+            async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+                unreachable!()
+            }
+            async fn prepare(&self, _: &str, _: &Value) -> fin_domain::Result<PreparedOperation> {
+                self.started.notify_one();
+                self.release.notified().await;
+                Err(FinError::new(
+                    "SYNTHETIC_PREPARATION_STOP",
+                    "preflight",
+                    "Test finished preparation.",
+                    "No submission.",
+                ))
+            }
+            async fn revalidate(
+                &self,
+                _: &PreparedOperation,
+            ) -> fin_domain::Result<PreparedOperation> {
+                unreachable!()
+            }
+            async fn submit(
+                &self,
+                _: &PreparedOperation,
+                _: Arc<dyn SubmissionJournal>,
+            ) -> fin_domain::Result<Submission> {
+                panic!("No fixture submission")
+            }
+            async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("journal.sqlite");
+        let mut store = Store::open(&database).unwrap();
+        let orphan = json!({"id":"orphan","request_id":"orphan-request","fingerprint":"orphan-fp",
+            "fingerprint_version":1,"operation":"synthetic.write","input":{},
+            "status":"awaiting_approval","created_at":now(),"updated_at":now()});
+        store
+            .create_request(
+                "orphan",
+                "orphan-request",
+                "orphan-fp",
+                "synthetic.write",
+                None,
+                "awaiting_approval",
+                &orphan,
+                &now(),
+            )
+            .unwrap();
+        drop(store);
+        let adapter = Arc::new(PausedPreparation {
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        });
+        let compose = || {
+            compose_runtime(
+                config(),
+                RuntimeDependencies {
+                    store: Store::open(&database).unwrap(),
+                    adapters: vec![adapter.clone()],
+                    authorizer: Arc::new(ReadOnlyAuthorizer),
+                    valuator: Arc::new(FixtureValuator),
+                    bridge: None,
+                },
+            )
+            .unwrap()
+        };
+        let runtime = compose();
+        assert_eq!(
+            runtime.engine.status("orphan", false).await.unwrap().status,
+            fin_domain::Status::AwaitingApproval
+        );
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let serving = tokio::spawn(serve_listener(listener, runtime.clone(), unsafe {
+            libc::geteuid()
+        }));
+        assert!(socket_request(&socket, BrokerRequest::Operations).await.ok);
+        assert_eq!(
+            runtime.engine.status("orphan", false).await.unwrap().status,
+            fin_domain::Status::Cancelled
+        );
+        let execute_socket = socket.clone();
+        let execute = tokio::spawn(async move {
+            socket_request(
+                &execute_socket,
+                BrokerRequest::Execute {
+                    request: OperationRequest {
+                        request_id: "active-request".into(),
+                        operation: "synthetic.write".into(),
+                        input: json!({}),
+                        run_id: None,
+                    },
+                },
+            )
+            .await
+        });
+        adapter.started.notified().await;
+        let active = runtime
+            .engine
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.request_id == "active-request")
+            .unwrap();
+        assert_eq!(active.status, fin_domain::Status::AwaitingApproval);
+        let other_runtime = compose();
+        assert_eq!(
+            other_runtime
+                .engine
+                .status(&active.id, false)
+                .await
+                .unwrap(),
+            active
+        );
+        drop(other_runtime);
+        adapter.release.notify_one();
+        let result = execute.await.unwrap();
+        assert!(result.ok, "{:?}", result.error);
+        let result = result.result.unwrap();
+        assert_eq!(result["error"]["code"], "SYNTHETIC_PREPARATION_STOP");
+        assert!(result["submission"].is_null());
+        assert!(socket_request(&socket, BrokerRequest::DaemonStop).await.ok);
+        serving.await.unwrap().unwrap();
     }
 
     #[tokio::test]

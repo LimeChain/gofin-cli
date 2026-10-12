@@ -22,6 +22,13 @@ pub struct FinancialPlanSpec {
     pub version: u32,
     /// Display label only. It grants no authority and is included in approval.
     pub name: String,
+    /// Optional caller-authored financial sentence shown after the plan name in
+    /// approval. It grants no authority; the complete plan remains bound. Use
+    /// one trimmed line, with at most 140 Unicode characters across name and
+    /// summary together. Control and bidirectional formatting are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 140))]
+    pub summary: Option<String>,
     pub steps: Vec<FinancialPlanStepSpec>,
     pub aggregate_bounds: FinancialPlanBounds,
 }
@@ -229,7 +236,7 @@ impl FinancialPlanAuthorizationRequest {
 }
 
 impl FinancialPlanSpec {
-    /// Validate the plan's stable structural contract and display name.
+    /// Validate the plan's stable structural contract and approval text.
     pub fn validate(&self) -> crate::Result<()> {
         if self.version != FINANCIAL_PLAN_VERSION {
             return Err(FinError::validation(
@@ -237,6 +244,22 @@ impl FinancialPlanSpec {
             ));
         }
         validate_financial_plan_name(&self.name)?;
+        if let Some(summary) = &self.summary {
+            // Leave room for the native approval prefix, step count and full
+            // duration. Reject long text before approval instead of truncating
+            // material financial words in the prompt.
+            if summary.is_empty()
+                || summary.trim() != summary
+                || self.name.chars().count() + summary.chars().count() > 140
+                || summary
+                    .chars()
+                    .any(|c| c.is_control() || is_bidi_format_control(c))
+            {
+                return Err(FinError::validation(
+                    "Plan summaries must be one trimmed, nonempty line with no control or bidirectional formatting characters; name and summary together must contain at most 140 Unicode characters.",
+                ));
+            }
+        }
         if self.steps.is_empty() {
             return Err(FinError::validation(
                 "A financial plan must contain at least one step.",
@@ -614,6 +637,7 @@ mod tests {
         FinancialPlanSpec {
             version: FINANCIAL_PLAN_VERSION,
             name: "Synthetic sale".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
                 action_deadline_seconds: None,
                 step_id: "sell".into(),
@@ -651,6 +675,89 @@ mod tests {
         assert!(plan_name("hidden\u{202e}name").is_err());
         assert!(plan_name("Arabic \u{061c} label").is_err());
         assert!(plan_name("duplicate labels are allowed").is_ok());
+    }
+
+    #[test]
+    fn validates_complete_summary_before_approval_without_truncation() {
+        let mut plan = sample_plan();
+        plan.summary = Some("Sell up to 10 BTC atoms within the reviewed fee limits.".into());
+        plan.validate().unwrap();
+        let remaining = 140 - plan.name.chars().count();
+        plan.summary = Some("é".repeat(remaining));
+        plan.validate().unwrap();
+        plan.summary = Some("界".repeat(remaining + 1));
+        assert!(plan.validate().is_err());
+        for text in [
+            "",
+            " ",
+            " leading",
+            "trailing ",
+            "line\nbreak",
+            "tab\there",
+            "escape\u{1b}",
+            "line\u{2028}break",
+            "paragraph\u{2029}break",
+            "hidden\u{202e}amount",
+            "Arabic\u{061c}amount",
+            "isolate\u{2066}amount\u{2069}",
+        ] {
+            plan.summary = Some(text.into());
+            assert!(plan.validate().is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
+    fn optional_summary_preserves_legacy_json_and_binds_changed_display_text() {
+        let original = sample_plan();
+        let legacy = serde_json::to_value(&original).unwrap();
+        assert!(legacy.get("summary").is_none());
+        let restored: FinancialPlanSpec = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.summary.is_none());
+        assert_eq!(serde_json::to_value(&restored).unwrap(), legacy);
+        let usage = FinancialPlanUsage::default();
+        let legacy_review = serde_json::json!({
+            "version": 1, "kind": "financial_plan_review", "plan": legacy,
+            "permissions": [], "valid_for_seconds": 600,
+            "replaces_revision_id": null, "carried_forward_usage": usage,
+        });
+        let legacy_hash = crate::binding_hash(&legacy_review).unwrap();
+        assert_eq!(
+            legacy_hash,
+            "bde77e6a82728c30b158bd000c06958c90d1ec7d8a752445e1112795f695647a"
+        );
+        assert_eq!(
+            financial_plan_review_hash(&restored, &[], 600, None, &usage).unwrap(),
+            legacy_hash,
+        );
+        let approval =
+            financial_plan_approval_binding("plan", "revision", &restored, &[], 600, None, &usage);
+        let mut summarized = restored;
+        summarized.summary = Some("Sell up to 10 BTC atoms within the reviewed fee limits.".into());
+        let value = serde_json::to_value(&summarized).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FinancialPlanSpec>(value).unwrap(),
+            summarized
+        );
+        let summary_hash = financial_plan_review_hash(&summarized, &[], 600, None, &usage).unwrap();
+        assert_ne!(summary_hash, legacy_hash);
+        let summarized_approval = financial_plan_approval_binding(
+            "plan",
+            "revision",
+            &summarized,
+            &[],
+            600,
+            None,
+            &usage,
+        );
+        assert_ne!(
+            crate::binding_hash(&approval).unwrap(),
+            crate::binding_hash(&summarized_approval).unwrap()
+        );
+        summarized.summary = Some("Sell up to 9 BTC atoms within the reviewed fee limits.".into());
+        assert_ne!(
+            financial_plan_review_hash(&summarized, &[], 600, None, &usage).unwrap(),
+            summary_hash
+        );
     }
 
     #[test]

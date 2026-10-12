@@ -294,6 +294,13 @@ impl Adapter for BinanceAdapter {
     ) -> Result<Submission, FinError> {
         self.0.submit(prepared, journal).await
     }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        self.0.submit_revalidated(validated, journal).await
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, FinError> {
         self.0.reconcile(record).await
     }
@@ -1130,6 +1137,11 @@ impl BinanceProfile {
                 if let Some(object) = output.as_object_mut() {
                     if deposit {
                         object.insert("creditState".into(), json!(credit_state));
+                        object.insert("credited".into(), json!(record.confirmed_deposit_credit()));
+                        object.insert(
+                            "withdrawalLocked".into(),
+                            json!(record.locked_deposit_credit()),
+                        );
                     } else {
                         object.insert("venueState".into(), json!(venue_state));
                     }
@@ -2460,7 +2472,12 @@ impl ExchangeProfile for BinanceProfile {
                                     .and_then(Value::as_str)
                                     .unwrap_or("pending")
                             };
-                            if state_name == "pending" || state_name == "credited_locked" {
+                            let unresolved = if deposit {
+                                record["credited"] != true
+                            } else {
+                                state_name == "pending"
+                            };
+                            if unresolved {
                                 let id = record
                                     .get("id")
                                     .and_then(Value::as_str)
@@ -2988,7 +3005,7 @@ impl ExchangeProfile for BinanceProfile {
                     ));
                 }
                 Ok(
-                    json!({"operation":operation,"account":account.name,"observedAt":now(),"coin":input.coin,"network":input.network,"address":address.address,"memo":address.tag.unwrap_or_default(),"tokenContract":network.contract_address.as_deref().unwrap_or("unknown"),"denomination":network.denomination.map(|v|json!(v)).unwrap_or(json!("unknown")),"minimumConfirmations":network.min_confirm.map(|v|json!(v)).unwrap_or(json!("unknown")),"unlockConfirmations":network.unlock_confirm.map(|v|json!(v)).unwrap_or(json!("unknown")),"minimumDeposit":network.deposit_dust.as_ref().map(|v|json!(v.canonical())).unwrap_or(json!("unknown")),"usableCreditRequires":"matching Binance deposit history with creditState=credited"}),
+                    json!({"operation":operation,"account":account.name,"observedAt":now(),"coin":input.coin,"network":input.network,"address":address.address,"memo":address.tag.unwrap_or_default(),"tokenContract":network.contract_address.as_deref().unwrap_or("unknown"),"denomination":network.denomination.map(|v|json!(v)).unwrap_or(json!("unknown")),"minimumConfirmations":network.min_confirm.map(|v|json!(v)).unwrap_or(json!("unknown")),"unlockConfirmations":network.unlock_confirm.map(|v|json!(v)).unwrap_or(json!("unknown")),"minimumDeposit":network.deposit_dust.as_ref().map(|v|json!(v.canonical())).unwrap_or(json!("unknown")),"usableCreditRequires":"matching Binance deposit history with credited=true (status 1 or 6 and clear travel-rule status), plus exact free-balance evidence; withdrawalLocked remains independent"}),
                 )
             }
             "binance.deposit-history" | "binance.withdrawal-history" => {

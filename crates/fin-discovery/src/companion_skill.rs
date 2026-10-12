@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const CONTENT: &str = include_str!("../../../skills/fin/SKILL.md");
-pub const VERSION: &str = "1.3.1";
+pub const VERSION: &str = "1.5.1";
 pub const SETUP_PROMPT: &str = "Install Fin's optional skill";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]

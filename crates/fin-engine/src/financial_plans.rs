@@ -219,6 +219,9 @@ impl Engine {
                 ));
             }
         }
+        fin_domain::execution_progress::emit(
+            fin_domain::execution_progress::Stage::AwaitingApproval,
+        );
         let approval = match self.authorizer.authorize(&challenge).await {
             Ok(approval) => approval,
             Err(error) => {
@@ -427,13 +430,15 @@ impl Engine {
             deadline.apply(&mut execution_input)?;
         }
         let context = self.preparation_context(None)?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(operation, &execution_input, &context),
         )
-        .await?;
+        .await
+        .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         if prepared.action_deadline.is_some() {
             return Err(internal("adapter supplied broker timing"));
         }
@@ -453,7 +458,8 @@ impl Engine {
                 .map_err(|_| internal("store lock poisoned"))?;
             validate_candidate_plan_caps(&record, step_id, &prepared, &store)?;
         }
-        validate_prepared(&prepared, operation, self.clock.now())?;
+        validate_prepared(&prepared, operation, self.clock.now())
+            .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         Ok(prepared)
     }
 
@@ -621,21 +627,25 @@ impl Engine {
         let mut execution_request = request.clone();
         execution_request.input = execution_input.clone();
         let context = self.preparation_context(None)?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             &request.operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(&request.operation, &execution_input, &context),
         )
-        .await?;
+        .await
+        .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         if prepared.action_deadline.is_some() {
             return Err(internal("adapter supplied broker timing"));
         }
         prepared.action_deadline = action_deadline;
         let required_origins = self.cost_origin_assets(&prepared, None)?;
         self.complete_cost_origin_prices(&mut prepared, &required_origins)
-            .await?;
-        validate_prepared(&prepared, &request.operation, self.clock.now())?;
+            .await
+            .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
+        validate_prepared(&prepared, &request.operation, self.clock.now())
+            .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         self.validate_plan_candidate(
             &*adapter,
             &plan.revision,
@@ -819,6 +829,7 @@ impl Engine {
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
+                let error = self.plan_candidate_recovery(error, plan_id, Some(&operation));
                 if !operation.status.terminal() {
                     operation.status = if operation.submission.is_some() {
                         Status::Unknown
@@ -842,6 +853,80 @@ impl Engine {
                 Ok(operation)
             }
         }
+    }
+
+    /// Explain candidate freshness/transport recovery using current authority.
+    /// This guidance never retries, renews or changes financial state.
+    fn plan_candidate_recovery(
+        &self,
+        mut error: FinError,
+        plan_id: &str,
+        attempt: Option<&OperationRecord>,
+    ) -> FinError {
+        if !matches!(
+            error.code.as_str(),
+            "PREVIEW_EXPIRED"
+                | "PREVIEW_CHANGED"
+                | "REQUEST_CHANGED"
+                | "PLAN_CANDIDATE_CHANGED"
+                | "BINDING_CHANGED"
+                | "NONCE_CHANGED"
+                | "STALE_VALUATION"
+                | "VALUE_BOUND_EXCEEDED"
+                | "SLIPPAGE_LIMIT"
+                | "EVIDENCE_TIMEOUT"
+                | "RPC_READ_TIMEOUT"
+                | "RPC_UNAVAILABLE"
+        ) {
+            return error;
+        }
+        let Ok(plan) = self.load_financial_plan(plan_id) else {
+            return error;
+        };
+        let at = self.clock.now();
+        let active = plan.revision.status == FinancialPlanAuthorizationStatus::Active
+            && parse_time(&plan.revision.expires_at).is_ok_and(|expiry| expiry > at);
+        let submitted = attempt.is_some_and(|attempt| {
+            attempt.submission.is_some() || attempt.dispatch_evidence.is_some()
+        });
+        let other_attempt = plan
+            .active_attempt_id
+            .as_deref()
+            .filter(|id| attempt.is_none_or(|attempt| attempt.id != *id));
+        let reconcile = submitted || other_attempt.is_some();
+        error.next_action = if reconcile {
+            "Inspect this plan's status and reconcile the original attempt. Do not create another financial submission or renew consent merely to verify its outcome."
+        } else if !active {
+            "Nothing was submitted. Review the remaining work and authorize a replacement using --replaces with the current revision ID before starting a new attempt."
+        } else if attempt.is_some() {
+            "Nothing was submitted. Prepare a fresh candidate under the same plan using a new attempt ID. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        } else {
+            "Nothing was submitted or recorded as an attempt. Retry preparation under the same plan; the request ID can be reused. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        }
+        .into();
+        let mut details = error
+            .details
+            .as_deref()
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        details.extend(
+            json!({
+                "plan_id": plan_id,
+                "revision_id": plan.revision.revision_id,
+                "observed_at": at.to_rfc3339(),
+                "attempt_id": other_attempt.or_else(|| attempt.map(|attempt| attempt.id.as_str())),
+                "reconciliation_required": reconcile,
+                "reauthorization_required": !reconcile && !active,
+                "new_attempt_required": !reconcile && attempt.is_some(),
+                "submission_recorded": submitted,
+            })
+            .as_object()
+            .expect("recovery details are an object")
+            .clone(),
+        );
+        error.details = Some(Box::new(Value::Object(details)));
+        error
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -2775,6 +2860,39 @@ fn validate_aggregate_permission_bounds(
     spec: &financial_plans::FinancialPlanSpec,
     permissions: &[FinancialPlanStepPermission],
 ) -> Result<()> {
+    // Completion targets are required gross spending, unlike optional step
+    // ceilings that may deliberately share a smaller aggregate allowance.
+    // Catch impossible plans with exact arithmetic before asking for approval.
+    let mut required = BTreeMap::<(ResourceId, fin_domain::AssetId), BigUint>::new();
+    for target in spec
+        .steps
+        .iter()
+        .filter_map(|step| step.completion.principal_spend.as_ref())
+    {
+        *required
+            .entry((target.resource.clone(), target.amount.asset.clone()))
+            .or_default() += target.amount.atoms.integer();
+    }
+    for ((resource, asset), amount) in required {
+        let cap = spec
+            .aggregate_bounds
+            .maximum_debits
+            .iter()
+            .find(|cap| cap.resource == resource && cap.amount.asset == asset);
+        if cap.is_none_or(|cap| amount > cap.amount.atoms.integer()) {
+            return Err(plan_error(
+                "PLAN_COMPLETION_OUTSIDE_AGGREGATE",
+                "Required principal-spend targets exceed the plan's cumulative debit cap.",
+                "Reduce the completion targets or review a sufficient aggregate cap before authorization.",
+            )
+            .with_details(json!({
+                "resource": resource,
+                "asset": asset,
+                "required_atoms": amount.to_string(),
+                "maximum_atoms": cap.map(|cap| &cap.amount.atoms),
+            })));
+        }
+    }
     for permission in permissions {
         for item in permission_debits(permission) {
             if !spec
@@ -4797,6 +4915,7 @@ mod tests {
             plan: financial_plans::FinancialPlanSpec {
                 version: financial_plans::FINANCIAL_PLAN_VERSION,
                 name: "Generic exact read".into(),
+                summary: None,
                 steps: vec![financial_plans::FinancialPlanStepSpec {
                     action_deadline_seconds: None,
                     step_id: "read-account".into(),
@@ -6309,10 +6428,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn required_completion_spend_must_fit_aggregate_without_summing_optional_caps() {
+        let original = prior_record();
+        for (steps, target, aggregate, succeeds) in [
+            (1, "20", "19", false),
+            (2, "20", "30", false),
+            (2, "20", "40", true),
+            (2, "10", "20", true),
+        ] {
+            let mut spec = original.revision.spec.clone();
+            spec.steps.clear();
+            spec.aggregate_bounds.maximum_debits = vec![resource_amount("acct", "USDT", aggregate)];
+            let mut permissions = Vec::new();
+            for index in 0..steps {
+                let mut step = step_spec();
+                step.step_id = format!("step-{index}");
+                step.completion.principal_spend = Some(resource_amount("acct", "USDT", target));
+                let mut permitted = permission(json!({}), json!({}), "100");
+                permitted.step_id = step.step_id.clone();
+                spec.steps.push(step);
+                permissions.push(permitted);
+            }
+            let result = validate_plan_permissions(&spec, &permissions);
+            if succeeds {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "PLAN_COMPLETION_OUTSIDE_AGGREGATE");
+                assert_eq!(error.details.unwrap()["maximum_atoms"], aggregate);
+            }
+        }
+    }
+
+    #[test]
+    fn required_completion_spend_keeps_exact_resource_and_asset_identities_separate() {
+        let original = prior_record();
+        let mut spec = original.revision.spec.clone();
+        spec.steps.clear();
+        spec.aggregate_bounds.maximum_debits.clear();
+        let mut permissions = Vec::new();
+        for (index, (resource, token)) in [("acct", "USDT"), ("other", "USDT"), ("acct", "ETH")]
+            .into_iter()
+            .enumerate()
+        {
+            let amount = resource_amount(resource, token, "20");
+            let mut step = step_spec();
+            step.step_id = format!("step-{index}");
+            step.completion.principal_spend = Some(amount.clone());
+            let mut permitted = permission(json!({}), json!({}), "100");
+            permitted.step_id = step.step_id.clone();
+            permitted.permission.as_mut().unwrap().spec.maximum_debits = vec![amount.clone()];
+            spec.aggregate_bounds.maximum_debits.push(amount);
+            spec.steps.push(step);
+            permissions.push(permitted);
+        }
+        validate_plan_permissions(&spec, &permissions).unwrap();
+    }
+
     fn prior_record() -> FinancialPlanAuthorizationRecord {
         let spec = financial_plans::FinancialPlanSpec {
             version: 1,
             name: "Plan".into(),
+            summary: None,
             steps: vec![step_spec()],
             aggregate_bounds: financial_plans::FinancialPlanBounds {
                 maximum_debits: vec![resource_amount("acct", "USDT", "30")],

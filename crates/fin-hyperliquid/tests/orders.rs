@@ -1577,6 +1577,7 @@ async fn exact_plan_orders_are_sequenced_and_revocation_still_allows_pending_rec
     let plan = FinancialPlanSpec {
         version: 1,
         name: "two bounded synthetic orders".into(),
+        summary: None,
         steps: vec![
             step("first", first_input.clone()),
             step("second", second_input.clone()),

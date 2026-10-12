@@ -8,6 +8,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 #[cfg(test)]
+mod execution_result_tests;
+#[cfg(test)]
 mod uncertain_result_tests;
 
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +80,35 @@ impl Ui {
             return Progress::quiet();
         }
         Progress::start(text, self.terminal.color, io::stderr())
+    }
+
+    /// Stages come from broker work boundaries, never timers. Stop animation
+    /// during human approval, and keep redirected/machine output quiet.
+    pub fn execution_stage(
+        &self,
+        stage: fin_domain::execution_progress::Stage,
+        development: bool,
+    ) -> Option<Progress> {
+        use fin_domain::execution_progress::Stage;
+        if self.machine {
+            return None;
+        }
+        if stage == Stage::AwaitingApproval {
+            let text = if development {
+                "Waiting for development approval..."
+            } else {
+                "Waiting for Touch ID approval..."
+            };
+            let _ = self.message_to(text, "36", &mut io::stderr().lock());
+            return None;
+        }
+        Some(self.progress(match stage {
+            Stage::Preparing => "Preparing transaction...",
+            Stage::Revalidating => "Checking final quote and limits...",
+            Stage::Submitting => "Submitting transaction...",
+            Stage::Verifying => "Verifying outcome...",
+            Stage::AwaitingApproval => unreachable!(),
+        }))
     }
 
     /// Supplemental human messages are suppressed in machine mode.
@@ -228,6 +259,9 @@ impl Ui {
         let plan = &review["plan"];
         let name = plan["name"].as_str().unwrap_or("unnamed");
         self.message_to(&format!("Plan: {name}"), "36", output)?;
+        if let Some(summary) = plan["summary"].as_str() {
+            self.message_to(summary, "36", output)?;
+        }
         if let Some(plan_id) = review["plan_id"].as_str() {
             self.message_to(&format!("Plan ID: {plan_id}"), "36", output)?;
         } else {
@@ -582,6 +616,20 @@ impl Ui {
                 writeln!(output, "{}", self.styled(text, "33"))?;
             }
             Ok(())
+        } else if matches!(command, "execute" | "status")
+            && !self.is_verbose()
+            && render_bridge_result(command, value).is_none()
+            && let Some(summary) = render_operation_result(value, status_command)
+        {
+            let color = match value["status"].as_str() {
+                Some("completed") => "32",
+                Some("failed") => "31",
+                _ => "33",
+            };
+            for text in summary.lines() {
+                writeln!(output, "{}", self.styled(text, color))?;
+            }
+            Ok(())
         } else if command == "authorizations" && !self.is_verbose() {
             for (text, color) in authorization_rows(value) {
                 writeln!(output, "{}", self.styled(&safe_text(&text), color))?;
@@ -794,6 +842,12 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
             return rendered;
         }
     }
+    if !verbose
+        && matches!(command, "execute" | "status")
+        && let Some(rendered) = render_operation_result(value, None)
+    {
+        return rendered;
+    }
     if command == "authorizations" && !verbose {
         for (text, _) in authorization_rows(value) {
             line(&mut output, 0, &safe_text(&text));
@@ -939,6 +993,126 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         render_value(&mut output, value, 0);
     }
     output
+}
+
+fn render_operation_result(value: &Value, status_command: Option<&str>) -> Option<String> {
+    let id = value["id"].as_str()?;
+    let operation = value["operation"].as_str()?;
+    let status = value["status"].as_str()?;
+    if id.is_empty()
+        || id.starts_with('-')
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+    {
+        return None;
+    }
+    let headline = match status {
+        "completed" => "✓ Completed and verified",
+        "pending" => "Pending verification",
+        "failed" => "✗ Failed",
+        "cancelled" => "Cancelled",
+        "expired" => "Expired",
+        _ => return None,
+    };
+    let mut output = format!("{headline}: {}.\n", safe_text(operation));
+    let effects = value["effects"]["effects"].as_array();
+    if let Some(effects) = effects {
+        for effect in effects {
+            let kind = effect["kind"].as_str().unwrap_or_default();
+            let received = match kind {
+                "conversion" => Some(&effect["received"]),
+                "transfer" => Some(&effect["credit"]),
+                _ => None,
+            };
+            if let Some(amount) = received.and_then(display_amount) {
+                line(&mut output, 0, &format!("Received {}.", safe_text(&amount)));
+            }
+            if kind == "cost"
+                && let Some(amount) = display_amount(&effect["amount"])
+            {
+                line(&mut output, 0, &format!("Cost: {}.", safe_text(&amount)));
+            }
+        }
+    }
+    if status == "completed" && value["effects"]["evidence"]["withdrawal_locked"] == true {
+        line(
+            &mut output,
+            0,
+            "Binance reports a withdrawal hold; the deposit credit is verified.",
+        );
+    }
+    if let Some(error) = value["error"]["message"].as_str().filter(|s| !s.is_empty()) {
+        line(&mut output, 0, &safe_text(error));
+    }
+    for warning in value["preview"]["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        // Already-reviewed permission mechanics remain in verbose/JSON details.
+        // Preserve material warnings such as unpriced exposure or lasting debt.
+        if !warning.starts_with("Swap permission: ")
+            && !(status == "completed"
+                && warning.starts_with("A successful Ethereum transaction does not complete this operation until Binance records "))
+            && warning
+                != "Every financial write requires a fresh human authorization. An uncertain hash is reconciled without resubmission."
+            && warning != "An uncertain transaction must be reconciled without resubmission."
+        {
+            line(&mut output, 0, &format!("Warning: {}", safe_text(warning)));
+        }
+    }
+    if status == "pending" {
+        line(
+            &mut output,
+            0,
+            "Outcome is not yet verified. Do not resubmit.",
+        );
+    } else if status != "completed" {
+        if effects.is_some_and(|effects| !effects.is_empty()) {
+            line(
+                &mut output,
+                0,
+                "Verified financial effects were recorded; inspect them before another action.",
+            );
+        } else if value["submission"].is_null() {
+            line(&mut output, 0, "No submission was recorded.");
+        } else {
+            line(
+                &mut output,
+                0,
+                "A submission was recorded. Do not repeat this request.",
+            );
+        }
+    }
+    line(&mut output, 0, &format!("Operation ID: {id}"));
+    let command = format!("fin status {id}");
+    if status == "pending" {
+        line(
+            &mut output,
+            0,
+            &format!("Next: {}", safe_text(status_command.unwrap_or(&command))),
+        );
+    } else if status != "completed" {
+        if let Some(next) = value["error"]["next_action"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            line(&mut output, 0, &format!("Next: {}", safe_text(next)));
+        } else {
+            line(
+                &mut output,
+                0,
+                &format!(
+                    "Next: {} --verbose",
+                    safe_text(status_command.unwrap_or(&command))
+                ),
+            );
+        }
+    }
+    line(&mut output, 0, "Use --verbose for full technical details.");
+    Some(output)
 }
 
 fn render_uncertain_operation(value: &Value, status_command: Option<&str>) -> Option<String> {
@@ -1345,18 +1519,27 @@ fn display_amount(amount: &Value) -> Option<String> {
             digits.push_str(fraction);
         }
     }
-    let asset = match reference {
-        "native" => "ETH",
-        address
-            if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
-                || address.eq_ignore_ascii_case("0xaf88d065e77c8cc2239327c5edb3a432268e5831") =>
+    let network = amount["asset"]["network"]
+        .as_str()
+        .unwrap_or("unknown network");
+    let asset = match (network, reference) {
+        ("ethereum:1" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663", "native") => "ETH",
+        ("ethereum:1", address)
+            if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") =>
         {
             "USDC"
         }
-        address if address.eq_ignore_ascii_case("0x5fc5360d0400a0fd4f2af552add042d716f1d168") => {
+        ("ethereum:42161", address)
+            if address.eq_ignore_ascii_case("0xaf88d065e77c8cc2239327c5edb3a432268e5831") =>
+        {
+            "USDC"
+        }
+        ("ethereum:4663", address)
+            if address.eq_ignore_ascii_case("0x5fc5360d0400a0fd4f2af552add042d716f1d168") =>
+        {
             "USDG"
         }
-        other => other,
+        (_, other) => other,
     };
     Some(format!("{digits} {asset}"))
 }
@@ -1497,6 +1680,12 @@ fn financial_plan_rows(value: &Value) -> Vec<(String, &'static str)> {
         .or_else(|| value["authorization_status"].as_str())
         .unwrap_or("reviewed");
     rows.push((format!("Plan {name} ({plan_id})"), "36"));
+    if let Some(summary) = revision["spec"]["summary"]
+        .as_str()
+        .or_else(|| value["plan"]["summary"].as_str())
+    {
+        rows.push((summary.into(), "36"));
+    }
     rows.push((
         format!("Authorization: {authorization_state}"),
         if authorization_state == "active" {
@@ -2168,6 +2357,50 @@ mod tests {
             parsed["steps"][0]["attempts"][0]["result"]["assets"][0]["symbol"],
             "ETH"
         );
+    }
+
+    #[test]
+    fn plan_summary_is_complete_in_human_review_and_machine_results() {
+        let summary = "Send 0.01 ETH to Savings; network fees up to 0.001 ETH.";
+        let review = json!({"plan":{"name":"Fund Savings","summary":summary,"steps":[]},"valid_for_seconds":600});
+        for terminal in [
+            ui(false, false, true, true, false, false),
+            ui(false, false, true, true, true, false),
+            ui(false, false, true, true, false, true),
+            ui(false, false, false, false, false, false),
+        ] {
+            let mut bytes = Vec::new();
+            terminal
+                .plan_authorization_review_to(&review, &mut bytes)
+                .unwrap();
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(text.contains("Plan: Fund Savings"));
+            assert!(text.contains(summary));
+            assert!(text.contains("10 minutes"));
+            if terminal.terminal.color {
+                assert!(text.contains(&format!("\u{1b}[36m{summary}\u{1b}[0m")));
+            } else {
+                assert!(!text.contains('\u{1b}'));
+            }
+        }
+        let machine = ui(true, false, false, false, true, true);
+        let mut bytes = Vec::new();
+        machine
+            .plan_authorization_review_to(&review, &mut bytes)
+            .unwrap();
+        assert!(bytes.is_empty());
+        machine
+            .write_result_to(&review, "plans", &mut bytes)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), review);
+        assert!(!String::from_utf8(bytes).unwrap().contains('\u{1b}'));
+
+        let status = json!({"plan_id":"synthetic-plan","revision":{"spec":review["plan"],"status":"active"},"steps":[]});
+        let mut bytes = Vec::new();
+        ui(false, false, false, false, false, false)
+            .write_result_to(&status, "plans", &mut bytes)
+            .unwrap();
+        assert!(String::from_utf8(bytes).unwrap().contains(summary));
     }
 
     #[test]

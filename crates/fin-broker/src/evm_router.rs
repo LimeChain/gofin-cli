@@ -357,6 +357,15 @@ impl Adapter for EvmNetworkRouter {
     ) -> fin_domain::Result<Submission> {
         self.prepared(prepared)?.submit(prepared, journal).await
     }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> fin_domain::Result<Submission> {
+        self.prepared(validated.prepared())?
+            .submit_revalidated(validated, journal)
+            .await
+    }
     async fn verified_position_baselines(
         &self,
         record: &OperationRecord,

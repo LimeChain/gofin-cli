@@ -6306,7 +6306,7 @@
         "/requestId"
       ],
       "coin": "Binance asset identity; never resolved from an EVM ticker",
-      "completion": "chain submission alone is insufficient; matching usable deposit history and balance delta are required",
+      "completion": "chain submission alone is insufficient; matching deposit history with status 1 or 6, clear travel-rule status and exact free-balance delta are required; status 6 may retain a Binance withdrawal hold",
       "legacyDefaults": "Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.",
       "maxFeeEth": "Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.",
       "network": "explicit Binance network code matched to current metadata and a configured Fin EVM chain",
@@ -21910,7 +21910,13 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "retry": "Reconcile the original persisted hash, never blind replay."
+      "quote_revalidation": "Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.",
+      "retry": "Reconcile the original persisted hash, never blind replay.",
+      "usd_pricing_buffer": {
+        "basis_points": 100,
+        "rounding": "up to cents",
+        "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
+      }
     }
   },
   {
@@ -23444,7 +23450,13 @@
         "maximum_seconds": 600
       },
       "pool_fee_semantics": "fee is read from the selected pool at the quote block and may change before inclusion; max_pool_fee_ppm limits the quote observation only, not the in-transaction fee.",
-      "retry": "Reconcile the original persisted hash, never blind replay."
+      "quote_revalidation": "Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.",
+      "retry": "Reconcile the original persisted hash, never blind replay.",
+      "usd_pricing_buffer": {
+        "basis_points": 100,
+        "rounding": "up to cents",
+        "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
+      }
     }
   },
   {
@@ -24949,7 +24961,13 @@
         "financial_limits": "per_step_maximum_debits_and_costs",
         "mode": "exact_input"
       },
-      "retry": "Reconcile the original persisted hash, never blind replay."
+      "quote_revalidation": "Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.",
+      "retry": "Reconcile the original persisted hash, never blind replay.",
+      "usd_pricing_buffer": {
+        "basis_points": 100,
+        "rounding": "up to cents",
+        "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
+      }
     }
   },
   {
@@ -26567,7 +26585,13 @@
         "field": "deadline",
         "maximum_seconds": 600
       },
-      "retry": "Reconcile the original persisted hash, never blind replay."
+      "quote_revalidation": "Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.",
+      "retry": "Reconcile the original persisted hash, never blind replay.",
+      "usd_pricing_buffer": {
+        "basis_points": 100,
+        "rounding": "up to cents",
+        "scope": "New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."
+      }
     }
   },
   {

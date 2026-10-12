@@ -508,25 +508,20 @@ impl EthereumAdapter {
         Ok(refreshed)
     }
 
-    pub(crate) async fn permit2_submit(
+    pub(crate) async fn permit2_submit_revalidated(
         &self,
-        prepared: &PreparedOperation,
+        validated: &RevalidatedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
-        let fresh = self.permit2_revalidate(prepared).await?;
-        require(
-            fresh.binding == prepared.binding,
-            "BINDING_CHANGED",
-            "Permit2 executable fields differ from the approved transaction.",
-        )?;
-        require_attempt_valuation(prepared, &fresh, self.clock.now())?;
+        let prepared = validated.prepared();
         let b: Permit2Binding = serde_json::from_value(prepared.binding.clone())
             .map_err(|_| FinError::validation("Permit2 binding is invalid."))?;
         self.runtime
-            .submit(
+            .submit_revalidated(
                 &b.transaction,
                 json!({"operation":prepared.operation,"resource":b.resource}),
                 journal,
+                validated,
             )
             .await
     }

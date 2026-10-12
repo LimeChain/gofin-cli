@@ -8,7 +8,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use async_trait::async_trait;
-use fin_domain::{FinError, Quantity, Result, Submission, SubmissionJournal};
+use fin_domain::{FinError, Quantity, Result, RevalidatedOperation, Submission, SubmissionJournal};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1930,6 +1930,120 @@ impl EvmRuntime {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
         self.revalidate(transaction).await?;
+        self.dispatch(transaction, metadata, journal, None).await
+    }
+
+    /// Submit the exact envelope already checked by the adapter's final
+    /// revalidation. Only permit signature slots may differ, after their exact
+    /// materialized transaction has passed simulation.
+    pub async fn submit_revalidated(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: &RevalidatedOperation,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let binding = &validated.prepared().binding;
+        if binding.get("permit_template").is_some_and(|v| !v.is_null()) {
+            return Err(error(
+                "PERMIT_MATERIALIZATION_REQUIRED",
+                "submission",
+                "A permit template must be materialized and simulated through its dedicated submission path.",
+            ));
+        }
+        if binding.get("transaction")
+            != Some(
+                &serde_json::to_value(transaction)
+                    .map_err(|_| FinError::validation("Validated transaction is malformed."))?,
+            )
+        {
+            return Err(error(
+                "BINDING_CHANGED",
+                "submission",
+                "The transaction differs from the final revalidated candidate.",
+            ));
+        }
+        self.submit_validated_envelope(transaction, metadata, journal, validated)
+            .await
+    }
+
+    pub async fn submit_permit_template_revalidated(
+        &self,
+        template: &PreparedPermitTemplate,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: &RevalidatedOperation,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        if validated.prepared().binding.get("permit_template")
+            != Some(
+                &serde_json::to_value(template)
+                    .map_err(|_| FinError::validation("Validated permit template is malformed."))?,
+            )
+        {
+            return Err(error(
+                "BINDING_CHANGED",
+                "submission",
+                "The permit template differs from the final revalidated candidate.",
+            ));
+        }
+        if validated.prepared().binding.get("transaction")
+            != Some(
+                &serde_json::to_value(template.transaction()).map_err(|_| {
+                    FinError::validation("Validated permit transaction is malformed.")
+                })?,
+            )
+        {
+            return Err(error(
+                "BINDING_CHANGED",
+                "submission",
+                "The permit template differs from the validated frozen envelope.",
+            ));
+        }
+        let concrete = self
+            .materialize_permit_template(template, journal.clone())
+            .await?;
+        self.submit_validated_envelope(&concrete.transaction, metadata, journal, validated)
+            .await
+    }
+
+    async fn submit_validated_envelope(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: &RevalidatedOperation,
+    ) -> Result<Submission> {
+        transaction.consensus()?;
+        if transaction.chain_id != self.chain_id {
+            return Err(error(
+                "WRONG_CHAIN",
+                "submission",
+                "Revalidated transaction belongs to a different runtime chain.",
+            ));
+        }
+        // Nonce can change during intervening pricing/journal work. This cheap
+        // read remains immediately before signing; simulations and estimates
+        // already belong to the single adapter revalidation above.
+        if self.pending_nonce(address(&transaction.sender)?).await? != transaction.nonce {
+            return Err(error(
+                "NONCE_CHANGED",
+                "submission",
+                "Pending nonce differs from the revalidated envelope.",
+            ));
+        }
+        self.dispatch(transaction, metadata, journal, Some(validated))
+            .await
+    }
+
+    async fn dispatch(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: Option<&RevalidatedOperation>,
+    ) -> Result<Submission> {
         let signer = self.signer.as_ref().ok_or_else(|| {
             error(
                 "PROTECTED_SIGNER_REQUIRED",
@@ -1937,6 +2051,9 @@ impl EvmRuntime {
                 "No protected signing provider is configured.",
             )
         })?;
+        if let Some(validated) = validated {
+            validated.assert_fresh()?;
+        }
         journal.assert_authorized()?;
         let raw = signer.sign_prepared(transaction).await?;
         let tx_hash = verify_signed_envelope(transaction, &raw)?;
@@ -1945,6 +2062,9 @@ impl EvmRuntime {
             reference: format!("{tx_hash:#x}"),
             data: json!({"transaction":transaction,"metadata":metadata}),
         };
+        if let Some(validated) = validated {
+            validated.assert_fresh()?;
+        }
         journal.assert_authorized()?;
         journal.persist_submission(&submission)?;
         let returned = self

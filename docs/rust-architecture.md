@@ -225,6 +225,33 @@ Each operation owns typed request, prepared execution, and evidence structures. 
 
 An operation implements preparation, revalidation, submission, and reconciliation. Its definition also includes description, examples, input/output/error schemas, field semantics, authority requirements, read/write/configuration classification, and completion criteria.
 
+The engine owns the final adapter revalidation and checks its binding, valuation,
+policy and reservation before handing the complete immutable candidate to
+`submit_revalidated`. This in-process handoff is not serialized or restored from
+the journal. Exchange, wallet and bridge submission reuse that evidence without
+another preparation or simulation; direct submissions and adapters without this
+contract retain their validating path. Candidate and price expiry remain local
+checks at signing/dispatch, along with current authority and revocation. EVM
+submission rereads the pending nonce and verifies the exact frozen envelope;
+permit templates additionally materialize and simulate signed calldata once.
+Every path persists its immutable submission identity before dispatch.
+
+Human clients opt into bounded progress frames on the existing authenticated
+broker connection. The engine emits fixed stage enums at actual preparation,
+approval, final validation, submission and reconciliation boundaries. These are
+UI observations only, never authority or completion evidence. Delivery runs
+independently of execution: a disconnected or backpressured observer cannot
+cancel, delay indefinitely or repeat dispatch. Legacy and machine clients retain
+one final response, with unchanged operation records and error contracts.
+
+AMM preparation obtains one pinned protocol quote and uses it for shared bound
+validation and transaction construction. Final revalidation obtains its own fresh
+quote and retains exact simulation; there is no duplicate outer quote pass.
+Independent token metadata, pool-state and deployment reads run concurrently at
+the same selected block. USD valuation reuses the phase's verified asset identity
+and requests at most three distinct asset prices concurrently, preserving source
+identity and observation time. There is no cross-phase metadata or quote cache.
+
 The command registry also covers installation, daemon lifecycle, onboarding, and connection management. Help, `explain`, schemas, and implementation must use the same definitions. Generate structural schemas from Rust types with Serde/Schemars, retain explicit semantic validation, and pin schema-generation behavior with contract fixtures. Keep existing financial verbs and JSON behavior compatible where practical; document deliberate changes and migrations.
 
 Discovery must work before installation of the protected component, without credentials or a running broker. It must say who runs an interactive command, what safe arguments it accepts, how secret input is collected, what human approval is needed, what it changes, what checks actually run, and how success or failure is checked. See the required [onboarding/discovery contract](onboarding.md).
@@ -273,13 +300,18 @@ are informative and may be refreshed; they cannot authorize a write.
 
 ### Pricing evidence and approved USD ceilings
 
-This subsection describes legacy and standalone exact-operation approval.
-Operation-boundary attempts use fresh USD evidence for protected policy but do
-not inherit these incidental cent-rounded consent ceilings.
+These ceilings bind individual attempts, separately from reusable quantity
+consent. EVM attempts retain their USD reservation under standalone, boundary
+and named-plan execution; boundary consent itself does not freeze a unit price.
 
 Binance and EVM preparation attach versioned `_fin_usd_ceiling_v1` metadata using the
 shared domain helper. Movement, fee and extra-allocation maxima round upward to
 cents before initial policy checks/reservation and appear in the review summary.
+New EVM AMM swap candidates first add a fixed 1% pricing buffer, then round up
+to cents. The complete ceiling is reserved and checked against protected movement
+and rolling-allocation limits before approval or dispatch. This is independent
+of swap slippage: exact input, receipt and native gas limits do not increase.
+The summary discloses the buffer; old attempt records keep their original caps.
 Composite deposits carry the wallet transfer's ceilings into their outer approval
 while preserving the original nested transaction and historical deposit records.
 The immutable approval binds these ceilings and exact priced asset/unit/provider
@@ -294,6 +326,11 @@ evidence. Changed execution terms, increased ceilings, incompatible identities,
 stale quotes and unavailable providers still fail. Final submission revalidation
 uses the same contract. Historical bindings without this metadata retain the
 legacy exact-quote hash and pending records are never replayed or rebound.
+
+AMM revalidation keeps the original quote's slippage floor and the exact encoded
+minimum output in both calldata and typed conversion effects. A better quote
+does not impose a new minimum. A worse quote must still meet the frozen floor;
+fresh impact, route, identity, simulation and fee checks continue to apply.
 
 ## Write lifecycle and authorization
 
@@ -405,6 +442,15 @@ Credential enrollment/replacement/removal and trusted configuration changes use 
 Use SQLite through `rusqlite`, durable journaling, unique request IDs, and atomic transactions. Persist normalized inputs, canonicalization version, operation/application/evidence version, preparation binding, approval audit metadata, submission identity, and reconciled results. Never persist raw signed transactions or unrestricted spending signatures.
 
 Request identity distinguishes a retry from a deliberately new action. Changed parameters under the same request ID conflict. After timeout or restart, reconcile the original venue identifier or transaction hash before considering any new write. Do not promise universal exactly-once execution.
+
+The service runs interrupted-operation recovery once after acquiring its listening
+socket, before accepting requests. Protected startup holds the exclusive
+configuration lock during recovery; ordinary runtime composition and configuration
+reload never recover operation records, since another runtime can still be active. Unsubmitted
+approvals are cancelled and their reservations released; submitted operations
+become uncertain and keep their original identities and reservations. Existing
+named-plan authority retains its original scope and expiry. Recovery never
+requests approval or submits a write.
 
 Endpoints without a client correlation ID can append immutable dispatch evidence
 through `SubmissionJournal::persist_dispatch_evidence`. The broker checks the

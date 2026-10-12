@@ -4801,6 +4801,18 @@ impl Adapter for BridgeAdapter {
                 "Reconcile the original step before preparing a replacement.",
             ));
         }
+        let validated =
+            fin_domain::RevalidatedOperation::after_revalidation(fresh, self.clock.clone())?;
+        self.submit_revalidated(&validated, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn fin_domain::SubmissionJournal>,
+    ) -> fin_domain::Result<fin_domain::Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        journal.assert_candidate(prepared)?;
         let transaction: FrozenTransaction =
             serde_json::from_value(prepared.binding["transaction"].clone())
                 .map_err(|_| FinError::validation("Frozen bridge transaction is invalid."))?;
@@ -4810,7 +4822,7 @@ impl Adapter for BridgeAdapter {
             .ok_or_else(|| FinError::validation("Bridge chain runtime disappeared."))?
             .runtime
             .clone();
-        runtime.submit(&transaction, json!({"operation":"bridge.transfer","transfer_id":prepared.binding["transfer_id"],"step_id":prepared.binding["step_id"],"kind":prepared.binding["step_kind"]}), journal).await
+        runtime.submit_revalidated(&transaction, json!({"operation":"bridge.transfer","transfer_id":prepared.binding["transfer_id"],"step_id":prepared.binding["step_id"],"kind":prepared.binding["step_kind"]}), journal, validated).await
     }
 
     async fn reconcile(

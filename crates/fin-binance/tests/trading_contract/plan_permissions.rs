@@ -223,6 +223,7 @@ fn two_step_plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic ETH round trip".into(),
+        summary: None,
         steps: vec![
             FinancialPlanStepSpec {
                 action_deadline_seconds: None,
@@ -348,6 +349,7 @@ fn withdrawal_plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic named destination withdrawal".into(),
+        summary: None,
         steps: vec![FinancialPlanStepSpec {
             action_deadline_seconds: None,
             step_id: "withdraw".into(),
@@ -987,6 +989,19 @@ async fn aggregate_debit_cap_is_enforced_across_individually_larger_step_scopes(
     let mut request = plan_request();
     request.request_id = "SYNTHETIC-plan-aggregate-approval".into();
     request.plan = plan;
+    let rejected = engine
+        .authorize_financial_plan(request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, "PLAN_COMPLETION_OUTSIDE_AGGREGATE");
+    assert_eq!(approvals.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+
+    // An optional first BUY may share the cumulative allowance with a required
+    // second BUY. Review does not sum optional per-step ceilings. If the agent
+    // spends too much on the first step, execution must still block the second.
+    request.plan.steps[0].completion.principal_spend = None;
+    request.plan.steps[0].completion.operation_succeeded = true;
     let approved = engine.authorize_financial_plan(request).await.unwrap();
 
     let first = engine

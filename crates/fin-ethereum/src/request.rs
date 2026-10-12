@@ -494,6 +494,10 @@ pub fn definitions() -> Vec<Definition> {
         if matches!(*operation, "uniswap.swap" | "ramses.swap") {
             semantics["plan_relative_deadline"] = json!({"field":"deadline","maximum_seconds":super::amm_permissions::MAX_DEADLINE_SECONDS});
         }
+        if matches!(*operation, "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap") {
+            semantics["quote_revalidation"] = json!("Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.");
+            semantics["usd_pricing_buffer"] = json!({"basis_points":100,"rounding":"up to cents","scope":"New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."});
+        }
         Definition {
             name: (*operation).into(),
             description: description(operation).into(),

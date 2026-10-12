@@ -2,7 +2,7 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.3.1"
+  version: "1.5.1"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
@@ -35,6 +35,37 @@ Start with `fin --help` and `fin capabilities --json`, even before setup exists.
 Setup and credential changes belong to the human's fresh Terminal. Explain the supported command with safe metadata flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. Binance accepts HMAC, RSA, and Ed25519. A standalone subaccount needs only its own credentials: `fin connections add binance --name sub --role sub --credential-type ed25519`. No main credentials are required. Optionally supply both `--parent` and `--email` to link an enrolled main connection for hierarchy verification and main-authorized reads. The human enters secrets directly in the protected hidden prompt and separately approves configuration. Never ask for credentials in chat, arguments, JSON, environment variables, or an agent-controlled terminal. A bare add command guides public metadata; complete flags skip those prompts. Installation/enrollment moves no funds and grants no future financial authorization. Later `connections update` rotates credentials for the same identity/relationships; unresolved operations refuse changes. Cancelled or invalid rotation preserves the prior connection; an uncertain commit requires checking the original configuration outcome. Check `fin connections list --json` and `fin doctor --json` afterward. Missing platform support fails closed.
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
+
+When installed discovery advertises streaming, use `--json --stream` for financial
+execution and status reconciliation so the human can hear meaningful milestones.
+Read one JSON event per line: `type=progress` carries a stage and request/plan
+context; one final `type=result` wraps the unchanged command result, or
+`type=error` carries the structured error. Relay concise changes such as checking,
+submitting, and waiting for verification; avoid invented percentages or repeated
+unchanged updates. `connecting` is local activity; later stages come from the
+broker. Preparation can be in flight while a durable plan step is still
+`not_started`. A final event only ends the command: `pending` or `unknown` still
+requires reconciliation, and only verified completion justifies saying funds
+arrived. Progress is best effort, so absence of a stage is not proof it was skipped.
+If the stream ends without a final event, recover the original identity; never
+replay with a new ID. Keep `--json` alone for tools expecting one JSON value or
+older installed versions without streaming.
+
+Keep the human informed in conversation while consuming the stream; tool output
+alone is not a progress update. Before execution, name the action being started.
+Relay meaningful stage changes promptly in plain language tied to that action,
+such as "Checking the withdrawal", "Submitting to Binance", or "Waiting for the
+Arbitrum receipt". Combine stages that arrive together instead of narrating every
+event. Say "submitted" only when the result records a submission, and say funds
+arrived or a swap completed only after verified settlement.
+During a longer wait, give a brief update about once a minute: the last observed
+state, what confirmation is still missing, and whether the human needs to act.
+Do not invent activity or an ETA when Fin has supplied neither. Continue status
+reconciliation for pending or unknown outcomes without asking the human to poll
+or resubmit. After each verified step, state the outcome and next action, then
+continue under the existing approval. Finish with received amounts, actual fees
+and any unresolved work.
+
 
 EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
@@ -192,6 +223,27 @@ step's input format before approval, while live balances and fees remain deferre
 
 For a user's coherent intent that requires multiple linked financial actions, strongly recommend one bounded named plan. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
 
+Name each plan for the human intent and add one short `summary` sentence with
+its financial input, outcome and material fee limit. Together they should read
+as two complementary sentences in Touch ID, not repeat one another. For example,
+`name: "Fund Savings on Arbitrum"` and
+`summary: "Move 25 USDC from Main to Savings, including fees up to 1 USDC."`
+Use the actual approved quantities and destinations; distinguish expected returns
+from enforced minimum receipts. Keep name and summary to 140 Unicode characters
+combined (name at most 80), with no line breaks or control characters. Fin binds
+both to the reviewed revision and shows them in full; the structured scopes
+remain the authority. Finalize both before preview and preserve the review hash
+through authorization. Check the installed plan schema before adding `summary`
+when working with an older Fin version.
+
+Keep the human informed with brief updates at meaningful milestones: ready for
+approval, submitted, source confirmed, waiting for destination credit, verified
+completion, or an actionable blocker. Describe only stages evidenced by Fin's
+results. If a command is still running without stage data, say what it is checking
+rather than inventing percentages or a more advanced stage. While settlement is
+pending, use the returned status/reconciliation path and report meaningful changes;
+do not repeat unchanged updates or ask again while valid authority covers the work.
+
 For a genuinely standalone write, use one operation per write: prepare `fin preview OPERATION --input PUBLIC_JSON --json`, explain the exact effects and bounds, then invoke `fin execute OPERATION --input PUBLIC_JSON --id REQUEST_ID --json`. Supply actual JSON text, not a literal placeholder. The protected component displays the bound request and requires fresh Touch ID. Allowances, collateral settings, and cleanup are separate writes unless they belong to a coherent bounded sequence that the user wants reviewed as one plan. The shipped CLI cannot select a credential file, signer, approval provider, or authorization bypass. If the installed Fin version does not support named plans, disclose that limitation and use separate exact approvals for the linked writes where supported; never imply one approval covers them.
 
 Choose practical finite fee and price ranges before requesting approval. Avoid
@@ -309,10 +361,12 @@ fin plans authorize --input PLAN_JSON --id REQUEST_ID --valid-for 10m --review-h
 
 The human reviews the full plan in the terminal and approves one named revision
 with Touch ID. Completion requires verified operation success and any declared
-spend or net-receipt targets. A plan does not run by itself. Preview each intended attempt with
-`fin execute OPERATION --input INPUT_JSON --plan PLAN_ID --step STEP_ID --dry-run
---json`, then explicitly submit it with a stable attempt ID. Only the first
-incomplete step is eligible. A dependent step remains blocked until the declared
+spend or net-receipt targets. A plan does not run by itself. Explicitly submit
+each eligible step with a stable attempt ID; execution performs its preparation
+and final validation. Use `fin execute OPERATION --input INPUT_JSON --plan PLAN_ID
+--step STEP_ID --dry-run --json` when its result is needed to select concrete
+inputs or resolve a known uncertainty. Do not add a separate dry run before every
+already-understood step. Only the first incomplete step is eligible. A dependent step remains blocked until the declared
 producer has verified settlement and its net proceeds are available at the exact
 resource and asset; a projected receipt or unrelated deposit cannot fund it.
 The engine refreshes balances, prices, fees, market metadata and policy for each
@@ -321,7 +375,7 @@ step incomplete; status reports remaining targets and blockers. Never assume a
 terminal partial or no-fill attempt completes a step.
 
 ```text
-fin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json
+fin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json --stream
 fin plans status PLAN_ID --json
 fin plans cancel PLAN_ID --json
 ```
@@ -334,7 +388,15 @@ usage, and can restructure only the unstarted suffix. Expiry or cancellation
 stops future dispatch but does not cancel an order already submitted; status
 continues reconciliation and never executes another step.
 
-Keep one `--id` for a logical action and follow the operation schema for any venue request identifier. After interruption, use `fin operations --json` and `fin status OPERATION_ID --json`; status reconciles the original submission. A venue acceptance or transaction hash is not completion. Preserve successful steps. Never create a fresh identity to bypass an uncertain original outcome. A deliberate new action requires a fresh identity and approval.
+For candidate freshness or transport failures, follow Fin's `next_action` and
+structured recovery details. `reconciliation_required` means observe the original
+attempt. `new_attempt_required` means the failed, unsubmitted attempt is already
+recorded: use a new attempt ID for fresh preparation. If no attempt was recorded,
+the request ID can be reused. Do not seek another Touch ID merely to refresh a
+candidate while the plan is active and the replacement fits its limits; check
+`reauthorization_required` and current plan status before requesting new consent.
+
+Keep one `--id` for a logical action and follow the operation schema for any venue request identifier. After interruption, use `fin operations --json` and `fin status OPERATION_ID --json`; status reconciles the original submission. A venue acceptance or transaction hash is not completion. Preserve successful steps. Never create a fresh identity to bypass an uncertain original outcome. A deliberate new action requires a fresh identity and applicable authority: an existing active plan or bounded grant must cover it, otherwise obtain fresh approval.
 
 For `binance.transfer`, choose the signing authority explicitly. A main authority
 uses universal transfer; a source subaccount authority uses transfer-to-master

@@ -2,12 +2,14 @@
 pub mod authority_expiry;
 pub mod boundaries;
 pub mod clock;
+pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
 pub mod money;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
+pub mod submission_validation;
 pub mod unpriced;
 pub mod value_bounds;
 
@@ -21,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+pub use submission_validation::RevalidatedOperation;
 
 pub type Result<T> = std::result::Result<T, FinError>;
 /// Reviewed-adapter metadata in a prepared operation binding for one finite
@@ -1263,6 +1266,25 @@ pub trait Adapter: Send + Sync {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission>;
+    /// Reuse the broker's final adapter revalidation. Integrations that do not
+    /// implement this contract keep their ordinary validating submission path.
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit(validated.prepared(), journal).await
+    }
+    async fn submit_configuration_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit_configuration(validated.prepared(), journal)
+            .await
+    }
     /// Submit only through the explicit human configuration lifecycle.
     async fn submit_configuration(
         &self,

@@ -51,6 +51,32 @@ native/.build/approval-presentation-tests
 make bundle
 ```
 
+Native presentation regressions cover long-lived plans with a relative swap
+window, revised plans, Uniswap/Ramses support, legacy absolute deadlines, optional
+null compatibility, malformed windows, conflicting clocks and narrower permission
+ceilings. These pure Swift checks exercise the parser that runs before Touch ID;
+they do not authenticate. Synthetic workflow authorizers alone cannot establish
+that the native parser accepts a broker-reviewed plan.
+
+CLI regressions also run the full command entry point in human and machine modes:
+executing a relative-deadline plan sends exactly one plan-step execution request,
+without a standalone preview or approval. Dry runs send only a plan-step preview.
+
+Adapter latency regressions count one protocol quote in each of preparation and
+final validation, one output-token metadata observation per phase, and exact
+simulation in both phases. Delayed local transports prove independent RPC and
+price reads overlap without wall-time assertions. A metadata failure cancels the
+remaining reads before simulation and retains no partial cache.
+
+The synthetic workflow includes a 0.5% improving requote and 0.25% ETH/USD rise
+between swap preparation and revalidation. It verifies one approval, one swap
+dispatch, frozen receipt targets, fresh attributed prices, the fully reserved
+USD buffer, duplicate safety and final settlement. Domain/adapter regressions
+cover adverse quotes down to the exact receipt floor, rejection one atom below,
+USD buffer exhaustion, unchanged historical caps, price identity/freshness and
+protected movement/allocation limits. Plan errors report when a new candidate
+can reuse active consent versus when reconciliation or new approval is required.
+
 The full public CLI rehearsal uses the development CLI's ordinary parser,
 JSON rendering and identity-checked socket transport against the real broker
 handler. Its real Binance, Ethereum AMM and bridge adapters use in-memory venue,
@@ -61,6 +87,16 @@ no remote fallback. The build ID below identifies only this isolated fixture:
 FIN_DEV_BUILD_ID=synthetic-plan-timing-build cargo build --locked -p fin-cli --example fin-dev
 FIN_TIMING_CLI="$PWD/target/debug/examples/fin-dev" cargo test --locked -p fin-broker --test plan_timing_workflow
 ```
+
+With `FIN_TIMING_CLI`, one swap runs in a real pseudo-terminal with `NO_COLOR`
+and asserts broker-reported preparation, final validation, submission and
+verification, without another approval prompt. The first withdrawal uses
+`--json --stream` and checks ordered, correlated progress plus one final event;
+other operations retain the single-JSON contract. An abandoned standalone
+preparation is seeded before broker composition to prove startup recovery no
+longer blocks the named workflow. Separate protocol/UI tests cover coalesced frames, disconnected and
+backpressured observers, cancellation/expiry, redirected output and concise
+verified versus pending outcomes.
 
 Without `FIN_TIMING_CLI`, the same test exercises typed broker requests directly;
 that default test alone does not establish CLI/socket coverage. Neither mode

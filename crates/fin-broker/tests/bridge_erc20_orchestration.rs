@@ -607,6 +607,7 @@ async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_o
         let plan = FinancialPlanSpec {
             version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
             name: "Bridge route review".into(),
+            summary: None,
             steps: plan_steps,
             aggregate_bounds: FinancialPlanBounds {
                 maximum_debits: vec![fin_domain::ResourceAmount {
@@ -993,6 +994,7 @@ fn bridge_plan_spec(h: &Harness, links: &[BridgeStepLink], inputs: &[Value]) -> 
     FinancialPlanSpec {
         version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
         name: "Synthetic bridge plan".into(),
+        summary: None,
         steps,
         aggregate_bounds: FinancialPlanBounds {
             maximum_debits: vec![fin_domain::ResourceAmount {

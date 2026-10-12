@@ -1167,6 +1167,11 @@ impl FundingHistoryRow {
         self.status == 1 && self.travel_rule_status.is_none_or(|status| status == 0)
     }
 
+    /// Deposit credit is distinct from permission to withdraw it from Binance.
+    pub fn confirmed_deposit_credit(&self) -> bool {
+        matches!(self.status, 1 | 6) && self.travel_rule_status.is_none_or(|status| status == 0)
+    }
+
     pub fn locked_deposit_credit(&self) -> bool {
         self.status == 6
     }
@@ -1362,7 +1367,7 @@ pub struct DepositCreditState {
 impl From<&FundingHistoryRow> for DepositCreditState {
     fn from(row: &FundingHistoryRow) -> Self {
         Self {
-            credited: row.usable_deposit_credit(),
+            credited: row.confirmed_deposit_credit(),
             locked: row.locked_deposit_credit(),
         }
     }

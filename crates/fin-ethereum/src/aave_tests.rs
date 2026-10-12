@@ -358,6 +358,7 @@ async fn supply_plan_covers_exact_rounding_cost_and_reaches_only_the_missing_sig
         plan: FinancialPlanSpec {
             version: 1,
             name: "Synthetic Aave cost scope".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
                 step_id: "supply".into(),
                 operation: "aave.supply".into(),
@@ -425,6 +426,7 @@ async fn generic_exact_mode_cannot_bypass_borrow_plan_risk_or_gross_authority() 
         plan: FinancialPlanSpec {
             version: 1,
             name: "Synthetic rejected exact borrow".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
                 step_id: "borrow".into(),
                 operation: "aave.borrow".into(),

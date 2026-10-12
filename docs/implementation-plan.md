@@ -38,6 +38,27 @@ technical details stay in structured review, which the LLM explains to the
 human. Bounded approval wording must not promise an initial minimum receipt
 that its permitted requotes could lower.
 
+Named-plan native presentation accepts the same Uniswap/Ramses relative action
+window as the broker: omit the absolute deadline and keep the positive window
+within the permission's deadline ceiling. Legacy absolute deadlines remain
+supported. The native parser rejects conflicting clocks before opening Touch ID;
+deadline resolution and parent-lifetime checks remain broker responsibilities.
+
+Human execution under an existing named plan follows the same plan-aware request
+as machine execution. It skips standalone approval previews, which cannot resolve
+relative plan deadlines and duplicate preparation. The terminal shows an execution
+activity indicator while the broker prepares and executes the approved step.
+
+EVM AMM revalidation anchors slippage to the quote used to prepare the immutable
+transaction. Improved quotes do not raise its minimum receipt; refreshed quotes
+and simulation must still cover the original encoded minimum, and the typed
+conversion effect keeps that same floor. Impact, route, nonce, fee, price identity
+and freshness checks remain independent. New EVM swap candidates reserve a fixed
+1% USD valuation buffer, rounded up to cents, before policy checks and approval.
+The summary discloses it; it grants no extra asset input or native fee units.
+Historical attempt ceilings remain unchanged. This avoids incidental cent-sized
+price tolerances without automatic retries, wider plan amounts or policy bypasses.
+
 Sushi v3 and PancakeSwap v3 use a closed, reviewed deployment map alongside
 legacy Uniswap/Ramses configuration. Router metadata, pool ABI, fee tiers and
 permit-compatible calldata are profile properties; shared financial accounting
@@ -60,6 +81,15 @@ terminal; the canonical approval still binds all scopes, amounts and fees.
 
 ## Approval responsiveness
 
+Binance deposit statuses 1 and 6 establish venue credit when travel-rule status
+is absent or clear. Composite settlement still requires canonical chain proof,
+exact transaction/destination/asset/amount matching and the exact free-balance
+increase. A verified status-6 deposit completes and releases Fin's reservation;
+its proof retains `withdrawal_locked: true` to distinguish Binance's withdrawal
+hold from deposit completion. Funding history preserves `creditState` and adds
+`credited` and `withdrawalLocked`; confirmed credits are not pending transfers
+in snapshots. This neither removes a Binance hold nor grants withdrawal authority.
+
 Uncertain operation results use a human-only presentation summary for ordinary
 `execute` and `status` commands. Preserve the adapter's reason, recovery guidance,
 warnings and latest reconciliation reason while leading with the unknown outcome
@@ -75,6 +105,13 @@ explicit and incomplete evidence never substitutes for required write preflight.
 Read-only connections and snapshot observers run concurrently with finite bounds;
 mutations, reconciliation and runtime replacement retain a single ordering gate.
 Configuration locks span dispatch so old policy cannot race protected maintenance.
+
+Progress observation heap-pins the financial execution future before wrapping it
+in task-local and concurrent delivery state. Keeping the large composite future
+inline multiplied stack usage and crashed deposit revalidation on ordinary
+2 MiB workers in unoptimized macOS builds. Workflow regressions exercise public
+socket dispatch, progress delivery and real HTTP transport on that same stack
+budget. Validation, approval, timeout and recovery rules remain unchanged.
 
 Bound external evidence collection, including RPC retries/fallback, while leaving
 financial dispatch and durable reconciliation under their original identities.
@@ -472,6 +509,11 @@ The installer only selects agents and dispatches the existing user-owned CLI.
 Compatible runtime updates refresh only recorded, existing, unmodified copies;
 conflicting or edited files remain for human review. Skill installation grants no
 financial authority. See the [companion skill guide](companion-skill.md).
+
+Companion skill 1.5.1 makes streamed execution conversational: agents promptly
+relay meaningful stages, explain longer waits about once a minute, and report
+verified amounts and fees before continuing the next authorized step. This is
+agent guidance over the existing stream, with no new execution or approval gate.
 
 ## AMM extension and Uniswap
 

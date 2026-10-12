@@ -75,6 +75,18 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
         Err(error(code, "validation", message))
     }
 }
+
+fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
+    if matches!(
+        prepared.operation.as_str(),
+        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+    ) {
+        fin_domain::value_bounds::bind_with_price_buffer(prepared)?;
+    } else {
+        fin_domain::value_bounds::bind(prepared);
+    }
+    Ok(())
+}
 /// Recheck adapter-owned valuation immediately before entering the signing
 /// runtime. The engine may have added origin prices for a bounded run, so
 /// compare exact asset identities rather than requiring identical price lists.
@@ -1016,7 +1028,7 @@ impl Adapter for EthereumAdapter {
         let mut prepared = self
             .prepare_operation(operation, input, None, &PreparationContext::default())
             .await?;
-        fin_domain::value_bounds::bind(&mut prepared);
+        bind_prepared_valuation(&mut prepared)?;
         Ok(prepared)
     }
     async fn prepare_with_context(
@@ -1031,7 +1043,7 @@ impl Adapter for EthereumAdapter {
         let mut prepared = self
             .prepare_operation(operation, input, None, context)
             .await?;
-        fin_domain::value_bounds::bind(&mut prepared);
+        bind_prepared_valuation(&mut prepared)?;
         Ok(prepared)
     }
     async fn preflight_return_route(
@@ -1145,9 +1157,6 @@ impl Adapter for EthereumAdapter {
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.submit(prepared, journal).await;
         }
-        if prepared.operation == "wallet.permit2.approve" {
-            return self.permit2_submit(prepared, journal).await;
-        }
         let fresh = self.revalidate(prepared).await?;
         require(
             fresh.binding == prepared.binding,
@@ -1155,6 +1164,24 @@ impl Adapter for EthereumAdapter {
             "Current executable fields differ from approved envelope.",
         )?;
         require_attempt_valuation(prepared, &fresh, self.clock.now())?;
+        let validated = RevalidatedOperation::after_revalidation(fresh, self.clock.clone())?;
+        self.submit_revalidated(&validated, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        let prepared = validated.prepared();
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.submit_revalidated(validated, journal).await;
+        }
+        validated.assert_fresh()?;
+        // The runtime checks the journal immediately around protected signing
+        // and dispatch. Composite deposits retain their outer candidate there.
+        if prepared.operation == "wallet.permit2.approve" {
+            return self.permit2_submit_revalidated(validated, journal).await;
+        }
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
@@ -1162,20 +1189,15 @@ impl Adapter for EthereumAdapter {
                 "Original binding is malformed.",
             )
         })?;
-        let transaction = if let Some(template) = &binding.permit_template {
-            self.runtime
-                .materialize_permit_template(template, journal.clone())
-                .await?
-                .transaction
-        } else {
-            binding.transaction.clone()
-        };
+        let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
+        if let Some(template) = &binding.permit_template {
+            return self
+                .runtime
+                .submit_permit_template_revalidated(template, metadata, journal, validated)
+                .await;
+        }
         self.runtime
-            .submit(
-                &transaction,
-                json!({"operation":prepared.operation,"resource":binding.resource}),
-                journal,
-            )
+            .submit_revalidated(&binding.transaction, metadata, journal, validated)
             .await
     }
     async fn verified_position_baselines(

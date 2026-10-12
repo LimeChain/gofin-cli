@@ -1794,8 +1794,8 @@ impl Store {
                     record["error"] = json!({
                         "code": "INTERRUPTED_APPROVAL",
                         "stage": "approval",
-                        "message": "Approval was interrupted before submission.",
-                        "next_action": "Inspect this operation; any new write requires fresh approval."
+                        "message": "The operation was interrupted before submission. Nothing was submitted.",
+                        "next_action": "Use a new request ID for a deliberate retry. An active named plan can cover an in-scope retry without fresh Touch ID; standalone writes require fresh approval."
                     });
                     tx.execute(
                         "UPDATE operations SET status='cancelled', record_json=?1 WHERE id=?2",
@@ -8572,6 +8572,12 @@ mod tests {
         );
         assert_eq!(store.reservation_count("pre").unwrap(), 0);
         assert_eq!(store.reservation_count("sent").unwrap(), 1);
+        assert!(
+            store.get_record("pre").unwrap().unwrap()["error"]["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("without fresh Touch ID")
+        );
         assert_eq!(
             store.submission("sent").unwrap().unwrap().reference,
             "0xsynthetic-original"
