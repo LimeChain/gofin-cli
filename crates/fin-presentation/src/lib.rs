@@ -7,6 +7,9 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(test)]
+mod uncertain_result_tests;
+
 #[derive(Clone, Copy, Debug)]
 struct TerminalPolicy {
     interactive: bool,
@@ -527,14 +530,47 @@ impl Ui {
         self.write_result_to(value, command, &mut io::stdout().lock())
     }
 
+    /// The CLI supplies environment-specific guidance; rendering grants no authority.
+    pub fn write_result_with_status_command(
+        &self,
+        value: &Value,
+        command: &str,
+        status_command: Option<&str>,
+    ) -> io::Result<()> {
+        self.write_result_with_status_command_to(
+            value,
+            command,
+            status_command,
+            &mut io::stdout().lock(),
+        )
+    }
+
     fn write_result_to(
         &self,
         value: &Value,
         command: &str,
         output: &mut impl Write,
     ) -> io::Result<()> {
+        self.write_result_with_status_command_to(value, command, None, output)
+    }
+
+    fn write_result_with_status_command_to(
+        &self,
+        value: &Value,
+        command: &str,
+        status_command: Option<&str>,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
         if self.machine {
             write_json(value, output)
+        } else if matches!(command, "execute" | "status")
+            && !self.is_verbose()
+            && let Some(summary) = render_uncertain_operation(value, status_command)
+        {
+            for text in summary.lines() {
+                writeln!(output, "{}", self.styled(text, "33"))?;
+            }
+            Ok(())
         } else if matches!(command, "execute" | "status")
             && !self.is_verbose()
             && render_partial_transfer_failure(value).is_some()
@@ -740,10 +776,16 @@ pub fn safe_text(text: &str) -> String {
     safe
 }
 
-/// Render every result field without numeric conversion or loss of unknown
-/// fields. Discovery has a shorter overview with its full metadata in verbose mode.
+/// Render concise human guidance where supported. Verbose mode preserves every
+/// result field without numeric conversion or loss of unknown fields.
 pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
     let mut output = String::new();
+    if !verbose
+        && matches!(command, "execute" | "status")
+        && let Some(rendered) = render_uncertain_operation(value, None)
+    {
+        return rendered;
+    }
     if !verbose && matches!(command, "read" | "preview" | "execute" | "status") {
         if let Some(rendered) = render_partial_transfer_failure(value) {
             return rendered;
@@ -897,6 +939,123 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         render_value(&mut output, value, 0);
     }
     output
+}
+
+fn render_uncertain_operation(value: &Value, status_command: Option<&str>) -> Option<String> {
+    if value["status"].as_str() != Some("unknown") {
+        return None;
+    }
+    let id = value["id"].as_str()?;
+    let operation = value["operation"].as_str()?;
+    // Only offer a copyable shell command for a safe operation identity. Malformed
+    // records retain the full display instead of inventing a recovery instruction.
+    if id.is_empty()
+        || id.starts_with('-')
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        || operation.is_empty()
+    {
+        return None;
+    }
+    let synthetic = value["submission"]["kind"].as_str() == Some("synthetic_local");
+    let mut output = String::new();
+    line(&mut output, 0, "Outcome not yet confirmed (unknown).");
+    line(
+        &mut output,
+        0,
+        &format!("Operation: {}", safe_text(operation)),
+    );
+    if synthetic && let Some(input) = value["input"]["value"].as_str() {
+        line(&mut output, 0, &format!("Input: {}", safe_text(input)));
+    } else if let Some(summary) = value["preview"]["summary"].as_str() {
+        line(&mut output, 0, &format!("Action: {}", safe_text(summary)));
+    }
+    line(&mut output, 0, "");
+    if synthetic {
+        line(
+            &mut output,
+            0,
+            "Fin recorded a synthetic submission, but has not verified its outcome.",
+        );
+        line(
+            &mut output,
+            0,
+            "This fixture moves no money and makes no network calls.",
+        );
+    } else if value["submission"].is_object() {
+        line(
+            &mut output,
+            0,
+            "This action may already have been submitted; its outcome is not yet verified.",
+        );
+    } else {
+        line(
+            &mut output,
+            0,
+            "Fin cannot yet confirm whether the action was submitted.",
+        );
+    }
+    if let Some(reason) = value["error"]["message"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+    {
+        line(&mut output, 0, &format!("Reason: {}", safe_text(reason)));
+    }
+    if let Some(reason) = value["last_reconciliation_evidence"]["reason"]
+        .as_str()
+        .filter(|text| !text.is_empty() && Some(*text) != value["error"]["message"].as_str())
+    {
+        line(
+            &mut output,
+            0,
+            &format!("Latest check: {}", safe_text(reason)),
+        );
+    }
+    for warning in value["preview"]["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        line(&mut output, 0, &format!("Warning: {}", safe_text(warning)));
+    }
+    if let Some(guidance) = value["error"]["next_action"]
+        .as_str()
+        .filter(|text| !text.is_empty())
+    {
+        line(
+            &mut output,
+            0,
+            &format!("Recovery guidance: {}", safe_text(guidance)),
+        );
+    }
+    line(&mut output, 0, "");
+    line(&mut output, 0, &format!("Operation ID: {}", safe_text(id)));
+    if let Some(request_id) = value["request_id"].as_str() {
+        line(
+            &mut output,
+            0,
+            &format!("Request ID: {}", safe_text(request_id)),
+        );
+    }
+    line(&mut output, 0, "");
+    let default_command = format!("fin status {id}");
+    line(
+        &mut output,
+        0,
+        &format!(
+            "Next: {}",
+            safe_text(status_command.unwrap_or(&default_command))
+        ),
+    );
+    line(
+        &mut output,
+        0,
+        "Check the original operation; do not create a replacement request.",
+    );
+    line(&mut output, 0, "For full technical details, add --verbose.");
+    Some(output)
 }
 
 fn render_partial_transfer_failure(value: &Value) -> Option<String> {

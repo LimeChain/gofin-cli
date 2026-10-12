@@ -704,6 +704,12 @@ return plan or restoration is required. Inspect operations with
 `fin status OPERATION_ID --json`. The `run` command and `execute --run` argument
 are removed; stored financial records and unresolved reservations remain intact.
 
+For an `unknown` operation, default human output explains the uncertainty, retains
+the operation's reason and recovery guidance, and shows a command to check the
+original operation ID. It does not imply failure or permission to submit again.
+Use `--verbose` for the full record; `--json` keeps the original structured result.
+Development output points to the same named environment through `make dev-env-cli`.
+
 Existing installations keep their stored limits, including the original $100
 values, until a human changes them. A previous requirement to execute inside a
 restoration run no longer governs new operations. Historical run records,

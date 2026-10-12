@@ -55,6 +55,14 @@ terminal; the canonical approval still binds all scopes, amounts and fees.
 
 ## Approval responsiveness
 
+Uncertain operation results use a human-only presentation summary for ordinary
+`execute` and `status` commands. Preserve the adapter's reason, recovery guidance,
+warnings and latest reconciliation reason while leading with the unknown outcome
+and the original operation ID. The CLI supplies the selected development
+environment's status command; the installed CLI uses `fin status`. Machine and
+verbose output retain all record fields. This changes no authorization, journal,
+submission or settlement behavior.
+
 Keep ordinary preparation on adapter-selected state and installation-wide journal
 policy. Additive `SnapshotScope` selectors use physical resources, network IDs
 and exact assets; empty selectors retain the full view. Observer coverage remains

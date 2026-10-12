@@ -109,6 +109,13 @@ fn response_matches(
 
 #[async_trait]
 impl Transport for DevelopmentTransport {
+    fn status_recovery_command(&self, id: &str) -> Option<String> {
+        Some(development_status_command(
+            std::env::var("FIN_DEV_ENV_NAME").ok().as_deref(),
+            id,
+        ))
+    }
+
     fn development_mode(&self) -> bool {
         true
     }
@@ -267,6 +274,22 @@ fn unavailable() -> FinError {
     )
 }
 
+fn development_status_command(name: Option<&str>, id: &str) -> String {
+    // Names supplied by the Make wrapper follow fin-dev.py's validation. Check
+    // again before displaying a copyable command; this is guidance, not authority.
+    match name.filter(|name| {
+        !name.is_empty()
+            && name.len() <= 48
+            && name.as_bytes()[0].is_ascii_alphanumeric()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+    }) {
+        Some(name) => format!("make dev-env-cli DEV_ENV={name} ARGS='status {id}'"),
+        None => format!("Use the same development environment's CLI to run status {id}."),
+    }
+}
+
 fn identity_error() -> FinError {
     FinError::new(
         "DEVELOPMENT_IDENTITY_MISMATCH",
@@ -392,6 +415,25 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_guidance_stays_in_the_selected_development_environment() {
+        assert_eq!(
+            development_status_command(Some("learn"), "synthetic-operation-1"),
+            "make dev-env-cli DEV_ENV=learn ARGS='status synthetic-operation-1'"
+        );
+        for name in [
+            None,
+            Some(""),
+            Some("learn; touch unwanted"),
+            Some("-other"),
+        ] {
+            let text = development_status_command(name, "synthetic-operation-1");
+            assert!(text.contains("same development environment"));
+            assert!(!text.contains("Next: fin status"));
+            assert!(!text.contains("touch unwanted"));
+        }
+    }
 
     #[test]
     fn cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write() {
