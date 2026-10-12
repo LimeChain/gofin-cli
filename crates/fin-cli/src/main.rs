@@ -1644,6 +1644,7 @@ fn launch_human_privileged_with_terminal(
             PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
             PrivilegedAction::Remove(args) => drop(args),
             PrivilegedAction::PolicySet(args) => drop(args),
+            PrivilegedAction::Configure(request) => drop(request),
         }
         Err(FinError::new(
             "PROTECTED_PROVIDER_UNAVAILABLE",
@@ -3444,9 +3445,20 @@ mod tests {
             serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
         for action in [
             PrivilegedAction::Setup,
+            PrivilegedAction::PolicySet(fin_discovery::PolicySetArgs {
+                max_movement_usd: "100".into(),
+                max_run_allocation_usd: "100".into(),
+                allow_unpriced_exchange_assets: None,
+            }),
             PrivilegedAction::Add(args),
             PrivilegedAction::Update(update),
             PrivilegedAction::Remove(remove),
+            PrivilegedAction::Configure(OperationRequest {
+                operation: "synthetic.configuration".into(),
+                input: json!({"account":"synthetic-main"}),
+                request_id: "synthetic-configuration-1".into(),
+                run_id: None,
+            }),
         ] {
             let error =
                 launch_human_privileged_with_terminal(action, true, false, false).unwrap_err();
