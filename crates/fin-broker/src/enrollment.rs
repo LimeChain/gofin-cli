@@ -523,7 +523,7 @@ fn collect_material(
     Ok(Some(material))
 }
 
-/// Add only missing reviewed chain and AMM coverage during the human's
+/// Refresh shipped RPC defaults and add missing reviewed chain and AMM coverage during the human's
 /// protected EVM enrollment. Existing deployment choices remain authoritative.
 fn expand_reviewed_evm_coverage(config: &mut BrokerConfigV2) -> Vec<String> {
     let reviewed_networks = NetworkConfig::reviewed_evm_networks();
@@ -536,6 +536,7 @@ fn expand_reviewed_evm_coverage_with(
     reviewed_networks: &[NetworkConfig],
     reviewed_amms: &[DeploymentConfig],
 ) -> Vec<String> {
+    refresh_reviewed_rpc_defaults(config, reviewed_networks);
     let mut warnings = Vec::new();
     for network in reviewed_networks {
         if !config
@@ -697,6 +698,31 @@ fn enrollment_config_for_action(
     }
 }
 
+/// Replace only an exact previously shipped public RPC list. This changes
+/// transport defaults, not network scope, fee policy or pending identities.
+fn refresh_reviewed_rpc_defaults(config: &mut BrokerConfigV2, reviewed: &[NetworkConfig]) {
+    for network in &mut config.networks {
+        let Some(descriptor) = fin_networks::by_chain_id(network.chain_id) else {
+            continue;
+        };
+        if descriptor.previous_rpc_urls.is_empty()
+            || !network
+                .rpc_urls
+                .iter()
+                .map(String::as_str)
+                .eq(descriptor.previous_rpc_urls.iter().copied())
+        {
+            continue;
+        }
+        if let Some(current) = reviewed
+            .iter()
+            .find(|current| current.chain_id == network.chain_id)
+        {
+            network.rpc_urls = current.rpc_urls.clone();
+        }
+    }
+}
+
 pub(crate) fn effective_protected_config_with(
     mut config: BrokerConfigV2,
     reviewed_networks: &[NetworkConfig],
@@ -704,6 +730,7 @@ pub(crate) fn effective_protected_config_with(
 ) -> fin_domain::Result<BrokerConfigV2> {
     strip_derived_hyperliquid_links(&mut config);
     config.validate()?;
+    refresh_reviewed_rpc_defaults(&mut config, reviewed_networks);
     let reusable_wallet_enrolled = config
         .connections
         .iter()
@@ -1832,6 +1859,81 @@ mod tests {
     }
 
     #[test]
+    fn shipped_rpc_defaults_gain_backups_without_rewriting_stored_config_or_network_scope() {
+        let mut stored = empty_config(
+            NetworkConfig::reviewed_evm_networks()
+                .into_iter()
+                .filter(|network| network.chain_id != 4663)
+                .collect(),
+            vec![],
+        );
+        for network in &mut stored.networks {
+            if network.chain_id != 1 {
+                network.rpc_urls.truncate(1); // Previously shipped Base/Arbitrum defaults.
+                network.confirmations = 9;
+                network.snapshot_tokens = vec!["0x1111111111111111111111111111111111111111".into()];
+            }
+        }
+        stored.policy.max_movement_usd_micros = "50000000".into();
+        let original = serde_json::to_value(&stored).unwrap();
+        let effective = effective_protected_config(stored.clone()).unwrap();
+        assert_eq!(effective.networks.len(), stored.networks.len());
+        for (old, new) in stored.networks.iter().zip(&effective.networks) {
+            let expected = match old.chain_id {
+                1 => vec![
+                    "https://ethereum-rpc.publicnode.com",
+                    "https://eth.drpc.org",
+                ],
+                8453 => vec!["https://mainnet.base.org", "https://base.drpc.org"],
+                42161 => vec![
+                    "https://arb1.arbitrum.io/rpc",
+                    "https://arb-one.api.pocket.network",
+                    "https://arb-mainnet.g.alchemy.com/public",
+                ],
+                _ => unreachable!(),
+            };
+            assert_eq!(new.rpc_urls, expected);
+            assert_eq!(new.confirmations, old.confirmations);
+            assert_eq!(new.snapshot_tokens, old.snapshot_tokens);
+            assert_eq!(new.id, old.id);
+        }
+        assert_eq!(effective.policy, stored.policy);
+        assert_eq!(effective.connections, stored.connections);
+        assert_eq!(effective.approver_uid, stored.approver_uid);
+        assert_eq!(serde_json::to_value(&stored).unwrap(), original);
+        let again = effective_protected_config(effective.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(again).unwrap(),
+            serde_json::to_value(effective).unwrap()
+        );
+    }
+
+    #[test]
+    fn custom_rpc_lists_and_provider_order_remain_authoritative() {
+        for chain_id in [1, 8453, 42161] {
+            let reviewed = NetworkConfig::reviewed_evm_networks()
+                .into_iter()
+                .find(|network| network.chain_id == chain_id)
+                .unwrap();
+            for urls in [
+                vec!["https://custom.example/rpc".to_owned()],
+                vec![
+                    reviewed.rpc_urls[0].clone(),
+                    "https://custom.example/backup".into(),
+                ],
+                reviewed.rpc_urls.iter().rev().cloned().collect(),
+            ] {
+                let mut network = reviewed.clone();
+                network.rpc_urls = urls;
+                let stored = empty_config(vec![network], vec![]);
+                let original = serde_json::to_value(&stored).unwrap();
+                let effective = effective_protected_config(stored).unwrap();
+                assert_eq!(serde_json::to_value(effective).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
     fn effective_protected_config_adds_reviewed_coverage_without_touching_custom_data() {
         let reviewed_networks = NetworkConfig::reviewed_evm_networks();
         let mut custom_mainnet = NetworkConfig::ethereum_mainnet();
@@ -1946,7 +2048,10 @@ mod tests {
         );
         assert!(first.networks.iter().any(|n| n.chain_id == 42161));
         let base = first.networks.iter().find(|n| n.chain_id == 8453).unwrap();
-        assert_eq!(base.rpc_urls, ["https://mainnet.base.org"]);
+        assert_eq!(
+            base.rpc_urls,
+            ["https://mainnet.base.org", "https://base.drpc.org"]
+        );
         let base_deployment = first
             .deployments
             .iter()

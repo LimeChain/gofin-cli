@@ -1096,6 +1096,12 @@ pub trait Adapter: Send + Sync {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         Vec::new()
     }
+    /// Observed transport health, without network probes or credentials.
+    /// Unsupported adapters return null. Public management output accepts only
+    /// reviewed diagnostic fields, identifiers and reason codes.
+    fn diagnostics(&self) -> Value {
+        Value::Null
+    }
     /// Stable protected identities whose change can alter an approved
     /// operation's authority, such as account UIDs or resolved destination
     /// aliases. This collection is broker-only and must never be reduced by

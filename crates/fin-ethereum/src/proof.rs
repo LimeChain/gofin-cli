@@ -388,14 +388,39 @@ impl EthereumAdapter {
         {
             return Ok(pending());
         }
-        let latest = fin_evm::rpc_u64(
-            &self
-                .runtime
-                .rpc
-                .request("eth_blockNumber", json!([]))
-                .await
-                .map_err(|error| external_credit_rpc_error(error, "eth_blockNumber"))?,
-        )?;
+        let minimum = block
+            .checked_add(required_confirmations - 1)
+            .ok_or_else(|| {
+                error(
+                    "RPC_DATA_INVALID",
+                    "reconciliation",
+                    "Required confirmation height overflows.",
+                )
+            })?;
+        let latest = match self
+            .runtime
+            .rpc
+            .request_checked(
+                "eth_blockNumber",
+                json!([]),
+                fin_evm::RpcReadRequirements {
+                    minimum_block: Some(minimum),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(value) => fin_evm::rpc_u64(&value)?,
+            Err(error)
+                if matches!(
+                    error.code.as_str(),
+                    "RPC_EVIDENCE_UNAVAILABLE" | "RPC_STALE_READ" | "RPC_UNSUPPORTED_CAPABILITY"
+                ) =>
+            {
+                return Ok(pending());
+            }
+            Err(error) => return Err(external_credit_rpc_error(error, "eth_blockNumber")),
+        };
         let observed_confirmations = if latest >= block {
             latest - block + 1
         } else {
@@ -408,7 +433,14 @@ impl EthereumAdapter {
             let finalized = self
                 .runtime
                 .rpc
-                .request("eth_getBlockByNumber", json!(["finalized", false]))
+                .request_checked(
+                    "eth_getBlockByNumber",
+                    json!(["finalized", false]),
+                    fin_evm::RpcReadRequirements {
+                        minimum_block: Some(block),
+                        ..Default::default()
+                    },
+                )
                 .await;
             let finalized_height = finalized
                 .as_ref()
@@ -653,7 +685,14 @@ impl EthereumAdapter {
             let finalized = self
                 .runtime
                 .rpc
-                .request("eth_getBlockByNumber", json!(["finalized", false]))
+                .request_checked(
+                    "eth_getBlockByNumber",
+                    json!(["finalized", false]),
+                    fin_evm::RpcReadRequirements {
+                        minimum_block: Some(receipt.block_number),
+                        ..Default::default()
+                    },
+                )
                 .await;
             let finalized_height = finalized
                 .as_ref()

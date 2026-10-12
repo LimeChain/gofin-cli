@@ -78,6 +78,22 @@ Configuration locks span dispatch so old policy cannot race protected maintenanc
 
 Bound external evidence collection, including RPC retries/fallback, while leaving
 financial dispatch and durable reconciliation under their original identities.
+EVM reads keep one 10-second deadline across all endpoints. Before an endpoint
+attempt, divide the remaining budget among the remaining eligible endpoints;
+that share covers chain verification, the requested read and its retries. A slow
+endpoint yields to the next provider, and the last provider may use all remaining
+time. Preserve exact request parameters and verify each provider's chain identity.
+Financial broadcasts keep their original endpoint and are not cancelled by these
+read deadlines; their pre-dispatch identity check remains bounded separately.
+The EVM HTTP transport records a monotonic, in-memory read cooldown after HTTP
+429. A valid Retry-After supplies seconds or an HTTP date, capped at 24 hours;
+missing or invalid values fall back to 30 seconds. Zero or past dates impose no
+additional delay. A positive server-specified delay skips immediate retries and
+allows read failover; otherwise existing bounded retries remain. Subsequent reads
+skip cooling endpoints and return structured retry guidance if all are cooling.
+Overlapping responses cannot shorten a recorded deadline. Expired endpoints
+rejoin configured priority order. Broadcasts retain the original primary
+endpoint and are never redirected or retried by this cooldown.
 Plan review performs schema/scope and selected identity metadata checks; deployment,
 current balances, execution pricing/fees and simulations stay at step execution.
 This additive API needs no journal migration and grants no new financial authority.
@@ -634,7 +650,8 @@ This model never enters a production adapter and is not live fee evidence.
 ### Base integration with the reviewed-network registry
 
 Base remains a reviewed sequencer-inclusion network with the standard
-`https://mainnet.base.org` RPC when composing the shared network registry.
+`https://mainnet.base.org` primary and `https://base.drpc.org` read fallback
+when composing the shared network registry.
 The credential-preserving effective configuration overlay adds its missing
 Uniswap, WETH and Aave deployments while retaining existing custom profiles,
 connection identities and journal records. The owned AMM fork checks both Base

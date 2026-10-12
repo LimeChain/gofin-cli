@@ -91,10 +91,25 @@ At protected configuration load, the broker derives missing reviewed networks
 and AMM deployments for any reusable `ConnectionConfig::Evm`, including
 read-only wallets. The validated effective config is in memory only: this
 overlay does not rewrite protected config, inspect credentials, or create
-financial authority. Existing RPCs, deployment overrides and asset scope win;
+financial authority. Exact previously shipped Base/Arbitrum single-RPC default
+lists gain their reviewed public fallback on startup/reload, including already
+configured legacy networks. Custom RPC lists and provider order, deployment
+overrides and asset scope win;
 legacy chain-scoped Ethereum connections remain limited to their configured
 network. The same pure derivation runs on startup and protected reload so a
 broker update can expose newly shipped reviewed coverage without reenrollment.
+
+The EVM transport owns bounded endpoint eligibility, freshness checks, read
+capability cooldowns and credential-free health observations. Typed state
+reads resolve one canonical hash and retain it for the request across endpoint
+changes; the bounded shared anchor cache is not the authority for an in-flight
+request. Adapters continue to interpret original-envelope, receipt, financial
+effects and finality evidence. Minimum-height constraints let lagging providers
+fall back without weakening those adapter-owned requirements. `doctor` reads
+allowlisted snapshots from the actual wallet/bridge clients without probing
+networks; recent successful fallback is retained independently of the latest
+read. Broadcasts remain primary-only and unresolved writes use the existing
+journal and reconciliation path.
 When the effective config changes, the existing reload path recomposes adapters
 against the same journal; pending submission identities remain in place and
 are never replayed as a consequence of coverage derivation.

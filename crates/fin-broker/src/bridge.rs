@@ -34,12 +34,24 @@ const RELAY_DEPOSITORY: &str = "0x4cd00e387622c35bddb9b4c962c136462338bc31";
 const RELAY_ROUTER: &str = "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f";
 const RELAY_HUB: &str = "0xDDD361727C22A01EB137880678A20b0BEaE69318";
 const RELAY_HUB_RPC: &str = "https://rpc.chain.relay.link";
-const BASE_RPC: &str = "https://mainnet.base.org";
-const ARBITRUM_RPC: &str = "https://arb1.arbitrum.io/rpc";
-const ROBINHOOD_RPC: &str = "https://rpc.mainnet.chain.robinhood.com";
 const ETHEREUM_USDC: &str = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 const ARBITRUM_USDC: &str = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
 const ROBINHOOD_USDG: &str = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+
+// Read-only sidecars use the same reviewed fallback lists as wallet runtimes.
+fn reviewed_observer_rpc(chain_id: u64) -> fin_domain::Result<Arc<dyn fin_evm::EvmRpc>> {
+    let network = fin_networks::by_chain_id(chain_id).ok_or_else(|| {
+        FinError::validation("Bridge observer chain must be in the reviewed network registry.")
+    })?;
+    Ok(Arc::new(fin_evm::HttpRpc::new(
+        network
+            .rpc_urls
+            .iter()
+            .map(|url| (*url).to_owned())
+            .collect(),
+        chain_id,
+    )?))
+}
 
 fin_evm::alloy::sol! {
     interface BridgeErc20 {
@@ -102,7 +114,7 @@ impl BridgeAdapter {
 
     pub fn with_observers(
         wallet_adapters: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
-        observers: BTreeMap<u64, Arc<fin_evm::EvmRuntime>>,
+        mut observers: BTreeMap<u64, Arc<fin_evm::EvmRuntime>>,
         valuator: Arc<SharedUsdValuator>,
     ) -> fin_domain::Result<Self> {
         let relay: Arc<dyn BridgeProvider> = Arc::new(RelayProvider::new(reviewed_relay_config())?);
@@ -117,13 +129,14 @@ impl BridgeAdapter {
                 source_observer,
                 CanonicalConfig::reviewed(),
             )?));
-            let base_rpc = observers
-                .get(&8453)
-                .map(|observer| observer.rpc.clone())
-                .unwrap_or(Arc::new(fin_evm::HttpRpc::new(
-                    vec![BASE_RPC.into()],
+            if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(8453) {
+                entry.insert(Arc::new(fin_evm::EvmRuntime::new(
+                    reviewed_observer_rpc(8453)?,
                     8453,
-                )?));
+                    None,
+                )));
+            }
+            let base_rpc = observers[&8453].rpc.clone();
             providers.push(Arc::new(BaseCanonicalProvider::new(
                 Arc::new(fin_evm::EvmRuntime::new(
                     source.runtime.rpc.clone(),
@@ -171,7 +184,7 @@ impl BridgeAdapter {
         // no authority over its wallet runtime.
         if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(8453) {
             entry.insert(Arc::new(fin_evm::EvmRuntime::new(
-                Arc::new(fin_evm::HttpRpc::new(vec![BASE_RPC.into()], 8453)?),
+                reviewed_observer_rpc(8453)?,
                 8453,
                 None,
             )));
@@ -184,9 +197,9 @@ impl BridgeAdapter {
                 None,
             )),
         );
-        for (chain_id, rpc_url) in [(42161, ARBITRUM_RPC), (4663, ROBINHOOD_RPC)] {
+        for chain_id in [42161, 4663] {
             if let std::collections::btree_map::Entry::Vacant(entry) = observers.entry(chain_id) {
-                let rpc = Arc::new(fin_evm::HttpRpc::new(vec![rpc_url.into()], chain_id)?);
+                let rpc = reviewed_observer_rpc(chain_id)?;
                 entry.insert(Arc::new(fin_evm::EvmRuntime::new(rpc, chain_id, None)));
             }
         }
@@ -3487,6 +3500,24 @@ impl Adapter for BridgeAdapter {
 
     fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
         Vec::new()
+    }
+
+    fn diagnostics(&self) -> Value {
+        // Canonical providers and settlement observers share these clients.
+        // Wallet runtimes also cover source transports supplied independently
+        // through the fixture/custom-provider composition entrypoint.
+        let snapshots = self
+            .observers
+            .values()
+            .map(|runtime| runtime.rpc.diagnostics())
+            .chain(
+                self.wallet_adapters
+                    .values()
+                    .map(|adapter| adapter.diagnostics()),
+            )
+            .filter(|snapshot| !snapshot.is_null())
+            .collect::<Vec<_>>();
+        json!(snapshots)
     }
 
     fn snapshot_is_global(&self) -> bool {
@@ -7108,6 +7139,60 @@ fn receipt_logs_canonical(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DiagnosticObserverRpc {
+        health: Arc<Mutex<Value>>,
+        requested: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl fin_evm::EvmRpc for DiagnosticObserverRpc {
+        fn diagnostics(&self) -> Value {
+            self.health.lock().unwrap().clone()
+        }
+        async fn request(&self, _: &str, _: Value) -> fin_domain::Result<Value> {
+            self.requested.store(true, Ordering::SeqCst);
+            Err(FinError::validation(
+                "Doctor must not probe bridge observers.",
+            ))
+        }
+    }
+
+    #[test]
+    fn bridge_diagnostics_read_existing_sidecar_transport_without_network_probes() {
+        let health = Arc::new(Mutex::new(json!({
+            "chain_id":42161,"read_timeout_ms":10000,
+            "endpoints":[{"endpoint_id":"rpc-1","identity_verified":true,"status":"healthy","retry_after_ms":0,"last_error_code":null,"unsupported_methods":[]}],
+            "last_read":{"method":"eth_call","selected_endpoint":"rpc-1","attempts":[{"endpoint_id":"rpc-1","reason":"ok"}],"outcome":"ok"}
+        })));
+        let rpc = Arc::new(DiagnosticObserverRpc {
+            health: health.clone(),
+            requested: AtomicBool::new(false),
+        });
+        let mut adapter =
+            BridgeAdapter::new(BTreeMap::new(), Arc::new(SharedUsdValuator::new().unwrap()))
+                .unwrap();
+        adapter.observers.insert(
+            42161,
+            Arc::new(fin_evm::EvmRuntime::new(rpc.clone(), 42161, None)),
+        );
+        assert!(
+            adapter
+                .diagnostics()
+                .as_array()
+                .unwrap()
+                .contains(&health.lock().unwrap().clone())
+        );
+        health.lock().unwrap()["last_read"]["outcome"] = json!("cancelled");
+        assert!(
+            adapter
+                .diagnostics()
+                .as_array()
+                .unwrap()
+                .contains(&health.lock().unwrap().clone())
+        );
+        assert!(!rpc.requested.load(Ordering::SeqCst));
+    }
 
     struct SequencedBlockRpc {
         finalized_requested: AtomicBool,

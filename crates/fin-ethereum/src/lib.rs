@@ -997,6 +997,9 @@ impl Adapter for EthereumAdapter {
     fn connections(&self) -> Vec<ConnectionMetadata> {
         self.metadata()
     }
+    fn diagnostics(&self) -> Value {
+        self.runtime.rpc.diagnostics()
+    }
     async fn snapshot(&self) -> Result<StateSnapshot> {
         self.read_snapshot().await
     }
