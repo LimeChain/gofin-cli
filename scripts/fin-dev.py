@@ -514,6 +514,7 @@ def cli_invocation(name: str, args: list[str]) -> tuple[list[str], dict[str, str
                 "FIN_DEV_DATABASE": metadata["database"], "FIN_DEV_IDENTITY": metadata["environment_identity"],
                 "FIN_DEV_BUILD_ID": metadata["build_id"],
                 "FIN_DEV_ENVIRONMENT_ID": metadata["environment_id"],
+                "FIN_DEV_ENV_NAME": name,
                 "FIN_DEV_MODE": metadata.get("mode", "synthetic")})
     command = [str(cli_bin), "--identity", metadata["environment_identity"],
                "--build-id", metadata["build_id"], "--mode", metadata.get("mode", "synthetic"), *args]

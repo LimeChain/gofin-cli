@@ -370,6 +370,9 @@ enum ConnectionsCommand {
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
+    fn status_recovery_command(&self, _id: &str) -> Option<String> {
+        None
+    }
     fn development_mode(&self) -> bool {
         false
     }
@@ -935,6 +938,9 @@ fn discovery_help(name: &str) -> Value {
 pub trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError>;
+    fn status_recovery_command(&self, _id: &str) -> Option<String> {
+        None
+    }
     fn development_mode(&self) -> bool {
         false
     }
@@ -998,6 +1004,9 @@ pub trait Client: Send + Sync {
 impl<T: Transport> Client for T {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
         Transport::call(self, request).await
+    }
+    fn status_recovery_command(&self, id: &str) -> Option<String> {
+        Transport::status_recovery_command(self, id)
     }
     fn development_mode(&self) -> bool {
         Transport::development_mode(self)
@@ -1935,6 +1944,15 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
 }
 
 fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
+    emit_with_status_command(result, ui, command, None)
+}
+
+fn emit_with_status_command(
+    result: Result<Value, FinError>,
+    ui: &Ui,
+    command: &str,
+    status_command: Option<&str>,
+) -> i32 {
     match result {
         Ok(value) => {
             let output = if command == "completions" && !ui.is_machine() {
@@ -1983,7 +2001,7 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(fin_presentation::render_human(command, &value, false).trim_end())
             } else {
-                ui.write_result(&value, command)
+                ui.write_result_with_status_command(&value, command, status_command)
             };
             i32::from(output.is_err())
         }
@@ -2110,7 +2128,12 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         Err(error) => Err(error),
     };
     drop(progress);
-    emit(result, &ui, name)
+    let status_command = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["id"].as_str())
+        .and_then(|id| client.status_recovery_command(id));
+    emit_with_status_command(result, &ui, name, status_command.as_deref())
 }
 
 fn development_command_allowed(command: &Command) -> bool {
