@@ -1,12 +1,12 @@
 # Fin roadmap and feature backlog
 
-Updated 2026-10-12. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
+Updated 2026-10-13. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
 First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28, 30, 31 and 34**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decision on 2026-10-11; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 48% complete (12/25 items)
+## First release — 52% complete (13/25 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Completion is the number of items marked implemented divided by the total items 
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
 | 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
-| 11 | [Kraken support](kraken-support.md) | In progress — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
+| 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | In progress — user reported; foundation for Solana integrations |
 | 14 | [Solana Meteora support](integration-roadmap.md#14-solana-meteora-support) | Roadmap — scope to define |

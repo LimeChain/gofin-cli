@@ -15,7 +15,7 @@ The first release requires **backlog items 1–23, 32 and 33**, including item 2
 
 ## 11. Kraken support
 
-Status: In progress, reported by the user on 2026-10-11.
+Status: Implemented, reported by the user on 2026-10-13. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered operation coverage.
 
 Implement and verify the full Kraken action suite supported by the selected CCXT version, including applicable market/account reads, trading, order management, funding, deposits and withdrawals. Use ask-ogi extensively for implementation and verification assistance, following the approach selected for Hyperliquid. See the [detailed Kraken draft](kraken-support.md). Inventory Kraken product/API distinctions explicitly; supported deposit assets/networks and live-test parameters require verification and selection rather than inheriting Hyperliquid's Arbitrum USDC route.
 
