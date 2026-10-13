@@ -19,6 +19,13 @@ pub fn binance_evm_chain_id(network: &str) -> Option<u64> {
     }
 }
 
+/// Canonical Binance network codes for Solana mainnet-beta. Keep this mapping
+/// deliberately small: payout proof is only available for the reviewed SOL
+/// route, while Binance may advertise other Solana-like networks.
+pub fn binance_solana_network(network: &str) -> bool {
+    network == "SOL"
+}
+
 pub(super) fn same_address(network: &str, a: &str, b: &str) -> bool {
     if binance_evm_chain_id(network).is_some() && valid_eth_address(a) && valid_eth_address(b) {
         a.eq_ignore_ascii_case(b)
@@ -149,14 +156,24 @@ impl BinanceProfile {
     ) -> Result<EthereumDestination, FinError> {
         self.validate_withdrawal_selector(input)?;
         let chain = binance_evm_chain_id(&input.network);
+        let is_solana = binance_solana_network(&input.network);
+        let configured_route = |d: &&EthereumDestination| {
+            if is_solana {
+                d.chain_id == 0 && d.resource.0 == format!("solana:mainnet-beta:{}", d.address)
+            } else {
+                Some(d.chain_id) == chain
+            }
+        };
         let mut destination = if !input.destination.is_empty() {
-            self.config.destinations.iter().find(|d| d.name == input.destination && Some(d.chain_id) == chain)
+            self.config.destinations.iter().find(|d| d.name == input.destination && configured_route(d))
                 .cloned().ok_or_else(|| error("WRONG_NETWORK", "preview", "Named destination is not configured for this Binance network; use an explicit public address."))?
         } else {
             let address = input.address.as_deref().unwrap_or_default();
-            if let Some(existing) = self.config.destinations.iter().find(|d| {
-                Some(d.chain_id) == chain && same_address(&input.network, &d.address, address)
-            }) {
+            if let Some(existing) =
+                self.config.destinations.iter().find(|d| {
+                    configured_route(d) && same_address(&input.network, &d.address, address)
+                })
+            {
                 existing.clone()
             } else {
                 let identity_address = if binance_evm_chain_id(&input.network).is_some()
@@ -181,9 +198,35 @@ impl BinanceProfile {
             }
         };
         validate_route(input, network, &destination.address)?;
+        if is_solana
+            && self.recipient_verifier.as_ref().is_some_and(|verifier| {
+                !verifier.valid_recipient(&input.network, &destination.address)
+            })
+        {
+            return Err(error(
+                "ADDRESS_INVALID",
+                "preview",
+                "Destination is not an exact case-sensitive Solana address.",
+            ));
+        }
         if network.denomination.is_some_and(|n| n != 1) {
             // Binance units can differ from contract units. Do not infer a conversion.
             destination.assets.remove(&input.coin);
+        } else if is_solana {
+            // Configured Solana destinations identify wallet ownership only;
+            // route assets are freshly resolved from Binance metadata + RPC.
+            destination.assets.remove(&input.coin);
+            if let Some(verifier) = &self.recipient_verifier
+                && let Some(asset) = verifier
+                    .resolve_route_asset(
+                        &input.network,
+                        &input.coin,
+                        network.contract_address.as_deref(),
+                    )
+                    .await?
+            {
+                destination.assets.insert(input.coin.clone(), asset);
+            }
         } else if let Some(asset) = destination.assets.get(&input.coin) {
             let contract = network.contract_address.as_deref().unwrap_or("");
             if asset.network != format!("ethereum:{}", destination.chain_id)

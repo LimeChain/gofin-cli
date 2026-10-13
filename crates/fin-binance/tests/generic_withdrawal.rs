@@ -314,6 +314,7 @@ fn record(preview: PreparedOperation, submission: Submission) -> OperationRecord
         approval: None,
         submission: Some(submission),
         dispatch_evidence: None,
+        position_baseline: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,

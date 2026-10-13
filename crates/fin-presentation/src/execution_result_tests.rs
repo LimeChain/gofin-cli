@@ -132,3 +132,66 @@ fn concise_results_keep_material_warnings_but_omit_reviewed_permission_boilerpla
         "same address on another chain cannot inherit a trusted symbol"
     );
 }
+
+#[test]
+fn solana_results_show_exact_units_and_preserve_mint_identity() {
+    let mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    let mut amount = json!({"atoms":"1234567","asset":{"network":"solana:mainnet-beta","reference":mint,"decimals":6}});
+    assert_eq!(display_amount(&amount).unwrap(), "1.234567 USDC");
+    amount["asset"]["reference"] = json!(mint.to_lowercase());
+    assert!(
+        display_amount(&amount)
+            .unwrap()
+            .ends_with(&mint.to_lowercase())
+    );
+    amount["asset"]["reference"] = json!(mint);
+    amount["asset"]["decimals"] = json!(9);
+    assert!(display_amount(&amount).unwrap().ends_with(mint));
+    amount["asset"]["reference"] = json!("native");
+    amount["atoms"] = json!("5000");
+    assert_eq!(display_amount(&amount).unwrap(), "0.000005 SOL");
+}
+
+#[test]
+fn verified_open_escrow_reports_progress_without_claiming_swap_completion() {
+    let mut value = record("pending");
+    value["operation"] = json!("jupiter.limit.create");
+    value["effects"]["effects"] = json!([{
+        "kind":"escrow_progress", "state":"open", "remaining_input":"6000000", "input_refunded":"0", "output_filled":"4000000",
+        "input_asset":{"network":"solana:mainnet-beta","reference":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","decimals":6},
+        "output_asset":{"network":"solana:mainnet-beta","reference":"2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo","decimals":6}
+    }]);
+    let text = render_human("status", &value, false);
+    assert!(text.contains("Order open: jupiter.limit.create"));
+    assert!(text.contains("In escrow: 6 USDC"));
+    assert!(text.contains("Received 4 PYUSD"));
+    assert!(text.contains("Placement is verified"));
+    assert!(text.contains("Next: fin status synthetic-swap-1"));
+    assert!(!text.contains("Completed"));
+    assert!(!text.contains("Refunded"));
+    value["effects"] = Value::Null;
+    let text = render_human("status", &value, false);
+    assert!(text.contains("Pending verification"));
+    assert!(!text.contains("Placement is verified"));
+}
+
+#[test]
+fn keeper_pending_and_retained_funding_have_distinct_human_meanings() {
+    let mut value = record("pending");
+    value["operation"] = json!("jupiter.perps.tpsl.create");
+    value["effects"]["effects"] = json!([
+        {"kind":"pending_request_progress","state":"open"},
+        {"kind":"account_funding_progress","remaining":"2352480","asset":{"network":"solana:mainnet-beta","reference":"native","decimals":9}}
+    ]);
+    let text = render_human("status", &value, false);
+    assert!(text.contains("Request open"));
+    assert!(text.contains("keeper execution is still pending"));
+    assert!(text.contains("Account funding retained: 0.00235248 SOL"));
+    assert!(!text.contains("Cost:"));
+    assert!(!text.contains("Received"));
+    let mut bytes = Vec::new();
+    Ui::new(true, false)
+        .write_result_to(&value, "status", &mut bytes)
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), value);
+}

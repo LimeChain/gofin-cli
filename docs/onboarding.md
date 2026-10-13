@@ -329,6 +329,11 @@ not just serialization after an interactive command has finished.
   output cannot cancel/replay a financial action. A terminal result may still
   report pending financial work; reconcile the original identity. Discover the
   event schemas in `machine_contract.streaming`.
+- Verified open escrow and keeper requests remain pending financial work. Human
+  results distinguish order/request placement from settlement, show remaining
+  escrow and exact refunds, and identify retained account funding separately
+  from costs. Solana amounts use exact network/mint identities; readable labels
+  never replace the structured mint or alter decimal precision.
 - Use stable schemas, error codes, status meanings, exit codes, and resource or
   operation references. Include argument/validation failures, missing setup,
   authorization refusal, cancellation, timeout, and uncertain submission in
@@ -513,3 +518,20 @@ or market metadata may be read during permission review; future-funded balances,
 fees, deployment checks and simulations remain deferred to execution.
 
 See [the latency and human verification recipe](testing/responsiveness.md).
+
+## Solana and optional Jupiter service credentials
+
+Solana enrollment uses `--provider solana` with `--credential-type private_key`
+or `read_only`. Read-only enrollment requires a case-sensitive base58 address.
+Private entry accepts a conventional 64-byte base58 keypair or JSON array of
+64 bytes, derives the public address, and validates any supplied expected
+address. No private key belongs in CLI arguments, machine input or output.
+The reviewed cluster is mainnet-beta; enrollment grants no financial authority.
+
+Jupiter access is keyless by default. A human may separately enroll their own
+service credential with `--provider jupiter --credential-type api_key`. Fin
+ships no shared API key. The service credential does not contain or select a
+wallet signer. Typed offline discovery exposes both enrollment paths before
+a broker or credentials exist. Human installation, enrollment UX, isolation
+and Touch ID checks remain pending until observed; consult the
+[installation and protected-runtime checklist](testing/solana-human-checklist.md).

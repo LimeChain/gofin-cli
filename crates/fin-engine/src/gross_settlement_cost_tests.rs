@@ -98,7 +98,7 @@ fn gross_settlement_losses_remain_bounded_and_consumed_after_net_gains_and_rebat
         .iter()
         .filter(|effect| matches!(effect, FinancialEffect::Cost { .. }))
     {
-        assert!(cost_within_intent(effect, &intent, &effects).unwrap());
+        assert!(cost_within_intent(effect, &intent, &effects, Some(&prices)).unwrap());
     }
     assert_eq!(
         ordinary_policy::actual_effect_charge(&effects, &prices).unwrap(),
@@ -110,15 +110,15 @@ fn gross_settlement_losses_remain_bounded_and_consumed_after_net_gains_and_rebat
             *minimum_delta = fin_domain::SignedQuantity::new("0").unwrap();
         }
     }
-    assert!(!cost_within_intent(&effects[3], &no_loss, &effects).unwrap());
+    assert!(!cost_within_intent(&effects[3], &no_loss, &effects, Some(&prices)).unwrap());
     let mut no_settlement = effects.clone();
     no_settlement.retain(|effect| !matches!(effect, FinancialEffect::Settlement { .. }));
-    assert!(!cost_within_intent(&effects[3], &intent, &no_settlement).unwrap());
+    assert!(!cost_within_intent(&effects[3], &intent, &no_settlement, Some(&prices)).unwrap());
     let mut exceeded = effects.clone();
     if let FinancialEffect::Cost { amount, .. } = &mut exceeded[3] {
         amount.atoms = fin_domain::Quantity::from_u64(31);
     }
-    assert!(!cost_within_intent(&exceeded[3], &intent, &exceeded).unwrap());
+    assert!(!cost_within_intent(&exceeded[3], &intent, &exceeded, Some(&prices)).unwrap());
 }
 #[test]
 fn included_settlement_cost_is_not_charged_again_when_a_gross_cash_debit_contains_it() {

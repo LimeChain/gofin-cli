@@ -192,6 +192,38 @@ struct ApprovalPresentationTests {
         evmConnection["provider"] = "evm"
         evm["connection"] = evmConnection
         assert(configurationAuthenticationReason(evm) == "save the EVM connection \"SYNTHETIC-wallet\"")
+        let solanaConnection: [String: Any] = [
+            "provider": "solana", "name": "SYNTHETIC-solana", "resource": "solana:mainnet-beta:11111111111111111111111111111111",
+            "credential_ref": "SYNTHETIC-SOLANA-REFERENCE", "network": "solana:mainnet-beta",
+            "address": "11111111111111111111111111111111", "signing_enabled": true,
+        ]
+        var solanaReadOnly = solanaConnection
+        solanaReadOnly["name"] = "SYNTHETIC-solana-watch"
+        solanaReadOnly["credential_ref"] = NSNull()
+        solanaReadOnly["signing_enabled"] = false
+        let jupiterConnection: [String: Any] = [
+            "provider": "jupiter", "name": "SYNTHETIC-jupiter", "resource": "jupiter:service",
+            "credential_ref": "SYNTHETIC-JUPITER-REFERENCE",
+        ]
+        for (connection, title) in [(solanaConnection, "Solana"), (solanaReadOnly, "Solana"), (jupiterConnection, "Jupiter")] {
+            var candidate = binding
+            candidate["connection"] = connection
+            candidate["checks"] = title == "Solana" ? [
+                ["name": "mainnet-beta RPC identity", "status": "passed"],
+                ["name": "wallet identity", "status": "passed", "signer_derived": connection["signing_enabled"]!],
+                ["name": "native balance read", "status": "passed", "lamports": 0],
+            ] : [["name": "protected service credential", "status": "passed"]]
+            for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
+                candidate["action"] = action
+                assert(configurationAuthenticationReason(candidate) == "\(verb) the \(title) connection \"\(connection["name"] as! String)\"")
+                assert(reviewed(candidate))
+                assert(!reviewed(candidate, "changed"))
+                var movement = candidate; movement["financial_movement"] = true
+                assert(!reviewed(movement) && configurationAuthenticationReason(movement) == nil)
+                var authority = candidate; authority["future_financial_authority"] = true
+                assert(!reviewed(authority) && configurationAuthenticationReason(authority) == nil)
+            }
+        }
         let pricing: [String: Any] = ["action": "add", "financial_movement": false, "future_financial_authority": false,
                                       "connection": ["provider": "coingecko", "name": "SYNTHETIC-pricing"]]
         assert(configurationAuthenticationReason(pricing) == "save the CoinGecko connection \"SYNTHETIC-pricing\"")

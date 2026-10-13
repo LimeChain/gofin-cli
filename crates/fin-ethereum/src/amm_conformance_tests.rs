@@ -174,7 +174,10 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
         operation: "uniswap.swap".into(),
         input: initial,
         bounds: bounds(),
-        valid_for_seconds: 600,
+        // Keep the authority valid longer than the adapter's 600-second
+        // transaction deadline cap so this over-cap case reaches the adapter
+        // and deterministically reports DEADLINE_INVALID.
+        valid_for_seconds: 1_200,
         replaces: None,
     };
     let review = engine

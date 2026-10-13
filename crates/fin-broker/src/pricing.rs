@@ -10,6 +10,77 @@ pub struct SharedUsdValuator {
     source: Arc<dyn UsdPriceSource>,
     clock: Arc<dyn fin_domain::clock::Clock>,
 }
+
+/// Dispatch exact Solana mint identities to Jupiter Price V3 while retaining
+/// the configured source for Binance and EVM assets.
+pub struct NetworkUsdPriceSource {
+    fallback: Arc<dyn UsdPriceSource>,
+    solana: Arc<dyn UsdPriceSource>,
+}
+
+impl NetworkUsdPriceSource {
+    pub fn new(fallback: Arc<dyn UsdPriceSource>, solana: Arc<dyn UsdPriceSource>) -> Self {
+        Self { fallback, solana }
+    }
+    fn source(&self, asset: &AssetId) -> &Arc<dyn UsdPriceSource> {
+        if asset.network.starts_with("solana:") {
+            &self.solana
+        } else {
+            &self.fallback
+        }
+    }
+}
+
+#[async_trait]
+impl UsdPriceSource for NetworkUsdPriceSource {
+    async fn quote(&self, asset: &AssetId) -> fin_domain::Result<UsdQuote> {
+        self.source(asset).quote(asset).await
+    }
+    async fn quotes(&self, assets: &[AssetId]) -> fin_domain::Result<Vec<UsdQuote>> {
+        let solana_assets = assets
+            .iter()
+            .filter(|asset| asset.network.starts_with("solana:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let other_assets = assets
+            .iter()
+            .filter(|asset| !asset.network.starts_with("solana:"))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Some sources reject empty batch requests (and they should not be
+        // contacted when this portfolio slice has no assets for them).
+        let mut solana = if solana_assets.is_empty() {
+            Vec::new()
+        } else {
+            self.solana.quotes(&solana_assets).await?
+        }
+        .into_iter();
+        let mut other = if other_assets.is_empty() {
+            Vec::new()
+        } else {
+            self.fallback.quotes(&other_assets).await?
+        }
+        .into_iter();
+        assets
+            .iter()
+            .map(|asset| {
+                let quote = if asset.network.starts_with("solana:") {
+                    solana.next()
+                } else {
+                    other.next()
+                };
+                quote.ok_or_else(|| {
+                    FinError::new(
+                        "PRICE_DATA_INVALID",
+                        "valuation",
+                        "A configured exact-asset price source returned an incomplete batch.",
+                        "Retry pricing for the exact asset identities.",
+                    )
+                })
+            })
+            .collect()
+    }
+}
 impl SharedUsdValuator {
     pub fn new() -> fin_domain::Result<Self> {
         Ok(Self::with_source(Arc::new(ExchangeSpotPrices::new(

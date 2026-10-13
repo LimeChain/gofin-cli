@@ -109,6 +109,7 @@ fn a_live_grant_cannot_dispatch_after_its_price_evidence_expires_in_a_queue() {
         approval: Some(audit.clone()),
         submission: None,
         dispatch_evidence: None,
+        position_baseline: None,
         effects: None,
         last_reconciliation_evidence: None,
         error: None,

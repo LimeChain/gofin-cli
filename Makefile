@@ -11,12 +11,12 @@ DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-solana-cex-funding test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
 	  'make dev [ARGS="..."]  Run the debug CLI; broker commands use the installed service' \
-	  'make dev-env-start [DEV_ENV=name] [DEV_MODE=synthetic|live]  Build and start this worktree environment' \
+	  'make dev-env-start [DEV_ENV=name] [DEV_MODE=synthetic|live] [DEV_FIXTURE=solana]  Build and start this worktree environment' \
 	  'make dev-env-import [DEV_ENV=name] DEV_CREDENTIALS_FILE=/path/.env  Import development credentials while stopped' \
 	  'make dev-env-cli [DEV_ENV=name] ARGS="..."  Invoke that environment worktree CLI' \
 	  'make dev-env-stop [DEV_ENV=name]   Stop only that environment; preserve its journal' \
@@ -26,6 +26,7 @@ help:
 	  'make catalog           Regenerate offline financial discovery from Rust definitions' \
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
+	  'make test-solana-cex-funding  Public CLI Binance/Kraken Solana funding rehearsals; synthetic funds' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
 	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
 	  'make test-aave-cli-fork Public CLI named Aave lifecycle; AAVE_FORK_CHAIN=1|8453|42161' \
@@ -47,7 +48,7 @@ build:
 	@cargo build --locked -p fin-cli -p fin-broker
 
 dev-env-start:
-	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)"
+	@python3 scripts/fin-dev.py $(DEV_FLAGS) start "$(DEV_ENV)" --mode "$(DEV_MODE)" $(if $(DEV_FIXTURE),--fixture "$(DEV_FIXTURE)")
 
 dev-env-import:
 	@test -n "$(DEV_CREDENTIALS_FILE)" || { printf '%s\n' 'Set DEV_CREDENTIALS_FILE to your disposable .env file.' >&2; exit 2; }
@@ -71,14 +72,36 @@ test-ui:
 	@cargo test --locked -p fin-cli -p fin-discovery -p fin-presentation --lib --bins --test offline_cli
 	@python3 scripts/test-prepare-amm-touch-id-checklist.py
 	@python3 scripts/test-prepare-hyperliquid-human-plan.py
+	@if [ "$$(uname -s)" = Darwin ]; then \
+	  mkdir -p native/.build && \
+	  xcrun swiftc native/ApprovalPresentation.swift native/ApprovalPresentationTests.swift -o native/.build/approval-presentation-tests && \
+	  native/.build/approval-presentation-tests; \
+	else \
+	  printf '%s\n' 'Native Touch ID presentation tests: not run (requires macOS).'; \
+	fi
 
 test-dev-env:
 	@python3 scripts/test-fin-dev.py
 	@python3 scripts/test-dev-runtime.py
+	@python3 scripts/test-solana-rehearsal.py
+	@python3 scripts/test-solana-rehearsal.py --perps-only
+	@python3 scripts/test-solana-rehearsal.py --perps-collateral-only
+	@python3 scripts/test-solana-rehearsal.py --perps-limit-only
+	@python3 scripts/test-solana-rehearsal.py --perps-limit-plan-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-paired-only
+	@python3 scripts/test-solana-rehearsal.py --perps-tpsl-plan-only
+	@python3 scripts/test-solana-rehearsal.py --jlp-only
+	@python3 scripts/test-solana-rehearsal.py --trigger-only
+	@python3 scripts/test-solana-rehearsal.py --trigger-fill-only
 	@python3 scripts/test-fork-runner.py
 	@python3 scripts/test-base-aave-fork-runner.py
 	@python3 scripts/test-amm-fork-runner.py
 	@python3 scripts/test-dev-workflow.py
+
+test-solana-cex-funding:
+	@FIN_DEV_BUILD_ID=synthetic-solana-funding-build cargo build --offline --locked -p fin-cli --example fin-dev
+	@FIN_SOLANA_FUNDING_CLI="$(CURDIR)/target/debug/examples/fin-dev" cargo test --offline --locked -p fin-broker --lib solana_funding
 
 test-fork:
 	@/bin/sh scripts/verify-rust-fork.sh

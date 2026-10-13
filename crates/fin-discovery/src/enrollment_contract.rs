@@ -61,6 +61,18 @@ pub enum PublicConnection {
         execution_scope: String,
         signing_enabled: bool,
     },
+    Solana {
+        name: String,
+        resource: ResourceId,
+        address: String,
+        network: String,
+        signing_enabled: bool,
+    },
+    Jupiter {
+        name: String,
+        resource: ResourceId,
+        credential_configured: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -136,6 +148,30 @@ mod tests {
             let mut wrong = value.clone();
             wrong[forbidden] = json!("SYNTHETIC-SECRET");
             assert!(serde_json::from_value::<PublicConnection>(wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn solana_and_jupiter_contracts_roundtrip_without_secret_or_reference_slots() {
+        let cases = [
+            json!({"provider":"solana","name":"observer","resource":"solana:mainnet-beta:observer","address":"SyntheticAddress","network":"solana:mainnet-beta","signing_enabled":false}),
+            json!({"provider":"solana","name":"signer","resource":"solana:mainnet-beta:signer","address":"SyntheticSignerAddress","network":"solana:mainnet-beta","signing_enabled":true}),
+            json!({"provider":"jupiter","name":"service","resource":"jupiter:service","credential_configured":true}),
+        ];
+        for value in cases {
+            let parsed: PublicConnection = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+            for forbidden in [
+                "credential_ref",
+                "private_key",
+                "api_key",
+                "secret",
+                "signature",
+            ] {
+                let mut changed = value.clone();
+                changed[forbidden] = json!("SYNTHETIC-SECRET-REFERENCE");
+                assert!(serde_json::from_value::<PublicConnection>(changed).is_err());
+            }
         }
     }
 }

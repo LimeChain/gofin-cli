@@ -156,6 +156,10 @@ async fn rpc_runtime() -> (
     ));
     // Use the real broker composition so the SQLite journal is available;
     // the shared fixture authorizer rejects any attempt to request approval.
+    let router = Arc::new(wallet_router::WalletFamilyRouter::new(
+        Some(router),
+        BTreeMap::new(),
+    ));
     let runtime = delayed_runtime(vec![router]);
     (primary, backup, rpc, runtime)
 }

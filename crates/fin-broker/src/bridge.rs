@@ -4547,6 +4547,7 @@ impl Adapter for BridgeAdapter {
             .into_iter()
             .collect();
         Ok(fin_domain::financial_plans::PlanPermission {
+            recovery_parent: None,
             spec: fin_domain::boundaries::BoundarySpec {
                 fixed,
                 parameters: serde_json::to_value(&bounds).map_err(|_| internal_error())?,

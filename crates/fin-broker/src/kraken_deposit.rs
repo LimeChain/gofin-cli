@@ -74,7 +74,7 @@ fn deposit_route_digest(binding: &DepositBinding) -> Result<String> {
     // Kraken's route response contains floating-point presentation metadata.
     // Hash only the typed identity and exact approved quantities; re-hashing
     // the raw response would either admit binary floats or make recovery fail.
-    binding_hash(&json!({
+    let mut identity = json!({
         "method_id":binding.method_id,
         "method_name":binding.method_name,
         "network_id":binding.network_id,
@@ -86,7 +86,15 @@ fn deposit_route_digest(binding: &DepositBinding) -> Result<String> {
         "net":binding.net,
         "fee":binding.fee,
         "fee_asset":binding.fee_asset,
-    }))
+    });
+    // Keep the historical EVM digest stable for persisted operation proofs.
+    if binding.source_kind == "solana" {
+        identity["source_kind"] = json!(binding.source_kind);
+        identity["cluster"] = json!(binding.cluster);
+        identity["mint"] = json!(binding.mint);
+        identity["source_asset"] = json!(binding.source_asset);
+    }
+    binding_hash(&identity)
 }
 fn exact_deposit_evidence(row: &Value) -> Value {
     json!({
@@ -134,6 +142,15 @@ struct DepositBinding {
     #[serde(default = "credit_api")]
     credit_api: String,
     account_resource: ResourceId,
+    #[serde(
+        default = "evm_source_kind",
+        skip_serializing_if = "is_evm_source_kind"
+    )]
+    source_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cluster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mint: Option<String>,
     #[serde(default)]
     physical_identity: Option<String>,
     method_id: String,
@@ -168,13 +185,25 @@ fn decode_binding(raw: &Value) -> std::result::Result<DepositBinding, serde_json
 pub(crate) struct KrakenEvmDepositAdapter {
     kraken: Arc<KrakenProfile>,
     ethereum: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
+    solana: BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
+}
+fn evm_source_kind() -> String {
+    "evm".into()
+}
+fn is_evm_source_kind(source_kind: &String) -> bool {
+    source_kind == "evm"
 }
 impl KrakenEvmDepositAdapter {
-    pub(crate) fn new(
+    pub(crate) fn with_solana(
         kraken: Arc<KrakenProfile>,
         ethereum: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
+        solana: BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
     ) -> Self {
-        Self { kraken, ethereum }
+        Self {
+            kraken,
+            ethereum,
+            solana,
+        }
     }
     fn input(raw: &Value) -> Result<DepositInput> {
         serde_json::from_value(raw.clone()).map_err(|_| {
@@ -256,6 +285,35 @@ impl KrakenEvmDepositAdapter {
         original: Option<&PreparedOperation>,
     ) -> Result<PreparedOperation> {
         let input = Self::input(raw_input)?;
+        let solana_source = input.network.as_deref() == Some("solana");
+        if input
+            .network
+            .as_deref()
+            .is_some_and(|network| network != "solana")
+            || (solana_source
+                && (input.chain_id != 0
+                    || !input.max_fee_eth.is_empty()
+                    || input.cluster.as_deref() != Some(fin_solana::CLUSTER)
+                    || input.max_fee_sol.as_deref().is_none_or(str::is_empty)
+                    || input.token.is_some()
+                    || input.denomination.is_some()))
+            || (!solana_source
+                && (input.cluster.is_some()
+                    || input.mint.is_some()
+                    || input.max_fee_sol.is_some()
+                    || input.max_account_funding_sol.is_some()
+                    || input.chain_id == 0
+                    || input.max_fee_eth.is_empty()))
+        {
+            return Err(FinError::validation(
+                "Choose exactly one supported Kraken deposit source: reviewed EVM or Solana mainnet-beta.",
+            ));
+        }
+        if solana_source && let Some(mint) = input.mint.as_deref() {
+            fin_solana::parse_address(mint).map_err(|_| {
+                FinError::validation("Solana mint must be one exact canonical base58 address.")
+            })?;
+        }
         if input.request_id.is_empty() || input.request_id.len() > 128 {
             return Err(FinError::validation(
                 "A bounded deposit requestId is required.",
@@ -297,13 +355,30 @@ impl KrakenEvmDepositAdapter {
                 ));
             }
         }
-        let ethereum = self.ethereum.get(&input.chain_id).ok_or_else(|| {
-            error(
-                "KRAKEN_DEPOSIT_CHAIN_UNSUPPORTED",
-                "Deposit source requires a configured reviewed EVM chain.",
-            )
-        })?;
-        let wallet = ethereum
+        let source_adapter: Arc<dyn Adapter> = if solana_source {
+            self.solana
+                .get(&input.wallet)
+                .cloned()
+                .map(|adapter| adapter as Arc<dyn Adapter>)
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_WALLET_UNKNOWN",
+                        "Solana deposit source requires an enrolled mainnet-beta wallet.",
+                    )
+                })?
+        } else {
+            self.ethereum
+                .get(&input.chain_id)
+                .cloned()
+                .map(|adapter| adapter as Arc<dyn Adapter>)
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_CHAIN_UNSUPPORTED",
+                        "Deposit source requires a configured reviewed EVM chain.",
+                    )
+                })?
+        };
+        let wallet = source_adapter
             .connections()
             .into_iter()
             .find(|c| c.name == input.wallet && c.signing_enabled)
@@ -334,7 +409,9 @@ impl KrakenEvmDepositAdapter {
         }
         let method = selected[0];
         let network_name = text(&method["network"], "network_name")?;
-        if crate::kraken::reviewed_chain(network_name) != Some(input.chain_id) {
+        if (!solana_source && crate::kraken::reviewed_chain(network_name) != Some(input.chain_id))
+            || (solana_source && !crate::kraken::reviewed_solana_network(network_name))
+        {
             return Err(error(
                 "KRAKEN_DEPOSIT_CHAIN_MISMATCH",
                 "Kraken network identity does not match the selected reviewed source chain.",
@@ -454,26 +531,55 @@ impl KrakenEvmDepositAdapter {
             .get("contract_address")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty());
-        use fin_binance::BinanceRecipientVerifier;
-        let observer = crate::EthereumPayoutVerifier::new(self.ethereum.clone())?;
-        let source_asset = observer
-            .resolve_asset(
-                input.chain_id,
-                if coin == "XETH" { "ETH" } else { coin },
-                contract,
-            )
-            .await?
-            .ok_or_else(|| {
-                error(
+        let source_asset = if solana_source {
+            if (coin == "SOL" && input.mint.is_some())
+                || (coin != "SOL" && input.mint.as_deref() != contract)
+            {
+                return Err(error(
+                    "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
+                    "Solana SPL deposits require the exact route mint; native SOL must omit mint.",
+                ));
+            }
+            let wallet = self
+                .solana
+                .get(&input.wallet)
+                .expect("selected Solana adapter");
+            let asset =
+                fin_solana::funding::resolve_external_asset(&wallet.runtime(), coin, contract)
+                    .await?;
+            if asset.reference != "native"
+                && (coin != "USDC" || asset.reference != fin_solana::funding::MAINNET_USDC_MINT)
+            {
+                return Err(error(
                     "KRAKEN_DEPOSIT_SOURCE_ASSET_UNSUPPORTED",
-                    "Exact Kraken network contract is not a supported observed chain asset.",
+                    "Kraken Solana deposits currently support native SOL and the pinned mainnet USDC mint only.",
+                ));
+            }
+            asset
+        } else {
+            use fin_binance::BinanceRecipientVerifier;
+            let observer = crate::EthereumPayoutVerifier::new(self.ethereum.clone())?;
+            observer
+                .resolve_asset(
+                    input.chain_id,
+                    if coin == "XETH" { "ETH" } else { coin },
+                    contract,
                 )
-            })?;
-        if input
-            .token
-            .as_ref()
-            .is_some_and(|token| !token.eq_ignore_ascii_case(&source_asset.reference))
-        {
+                .await?
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_SOURCE_ASSET_UNSUPPORTED",
+                        "Exact Kraken network contract is not a supported observed chain asset.",
+                    )
+                })?
+        };
+        if input.token.as_ref().is_some_and(|token| {
+            if solana_source {
+                token != &source_asset.reference
+            } else {
+                !token.eq_ignore_ascii_case(&source_asset.reference)
+            }
+        }) {
             return Err(error(
                 "KRAKEN_DEPOSIT_TOKEN_MISMATCH",
                 "Selected token differs from the venue route's independently observed chain asset.",
@@ -670,11 +776,36 @@ impl KrakenEvmDepositAdapter {
                 "Gross deposit exceeds or differs from this method/account's current limit.",
             ));
         }
-        let inner_input = json!({"wallet":input.wallet,"network":"evm","chain_id":input.chain_id,"request_id":input.request_id,"max_fee_eth":input.max_fee_eth,"token":source_asset.reference,"amount":input.amount,"recipient":recipient});
-        let inner = if let Some(original) = original {
-            ethereum.revalidate(original).await?
+        let inner_input = if solana_source {
+            let mut inner = json!({"wallet":input.wallet,"network":"solana","cluster":fin_solana::CLUSTER,"requestId":input.request_id,"max_fee_sol":input.max_fee_sol,"amount":input.amount,"recipient":recipient});
+            if source_asset.reference != "native" {
+                inner["mint"] = json!(source_asset.reference);
+                let wallet = self.solana.get(&input.wallet).ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_WALLET_MISSING",
+                        "Original Solana source wallet is no longer configured.",
+                    )
+                })?;
+                let source_account = fin_solana::associated_token_address(
+                    wallet.address(),
+                    &source_asset.reference,
+                    fin_solana::token::TOKEN_PROGRAM_ID,
+                )?;
+                inner["source_token_account"] = json!(source_account);
+            }
+            if let Some(cap) = &input.max_account_funding_sol {
+                inner["max_account_funding_sol"] = json!(cap);
+            }
+            inner
         } else {
-            ethereum.prepare("wallet.transfer", &inner_input).await?
+            json!({"wallet":input.wallet,"network":"evm","chain_id":input.chain_id,"request_id":input.request_id,"max_fee_eth":input.max_fee_eth,"token":source_asset.reference,"amount":input.amount,"recipient":recipient})
+        };
+        let inner = if let Some(original) = original {
+            source_adapter.revalidate(original).await?
+        } else {
+            source_adapter
+                .prepare("wallet.transfer", &inner_input)
+                .await?
         };
         let source = inner.intent.debits.first().ok_or_else(|| {
             error(
@@ -705,6 +836,14 @@ impl KrakenEvmDepositAdapter {
             discovery_api: discovery_api(),
             credit_api: credit_api(),
             account_resource: account.resource.clone(),
+            source_kind: if solana_source {
+                "solana".into()
+            } else {
+                "evm".into()
+            },
+            cluster: solana_source.then(|| fin_solana::CLUSTER.into()),
+            mint: (solana_source && source_asset.reference != "native")
+                .then(|| source_asset.reference.clone()),
             physical_identity: account.details["physical_identity"]
                 .as_str()
                 .map(str::to_owned),
@@ -746,20 +885,49 @@ impl KrakenEvmDepositAdapter {
                 },
             });
         }
+        let mut expected = vec![EffectConstraint::Transfer {
+            from: source.resource.clone(),
+            to: account.resource.clone(),
+            debit_asset: source_asset.clone(),
+            credit_asset: venue_asset.clone(),
+            maximum_debit: source_atoms.clone(),
+            minimum_credit: net.clone(),
+        }];
+        if solana_source {
+            // Solana SPL transfers may need a new recipient ATA. The wallet
+            // preview binds its exact creation/rent transfer separately from
+            // the Kraken custody credit; carry that typed constraint through
+            // approval so the rent is neither hidden nor mistaken for deposit.
+            expected.extend(inner.intent.expected.iter().skip(1).cloned());
+        }
+        let mut debits = vec![ResourceAmount {
+            resource: source.resource.clone(),
+            amount: source.amount.clone(),
+        }];
+        if solana_source {
+            for effect in inner.intent.expected.iter().skip(1) {
+                if let EffectConstraint::Transfer {
+                    from,
+                    debit_asset,
+                    maximum_debit,
+                    ..
+                } = effect
+                    && !maximum_debit.is_zero()
+                {
+                    debits.push(ResourceAmount {
+                        resource: from.clone(),
+                        amount: Amount {
+                            asset: debit_asset.clone(),
+                            atoms: maximum_debit.clone(),
+                        },
+                    });
+                }
+            }
+        }
         let intent = FinancialIntent {
-            debits: vec![ResourceAmount {
-                resource: source.resource.clone(),
-                amount: source.amount.clone(),
-            }],
+            debits,
             maximum_costs,
-            expected: vec![EffectConstraint::Transfer {
-                from: source.resource.clone(),
-                to: account.resource.clone(),
-                debit_asset: source_asset,
-                credit_asset: venue_asset,
-                maximum_debit: source_atoms,
-                minimum_credit: net,
-            }],
+            expected,
             locks,
         };
         let valuation = Some(
@@ -780,8 +948,18 @@ impl KrakenEvmDepositAdapter {
             binding: serde_json::to_value(binding)
                 .map_err(|_| FinError::validation("Deposit binding serialization failed."))?,
             summary: format!(
-                "Deposit {} {} from {} to Kraken {} on {}; maximum chain fee {} ETH",
-                input.amount, coin, input.wallet, input.account, network_name, input.max_fee_eth
+                "Deposit {} {} from {} to Kraken {} on {}; maximum chain fee {} {}",
+                input.amount,
+                coin,
+                input.wallet,
+                input.account,
+                network_name,
+                if solana_source {
+                    input.max_fee_sol.as_deref().unwrap_or("0")
+                } else {
+                    &input.max_fee_eth
+                },
+                if solana_source { "SOL" } else { "ETH" }
             ),
             checks: vec![Check {
                 name: "funding_route".into(),
@@ -802,8 +980,9 @@ impl KrakenEvmDepositAdapter {
 }
 #[async_trait]
 impl Adapter for KrakenEvmDepositAdapter {
-    fn uses_rpc_reads(&self, operation: &str, _input: &Value) -> bool {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
         operation == "kraken.deposit"
+            && Self::input(input).is_ok_and(|input| input.network.is_none() && input.chain_id != 0)
     }
     fn definitions(&self) -> Vec<Definition> {
         vec![deposit_definition()]
@@ -812,6 +991,9 @@ impl Adapter for KrakenEvmDepositAdapter {
         let mut rows = self.kraken.authorization_identities();
         for a in self.ethereum.values() {
             rows.extend(a.authorization_identities());
+        }
+        for wallet in self.solana.values() {
+            rows.extend(wallet.authorization_identities());
         }
         rows
     }
@@ -913,6 +1095,33 @@ impl Adapter for KrakenEvmDepositAdapter {
                 "Deposit does not bind an exact wallet transfer.",
             ));
         }
+        // Revalidation checked the nested envelope and fresh pricing. Preserve
+        // the historical nested preview in the immutable approval binding and
+        // keep the freshly validated outer candidate at signing and dispatch.
+        journal.assert_candidate(p)?;
+        if b.source_kind == "solana" {
+            let wallet = b
+                .inner_input
+                .get("wallet")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_BINDING_INVALID",
+                        "Solana wallet identity is missing from the original binding.",
+                    )
+                })?;
+            return self
+                .solana
+                .get(wallet)
+                .ok_or_else(|| {
+                    error(
+                        "KRAKEN_DEPOSIT_WALLET_MISSING",
+                        "Original Solana source wallet is no longer configured.",
+                    )
+                })?
+                .submit_nested_revalidated(validated, &b.inner, journal)
+                .await;
+        }
         let transaction: fin_evm::FrozenTransaction =
             serde_json::from_value(b.inner.binding["transaction"].clone()).map_err(|_| {
                 error(
@@ -929,10 +1138,6 @@ impl Adapter for KrakenEvmDepositAdapter {
                     "Deposit source resource is malformed.",
                 )
             })?;
-        // Revalidation checked the nested envelope and fresh pricing. Preserve
-        // the historical nested preview in the immutable approval binding and
-        // keep the freshly validated outer candidate at signing and dispatch.
-        journal.assert_candidate(p)?;
         self.ethereum
             .get(&b.chain_id)
             .ok_or_else(|| {
@@ -973,7 +1178,33 @@ impl Adapter for KrakenEvmDepositAdapter {
                 json!({}),
             ));
         };
-        let Some(ethereum) = self.ethereum.get(&b.chain_id) else {
+        // Solana's public submission reference identifies the frozen message,
+        // while venue histories use the transaction's case-sensitive
+        // base58 signature. EVM submission references remain transaction hashes.
+        let venue_txid = if b.source_kind == "solana" {
+            submission.data["wallet_signature"]
+                .as_str()
+                .filter(|signature| !signature.is_empty())
+                .unwrap_or(&submission.reference)
+        } else {
+            &submission.reference
+        };
+        let source_adapter: &dyn Adapter = if b.source_kind == "solana" {
+            let Some(wallet) = b
+                .inner_input
+                .get("wallet")
+                .and_then(Value::as_str)
+                .and_then(|name| self.solana.get(name))
+            else {
+                return Ok(unknown(
+                    "Original Solana source wallet is no longer configured.",
+                    json!({}),
+                ));
+            };
+            wallet.as_ref()
+        } else if let Some(ethereum) = self.ethereum.get(&b.chain_id) {
+            ethereum.as_ref()
+        } else {
             return Ok(unknown(
                 "Original source chain is no longer configured.",
                 json!({}),
@@ -997,7 +1228,7 @@ impl Adapter for KrakenEvmDepositAdapter {
             preview: Some(b.inner.clone()),
             ..record.clone()
         };
-        let chain = match ethereum.reconcile(&inner_record).await {
+        let chain = match source_adapter.reconcile(&inner_record).await {
             Ok(chain) => chain,
             Err(source_error) => {
                 return Ok(unknown(
@@ -1054,9 +1285,13 @@ impl Adapter for KrakenEvmDepositAdapter {
         let found: Vec<_> = rows
             .iter()
             .filter(|r| {
-                r["txid"]
-                    .as_str()
-                    .is_some_and(|tx| tx.eq_ignore_ascii_case(&submission.reference))
+                r["txid"].as_str().is_some_and(|tx| {
+                    if b.source_kind == "solana" {
+                        tx == venue_txid
+                    } else {
+                        tx.eq_ignore_ascii_case(&submission.reference)
+                    }
+                })
             })
             .collect();
         if found.len() != 1 {
@@ -1070,9 +1305,13 @@ impl Adapter for KrakenEvmDepositAdapter {
             && row["method"]
                 .as_str()
                 .is_some_and(|reported| deposit_status_method_matches(&b.method_name, reported))
-            && row["info"]
-                .as_str()
-                .is_some_and(|a| a.eq_ignore_ascii_case(&b.address));
+            && row["info"].as_str().is_some_and(|a| {
+                if b.source_kind == "solana" {
+                    a == b.address
+                } else {
+                    a.eq_ignore_ascii_case(&b.address)
+                }
+            });
         // Kraken's documented Settled deposit status still awaits confirmations.
         // Keep the original submission pending without manufacturing usable credit.
         if row["status"] == "Settled"
@@ -1115,7 +1354,7 @@ impl Adapter for KrakenEvmDepositAdapter {
                         "not_returned":row["status-prop"]!="return",
                         "asset_matches":row["asset"]==b.venue_asset.reference,
                         "method_matches":row["method"].as_str().is_some_and(|reported|deposit_status_method_matches(&b.method_name,reported)),
-                        "address_matches":row["info"].as_str().is_some_and(|a|a.eq_ignore_ascii_case(&b.address))
+                        "address_matches":row["info"].as_str().is_some_and(|a| if b.source_kind == "solana" { a == b.address } else { a.eq_ignore_ascii_case(&b.address) })
                     }
                 }),
             ));
@@ -1160,7 +1399,12 @@ impl Adapter for KrakenEvmDepositAdapter {
                     && v["type"] == "deposit"
             })
             .collect();
-        if entries.len() != 1 || native_quantity(text(entries[0].1, "amount")?, 36)? != b.gross {
+        let ledger_amount = if entries.len() == 1 {
+            native_quantity(text(entries[0].1, "amount")?, 36)?
+        } else {
+            fin_domain::Quantity::zero()
+        };
+        if entries.len() != 1 || (ledger_amount != b.gross && ledger_amount != b.net) {
             return Ok(unknown(
                 "Deposit credit lacks a unique exact ledger identity.",
                 json!({"matchingLedgerRows":entries.len()}),
@@ -1176,6 +1420,7 @@ impl Adapter for KrakenEvmDepositAdapter {
         }
         let actual_net = b.gross.checked_sub(&credit_fee)?;
         if (history_amount != actual_net && history_amount != b.gross)
+            || ledger_amount != history_amount
             || (row.get("fee").is_some() && native_quantity(text(row, "fee")?, 36)? != credit_fee)
         {
             return Ok(unknown(
@@ -1232,11 +1477,15 @@ impl Adapter for KrakenEvmDepositAdapter {
             b.inner.intent.debits.first().ok_or_else(|| {
                 error("KRAKEN_DEPOSIT_INNER_INVALID", "Source intent is missing.")
             })?;
-        let expected_recipient = ResourceId(format!(
-            "ethereum:{}:{}",
-            b.chain_id,
-            b.address.to_ascii_lowercase()
-        ));
+        let expected_recipient = if b.source_kind == "solana" {
+            ResourceId(format!("solana:{}:{}", fin_solana::CLUSTER, b.address))
+        } else {
+            ResourceId(format!(
+                "ethereum:{}:{}",
+                b.chain_id,
+                b.address.to_ascii_lowercase()
+            ))
+        };
         let mut effects = vec![];
         let mut matched = false;
         for effect in proof.effects {
@@ -1265,6 +1514,14 @@ impl Adapter for KrakenEvmDepositAdapter {
                     });
                 }
                 FinancialEffect::Cost { .. } => effects.push(effect),
+                FinancialEffect::Transfer { ref to, .. }
+                    if b.source_kind == "solana"
+                        && to.0.starts_with("solana:mainnet-beta:account:") =>
+                {
+                    // Preserve independently verified ATA rent funding as its
+                    // own typed movement; it is not exchange asset custody.
+                    effects.push(effect);
+                }
                 _ => {
                     return Ok(unknown(
                         "Unexpected source effects cannot be translated into Kraken custody.",
@@ -1380,7 +1637,7 @@ impl Adapter for KrakenEvmDepositAdapter {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use fin_exchange::kraken::DispatchGuard;
     use fin_kraken::{KrakenAccount, KrakenProduct, KrakenResponse, KrakenTransport};
@@ -1389,7 +1646,7 @@ mod tests {
     mod cost_tests {
         include!("kraken_deposit_cost_tests.rs");
     }
-    mod submission_tests {
+    pub(crate) mod submission_tests {
         include!("kraken_deposit_submission_tests.rs");
     }
     struct Venue {
@@ -1404,6 +1661,10 @@ mod tests {
         fee_proven: AtomicBool,
         readable_credit: AtomicBool,
         fee_overrun: AtomicBool,
+        solana_source: AtomicBool,
+        solana_usdc: AtomicBool,
+        solana_signature: Arc<Mutex<Option<String>>>,
+        solana_rpc: Arc<Mutex<Option<Arc<crate::test_support::solana::FundingRpc>>>>,
         multiple_claimed_addresses: AtomicBool,
         no_account_deposit_maximum: AtomicBool,
         requests: Mutex<Vec<(E, Value)>>,
@@ -1427,20 +1688,37 @@ mod tests {
             let separate = self.separate_fee.load(Ordering::SeqCst);
             let fees = self.fee.load(Ordering::SeqCst) && !separate;
             let credited = self.credit.load(Ordering::SeqCst)
-                || self.rpc.submitted_hash.lock().unwrap().is_some();
+                || (!self.solana_source.load(Ordering::SeqCst)
+                    && self.rpc.submitted_hash.lock().unwrap().is_some());
             let mut response = match e {
                 E::KrakenPrivatePostGetApiKeyInfo => {
                     json!({"result":{"permissions":if self.readable_credit.load(Ordering::SeqCst){vec!["query-funds","query-ledger"]}else{vec!["query-funds"]}}})
                 }
                 E::KrakenFundingGetFundingV1MethodsDirection => {
-                    json!({"methods":[{"method_id":"00000000-0000-0000-0000-000000000001","method_name":"Ether (Hex)","asset":{"class":"currency","name":"ETH"},"network":{"network_id":"00000000-0000-0000-0000-000000000002","network_name":if self.wrong_network.load(Ordering::SeqCst){"Bitcoin"}else{"Ethereum"}},"minimum_amount":"0.001","maximum_amount":"1","fees":{"base":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0001"}else{"0"}},"included":true},"deposit":{"shares_addresses_with_method_id":"00000000-0000-0000-0000-000000000003"}}]})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"methods":[{"method_id":"00000000-0000-0000-0000-000000000001","method_name":"USDC (Solana)","asset":{"class":"currency","name":"USDC"},"network":{"network_id":"sol-mainnet","network_name":"Solana","contract_address":crate::test_support::solana::USDC_MINT},"minimum_amount":"0.01","maximum_amount":"100000","fees":{"base":{"asset":{"class":"currency","name":"USDC"},"amount":"0"},"included":false},"deposit":{"shares_addresses_with_method_id":"00000000-0000-0000-0000-000000000003"}}]})
+                        } else {
+                            json!({"methods":[{"method_id":"00000000-0000-0000-0000-000000000001","method_name":"Solana","asset":{"class":"currency","name":"SOL"},"network":{"network_id":"sol-mainnet","network_name":if self.wrong_network.load(Ordering::SeqCst){"Solana Devnet"}else{"Solana"}},"minimum_amount":"0.001","maximum_amount":"100","fees":{"base":{"asset":{"class":"currency","name":"SOL"},"amount":"0.001"},"included":true},"deposit":{"shares_addresses_with_method_id":"00000000-0000-0000-0000-000000000003"}}]})
+                        }
+                    } else {
+                        json!({"methods":[{"method_id":"00000000-0000-0000-0000-000000000001","method_name":"Ether (Hex)","asset":{"class":"currency","name":"ETH"},"network":{"network_id":"00000000-0000-0000-0000-000000000002","network_name":if self.wrong_network.load(Ordering::SeqCst){"Bitcoin"}else{"Ethereum"}},"minimum_amount":"0.001","maximum_amount":"1","fees":{"base":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0001"}else{"0"}},"included":true},"deposit":{"shares_addresses_with_method_id":"00000000-0000-0000-0000-000000000003"}}]})
+                    }
                 }
                 E::KrakenPublicGetAssets => {
-                    json!({"result":{"XETH":{"altname":"ETH","decimals":18}}})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"result":{"USDC":{"altname":"USDC","decimals":6}}})
+                        } else {
+                            json!({"result":{"SOL":{"altname":"SOL","decimals":9}}})
+                        }
+                    } else {
+                        json!({"result":{"XETH":{"altname":"ETH","decimals":18}}})
+                    }
                 }
                 E::KrakenFundingGetFundingV2DepositAddresses => {
                     let mut addresses = vec![
-                        json!({"method_id":"00000000-0000-0000-0000-000000000003","address_details":{"crypto":{"address":"0x1111111111111111111111111111111111111111","memo":if self.memo.load(Ordering::SeqCst){"required-memo"}else{""}}}}),
+                        json!({"method_id":"00000000-0000-0000-0000-000000000003","address_details":{"crypto":{"address":if self.solana_source.load(Ordering::SeqCst){"11111111111111111111111111111111"}else{"0x1111111111111111111111111111111111111111"},"memo":if self.memo.load(Ordering::SeqCst){"required-memo"}else{""}}}}),
                     ];
                     if self.multiple_claimed_addresses.load(Ordering::SeqCst) {
                         addresses.push(json!({"method_id":"00000000-0000-0000-0000-000000000003","address_details":{"crypto":{"address":"0x2222222222222222222222222222222222222222"}}}));
@@ -1448,23 +1726,69 @@ mod tests {
                     json!({"addresses":addresses})
                 }
                 E::KrakenFundingGetFundingV1FeesMethodId => {
-                    json!({"fee":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0001"}else{"0"}},"gross_amount":{"asset":{"class":"currency","name":"ETH"},"amount":"0.01"},"net_amount":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0099"}else{"0.01"}}})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"fee":{"asset":{"class":"currency","name":"USDC"},"amount":"0"},"gross_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"1"},"net_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"1"}})
+                        } else {
+                            json!({"fee":{"asset":{"class":"currency","name":"SOL"},"amount":"0.001"},"gross_amount":{"asset":{"class":"currency","name":"SOL"},"amount":"0.1"},"net_amount":{"asset":{"class":"currency","name":"SOL"},"amount":"0.099"}})
+                        }
+                    } else {
+                        json!({"fee":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0001"}else{"0"}},"gross_amount":{"asset":{"class":"currency","name":"ETH"},"amount":"0.01"},"net_amount":{"asset":{"class":"currency","name":"ETH"},"amount":if fees{"0.0099"}else{"0.01"}}})
+                    }
                 }
                 E::KrakenFundingGetFundingV1LimitsDepositAssetClassAsset => {
                     if self.no_account_deposit_maximum.load(Ordering::SeqCst) {
                         json!({"deposit_limits":[{"method_id":"00000000-0000-0000-0000-000000000001","limits":[]}]})
+                    } else if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"deposit_limits":[{"method_id":"00000000-0000-0000-0000-000000000001","maximum_amount":{"asset":{"class":"currency","name":"USDC"},"amount":"100000"}}]})
+                        } else {
+                            json!({"deposit_limits":[{"method_id":"00000000-0000-0000-0000-000000000001","maximum_amount":{"asset":{"class":"currency","name":"SOL"},"amount":"100"}}]})
+                        }
                     } else {
                         json!({"deposit_limits":[{"method_id":"00000000-0000-0000-0000-000000000001","maximum_amount":{"asset":{"class":"currency","name":"ETH"},"amount":"1"}}]})
                     }
                 }
                 E::KrakenPrivatePostBalanceEx => {
-                    json!({"result":{"XETH":{"balance":if credited{if fees{"0.5099"}else{"0.51"}}else{"0.5"},"hold_trade":"0"}}})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"result":{"USDC":{"balance":if credited{"11"}else{"10"},"hold_trade":"0"}}})
+                        } else {
+                            json!({"result":{"SOL":{"balance":if credited{"10.099"}else{"10"},"hold_trade":"0"}}})
+                        }
+                    } else {
+                        json!({"result":{"XETH":{"balance":if credited{if fees{"0.5099"}else{"0.51"}}else{"0.5"},"hold_trade":"0"}}})
+                    }
                 }
                 E::KrakenPrivatePostDepositStatus => {
-                    json!({"result":[{"asset":"XETH","method":"Ether (Hex)","refid":"fixture-deposit-ref","txid":self.rpc.hash(),"info":"0x1111111111111111111111111111111111111111","amount":"0.01","fee":if fees{"0.0001"}else{"0"},"status":if !credited{"Settled"}else if self.early_confirmed.load(Ordering::SeqCst){"EarlyConfirmed"}else{"Success"}}]})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        let signature = self
+                            .solana_rpc
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .and_then(|rpc| rpc.last_signature())
+                            .or_else(|| self.solana_signature.lock().unwrap().clone())
+                            .unwrap_or_default();
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"result":[{"asset":"USDC","method":"USDC (Solana)","refid":"fixture-deposit-ref","txid":signature,"info":"11111111111111111111111111111111","amount":"1","fee":"0","status":if !credited{"Settled"}else{"Success"}}]})
+                        } else {
+                            json!({"result":[{"asset":"SOL","method":"Solana","refid":"fixture-deposit-ref","txid":signature,"info":"11111111111111111111111111111111","amount":"0.099","fee":"0.001","status":if !credited{"Settled"}else{"Success"}}]})
+                        }
+                    } else {
+                        json!({"result":[{"asset":"XETH","method":"Ether (Hex)","refid":"fixture-deposit-ref","txid":self.rpc.hash(),"info":"0x1111111111111111111111111111111111111111","amount":"0.01","fee":if fees{"0.0001"}else{"0"},"status":if !credited{"Settled"}else if self.early_confirmed.load(Ordering::SeqCst){"EarlyConfirmed"}else{"Success"}}]})
+                    }
                 }
                 E::KrakenPrivatePostLedgers => {
-                    json!({"result":{"ledger":{"deposit-ledger":{"type":"deposit","refid":"fixture-deposit-ref","asset":"XETH","amount":"0.01","fee":if fees{"0.0001"}else{"0"}}}}})
+                    if self.solana_source.load(Ordering::SeqCst) {
+                        if self.solana_usdc.load(Ordering::SeqCst) {
+                            json!({"result":{"ledger":{"deposit-ledger":{"type":"deposit","refid":"fixture-deposit-ref","asset":"USDC","amount":"1","fee":"0","balance":"11"}}}})
+                        } else {
+                            json!({"result":{"ledger":{"deposit-ledger":{"type":"deposit","refid":"fixture-deposit-ref","asset":"SOL","amount":"0.099","fee":"0.001","balance":"10.099"}}}})
+                        }
+                    } else {
+                        json!({"result":{"ledger":{"deposit-ledger":{"type":"deposit","refid":"fixture-deposit-ref","asset":"XETH","amount":"0.01","fee":if fees{"0.0001"}else{"0"}}}}})
+                    }
                 }
                 _ => panic!("Unexpected synthetic deposit endpoint {e:?}"),
             };
@@ -1698,6 +2022,10 @@ mod tests {
             fee_proven: AtomicBool::new(true),
             readable_credit: AtomicBool::new(true),
             fee_overrun: AtomicBool::new(false),
+            solana_source: AtomicBool::new(false),
+            solana_usdc: AtomicBool::new(false),
+            solana_signature: Arc::new(Mutex::new(None)),
+            solana_rpc: Arc::new(Mutex::new(None)),
             multiple_claimed_addresses: AtomicBool::new(false),
             no_account_deposit_maximum: AtomicBool::new(false),
             requests: Mutex::new(vec![]),
@@ -1735,20 +2063,56 @@ mod tests {
             .with_wallet_valuation(Arc::new(Prices)),
         );
         (
-            KrakenEvmDepositAdapter::new(kraken, BTreeMap::from([(1, ethereum)])),
+            KrakenEvmDepositAdapter::with_solana(
+                kraken,
+                BTreeMap::from([(1, ethereum)]),
+                BTreeMap::new(),
+            ),
             venue,
         )
     }
     fn input() -> Value {
         json!({"requestId":"synthetic-deposit-001","account":"fixture-spot","wallet":"fixture-wallet","methodId":"00000000-0000-0000-0000-000000000001","chainId":1,"amount":"0.01","maxFeeEth":"0.001"})
     }
+    #[test]
+    fn deposit_rpc_scope_keeps_solana_out_of_evm_deadline_policy() {
+        let (adapter, _) = adapter();
+        assert!(adapter.uses_rpc_reads("kraken.deposit", &input()));
+        let solana = json!({
+            "requestId":"synthetic-solana-deposit", "account":"fixture-spot",
+            "wallet":"solana-wallet", "methodId":"synthetic-method",
+            "network":"solana", "amount":"0.01", "maxFeeSol":"0.001",
+        });
+        assert!(!adapter.uses_rpc_reads("kraken.deposit", &solana));
+        assert!(!adapter.uses_rpc_reads("kraken.deposit", &json!({})));
+    }
+
     #[tokio::test]
     async fn current_route_alias_resolves_exact_wallet_and_canonical_venue_custody() {
         let (adapter, _) = adapter();
         let p = adapter.prepare("kraken.deposit", &input()).await.unwrap();
         let mut binding: DepositBinding = serde_json::from_value(p.binding.clone()).unwrap();
         binding.route["venue_presentation_rate"] = json!(0.125);
-        assert_eq!(deposit_route_digest(&binding).unwrap().len(), 64);
+        let legacy_identity = json!({
+            "method_id":binding.method_id,
+            "method_name":binding.method_name,
+            "network_id":binding.network_id,
+            "network_name":binding.network_name,
+            "chain_id":binding.chain_id,
+            "address":binding.address,
+            "venue_asset":binding.venue_asset,
+            "gross":binding.gross,
+            "net":binding.net,
+            "fee":binding.fee,
+            "fee_asset":binding.fee_asset,
+        });
+        assert_eq!(
+            deposit_route_digest(&binding).unwrap(),
+            binding_hash(&legacy_identity).unwrap()
+        );
+        assert!(p.binding.get("source_kind").is_none());
+        assert!(p.binding.get("cluster").is_none());
+        assert!(p.binding.get("mint").is_none());
         assert_eq!(p.binding["venue_asset"]["reference"], "XETH");
         assert_eq!(p.binding["source_asset"]["reference"], "native");
         assert_eq!(p.intent.debits[0].amount.atoms.to_decimal(18), "0.01");
@@ -1942,6 +2306,7 @@ mod tests {
             approval: None,
             submission: Some(submission),
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,

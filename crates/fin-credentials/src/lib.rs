@@ -48,6 +48,12 @@ pub enum SecretMaterial {
     EvmPrivateKey {
         private_key: String,
     },
+    SolanaPrivateKey {
+        private_key: String,
+    },
+    JupiterApiKey {
+        api_key: String,
+    },
     CoinGeckoApiKey {
         api_key: String,
         plan: String,
@@ -88,6 +94,15 @@ impl SecretMaterial {
             Self::EvmPrivateKey { private_key } => {
                 let raw = private_key.strip_prefix("0x").unwrap_or(private_key);
                 raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_hexdigit())
+            }
+            // The broker performs canonical base58/JSON64 parsing with the
+            // reviewed Solana signer before saving a connection. Keep this
+            // storage layer independent of the runtime/signing crate.
+            Self::SolanaPrivateKey { private_key } => !private_key.trim().is_empty(),
+            Self::JupiterApiKey { api_key } => {
+                !api_key.is_empty()
+                    && api_key.len() <= 1024
+                    && api_key.bytes().all(|byte| (b'!'..=b'~').contains(&byte))
             }
             Self::CoinGeckoApiKey { api_key, plan } => {
                 matches!(plan.as_str(), "demo" | "pro")
@@ -415,6 +430,94 @@ fn reject_acl(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kraken_spot_and_futures_credentials_are_typed_and_validate_base64_secrets() {
+        for material in [
+            SecretMaterial::KrakenApi {
+                api_key: "SYNTHETIC-KRAKEN-KEY".into(),
+                secret: "c3ludGhldGljLW9ubHk=".into(),
+            },
+            SecretMaterial::KrakenFuturesApi {
+                api_key: "SYNTHETIC-KRAKEN-FUTURES-KEY".into(),
+                secret: "c3ludGhldGljLW9ubHk=".into(),
+            },
+        ] {
+            material.validate_present().unwrap();
+            assert_eq!(format!("{material:?}"), "SecretMaterial(<redacted>)");
+            let encoded = serde_json::to_string(&material).unwrap();
+            let decoded: SecretMaterial = serde_json::from_str(&encoded).unwrap();
+            decoded.validate_present().unwrap();
+            assert_eq!(format!("{decoded:?}"), "SecretMaterial(<redacted>)");
+        }
+        for material in [
+            SecretMaterial::KrakenApi {
+                api_key: "SYNTHETIC-KRAKEN-KEY".into(),
+                secret: "not-base64".into(),
+            },
+            SecretMaterial::KrakenFuturesApi {
+                api_key: "SYNTHETIC-KRAKEN-FUTURES-KEY".into(),
+                secret: "".into(),
+            },
+        ] {
+            let error = material.validate_present().unwrap_err();
+            assert_eq!(error.code, "INVALID_CREDENTIAL");
+            assert!(!error.to_string().contains("SYNTHETIC-KRAKEN"));
+        }
+    }
+
+    #[test]
+    fn solana_and_jupiter_material_round_trip_without_debug_secret_exposure() {
+        let mut signer = SecretMaterial::SolanaPrivateKey {
+            private_key: "SYNTHETIC-SOLANA-KEY-FIXTURE-NOT-VALID-FOR-BROADCAST".into(),
+        };
+        signer.validate_present().unwrap();
+        assert_eq!(format!("{signer:?}"), "SecretMaterial(<redacted>)");
+        let signer_json = serde_json::to_string(&signer).unwrap();
+        assert!(signer_json.contains("solana_private_key"));
+        let signer_copy: SecretMaterial = serde_json::from_str(&signer_json).unwrap();
+        signer_copy.validate_present().unwrap();
+        signer.zeroize();
+        assert!(signer.validate_present().is_err());
+
+        let api_key = SecretMaterial::JupiterApiKey {
+            api_key: "SYNTHETIC-JUPITER-KEY-FIXTURE".into(),
+        };
+        api_key.validate_present().unwrap();
+        assert_eq!(format!("{api_key:?}"), "SecretMaterial(<redacted>)");
+        let api_json = serde_json::to_string(&api_key).unwrap();
+        assert!(api_json.contains("jupiter_api_key"));
+        let api_copy: SecretMaterial = serde_json::from_str(&api_json).unwrap();
+        api_copy.validate_present().unwrap();
+        assert!(!format!("{api_copy:?}").contains("SYNTHETIC"));
+    }
+
+    #[test]
+    fn jupiter_key_header_characters_are_bounded_and_secrets_never_echo() {
+        for key in ["", "has space", "bad\nheader", "ключ"] {
+            let error = SecretMaterial::JupiterApiKey {
+                api_key: key.into(),
+            }
+            .validate_present()
+            .unwrap_err();
+            assert_eq!(error.code, "INVALID_CREDENTIAL");
+            assert!(!error.to_string().contains("SYNTHETIC"));
+        }
+        assert!(
+            SecretMaterial::JupiterApiKey {
+                api_key: "A".repeat(1025)
+            }
+            .validate_present()
+            .is_err()
+        );
+        assert!(
+            SecretMaterial::JupiterApiKey {
+                api_key: "SYNTHETIC-KEY-123".into()
+            }
+            .validate_present()
+            .is_ok()
+        );
+    }
+
     #[test]
     fn coingecko_keys_are_typed_validated_redacted_and_zeroized() {
         for plan in ["demo", "pro"] {

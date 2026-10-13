@@ -821,6 +821,7 @@ mod tests {
             last_reconciliation_evidence: None,
             error: None,
             run_id: None,
+            position_baseline: None,
         }
     }
     fn proof(record: &OperationRecord, execution: ConversionSequence) -> VerifiedEffects {
