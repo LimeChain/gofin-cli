@@ -1348,13 +1348,23 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
             .as_str()
             .or_else(|| value["input"]["step_kind"].as_str())
             .unwrap_or("step");
+        let is_cctp = value["preview"]["binding"]["quote"]["provider"] == "cctp";
+        let step_label = if is_cctp && kind == "deposit" {
+            "burn"
+        } else {
+            kind
+        };
         let status = value["status"].as_str().unwrap_or("unknown");
         let mut output = String::new();
         if status == "completed" && kind == "deposit" {
             line(
                 &mut output,
                 0,
-                "Source deposit confirmed; destination settlement is still pending.",
+                if is_cctp {
+                    "CCTP source burn confirmed; destination mint and receipt are still pending."
+                } else {
+                    "Source deposit confirmed; destination settlement is still pending."
+                },
             );
             line(
                 &mut output,
@@ -1369,7 +1379,7 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
                 &mut output,
                 0,
                 &format!(
-                    "Bridge {kind} step confirmed for transfer {}.",
+                    "Bridge {step_label} step confirmed for transfer {}.",
                     safe_text(transfer_id)
                 ),
             );
@@ -1383,7 +1393,7 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
                 &mut output,
                 0,
                 &format!(
-                    "Bridge {kind} step {} for transfer {}.",
+                    "Bridge {step_label} step {} for transfer {}.",
                     safe_text(status),
                     safe_text(transfer_id)
                 ),
@@ -1522,7 +1532,13 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
                     1,
                     &format!(
                         "{}: {}",
-                        safe_text(step["kind"].as_str().unwrap_or("step")),
+                        safe_text(
+                            if value["provider"] == "cctp" && step["kind"] == "deposit" {
+                                "burn"
+                            } else {
+                                step["kind"].as_str().unwrap_or("step")
+                            }
+                        ),
                         safe_text(step["state"].as_str().unwrap_or("pending"))
                     ),
                 );
@@ -1533,7 +1549,38 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
         }
         if let Some(diagnostic) = value["provider_status"].as_object() {
             if let Some(status) = diagnostic.get("status").and_then(Value::as_str) {
-                if value["provider"].as_str() == Some("arbitrum_canonical") {
+                if value["provider"] == "cctp" {
+                    let phase = match status {
+                        "attestation_pending" => "Waiting for Circle attestation.",
+                        "mint_ready" => {
+                            "Attestation verified; explicitly submit the destination mint under current authority."
+                        }
+                        "destination_gas_required" => {
+                            "Destination ETH gas is required before minting."
+                        }
+                        "attestation_expired" => {
+                            "The attestation expired; recover the same burn before preparing a mint."
+                        }
+                        "mint_submission_uncertain" => {
+                            "Destination mint outcome is uncertain; reconcile its original operation."
+                        }
+                        "processed_receipt_pending" => {
+                            "Message processed; exact destination USDC receipt is still being verified."
+                        }
+                        "destination_settled"
+                            if diagnostic.get("settled") == Some(&Value::Bool(true)) =>
+                        {
+                            "Destination mint and USDC receipt verified."
+                        }
+                        _ => "CCTP settlement evidence is still being verified.",
+                    };
+                    line(&mut output, 0, phase);
+                    if let Some(action) = diagnostic.get("next_action").and_then(Value::as_str)
+                        && value["next_action"].as_str() != Some(action)
+                    {
+                        line(&mut output, 0, &format!("Next: {}", safe_text(action)));
+                    }
+                } else if value["provider"].as_str() == Some("arbitrum_canonical") {
                     line(
                         &mut output,
                         0,
@@ -1626,6 +1673,7 @@ fn bridge_provider_name(
 ) -> Option<&'static str> {
     match (provider?, destination_chain_id?) {
         ("relay", _) => Some("Relay"),
+        ("cctp", _) => Some("Circle CCTP V2"),
         ("arbitrum_canonical", 42161) => Some("Canonical Inbox"),
         ("arbitrum_canonical", 4663) => Some("Canonical Inbox"),
         _ => None,
@@ -2942,6 +2990,39 @@ mod tests {
         );
         assert!(text.contains("fin read bridge.status"));
         assert!(!text.contains("Transfer completed"));
+    }
+
+    #[test]
+    fn cctp_burn_and_waiting_states_do_not_claim_destination_completion() {
+        let burn = json!({"operation":"bridge.transfer","input":{"transferId":"cctp-id","stepKind":"deposit"},"status":"completed","preview":{"binding":{"quote":{"provider":"cctp"}}}});
+        let original = burn.clone();
+        let text = render_human("status", &burn, false);
+        assert!(text.contains("CCTP source burn confirmed"));
+        assert!(text.contains("destination mint and receipt are still pending"));
+        assert!(!text.contains("Source deposit confirmed"));
+        assert_eq!(burn, original);
+        for (status, expected) in [
+            ("attestation_pending", "Waiting for Circle attestation"),
+            (
+                "destination_gas_required",
+                "Destination ETH gas is required",
+            ),
+            (
+                "processed_receipt_pending",
+                "exact destination USDC receipt is still being verified",
+            ),
+        ] {
+            let pending = json!({"transfer_id":"cctp-id","provider":"cctp","state":"destination_pending","steps":[{"kind":"deposit","state":"settled"},{"kind":"mint","state":"unsubmitted"}],"provider_status":{"status":status,"settled":false,"next_action":"Preserve this transfer and resume its original mint."}});
+            let text = render_human("read", &pending, false);
+            assert!(text.contains("burn: settled"));
+            assert!(text.contains(expected));
+            assert!(text.contains("Next: Preserve this transfer"));
+            assert!(!text.contains("receipt verified"));
+        }
+        assert_eq!(
+            bridge_provider_name(Some("cctp"), Some(42161)),
+            Some("Circle CCTP V2")
+        );
     }
 
     #[test]

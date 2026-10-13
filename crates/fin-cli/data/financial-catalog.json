@@ -13133,7 +13133,7 @@
   },
   {
     "name": "bridge.quotes",
-    "description": "Compare the configured Relay, Arbitrum canonical and Base canonical bridge routes for exact EVM wallet, asset and recipient identities.",
+    "description": "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact EVM wallet, asset and recipient identities.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -13362,6 +13362,23 @@
           ],
           "type": "object"
         },
+        "CctpOptions": {
+          "additionalProperties": false,
+          "properties": {
+            "transferMode": {
+              "$ref": "#/$defs/CctpTransferMode",
+              "default": "standard"
+            }
+          },
+          "type": "object"
+        },
+        "CctpTransferMode": {
+          "enum": [
+            "standard",
+            "fast"
+          ],
+          "type": "string"
+        },
         "FeeCap": {
           "additionalProperties": false,
           "properties": {
@@ -13438,8 +13455,24 @@
             "source_usd_per_unit_micros": null
           }
         },
+        "cctp": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CctpOptions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "intent": {
           "$ref": "#/$defs/BridgeQuoteIntentInput"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "refreshTransferId": {
           "type": [
@@ -13599,10 +13632,36 @@
         }
       }
     ],
-    "coverage": "Compares configured Relay, Arbitrum canonical and Base canonical routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.",
+    "coverage": "Compares configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.",
     "completion": "Returns exact assets, Fin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.",
     "semantics": {
       "agent_supplied_calldata": false,
+      "cctp": {
+        "default_mode": "standard",
+        "funding_hyperliquid": "CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit",
+        "gas": "Existing source and destination ETH required; destination mint estimate provisional until attestation.",
+        "modes": [
+          "standard",
+          "fast"
+        ],
+        "networks": [
+          1,
+          42161,
+          8453
+        ],
+        "refunds": "No refund path; resume the original mint",
+        "stages": [
+          "approval_if_needed",
+          "deposit (burn)",
+          "attestation",
+          "mint",
+          "verified_receipt"
+        ],
+        "unavailable": {
+          "robinhood": "No official CCTP domain/deployment",
+          "solana": "Fin has no Solana signing and settlement runtime"
+        }
+      },
       "command_line_example": "fin read bridge.quotes --input JSON --json",
       "financial_authorization": false,
       "provider_comparison": "configured providers only; not market-wide",
@@ -13620,6 +13679,10 @@
         {
           "coverage": "bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages",
           "id": "base_canonical"
+        },
+        {
+          "coverage": "All six directed native-USDC routes among Ethereum, Base and Arbitrum; Standard and Fast; explicit destination mint",
+          "id": "cctp"
         }
       ],
       "quote_persistence": "broker-owned, restart-safe",
@@ -13628,7 +13691,7 @@
   },
   {
     "name": "bridge.recovery",
-    "description": "Declare fresh deferred stages for the same Base withdrawal after an invalidated settled proof or a canonically reverted stage.",
+    "description": "Recover the same Base withdrawal or CCTP burn: declare a replacement after proven stage failure, or explicitly request expired CCTP attestation refresh.",
     "kind": "read",
     "execution_actor": "agent_readable",
     "input_schema": {
@@ -13648,7 +13711,6 @@
     "output_schema": {
       "required": [
         "transfer_id",
-        "withdrawal_hash",
         "steps",
         "created",
         "next_action"
@@ -13687,12 +13749,13 @@
         "transferId": "TRANSFER_ID_FROM_QUOTE"
       }
     ],
-    "coverage": "Base canonical withdrawals with independently invalidated settled proof or canonically reverted proof/finalization.",
+    "coverage": "Base canonical withdrawals and CCTP V2 transfers with settled source proof; no source replay.",
     "completion": "Persists new deferred step identities; all prior operations, source proof, bounds and fees remain intact. Repeated reads return the same unsubmitted pair.",
     "semantics": {
       "agent_supplied_calldata": false,
       "approval_renewal": false,
       "financial_authorization": false,
+      "may_request_cctp_reattestation": true,
       "may_submit": false,
       "next": "Obtain fresh exact approval or revise the same named plan before executing the returned stages."
     }
@@ -13954,8 +14017,8 @@
         "transferId": "SYNTHETIC-transfer-id"
       }
     ],
-    "coverage": "Reconciles saved Relay transfers and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
-    "completion": "Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
+    "coverage": "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.",
+    "completion": "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.",
     "semantics": {
       "financial_authorization": false,
       "may_reconcile": true,
@@ -13966,7 +14029,7 @@
   },
   {
     "name": "bridge.transfer",
-    "description": "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof or finalization stage under its exact or named-plan authority.",
+    "description": "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof/finalization or CCTP destination mint under its exact or named-plan authority.",
     "kind": "write",
     "execution_actor": "agent_invocable",
     "input_schema": {
@@ -14132,7 +14195,8 @@
             "reset_allowance",
             "deposit",
             "prove",
-            "finalize"
+            "finalize",
+            "mint"
           ],
           "type": "string"
         },
@@ -14294,7 +14358,7 @@
         "transferId": "SYNTHETIC-transfer-id"
       }
     ],
-    "coverage": "Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
+    "coverage": "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, in Standard (default) and Fast modes with explicit mint. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.",
     "completion": "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.",
     "semantics": {
       "agent_supplied_calldata": false,
@@ -14311,7 +14375,8 @@
       "providers": [
         "relay",
         "arbitrum_canonical",
-        "base_canonical"
+        "base_canonical",
+        "cctp"
       ],
       "request_identity": "each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route",
       "service_required": true,

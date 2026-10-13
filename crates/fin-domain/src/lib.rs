@@ -126,16 +126,17 @@ pub enum BridgeStepKind {
     Deposit,
     Prove,
     Finalize,
+    Mint,
 }
 
 impl BridgeStepKind {
     pub const fn is_destination_stage(&self) -> bool {
-        matches!(self, Self::Prove | Self::Finalize)
+        matches!(self, Self::Prove | Self::Finalize | Self::Mint)
     }
     pub const fn pending_state(&self) -> BridgeTransferState {
         match self {
             Self::Deposit => BridgeTransferState::SourcePending,
-            Self::Prove | Self::Finalize => BridgeTransferState::DestinationPending,
+            Self::Prove | Self::Finalize | Self::Mint => BridgeTransferState::DestinationPending,
             Self::Approval | Self::ResetAllowance => BridgeTransferState::ApprovalPending,
         }
     }
@@ -152,7 +153,8 @@ impl BridgeStepKind {
             | Self::ResetAllowance
             | Self::Deposit
             | Self::Prove
-            | Self::Finalize => "bridge.transfer",
+            | Self::Finalize
+            | Self::Mint => "bridge.transfer",
         }
     }
 }
@@ -288,8 +290,10 @@ pub struct BridgeDestinationLocator {
     pub source_evidence_id: String,
     pub destination_chain_id: u64,
     pub transaction_hash: String,
-    /// Withdrawal messages do not determine a finalization transaction hash.
-    /// The scheme binds this immutable message hash instead; old locators omit it.
+    /// Deferred bridge messages do not determine a destination transaction hash.
+    /// The scheme binds an immutable message digest instead; old locators omit it.
+    /// CCTP V2 uses the normalized immutable burn digest because attestation
+    /// fills protocol fields that were not known when the source emitted it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_hash: Option<String>,
     pub proof: Value,

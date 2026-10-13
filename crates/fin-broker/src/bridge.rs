@@ -4,6 +4,7 @@
 
 use super::*;
 mod base_recovery;
+mod cctp_lifecycle;
 use fin_bridge::{
     BridgeAssetInput, BridgeBounds, BridgeEvidenceCandidate, BridgeIntent, BridgeProvider,
     BridgeQuote, BridgeQuoteInput, BridgeQuoteRequest, BridgeStatusInput, BridgeStep,
@@ -134,6 +135,19 @@ impl BridgeAdapter {
                 BaseCanonicalConfig::reviewed(),
             )?));
         }
+        providers.push(Arc::new(fin_bridge::cctp::CctpProvider::new(
+            observers
+                .iter()
+                .filter(|(chain, _)| matches!(**chain, 1 | 8453 | 42161))
+                .map(|(chain, runtime)| {
+                    (
+                        *chain,
+                        Arc::new(fin_evm::EvmRuntime::new(runtime.rpc.clone(), *chain, None)),
+                    )
+                })
+                .collect(),
+            fin_bridge::cctp::CctpConfig::reviewed(),
+        )?));
         Self::with_providers(providers, wallet_adapters, observers, valuator)
     }
 
@@ -536,7 +550,15 @@ impl BridgeAdapter {
         bounds: &BridgeBounds,
         previous: Option<&SavedQuote>,
     ) -> fin_domain::Result<PreparedBridge> {
-        if quote.provider == "base_canonical" {
+        if quote.provider == "base_canonical"
+            || (quote.provider == "cctp"
+                && plan
+                    .steps
+                    .iter()
+                    .filter(|s| s.kind == ProviderStepKind::Mint)
+                    .count()
+                    > 1)
+        {
             return Ok(plan);
         }
         let approval = quote
@@ -554,11 +576,18 @@ impl BridgeAdapter {
                 .as_ref()
                 .unwrap_or(&approval.amount),
         )?;
+        let destination_steps = plan
+            .steps
+            .iter()
+            .filter(|step| matches!(step.kind, ProviderStepKind::Mint))
+            .cloned()
+            .collect::<Vec<_>>();
         let kinds = if let Some(previous) = previous {
             previous
                 .plan
                 .steps
                 .iter()
+                .filter(|step| step.kind != ProviderStepKind::Mint)
                 .map(|step| step.kind)
                 .collect::<Vec<_>>()
         } else {
@@ -674,7 +703,7 @@ impl BridgeAdapter {
                     )
                 })?,
                 ProviderStepKind::Deposit => deposit.clone(),
-                ProviderStepKind::Prove | ProviderStepKind::Finalize => {
+                ProviderStepKind::Prove | ProviderStepKind::Finalize | ProviderStepKind::Mint => {
                     return Err(FinError::validation(
                         "Deferred stages require the Base canonical provider.",
                     ));
@@ -687,9 +716,22 @@ impl BridgeAdapter {
                 ProviderStepKind::Approval => vec![],
                 ProviderStepKind::Deposit if ordinal > 0 => vec![(ordinal - 1) as u8],
                 ProviderStepKind::Deposit => vec![],
-                ProviderStepKind::Prove | ProviderStepKind::Finalize => vec![],
+                ProviderStepKind::Prove | ProviderStepKind::Finalize | ProviderStepKind::Mint => {
+                    vec![]
+                }
             };
             steps.push(step);
+        }
+        for mut destination in destination_steps {
+            destination.ordinal = u8::try_from(steps.len()).map_err(|_| internal_error())?;
+            destination.dependencies = vec![
+                steps
+                    .iter()
+                    .find(|step| step.kind == ProviderStepKind::Deposit)
+                    .ok_or_else(internal_error)?
+                    .ordinal,
+            ];
+            steps.push(destination);
         }
         plan.steps = steps;
         if let Some(step) = plan
@@ -723,7 +765,11 @@ impl BridgeAdapter {
             .approval
             .as_ref()
             .map(|approval| approval.spender.as_str())
-            .unwrap_or(RELAY_DEPOSITORY);
+            .unwrap_or(if quote.provider == "cctp" {
+                fin_bridge::cctp::TOKEN_MESSENGER
+            } else {
+                RELAY_DEPOSITORY
+            });
         let observer = self
             .observers
             .get(&quote.intent.source.chain_id)
@@ -829,7 +875,7 @@ impl BridgeAdapter {
             },
             Definition {
                 name: "bridge.quotes".into(),
-                description: "Compare the configured Relay, Arbitrum canonical and Base canonical bridge routes for exact EVM wallet, asset and recipient identities.".into(),
+                description: "Compare the configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 bridge routes for exact EVM wallet, asset and recipient identities.".into(),
                 kind: OperationKind::Read,
                 execution_actor: fin_domain::ExecutionActor::AgentReadable,
                 input_schema: serde_json::to_value(schema_for!(BridgeQuoteInput)).expect("schema serializes"),
@@ -839,22 +885,22 @@ impl BridgeAdapter {
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"amount":"10000000"},"bounds":{}}),
                     json!({"intent":{"wallet":"wallet","source":{"chainId":1},"destinationChainId":4663,"destinationAssets":[{"chainId":4663}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[],"amount":"10000000000000000"},"bounds":{}})
                 ],
-                coverage: "Compares configured Relay, Arbitrum canonical and Base canonical routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
+                coverage: "Compares configured Relay, Arbitrum canonical, Base canonical and Circle CCTP V2 routes where their exact assets and networks apply. The response attributes successful quotes and per-provider failures; it reports coverage of these configured providers only, not the market.".into(),
                 completion: "Returns exact assets, Fin-priced fees, net receipt floors, provider arrival estimates when supplied, refund paths, quote validity and finite reviewed steps. Quotes reserve no funds and do not authorize a write.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"none","providers":[{"id":"relay","coverage":"quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"}],"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by Fin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"fin read bridge.quotes --input JSON --json"}),
+                semantics: json!({"service_required":true,"financial_authorization":false,"provider_credentials":"none","providers":[{"id":"relay","coverage":"quote-dependent native ETH and dynamically verified exact ERC-20 protocol routes"},{"id":"arbitrum_canonical","coverage":"native ETH Ethereum Mainnet to Arbitrum One or Robinhood Chain; same source-wallet recipient; no refund path"},{"id":"base_canonical","coverage":"bidirectional Ethereum/Base ETH and verified StandardBridge ERC-20 pairs; separate withdrawal prove/finalize stages"},{"id":"cctp","coverage":"All six directed native-USDC routes among Ethereum, Base and Arbitrum; Standard and Fast; explicit destination mint"}],"cctp":{"networks":[1,42161,8453],"modes":["standard","fast"],"default_mode":"standard","gas":"Existing source and destination ETH required; destination mint estimate provisional until attestation.","stages":["approval_if_needed","deposit (burn)","attestation","mint","verified_receipt"],"unavailable":{"robinhood":"No official CCTP domain/deployment","solana":"Fin has no Solana signing and settlement runtime"},"refunds":"No refund path; resume the original mint","funding_hyperliquid":"CCTP to Arbitrum owner wallet, then explicit hyperliquid.account.deposit and verified account credit"},"provider_comparison":"configured providers only; not market-wide","provider_usd_fields":"ignored; fee USD values are independently priced by Fin","agent_supplied_calldata":false,"quote_persistence":"broker-owned, restart-safe","command_line_example":"fin read bridge.quotes --input JSON --json"}),
             },
             Definition {
                 name: "bridge.transfer".into(),
-                description: "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof or finalization stage under its exact or named-plan authority.".into(),
+                description: "Prepare or execute one persisted bridge approval, source deposit, Base withdrawal proof/finalization or CCTP destination mint under its exact or named-plan authority.".into(),
                 kind: OperationKind::Write,
                 execution_actor: fin_domain::ExecutionActor::AgentInvocable,
                 input_schema: serde_json::to_value(schema_for!(BridgeTransferInput)).expect("schema serializes"),
                 output_schema: json!({"type":"object","required":["transfer_id","step_id","kind","status"]}),
                 error_schema: schema_for_fin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id","stepId":"SYNTHETIC-step-id","stepKind":"deposit","bounds":{"input":{"minimum":"10000000","maximum":"10000000"},"maximum_source_debit":"10000000","minimum_net_receipt":{"asset":{"network":"ethereum:42161","reference":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","decimals":6},"atoms":"9500000"},"fee_caps":[{"asset":{"network":"ethereum:1","reference":"native","decimals":18},"kind":"gas","maximum":"1000000000000000"}]}})],
-                coverage: "Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
+                coverage: "CCTP V2 supports all six directed native-USDC routes between Ethereum, Base and Arbitrum, in Standard (default) and Fast modes with explicit mint. Relay handles quote-dependent native ETH and dynamically verified ERC-20 source steps. Base canonical handles ETH and verified ERC-20 pairs in both directions, including deferred withdrawal proof/finalization stages. Canonical Inbox handles native ETH from Ethereum Mainnet to Arbitrum One or Robinhood Chain when the destination is the same EOA; that route has no refund path.".into(),
                 completion: "Each wallet step is a separate immutable operation. Source proof moves principal to nonspendable transit; destination settlement remains pending until the original provider's exact destination proof and configured finality are verified.".into(),
-                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
+                semantics: json!({"service_required":true,"financial_authorization":"fresh per-write Touch ID, one finite transfer-boundary grant, or one named-plan revision with each exact bridge step listed separately","named_plan_support":"adapter-reviewed one step per bridge.transfer input; every step binds the same persisted transfer and exact step ID/kind, and selected BridgeBounds are independently enforced","providers":["relay","arbitrum_canonical","base_canonical","cctp"],"source_and_destination":"reviewed wallet networks only","observer_only_chains":[{"chain_id":537713,"name":"RelayChain","wallet_authority":false}],"agent_supplied_calldata":false,"request_identity":"each step has its own operation ID; uncertain submissions reconcile under the original ID; quote refresh stays on the persisted provider and route","command_line_example":"fin preview bridge.transfer --input '{\"transferId\":\"TRANSFER_ID\",\"stepId\":\"STEP_ID\",\"stepKind\":\"deposit\",\"bounds\":{...}}'"}),
             },
             Definition {
                 name: "bridge.status".into(),
@@ -873,8 +919,8 @@ impl BridgeAdapter {
                 }),
                 error_schema: schema_for_fin_error(),
                 examples: vec![json!({"transferId":"SYNTHETIC-transfer-id"})],
-                coverage: "Reconciles saved Relay transfers and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.".into(),
-                completion: "Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.".into(),
+                coverage: "Reconciles saved CCTP, Base canonical, Relay and Canonical Inbox transfers from protected quote/source evidence; unused quotes are not financial pending state.".into(),
+                completion: "CCTP requires the original message and canonical native-USDC mint receipt; burn and attestation alone remain intermediate. Relay settles only after exact reviewed-router or direct-order-tag proof and the configured destination confirmation policy. Canonical settles only after the source-derived type-0x64 child transaction and configured destination confirmation policy match the saved message locator. Repeated status reads include the persisted typed credit, costs and sanitized proof identity.".into(),
                 semantics: json!({"financial_authorization":false,"may_reconcile":true,"may_submit":false,"provider_identity":"saved provider only; no fallback or route switching","provider_request_identity":"broker-persisted only"}),
             },
         ]
@@ -1282,11 +1328,51 @@ impl BridgeAdapter {
             .map(|(_, _, intent)| intent.clone())
             .unwrap_or_else(|| intent.clone());
         let request = BridgeQuoteRequest {
+            cctp: input.cctp.clone().or_else(|| {
+                existing.as_ref().and_then(|(_, previous, _)| {
+                    previous
+                        .quote
+                        .cctp
+                        .as_ref()
+                        .map(|metadata| fin_bridge::cctp::CctpOptions {
+                            transfer_mode: metadata.transfer_mode,
+                        })
+                })
+            }),
             intent: request_intent.clone(),
             bounds: quote_bounds.clone(),
         };
         let selected_providers = if let Some((_, previous, _)) = &existing {
+            if input
+                .provider
+                .as_ref()
+                .is_some_and(|id| id != &previous.quote.provider)
+            {
+                return Err(FinError::validation(
+                    "A refresh cannot change its bridge provider.",
+                ));
+            }
+            if input.cctp.as_ref().is_some_and(|options| {
+                previous
+                    .quote
+                    .cctp
+                    .as_ref()
+                    .is_none_or(|metadata| metadata.transfer_mode != options.transfer_mode)
+            }) {
+                return Err(FinError::validation(
+                    "A refresh cannot change its approved CCTP mode.",
+                ));
+            }
             vec![self.provider(&previous.quote.provider)?]
+        } else if let Some(id) = input.provider.as_deref() {
+            if input.cctp.is_some() && id != "cctp" {
+                return Err(FinError::validation(
+                    "CCTP options require the cctp provider.",
+                ));
+            }
+            vec![self.provider(id)?]
+        } else if input.cctp.is_some() {
+            vec![self.provider("cctp")?]
         } else {
             self.providers.values().cloned().collect::<Vec<_>>()
         };
@@ -1669,6 +1755,10 @@ impl BridgeAdapter {
                 "Keep the transfer unresolved and inspect its original quote and operation records."
             }
         };
+        let next_action = provider_status
+            .as_ref()
+            .and_then(|status| status["next_action"].as_str())
+            .unwrap_or(next_action);
         let saved = self.saved_quote(&transfer)?;
         let settlement_policy = self.settlement_policy(
             saved.quote.intent.source.chain_id,
@@ -1685,6 +1775,9 @@ impl BridgeAdapter {
         transfer: &BridgeTransferRecord,
     ) -> fin_domain::Result<Value> {
         let saved = self.saved_quote(transfer)?;
+        if saved.quote.provider == "cctp" {
+            return self.reconcile_cctp_external(engine, transfer, &saved).await;
+        }
         if saved.quote.provider == "base_canonical" {
             return self.reconcile_base_external(engine, transfer, &saved).await;
         }
@@ -2740,6 +2833,38 @@ impl BridgeAdapter {
         asset: &fin_domain::AssetId,
         candidate: fin_evm::alloy::primitives::U256,
     ) -> fin_domain::Result<()> {
+        let (spent, reserved) = self.transfer_gas_usage(transfer, Some(current_step), asset)?;
+        let total = candidate
+            .checked_add(spent)
+            .and_then(|n| n.checked_add(reserved))
+            .ok_or_else(internal_error)?;
+        let chain = asset
+            .network
+            .strip_prefix("ethereum:")
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(internal_error)?;
+        if total > fin_evm::u256(&maximum_gas_cap(bounds, chain)?)? {
+            return Err(error(
+                "BRIDGE_CUMULATIVE_FEE_LIMIT",
+                "preview",
+                "Prior bridge costs and unresolved reservations leave insufficient approved gas budget for this stage.",
+                "Preserve the transfer identity and inspect bridge.status; obtain an explicit revised fee budget where supported.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Canonical costs and uncertain reservations remain separate: only proven
+    /// costs can reduce the balance needed to fund the remaining approved cap.
+    fn transfer_gas_usage(
+        &self,
+        transfer: &BridgeTransferRecord,
+        current_step: Option<&str>,
+        asset: &fin_domain::AssetId,
+    ) -> fin_domain::Result<(
+        fin_evm::alloy::primitives::U256,
+        fin_evm::alloy::primitives::U256,
+    )> {
         let engine = self
             .engine
             .lock()
@@ -2760,11 +2885,13 @@ impl BridgeAdapter {
             }
             Vec::new()
         };
-        let mut total = candidate;
+        let mut spent = fin_evm::alloy::primitives::U256::ZERO;
+        let mut reserved = fin_evm::alloy::primitives::U256::ZERO;
         for operation in operations.iter().filter(|operation| {
             operation.preview.as_ref().is_some_and(|preview| {
                 preview.binding["transfer_id"] == transfer.id
-                    && preview.binding["step_id"].as_str() != Some(current_step)
+                    && current_step
+                        .is_none_or(|step| preview.binding["step_id"].as_str() != Some(step))
             })
         }) {
             if let Some(effects) = &operation.effects {
@@ -2776,7 +2903,7 @@ impl BridgeAdapter {
                     } = effect
                         && amount.asset == *asset
                     {
-                        total = total
+                        spent = spent
                             .checked_add(fin_evm::u256(&amount.atoms)?)
                             .ok_or_else(internal_error)?;
                     }
@@ -2794,27 +2921,14 @@ impl BridgeAdapter {
                     if cost.amount.asset == *asset
                         && cost.treatment == CostTreatment::AdditionalDebit
                     {
-                        total = total
+                        reserved = reserved
                             .checked_add(fin_evm::u256(&cost.amount.atoms)?)
                             .ok_or_else(internal_error)?;
                     }
                 }
             }
         }
-        let chain = asset
-            .network
-            .strip_prefix("ethereum:")
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(internal_error)?;
-        if total > fin_evm::u256(&maximum_gas_cap(bounds, chain)?)? {
-            return Err(error(
-                "BRIDGE_CUMULATIVE_FEE_LIMIT",
-                "preview",
-                "Prior bridge costs and unresolved reservations leave insufficient approved gas budget for this stage.",
-                "Preserve the withdrawal identity and inspect bridge.status; obtain an explicit revised fee budget where supported.",
-            ));
-        }
-        Ok(())
+        Ok((spent, reserved))
     }
 
     fn saved_quote(&self, record: &BridgeTransferRecord) -> fin_domain::Result<SavedQuote> {
@@ -3100,11 +3214,16 @@ impl BridgeAdapter {
             BridgeStepKind::Deposit => String::new(),
             BridgeStepKind::Prove => "Prove the saved Base withdrawal on Ethereum".into(),
             BridgeStepKind::Finalize => "Finalize the saved Base withdrawal on Ethereum".into(),
+            BridgeStepKind::Mint => "Mint the saved CCTP burn on its approved destination".into(),
         };
         let bridge_clause = if matches!(kind, BridgeStepKind::Deposit) {
-            format!("Bridge {amount}{range}")
+            if saved.quote.provider == "cctp" {
+                format!("Burn {amount}{range} for CCTP")
+            } else {
+                format!("Bridge {amount}{range}")
+            }
         } else if kind.is_destination_stage() {
-            format!("{action}; saved withdrawal {amount}")
+            format!("{action}; saved principal {amount}")
         } else {
             format!("{action}; bridge {amount}{range}")
         };
@@ -3156,6 +3275,7 @@ fn bridge_provider_label(provider: &str) -> &'static str {
         "relay" => "Relay",
         "arbitrum_canonical" => "Canonical Inbox",
         "base_canonical" => "Base canonical bridge",
+        "cctp" => "Circle CCTP V2",
         _ => "reviewed bridge provider",
     }
 }
@@ -3462,6 +3582,9 @@ impl Adapter for BridgeAdapter {
                 )
             })?;
         let saved = self.saved_quote(&record)?;
+        if requested.step_kind == BridgeStepKind::Mint {
+            return Ok(Some(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS));
+        }
         if requested.step_kind.is_destination_stage()
             || (saved.quote.provider == "base_canonical"
                 && saved.quote.intent.source.chain_id == 8453)
@@ -3516,7 +3639,7 @@ impl Adapter for BridgeAdapter {
 
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
         if operation == "bridge.recovery" {
-            return self.base_recovery(input).await;
+            return self.bridge_recovery(input).await;
         }
         if operation == "bridge.routes" {
             return self.routes(input).await;
@@ -3549,6 +3672,11 @@ impl Adapter for BridgeAdapter {
             ));
         }
         let (mut record, mut saved, mut step, link, requested_bounds) = self.step_context(input)?;
+        if link.kind == BridgeStepKind::Mint {
+            return self
+                .prepare_cctp_stage(input, &record, &saved, step, &link, requested_bounds)
+                .await;
+        }
         if link.kind.is_destination_stage() {
             return self
                 .prepare_base_stage(input, &record, &saved, step, &link, requested_bounds)
@@ -3616,6 +3744,7 @@ impl Adapter for BridgeAdapter {
                 .plan
                 .steps
                 .iter()
+                .filter(|step| step.kind != ProviderStepKind::Mint)
                 .map(|step| step.kind)
                 .collect::<Vec<_>>();
             if actual != desired {
@@ -3768,6 +3897,14 @@ impl Adapter for BridgeAdapter {
                 ));
             }
             saved.plan.fixed_scope_digest = selected_plan.fixed_scope_digest;
+        }
+        if saved.quote.provider == "cctp" {
+            saved.plan.fixed_scope_digest = self
+                .provider("cctp")?
+                .prepare(&saved.quote, &selected_bounds, sender)?
+                .fixed_scope_digest;
+            self.validate_cctp_gas(&saved.quote, &selected_bounds, wallet_alias, &record)
+                .await?;
         }
         if matches!(step.kind, ProviderStepKind::Approval) {
             let approval = saved.quote.approval.as_ref().ok_or_else(|| {
@@ -4069,7 +4206,7 @@ impl Adapter for BridgeAdapter {
                 asset: source_asset.clone(),
                 maximum_debit: saved.quote.gross_debit.atoms.clone(),
             }],
-            ProviderStepKind::Prove | ProviderStepKind::Finalize => vec![],
+            ProviderStepKind::Prove | ProviderStepKind::Finalize | ProviderStepKind::Mint => vec![],
         };
         let intent = FinancialIntent {
             debits,
@@ -4262,15 +4399,23 @@ impl Adapter for BridgeAdapter {
         let provider = self.provider(&saved.quote.provider)?;
         let mut normalized_plan = if requested.step_kind.is_destination_stage()
             && record.transit.is_some()
-            && saved.quote.provider == "base_canonical"
+            && matches!(saved.quote.provider.as_str(), "base_canonical" | "cctp")
         {
             let mut plan = saved.plan.clone();
             plan.bounds = bounds.clone();
-            plan.fixed_scope_digest = fin_bridge::base_canonical::scope_digest(
-                &saved.quote,
-                &bounds,
-                &saved.quote.intent.source_address,
-            )?;
+            plan.fixed_scope_digest = if saved.quote.provider == "cctp" {
+                fin_bridge::cctp::scope_digest(
+                    &saved.quote,
+                    &bounds,
+                    &saved.quote.intent.source_address,
+                )?
+            } else {
+                fin_bridge::base_canonical::scope_digest(
+                    &saved.quote,
+                    &bounds,
+                    &saved.quote.intent.source_address,
+                )?
+            };
             plan
         } else {
             provider.prepare(&saved.quote, &bounds, &saved.quote.intent.source_address)?
@@ -4476,20 +4621,21 @@ impl Adapter for BridgeAdapter {
                 .atoms
                 .clone(),
         );
-        let deferred_receipt = if link.kind == BridgeStepKind::Finalize {
-            expectation
-                .destination
-                .first()
-                .map(|target| ResourceAmount {
-                    resource: target.resource.clone(),
-                    amount: FinAmount {
-                        asset: target.asset.clone(),
-                        atoms: target.minimum_atoms.clone(),
-                    },
-                })
-        } else {
-            None
-        };
+        let deferred_receipt =
+            if matches!(link.kind, BridgeStepKind::Finalize | BridgeStepKind::Mint) {
+                expectation
+                    .destination
+                    .first()
+                    .map(|target| ResourceAmount {
+                        resource: target.resource.clone(),
+                        amount: FinAmount {
+                            asset: target.asset.clone(),
+                            atoms: target.minimum_atoms.clone(),
+                        },
+                    })
+            } else {
+                None
+            };
         let mut possible_credits = std::collections::BTreeSet::new();
         for target in expectation
             .destination
@@ -4535,11 +4681,14 @@ impl Adapter for BridgeAdapter {
         prepared: &PreparedOperation,
         bounds: &Value,
     ) -> fin_domain::Result<fin_domain::boundaries::BoundarySpec> {
-        if prepared.binding["quote"]["provider"] == "base_canonical" {
+        if matches!(
+            prepared.binding["quote"]["provider"].as_str(),
+            Some("base_canonical" | "cctp")
+        ) {
             return Err(error(
                 "BRIDGE_BOUNDARY_UNSUPPORTED",
                 "authorization",
-                "Base canonical stages use exact approval or a named sequential plan.",
+                "Explicit destination stages use exact approval or a named sequential plan.",
                 "Authorize the exact step, or include the finite stages and cumulative fees in a named plan.",
             ));
         }
@@ -4602,6 +4751,11 @@ impl Adapter for BridgeAdapter {
                     ));
                 }
             }
+        }
+        if kind == BridgeStepKind::Mint {
+            return self
+                .revalidate_cctp_mint(prepared, &transaction, &quote)
+                .await;
         }
         if kind.is_destination_stage() {
             let id = prepared.binding["transfer_id"]
@@ -4728,6 +4882,31 @@ impl Adapter for BridgeAdapter {
                     "Canonical token-pair precision or deployment changed before dispatch.",
                 ));
             }
+        }
+        if quote.provider == "cctp" {
+            let bounds: BridgeBounds = serde_json::from_value(prepared.binding["bounds"].clone())
+                .map_err(|_| internal_error())?;
+            let transfer = self
+                .state()?
+                .transfer(
+                    prepared.binding["transfer_id"]
+                        .as_str()
+                        .ok_or_else(internal_error)?,
+                )
+                .map_err(store_error)?
+                .ok_or_else(internal_error)?;
+            self.cctp_provider()?
+                .verify_deployments(&quote.intent)
+                .await?;
+            self.validate_cctp_gas(
+                &quote,
+                &bounds,
+                transfer.metadata["wallet_alias"]
+                    .as_str()
+                    .ok_or_else(internal_error)?,
+                &transfer,
+            )
+            .await?;
         }
         if quote.provider == "arbitrum_canonical" {
             require_empty_code(&runtime, &quote.intent.source_address, None).await?;
@@ -5742,6 +5921,7 @@ fn domain_step_kind(kind: &ProviderStepKind) -> BridgeStepKind {
         ProviderStepKind::Deposit => BridgeStepKind::Deposit,
         ProviderStepKind::Prove => BridgeStepKind::Prove,
         ProviderStepKind::Finalize => BridgeStepKind::Finalize,
+        ProviderStepKind::Mint => BridgeStepKind::Mint,
     }
 }
 
@@ -5769,6 +5949,7 @@ fn step_kind_name(kind: &BridgeStepKind) -> &'static str {
         BridgeStepKind::Deposit => "deposit",
         BridgeStepKind::Prove => "prove",
         BridgeStepKind::Finalize => "finalize",
+        BridgeStepKind::Mint => "mint",
     }
 }
 
@@ -6043,6 +6224,7 @@ fn finite_bridge_boundary_summary(
             }
             ProviderStepKind::Prove => Ok("prove the original withdrawal on Ethereum; witness and simulation deferred until source proof".into()),
             ProviderStepKind::Finalize => Ok("finalize the original withdrawal on Ethereum after current portal readiness checks".into()),
+            ProviderStepKind::Mint => Ok("mint the original CCTP burn on the approved destination after attestation validation; destination ETH gas required".into()),
         })
         .collect::<fin_domain::Result<Vec<_>>>()?
         .join("; ");
@@ -6138,7 +6320,10 @@ fn prospective_debit_update_before_source_approval(
                     .first()
                     .is_none_or(|reset| current.depends_on.contains(&reset.step_id))
         }
-        BridgeStepKind::Deposit | BridgeStepKind::Prove | BridgeStepKind::Finalize => false,
+        BridgeStepKind::Deposit
+        | BridgeStepKind::Prove
+        | BridgeStepKind::Finalize
+        | BridgeStepKind::Mint => false,
     };
     if !reset_history_is_safe {
         return false;
@@ -6369,6 +6554,10 @@ async fn reconcile_wallet_step(
         BridgeStepKind::Deposit => {
             verify_source_deposit(&step, &preview.binding, &receipt, transfer_id, &runtime).await?
         }
+        BridgeStepKind::Mint => {
+            cctp_lifecycle::verify_mint_step(&preview.binding, &receipt)?;
+            (vec![], None)
+        }
         BridgeStepKind::Prove | BridgeStepKind::Finalize => {
             let locator: fin_domain::BridgeDestinationLocator =
                 serde_json::from_value(preview.binding["source_locator"].clone())
@@ -6487,6 +6676,9 @@ async fn verify_source_deposit(
 ) -> fin_domain::Result<(Vec<FinancialEffect>, Option<VerifiedSourceProof>)> {
     let quote: BridgeQuote = serde_json::from_value(binding["quote"].clone())
         .map_err(|_| FinError::validation("Stored bridge quote is malformed."))?;
+    if quote.provider == "cctp" {
+        return cctp_lifecycle::verify_source(&quote, receipt, transfer_id);
+    }
     if quote.provider == "arbitrum_canonical" {
         return verify_canonical_source_deposit(
             step,
@@ -6981,7 +7173,10 @@ async fn verify_allowance_step(
     let expected = match kind {
         BridgeStepKind::ResetAllowance => fin_evm::alloy::primitives::U256::ZERO,
         BridgeStepKind::Approval => after,
-        BridgeStepKind::Deposit | BridgeStepKind::Prove | BridgeStepKind::Finalize => {
+        BridgeStepKind::Deposit
+        | BridgeStepKind::Prove
+        | BridgeStepKind::Finalize
+        | BridgeStepKind::Mint => {
             return Err(FinError::validation(
                 "This bridge stage is not an allowance step.",
             ));
@@ -8020,6 +8215,7 @@ mod tests {
         };
         let saved = SavedQuote {
             quote: BridgeQuote {
+                cctp: None,
                 quote_id: "synthetic-quote".into(),
                 provider: "relay".into(),
                 route_id: "synthetic-route".into(),
@@ -8092,6 +8288,7 @@ mod tests {
             },
             plan: PreparedBridge {
                 quote: BridgeQuote {
+                    cctp: None,
                     quote_id: String::new(),
                     provider: String::new(),
                     route_id: String::new(),
@@ -8323,6 +8520,7 @@ mod tests {
     #[test]
     fn multi_step_bridge_uses_one_cumulative_gas_cap_per_asset() {
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: "synthetic-quote".into(),
             provider: "relay".into(),
             route_id: "synthetic-route".into(),

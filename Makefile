@@ -27,6 +27,7 @@ help:
 	  'make test-ui           Offline CLI, presentation and discovery tests' \
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
+	  'make test-cctp-fork    Owned CCTP contract forks; CCTP_FORK_ARGS="--chain 42161" selects one' \
 	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
 	  'make test-aave-cli-fork Public CLI named Aave lifecycle; AAVE_FORK_CHAIN=1|8453|42161' \
 	  'make test-aave-fork    Owned Aave V3 fork; AAVE_FORK_CHAIN=1|8453|42161, AAVE_FORK_POOL=optional-pool, AAVE_FORK_PIN=saved-pin.json' \
@@ -78,6 +79,7 @@ test-dev-env:
 	@python3 scripts/test-fork-runner.py
 	@python3 scripts/test-base-aave-fork-runner.py
 	@python3 scripts/test-amm-fork-runner.py
+	@python3 scripts/test-cctp-fork-runner.py
 	@python3 scripts/test-dev-workflow.py
 
 test-fork:
@@ -129,3 +131,7 @@ test-aave-fork:
 test-aave-cli-fork:
 	@python3 scripts/test-aave-fork-receipt-proxy.py
 	@python3 scripts/verify-aave-cli-plan-fork.py --chain "$(AAVE_FORK_CHAIN)" $(if $(AAVE_FORK_PIN),--pin "$(AAVE_FORK_PIN)",)
+
+.PHONY: test-cctp-fork
+test-cctp-fork:
+	@python3 scripts/verify-cctp-fork.py $(CCTP_FORK_ARGS)

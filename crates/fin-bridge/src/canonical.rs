@@ -271,6 +271,7 @@ impl BridgeProvider for CanonicalProvider {
         };
         let digest = quote_digest(intent, &now.to_rfc3339())?;
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: format!("canonical:{digest}"),
             provider: PROVIDER_ID.into(),
             route_id: format!("ethereum-native-eth-to-{}", intent.destination_chain_id),
@@ -1100,6 +1101,7 @@ mod tests {
     fn native_request(destination: u64) -> BridgeQuoteRequest {
         let wallet = "0x1111111111111111111111111111111111111111";
         BridgeQuoteRequest {
+            cctp: None,
             intent: BridgeIntent {
                 wallet: ResourceId("ethereum-wallet".into()),
                 source_address: wallet.into(),

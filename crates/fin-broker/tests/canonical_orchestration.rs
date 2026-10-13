@@ -504,6 +504,8 @@ impl Harness {
     }
     fn quote_input(&self, amount: &str, refresh: Option<String>) -> BridgeQuoteInput {
         BridgeQuoteInput {
+            provider: None,
+            cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "wallet".into(),
                 source: BridgeAssetInput {
@@ -909,6 +911,8 @@ async fn deployed_canonical_native_source_proof_on_both_children() -> Result<()>
             .read(
                 "bridge.quotes",
                 &serde_json::to_value(BridgeQuoteInput {
+                    provider: None,
+                    cctp: None,
                     intent: BridgeQuoteIntentInput {
                         wallet: "fork-wallet".into(),
                         source: BridgeAssetInput {
@@ -1126,6 +1130,8 @@ async fn deployed_base_canonical_native_source_proof_keeps_principal_in_transit(
         ..Default::default()
     };
     let quote_input = BridgeQuoteInput {
+        provider: None,
+        cctp: None,
         intent: BridgeQuoteIntentInput {
             wallet: "fork-wallet".into(),
             source: BridgeAssetInput {

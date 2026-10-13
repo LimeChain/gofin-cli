@@ -4,16 +4,16 @@ use super::*;
 pub(super) fn base_recovery_definition() -> Definition {
     Definition {
         name: "bridge.recovery".into(),
-        description: "Declare fresh deferred stages for the same Base withdrawal after an invalidated settled proof or a canonically reverted stage.".into(),
+        description: "Recover the same Base withdrawal or CCTP burn: declare a replacement after proven stage failure, or explicitly request expired CCTP attestation refresh.".into(),
         kind: OperationKind::Read,
         execution_actor: fin_domain::ExecutionActor::AgentReadable,
         input_schema: serde_json::to_value(schema_for!(BridgeStatusInput)).expect("schema"),
-        output_schema: json!({"type":"object","required":["transfer_id","withdrawal_hash","steps","created","next_action"]}),
+        output_schema: json!({"type":"object","required":["transfer_id","steps","created","next_action"]}),
         error_schema: schema_for_fin_error(),
         examples: vec![json!({"transferId":"TRANSFER_ID_FROM_QUOTE"})],
-        coverage: "Base canonical withdrawals with independently invalidated settled proof or canonically reverted proof/finalization.".into(),
+        coverage: "Base canonical withdrawals and CCTP V2 transfers with settled source proof; no source replay.".into(),
         completion: "Persists new deferred step identities; all prior operations, source proof, bounds and fees remain intact. Repeated reads return the same unsubmitted pair.".into(),
-        semantics: json!({"may_submit":false,"financial_authorization":false,"approval_renewal":false,"agent_supplied_calldata":false,"next":"Obtain fresh exact approval or revise the same named plan before executing the returned stages."}),
+        semantics: json!({"may_submit":false,"may_request_cctp_reattestation":true,"financial_authorization":false,"approval_renewal":false,"agent_supplied_calldata":false,"next":"Obtain fresh exact approval or revise the same named plan before executing the returned stages."}),
     }
 }
 
@@ -399,6 +399,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: "SYNTHETIC-quote".into(),
             provider: "base_canonical".into(),
             route_id: "SYNTHETIC-route".into(),

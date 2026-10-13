@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub mod base_canonical;
 pub mod canonical;
+pub mod cctp;
 pub mod relay;
 pub mod routes;
 pub use routes::*;
@@ -130,6 +131,8 @@ pub struct RefundPath {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeQuote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp: Option<cctp::CctpQuoteMetadata>,
     pub quote_id: String,
     pub provider: String,
     pub route_id: String,
@@ -171,6 +174,7 @@ pub enum BridgeStepKind {
     Deposit,
     Prove,
     Finalize,
+    Mint,
 }
 impl BridgeStepKind {
     /// Stable engine input spelling. Every concrete attempt continues to use
@@ -182,6 +186,7 @@ impl BridgeStepKind {
             Self::Deposit => "deposit",
             Self::Prove => "prove",
             Self::Finalize => "finalize",
+            Self::Mint => "mint",
         }
     }
 }
@@ -266,6 +271,8 @@ pub struct BridgeCapabilities {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BridgeQuoteRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp: Option<cctp::CctpOptions>,
     pub intent: BridgeIntent,
     pub bounds: BridgeBounds,
 }
@@ -275,6 +282,10 @@ pub struct BridgeQuoteRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BridgeQuoteInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cctp: Option<cctp::CctpOptions>,
     pub intent: BridgeQuoteIntentInput,
     #[serde(default)]
     pub bounds: BridgeBounds,
@@ -454,6 +465,9 @@ pub fn validate_fee_usd_caps(bounds: &BridgeBounds, fees: &[PricedBridgeFee]) ->
 
 #[async_trait]
 pub trait BridgeProvider: Send + Sync {
+    fn as_cctp(&self) -> Option<&cctp::CctpProvider> {
+        None
+    }
     fn capabilities(&self) -> BridgeCapabilities;
     async fn discover_routes(&self, _request: &BridgeRouteRequest) -> Result<BridgeRouteDiscovery> {
         Ok(BridgeRouteDiscovery::unsupported(

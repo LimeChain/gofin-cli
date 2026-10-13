@@ -2,7 +2,7 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.5.2"
+  version: "1.5.3"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
@@ -147,13 +147,39 @@ grant. USD/price intervals are optional unless requested; when supplied, Fin
 prices independently with exact asset identity. Read the installed schema
 before forming a request.
 
+For CCTP, explicitly select `provider: "cctp"` and optional
+`cctp: {"transferMode": "standard"}` or `"fast"`. Only native USDC between
+Ethereum (domain 0), Arbitrum (domain 3) and Base (domain 6) is supported.
+Use `allowedRefundAssets: []` and a `refundTo` matching the source signer.
+Robinhood has no reviewed Circle CCTP domain; Solana has no Fin SVM adapter.
+Do not substitute Relay or a differently represented token for a CCTP request.
+
+Include every returned CCTP allowance/reset, source `deposit` (burn), and
+**destination `mint`** as explicit stages in one expiring named plan. Review
+both networks' ETH gas caps, the exact USDC fee bound, net receipt and expected
+waiting time. Even fast quotes budget standard fallback; these are estimates,
+not promises. Poll the original `bridge.status` while attestation is pending,
+then explicitly execute mint. A successful burn does not complete the transfer.
+An uncertain mint must reconcile; `bridge.recovery` refreshes an expired
+attestation or declares recovery only after the original attempt is resolved.
+It never grants new spending authority or authorizes another burn.
+
+For Hyperliquid funding from Ethereum or Base, mint to the approved owner's
+Arbitrum wallet, then append the existing `hyperliquid.account.deposit` using
+that exact verified native-USDC output as a funding dependency. Preserve its
+same-owner condition, 5-USDC minimum after CCTP fees, ETH fee cap and reviewed
+account identity. An Arbitrum source uses the deposit directly. Report usable
+Hyperliquid funds only after correlated account credit; intermediate wallet
+receipt is insufficient. Expiry/revocation blocks both mint and deposit writes
+while permitting read-only reconciliation.
+
 For a standalone bridge, preview the first declared step with its selected
 bounds. The same bounds must be passed to finite authorization and included in
 the transfer input. One bridge grant covers only that transfer's exact saved
 approval, optional allowance reset and source deposit steps, with cumulative
 debit and gas limits. For a workflow that also includes Binance funding or
 other linked actions, put the bridge writes in the same named plan instead:
-list one `bridge.transfer` plan step per exact saved approval/reset/deposit ID,
+list one `bridge.transfer` plan step per exact saved approval/reset/deposit/mint ID,
 all using the same transfer ID and selected bounds. For Base canonical withdrawals, include the saved prove and finalize IDs too. Use operation success for initiation/prove completion and the final stage for destination receipt, so the sequence does not wait for destination credit before proving. Base canonical requires exact approvals or a named plan, not an operation-boundary grant. A bridge transfer cannot be
 covered by both a named plan and a separate bridge grant. In either flow, each
 concrete write keeps its own stable operation `--id`; quote refresh does not

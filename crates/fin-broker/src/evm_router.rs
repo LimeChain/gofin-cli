@@ -2,7 +2,8 @@
 use super::*;
 use fin_domain::{PreparationContext, ReturnRouteContext, ReturnRouteProof};
 
-pub(super) struct EvmNetworkRouter {
+#[doc(hidden)]
+pub struct EvmNetworkRouter {
     adapters: BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
 }
 impl EvmNetworkRouter {

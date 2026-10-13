@@ -12,6 +12,8 @@ pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
 mod evm_router;
+#[doc(hidden)]
+pub use evm_router::EvmNetworkRouter;
 pub mod hyperliquid_deposit;
 mod hyperliquid_transport;
 pub mod hyperliquid_withdrawal;

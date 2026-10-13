@@ -344,8 +344,8 @@ async fn execute_source_and_get_transfer(
         DomainStepKind::ResetAllowance => 0,
         DomainStepKind::Approval => 1,
         DomainStepKind::Deposit => 2,
-        DomainStepKind::Prove | DomainStepKind::Finalize => {
-            panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+        DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => {
+            panic!("SYNTHETIC Relay fixture does not declare deferred destination stages")
         }
     });
     let bounds = harness.bounds_for_destination(destination_token);
@@ -548,8 +548,8 @@ async fn named_plan_permissions_bind_exact_bridge_steps_without_source_balance_o
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
-            DomainStepKind::Prove | DomainStepKind::Finalize => {
-                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred destination stages")
             }
         });
         assert_eq!(links.len(), 3);
@@ -693,7 +693,7 @@ async fn named_bridge_plan_keeps_parent_through_refresh_and_waits_for_destinatio
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
-         DomainStepKind::Prove | DomainStepKind::Finalize => panic!("SYNTHETIC Relay fixture does not declare deferred Base stages"), });
+         DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => panic!("SYNTHETIC Relay fixture does not declare deferred destination stages"), });
         let quoted_floor = h.state.transfer(&transfer).unwrap().unwrap()
             .settlement_expectation.unwrap().destination[0].minimum_atoms.clone();
         let mut bounds = h.bounds();
@@ -1045,8 +1045,8 @@ async fn exact_step_flow_refreshes_finite_allowance_cap_after_reset() {
             DomainStepKind::ResetAllowance => 0,
             DomainStepKind::Approval => 1,
             DomainStepKind::Deposit => 2,
-            DomainStepKind::Prove | DomainStepKind::Finalize => {
-                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred destination stages")
             }
         });
         assert_eq!(
@@ -1145,8 +1145,8 @@ async fn exact_step_flow_with_zero_initial_allowance_approves_then_deposits() {
             DomainStepKind::Approval => 0,
             DomainStepKind::Deposit => 1,
             DomainStepKind::ResetAllowance => 2,
-            DomainStepKind::Prove | DomainStepKind::Finalize => {
-                panic!("SYNTHETIC Relay fixture does not declare deferred Base stages")
+            DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => {
+                panic!("SYNTHETIC Relay fixture does not declare deferred destination stages")
             }
         });
         assert_eq!(
@@ -1283,7 +1283,7 @@ async fn erc20_reset_finite_approval_deposit_and_settlement_share_one_grant() {
         let first = h.bridge.read("bridge.quotes", &h.quote_input(None)).await.unwrap();
         let transfer = first["transfers"][0]["transfer_id"].as_str().unwrap().to_owned();
         let mut steps: Vec<BridgeStepLink> = serde_json::from_value(first["transfers"][0]["steps"].clone()).unwrap();
-        steps.sort_by_key(|step| match step.kind { DomainStepKind::ResetAllowance => 0, DomainStepKind::Approval => 1, DomainStepKind::Deposit => 2, DomainStepKind::Prove | DomainStepKind::Finalize => panic!("SYNTHETIC Relay fixture does not declare deferred Base stages"), });
+        steps.sort_by_key(|step| match step.kind { DomainStepKind::ResetAllowance => 0, DomainStepKind::Approval => 1, DomainStepKind::Deposit => 2, DomainStepKind::Prove | DomainStepKind::Finalize | DomainStepKind::Mint => panic!("SYNTHETIC Relay fixture does not declare deferred destination stages"), });
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].kind, DomainStepKind::ResetAllowance);
         assert_eq!(steps[1].kind, DomainStepKind::Approval);

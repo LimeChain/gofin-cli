@@ -246,7 +246,10 @@ impl HyperliquidEthereumDepositAdapter {
                 "completion": "canonical source receipt plus one exact owner/amount ledger credit linked by source hash or native VoteEthDeposit action",
                 "hashSemantics": "accept an owner-scoped exact deposit ledger row whose hash equals the original Arbitrum source transaction hash; if the ledger row uses a distinct native hash, require txDetails VoteEthDepositAction.ethTxHash to equal that source hash",
                 "intermediateStatus": "source-confirmed funds remain in transit and are not usable Hyperliquid collateral",
-                "maxAmountUsdc": "human-reviewed upper bound; exact amount must not exceed it"
+                "maxAmountUsdc": "human-reviewed upper bound; exact amount must not exceed it",
+                "plan_allowance_seconds": fin_domain::plan_timing::WITHDRAWAL_ALLOWANCE_SECONDS,
+                "planningEstimate": "15 minutes for source submission and usable account credit; an estimate, not a settlement guarantee",
+                "broker_generated_attempt_input_fields": ["/requestId"]
             }),
         }
     }
@@ -342,8 +345,9 @@ impl HyperliquidEthereumDepositAdapter {
         }
     }
 
-    async fn prepare_deposit(&self, raw: &Value) -> Result<PreparedOperation, FinError> {
-        let input = Self::input(raw)?;
+    /// Static permission checks must not require the future-funded balance,
+    /// a gas estimate, a price quote, or a source-chain observation.
+    fn validate_deposit_input(&self, input: &DepositInput) -> Result<Quantity, FinError> {
         if input.request_id.is_empty() || input.request_id.len() > 128 {
             return Err(error(
                 "INVALID_REQUEST_ID",
@@ -372,8 +376,6 @@ impl HyperliquidEthereumDepositAdapter {
                 "Select the Arbitrum signing wallet for the same owner address.",
             ));
         }
-        let account_mode = self.deposit_destination_mode(account).await?;
-        account_mode.ensure_supported_cash_accounting()?;
         let amount = Quantity::from_decimal(&input.amount, 6).map_err(|_| {
             error(
                 "INVALID_AMOUNT",
@@ -400,6 +402,21 @@ impl HyperliquidEthereumDepositAdapter {
                 "Choose an exact amount within the supported minimum and maximum.",
             ));
         }
+        let maximum_fee = Quantity::from_decimal(&input.max_fee_eth, 18).map_err(|_| {
+            FinError::validation("Maximum ETH fee must be an exact positive decimal.")
+        })?;
+        if maximum_fee.is_zero() {
+            return Err(FinError::validation("Maximum ETH fee must be positive."));
+        }
+        Ok(amount)
+    }
+
+    async fn prepare_deposit(&self, raw: &Value) -> Result<PreparedOperation, FinError> {
+        let input = Self::input(raw)?;
+        let amount = self.validate_deposit_input(&input)?;
+        let account = self.account(&input.account)?;
+        let account_mode = self.deposit_destination_mode(account).await?;
+        account_mode.ensure_supported_cash_accounting()?;
         let deployment = self.deposit_deployment().await?;
         let source_asset = Self::source_asset();
         let inner_input = Self::inner_input(&input);
@@ -876,6 +893,27 @@ impl Adapter for HyperliquidEthereumDepositAdapter {
             ));
         }
         self.prepare_deposit(input).await
+    }
+
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        raw: &Value,
+    ) -> Result<Vec<String>, FinError> {
+        if operation != "hyperliquid.account.deposit" {
+            return Err(FinError::validation(
+                "Unsupported Hyperliquid deposit operation.",
+            ));
+        }
+        let input = Self::input(raw)?;
+        self.validate_deposit_input(&input)?;
+        self.deposit_destination_mode(self.account(&input.account)?)
+            .await?
+            .ensure_supported_cash_accounting()?;
+        Ok(vec![
+            "Arbitrum USDC and ETH balances, Bridge2 deployment, fees and simulation are checked at execution; a declared predecessor must first prove the exact USDC credit.".into(),
+            "Source receipt alone does not complete this deposit; completion requires correlated usable Hyperliquid account credit.".into(),
+        ])
     }
 
     async fn revalidate(
@@ -1966,6 +2004,108 @@ mod tests {
         )
         .unwrap();
         (engine, adapter, transport, operation_id, source_hash)
+    }
+
+    #[tokio::test]
+    async fn plan_feasibility_checks_owner_mode_and_bounds_without_source_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, original, transport, _, _) =
+            engine_with_submitted_deposit(&directory.path().join("plan-feasibility.sqlite"));
+        // This RPC rejects every request. In particular no balances, gas,
+        // deployment or pricing are needed before predecessor funds arrive.
+        let mut adapter = composite_for_no_submission_restart();
+        adapter.profile = original.profile.clone();
+        adapter.transport = transport.clone();
+        let input = json!({"requestId":"future-deposit","account":"synthetic-hl",
+            "wallet":"synthetic-arbitrum","amount":"5","maxFeeEth":"0.0001",
+            "maxAmountUsdc":"10"});
+        let warnings = adapter
+            .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+            .await
+            .unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("predecessor"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("account credit"))
+        );
+
+        for (field, value, expected) in [
+            ("amount", "4.999999", "DEPOSIT_AMOUNT_OUT_OF_BOUNDS"),
+            ("amount", "5.0000001", "INVALID_AMOUNT"),
+            ("maxAmountUsdc", "4", "DEPOSIT_AMOUNT_OUT_OF_BOUNDS"),
+        ] {
+            let mut invalid = input.clone();
+            invalid[field] = json!(value);
+            assert_eq!(
+                adapter
+                    .validate_plan_feasibility("hyperliquid.account.deposit", &invalid)
+                    .await
+                    .unwrap_err()
+                    .code,
+                expected
+            );
+        }
+        let mut invalid_fee = input.clone();
+        invalid_fee["maxFeeEth"] = json!("0");
+        assert!(
+            adapter
+                .validate_plan_feasibility("hyperliquid.account.deposit", &invalid_fee)
+                .await
+                .is_err()
+        );
+        *transport.abstraction.lock().unwrap() = json!({"abstraction":"portfolioMargin"});
+        assert!(
+            adapter
+                .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+                .await
+                .is_err()
+        );
+        *transport.abstraction.lock().unwrap() = json!({"abstraction":"disabled"});
+        let mut account = adapter.profile.accounts[0].clone();
+        account.owner = "0x2222222222222222222222222222222222222222".into();
+        adapter.profile = Arc::new(
+            HyperliquidProfile::new(
+                vec![account],
+                transport.clone(),
+                Arc::new(NoCallPrices),
+                Arc::new(DeferredExecutionState::default()),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            adapter
+                .validate_plan_feasibility("hyperliquid.account.deposit", &input)
+                .await
+                .unwrap_err()
+                .code,
+            "DEPOSIT_OWNER_MISMATCH"
+        );
+        assert_eq!(transport.dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn deposit_plan_timing_counts_source_and_credit_once_and_assigns_attempt_identity() {
+        let adapter = composite_for_no_submission_restart();
+        assert_eq!(
+            adapter
+                .plan_step_allowance("hyperliquid.account.deposit", &json!({}))
+                .unwrap(),
+            Some(fin_domain::plan_timing::WITHDRAWAL_ALLOWANCE_SECONDS)
+        );
+        let definition = HyperliquidEthereumDepositAdapter::operation_definition();
+        assert_eq!(
+            definition.semantics["broker_generated_attempt_input_fields"],
+            json!(["/requestId"])
+        );
+        assert_eq!(
+            fin_domain::plan_timing::sequential_budget([900]).unwrap(),
+            1200
+        );
     }
 
     #[tokio::test]

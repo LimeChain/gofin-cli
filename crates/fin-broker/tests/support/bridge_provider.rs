@@ -62,6 +62,7 @@ impl BridgeProvider for SyntheticProvider {
         Ok(BridgeQuoteBatch {
             failures: vec![],
             quotes: vec![BridgeQuote {
+                cctp: None,
                 quote_id: format!("synthetic-{revision}"),
                 provider: "relay".into(),
                 route_id: "synthetic-fixed-route".into(),

@@ -828,6 +828,7 @@ impl BridgeProvider for BaseCanonicalProvider {
         let identity = serde_json::to_vec(&(intent, &steps, now.to_rfc3339()))
             .map_err(|_| proof_error("Quote encoding failed."))?;
         let quote = BridgeQuote {
+            cctp: None,
             quote_id: format!("base-canonical:{:#x}", keccak256(identity)),
             provider: PROVIDER_ID.into(),
             route_id: route_id(intent),
@@ -2271,6 +2272,7 @@ mod tests {
         let intent = native();
         let batch = provider
             .quote(&BridgeQuoteRequest {
+                cctp: None,
                 intent: intent.clone(),
                 bounds: BridgeBounds::default(),
             })

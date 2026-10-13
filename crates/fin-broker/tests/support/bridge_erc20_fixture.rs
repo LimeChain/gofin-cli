@@ -197,6 +197,7 @@ impl BridgeProvider for Erc20Provider {
         }
         Ok(BridgeQuoteBatch {
             quotes: vec![BridgeQuote {
+                cctp: None,
                 quote_id: format!("synthetic-erc20-{revision}"),
                 provider: "relay".into(),
                 route_id: "synthetic-usdc-fixed-route".into(),

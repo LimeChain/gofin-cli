@@ -327,6 +327,45 @@ and other bridged USDC representations are not interchangeable. Robinhood's
 reviewed token is USDG, not USDC. A requested RH USDC route may return a
 per-asset unsupported failure and must not be silently replaced.
 
+### CCTP native USDC and Hyperliquid funding
+
+CCTP V2 supports native USDC in all six directions between Ethereum, Arbitrum One
+and Base, using explicit standard or fast mode. Source allowance/burn and
+destination mint are separate writes. ETH gas is required on both networks;
+USDC fees reduce the destination receipt. Robinhood has no reviewed Circle
+CCTP deployment. Solana has Circle support but no Fin SVM execution adapter.
+See the [exact route matrix and recovery contract](docs/bridge-design.md#cctp-native-usdc-and-hyperliquid-funding).
+
+This example selects the CCTP provider for 10 USDC from Ethereum to Arbitrum:
+
+```sh
+fin read bridge.quotes --input '{"provider":"cctp","cctp":{"transferMode":"standard"},"intent":{"wallet":"wallet","source":{"chainId":1,"token":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"},"destinationChainId":42161,"destinationAssets":[{"chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831"}],"recipient":"0x1111111111111111111111111111111111111111","refundTo":"0x1111111111111111111111111111111111111111","allowedRefundAssets":[],"amount":"10000000"}}' --json
+fin schema bridge.transfer --json
+fin schema plans.preview --json
+fin schema hyperliquid.account.deposit --json
+```
+
+Replace both public addresses with the reviewed owner; `refundTo` must equal
+the source signer. Build a [named sequential plan](#named-sequential-plans) from
+the returned transfer/step IDs, including the explicit `mint` step and separate
+source/destination gas caps. The [complete bounded CCTP-to-Hyperliquid example](docs/bridge-design.md#reviewable-cctp-to-hyperliquid-plan-example)
+generates a plan from those IDs and includes the destination-USDC fee cap,
+funding dependency, aggregate limits and explicit execution commands. Authorize once, then explicitly execute each
+eligible step with its own stable attempt ID. Poll `bridge.status` using the
+original transfer ID while attestation or destination proof is pending. For an
+expired attestation or proved-failed mint, inspect `bridge.recovery`; preserve
+the burn and revise authority only when required by its returned recovery step.
+
+For Hyperliquid funding from Ethereum or Base, append
+`hyperliquid.account.deposit` with a funding dependency on the verified Arbitrum
+native-USDC receipt. The deposit uses the same enrolled owner and requires at
+least 5 USDC after bridge fees, plus Arbitrum ETH. Its inputs are `requestId`,
+`account`, `wallet`, `amount`, `maxFeeEth` and `maxAmountUsdc`.
+An Arbitrum source uses that deposit directly. Intermediate wallet receipt is
+not completion: the final step proves exact usable Hyperliquid ledger credit.
+Read-only status continues after expiry; expired or revoked plans cannot
+submit a mint or deposit.
+
 ### Relay routes
 
 Relay destination candidates are locators, not proof. For a direct native payout,
@@ -448,8 +487,9 @@ unsupported response leaves the Relay quote unavailable; it does not change a
 saved transfer's provider or route. A separate canonical quote is returned only
 when the exact request is eligible. Base (`8453`) is also a reviewed wallet and
 Aave network. Relay protocol observer access grants no spending authority;
-Relay Chain (`537713`) remains observer-only. CCTP, Across,
-LayerZero/Stargate and Chainlink CCIP have no enabled route. Both canonical
+Relay Chain (`537713`) remains observer-only. Across,
+LayerZero/Stargate and Chainlink CCIP have no enabled route. CCTP supports the
+three-network native-USDC matrix described above. Both canonical
 destinations completed in the recorded isolated development run; protected
 installation and human Touch ID remain unverified. See [bridge design](docs/bridge-design.md)
 and the [bridge verification guide](docs/testing/bridge.md).
@@ -1150,7 +1190,7 @@ the complete declaration with `fin schema plans.preview --json`.
 
 Bridge transfers can join the same plan as their funding steps. A plan has one
 separate `bridge.transfer` step for each saved approval, optional allowance
-reset and deposit. Repeat the quote-returned `transferId` and each exact
+reset, deposit and destination mint when declared. Repeat the quote-returned `transferId` and each exact
 `stepId`/`stepKind`, with the same selected `bounds`. Use an empty
 `permitted_variations` object because BridgeBounds inside the input defines the
 scope. The adapter binds every bridge step to one persisted parent transfer and

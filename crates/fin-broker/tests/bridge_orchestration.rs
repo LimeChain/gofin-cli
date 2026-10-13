@@ -319,6 +319,8 @@ impl Harness {
     }
     fn quote_input(&self, amount: &str, refresh: Option<String>) -> BridgeQuoteInput {
         BridgeQuoteInput {
+            provider: None,
+            cctp: None,
             intent: BridgeQuoteIntentInput {
                 wallet: "synthetic-wallet".into(),
                 source: BridgeAssetInput {

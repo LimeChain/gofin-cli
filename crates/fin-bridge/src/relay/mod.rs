@@ -1200,6 +1200,7 @@ fn parse_order_response_at(
     )?;
     let refund_paths = parse_refund_paths(order, config, &request.intent)?;
     let quote = BridgeQuote {
+        cctp: None,
         quote_id,
         provider: "relay".into(),
         route_id,
@@ -2031,6 +2032,7 @@ mod tests {
         };
         let err = provider
             .quote_http(&BridgeQuoteRequest {
+                cctp: None,
                 intent,
                 bounds: BridgeBounds::default(),
             })
@@ -2174,6 +2176,7 @@ mod tests {
         };
         let fixture_now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let request = BridgeQuoteRequest {
+            cctp: None,
             intent,
             bounds: BridgeBounds::default(),
         };
@@ -2299,6 +2302,7 @@ mod tests {
             amount: Quantity::new("3000000000000000").unwrap(),
         };
         let request = BridgeQuoteRequest {
+            cctp: None,
             intent,
             bounds: BridgeBounds::default(),
         };

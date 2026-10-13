@@ -145,6 +145,8 @@ async fn canonical_quote_is_attributed_and_refresh_keeps_its_provider_and_step_i
         .attach_state(BridgeStateRepository::new(store))
         .unwrap();
     let input = |refresh_transfer_id: Option<String>| BridgeQuoteInput {
+        provider: None,
+        cctp: None,
         intent: fin_bridge::BridgeQuoteIntentInput {
             wallet: "wallet".into(),
             source: BridgeAssetInput {

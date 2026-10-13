@@ -20,6 +20,7 @@ mod base_recovery_tests;
 mod boundary_migration_tests;
 #[cfg(test)]
 mod bridge_state_tests;
+mod cctp_state;
 pub mod compound_amendments;
 pub mod execution_state;
 pub mod grouped_amendments;
@@ -32,7 +33,7 @@ pub mod nonces;
 mod progress;
 pub mod unresolved_consumption;
 
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -344,6 +345,16 @@ impl BridgeStateRepository {
             .lock()
             .map_err(|_| StoreError::Poisoned)?
             .append_base_recovery(expected, updated)
+    }
+    pub fn append_cctp_recovery(
+        &self,
+        expected: &fin_domain::BridgeTransferRecord,
+        updated: &fin_domain::BridgeTransferRecord,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
+        self.store
+            .lock()
+            .map_err(|_| StoreError::Poisoned)?
+            .append_cctp_recovery(expected, updated)
     }
     pub fn transfer(&self, id: &str) -> Result<Option<fin_domain::BridgeTransferRecord>> {
         self.store
@@ -1295,6 +1306,15 @@ impl Store {
             tx.commit()?;
         }
 
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 16 {
+            // Mint stages and immutable message locators cannot be interpreted by
+            // older executors. The marker migration preserves every existing row.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=17;")?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -4815,7 +4835,6 @@ impl Store {
         if !unresolved {
             return Err(StoreError::ConcurrentReservation);
         }
-        commit_settlement_tx(&tx, settlement, timestamp)?;
         let changed = tx.execute(
             "UPDATE bridge_step_links SET operation_id=?3,step_json=?4 WHERE transfer_id=?1 AND step_id=?2 AND operation_id=?5",
             params![updated_transfer.id, bridge_step_id, updated_link.operation_id, serde_json::to_string(updated_link)?, operation_id],
@@ -4827,6 +4846,11 @@ impl Store {
             "UPDATE bridge_transfers SET version=?2,record_json=?3 WHERE transfer_id=?1 AND version=?4",
             params![updated_transfer.id, updated_transfer.version, serde_json::to_string(updated_transfer)?, previous.version],
         )?;
+        // The plan transition owns this release. Publish its link and parent
+        // together before generic terminal accounting observes the claim;
+        // otherwise the generic release clears operation_id first and makes
+        // the guarded plan update conflict with its own transaction.
+        commit_settlement_tx(&tx, settlement, timestamp)?;
         tx.execute(
             "UPDATE financial_plans SET active_revision_id=?1,record_json=?2,updated_at=?3 WHERE plan_id=?4",
             params![revision_id, updated_plan.to_string(), timestamp, plan_id],
@@ -6528,6 +6552,7 @@ fn bridge_cap_operation_matches_request(
         fin_domain::BridgeStepKind::Deposit => "deposit",
         fin_domain::BridgeStepKind::Prove => "prove",
         fin_domain::BridgeStepKind::Finalize => "finalize",
+        fin_domain::BridgeStepKind::Mint => "mint",
     };
     if record["status"] != "awaiting_approval"
         || !record["submission"].is_null()
@@ -6882,6 +6907,12 @@ fn valid_transit_locator(transit: &fin_domain::TransitResource) -> bool {
                         .message_hash
                         .as_deref()
                         .is_some_and(valid_evm_transaction_hash)
+            } else if locator.scheme == "cctp_v2_message" {
+                locator.transaction_hash.is_empty()
+                    && locator
+                        .message_hash
+                        .as_deref()
+                        .is_some_and(valid_evm_transaction_hash)
             } else {
                 locator.message_hash.is_none()
                     && valid_evm_transaction_hash(&locator.transaction_hash)
@@ -6919,6 +6950,15 @@ fn settlement_locator_matches(
                     .as_str()
                     .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
             })
+    } else if locator.scheme == "cctp_v2_message" {
+        transaction_hash.is_some_and(valid_evm_transaction_hash)
+            && locator.message_hash.as_deref().is_some_and(|message| {
+                proof.evidence["message_hash"]
+                    .as_str()
+                    .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
+            })
+            && proof.evidence["source_evidence_id"].as_str()
+                == Some(locator.source_evidence_id.as_str())
     } else {
         transaction_hash
             .filter(|hash| valid_evm_transaction_hash(hash))
@@ -7254,6 +7294,7 @@ fn validate_plan_bridge_claim_transition(
         fin_domain::BridgeStepKind::Deposit => "deposit",
         fin_domain::BridgeStepKind::Prove => "prove",
         fin_domain::BridgeStepKind::Finalize => "finalize",
+        fin_domain::BridgeStepKind::Mint => "mint",
     };
     let kind_matches = input.get("stepKind").or_else(|| input.get("step_kind"))
         == Some(&Value::String(kind_string.to_owned()));
@@ -7567,6 +7608,26 @@ impl Store {
         updated: &fin_domain::BridgeTransferRecord,
     ) -> Result<fin_domain::BridgeTransferRecord> {
         validate_base_recovery_append(expected, updated)?;
+        self.commit_bridge_recovery_append(expected, updated, "base_recovery")
+    }
+
+    /// Append one replacement mint only after a proved failed attempt. No
+    /// source identity, permission, reservation, or historical operation changes.
+    pub fn append_cctp_recovery(
+        &mut self,
+        expected: &fin_domain::BridgeTransferRecord,
+        updated: &fin_domain::BridgeTransferRecord,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
+        cctp_state::validate_recovery_append(expected, updated)?;
+        self.commit_bridge_recovery_append(expected, updated, "cctp_recovery")
+    }
+
+    fn commit_bridge_recovery_append(
+        &mut self,
+        expected: &fin_domain::BridgeTransferRecord,
+        updated: &fin_domain::BridgeTransferRecord,
+        marker: &str,
+    ) -> Result<fin_domain::BridgeTransferRecord> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -7599,7 +7660,7 @@ impl Store {
             .quote_revisions
             .last()
             .ok_or(StoreError::BridgeConflict)?
-            .payload["base_recovery"]["parent_operation_id"]
+            .payload[marker]["parent_operation_id"]
             .as_str()
             .ok_or(StoreError::BridgeConflict)?;
         let parent_status: String = tx.query_row(
@@ -7611,7 +7672,7 @@ impl Store {
             .quote_revisions
             .last()
             .ok_or(StoreError::BridgeConflict)?
-            .payload["base_recovery"]["reason"]
+            .payload[marker]["reason"]
             .as_str()
             .ok_or(StoreError::BridgeConflict)?;
         if parent_status
