@@ -1,0 +1,1157 @@
+{
+  "client": "kraken",
+  "ccxtVersion": "4.5.85",
+  "source": "https://github.com/ccxt/ccxt/tree/v4.5.85",
+  "implicitMethods": [
+    "zendesk_get201893608",
+    "zendesk_get360000292886",
+    "public_get_time",
+    "public_get_system_status",
+    "public_get_maintenance_schedule",
+    "public_get_assets",
+    "public_get_asset_pairs",
+    "public_get_ticker",
+    "public_get_ohlc",
+    "public_get_depth",
+    "public_get_grouped_book",
+    "public_get_trades",
+    "public_get_spread",
+    "public_get_pre_trade",
+    "public_get_post_trade",
+    "private_post_level3",
+    "private_post_balance",
+    "private_post_balance_ex",
+    "private_post_credit_lines",
+    "private_post_trade_balance",
+    "private_post_open_orders",
+    "private_post_closed_orders",
+    "private_post_query_orders",
+    "private_post_order_amends",
+    "private_post_trades_history",
+    "private_post_query_trades",
+    "private_post_open_positions",
+    "private_post_ledgers",
+    "private_post_query_ledgers",
+    "private_post_trade_volume",
+    "private_post_add_export",
+    "private_post_export_status",
+    "private_post_retrieve_export",
+    "private_post_remove_export",
+    "private_post_get_api_key_info",
+    "private_post_list_wallet_accounts",
+    "private_post_add_order",
+    "private_post_amend_order",
+    "private_post_cancel_order",
+    "private_post_cancel_all",
+    "private_post_cancel_all_orders_after",
+    "private_post_get_web_sockets_token",
+    "private_post_add_order_batch",
+    "private_post_cancel_order_batch",
+    "private_post_edit_order",
+    "private_post_deposit_methods",
+    "private_post_deposit_addresses",
+    "private_post_deposit_status",
+    "private_post_withdraw_methods",
+    "private_post_withdraw_addresses",
+    "private_post_withdraw_info",
+    "private_post_withdraw",
+    "private_post_withdraw_status",
+    "private_post_withdraw_cancel",
+    "private_post_wallet_transfer",
+    "private_post_create_subaccount",
+    "private_post_account_transfer",
+    "private_post_earn_allocate",
+    "private_post_earn_deallocate",
+    "private_post_earn_allocate_status",
+    "private_post_earn_deallocate_status",
+    "private_post_earn_strategies",
+    "private_post_earn_allocations"
+  ],
+  "unifiedMethods": [
+    "fetch_markets",
+    "fetch_status",
+    "fetch_currencies",
+    "fetch_trading_fee",
+    "fetch_order_book",
+    "fetch_tickers",
+    "fetch_ticker",
+    "fetch_ohlcv",
+    "fetch_ledger",
+    "fetch_ledger_entries_by_ids",
+    "fetch_ledger_entry",
+    "fetch_trades",
+    "fetch_balance",
+    "create_market_order_with_cost",
+    "create_market_buy_order_with_cost",
+    "create_order",
+    "create_orders",
+    "edit_order",
+    "fetch_order",
+    "fetch_order_trades",
+    "fetch_orders_by_ids",
+    "fetch_my_trades",
+    "cancel_order",
+    "cancel_orders",
+    "cancel_all_orders",
+    "cancel_all_orders_after",
+    "fetch_open_orders",
+    "fetch_closed_orders",
+    "fetch_deposits",
+    "fetch_time",
+    "fetch_withdrawals",
+    "create_deposit_address",
+    "fetch_deposit_methods",
+    "fetch_deposit_address",
+    "withdraw",
+    "fetch_positions",
+    "transfer_out",
+    "transfer"
+  ],
+  "capabilities": {
+    "spot": true,
+    "margin": true,
+    "swap": false,
+    "future": false,
+    "option": false,
+    "addMargin": false,
+    "cancelAllOrders": true,
+    "cancelAllOrdersAfter": true,
+    "cancelOrder": true,
+    "cancelOrders": true,
+    "createDepositAddress": true,
+    "createMarketBuyOrderWithCost": true,
+    "createMarketOrderWithCost": true,
+    "createMarketSellOrderWithCost": false,
+    "createOrder": true,
+    "createOrders": true,
+    "createStopLimitOrder": true,
+    "createStopMarketOrder": true,
+    "createStopOrder": true,
+    "createTrailingAmountOrder": true,
+    "createTrailingPercentOrder": true,
+    "editOrder": true,
+    "fetchBalance": true,
+    "fetchBorrowInterest": false,
+    "fetchBorrowRateHistories": false,
+    "fetchBorrowRateHistory": false,
+    "fetchClosedOrders": true,
+    "fetchCrossBorrowRate": false,
+    "fetchCrossBorrowRates": false,
+    "fetchCurrencies": true,
+    "fetchDepositAddress": true,
+    "fetchDepositAddresses": false,
+    "fetchDepositAddressesByNetwork": false,
+    "fetchDeposits": true,
+    "fetchFundingHistory": false,
+    "fetchFundingRate": false,
+    "fetchFundingRateHistory": false,
+    "fetchFundingRates": false,
+    "fetchIndexOHLCV": false,
+    "fetchIsolatedBorrowRate": false,
+    "fetchIsolatedBorrowRates": false,
+    "fetchLedger": true,
+    "fetchLedgerEntry": true,
+    "fetchLeverageTiers": false,
+    "fetchMarkets": true,
+    "fetchMarkOHLCV": false,
+    "fetchMyTrades": true,
+    "fetchOHLCV": true,
+    "fetchOpenInterestHistory": false,
+    "fetchOpenOrders": true,
+    "fetchOrder": true,
+    "fetchOrderBook": true,
+    "fetchOrderTrades": "emulated",
+    "fetchPositions": true,
+    "fetchPremiumIndexOHLCV": false,
+    "fetchStatus": true,
+    "fetchTicker": true,
+    "fetchTickers": true,
+    "fetchTime": true,
+    "fetchTrades": true,
+    "fetchTradingFee": true,
+    "fetchTradingFees": false,
+    "fetchWithdrawals": true,
+    "setLeverage": false,
+    "setMarginMode": false,
+    "transfer": true,
+    "withdraw": true
+  },
+  "excludedMethods": {
+    "private_post_get_web_sockets_token": "User excluded WebSockets and token issuance"
+  },
+  "sourceSha256": "48430cc7d00c8499250147222fb6968861ba009f2e30567e13cf6d60a53418a3",
+  "endpointCosts": {
+    "360000292886": 1.0,
+    "201893608": 1.0,
+    "Time": 1.0,
+    "SystemStatus": 1.0,
+    "MaintenanceSchedule": 1.0,
+    "Assets": 1.0,
+    "AssetPairs": 1.0,
+    "Ticker": 1.0,
+    "OHLC": 1.2,
+    "Depth": 1.2,
+    "GroupedBook": 1.2,
+    "Trades": 1.2,
+    "Spread": 1.0,
+    "PreTrade": 1.0,
+    "PostTrade": 1.0,
+    "Level3": 1.2,
+    "Balance": 3.0,
+    "BalanceEx": 3.0,
+    "CreditLines": 3.0,
+    "TradeBalance": 3.0,
+    "OpenOrders": 3.0,
+    "ClosedOrders": 3.0,
+    "QueryOrders": 3.0,
+    "OrderAmends": 3.0,
+    "TradesHistory": 6.0,
+    "QueryTrades": 3.0,
+    "OpenPositions": 3.0,
+    "Ledgers": 6.0,
+    "QueryLedgers": 3.0,
+    "TradeVolume": 3.0,
+    "AddExport": 3.0,
+    "ExportStatus": 3.0,
+    "RetrieveExport": 3.0,
+    "RemoveExport": 3.0,
+    "GetApiKeyInfo": 3.0,
+    "ListWalletAccounts": 3.0,
+    "AddOrder": 0.0,
+    "AmendOrder": 0.0,
+    "CancelOrder": 0.0,
+    "CancelAll": 3.0,
+    "CancelAllOrdersAfter": 3.0,
+    "GetWebSocketsToken": 3.0,
+    "AddOrderBatch": 0.0,
+    "CancelOrderBatch": 0.0,
+    "EditOrder": 0.0,
+    "DepositMethods": 3.0,
+    "DepositAddresses": 3.0,
+    "DepositStatus": 3.0,
+    "WithdrawMethods": 3.0,
+    "WithdrawAddresses": 3.0,
+    "WithdrawInfo": 3.0,
+    "Withdraw": 3.0,
+    "WithdrawStatus": 3.0,
+    "WithdrawCancel": 3.0,
+    "WalletTransfer": 3.0,
+    "CreateSubaccount": 3.0,
+    "AccountTransfer": 3.0,
+    "Earn/Allocate": 3.0,
+    "Earn/Deallocate": 3.0,
+    "Earn/AllocateStatus": 3.0,
+    "Earn/DeallocateStatus": 3.0,
+    "Earn/Strategies": 3.0,
+    "Earn/Allocations": 3.0
+  },
+  "unifiedBindings": {
+    "fetch_markets": {
+      "nativeMethods": [
+        "public_get_asset_pairs"
+      ],
+      "operations": [
+        "kraken.get-tradable-asset-pairs"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_status": {
+      "nativeMethods": [
+        "public_get_system_status"
+      ],
+      "operations": [
+        "kraken.get-system-status"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_currencies": {
+      "nativeMethods": [
+        "public_get_assets"
+      ],
+      "operations": [
+        "kraken.get-asset-info"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_trading_fee": {
+      "nativeMethods": [
+        "private_post_trade_volume"
+      ],
+      "operations": [
+        "kraken.get-trade-volume"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified market symbol",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_order_book": {
+      "nativeMethods": [
+        "public_get_depth"
+      ],
+      "operations": [
+        "kraken.get-order-book"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to fetch the order book for",
+        "@param {int} [limit] the maximum amount of order book entries to return",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_tickers": {
+      "nativeMethods": [
+        "public_get_ticker"
+      ],
+      "operations": [
+        "kraken.get-ticker-information"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string[]|undefined} symbols unified symbols of the markets to fetch the ticker for, all market tickers are returned if not assigned",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_ticker": {
+      "nativeMethods": [
+        "public_get_ticker"
+      ],
+      "operations": [
+        "kraken.get-ticker-information"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to fetch the ticker for",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_ohlcv": {
+      "nativeMethods": [
+        "public_get_ohlc"
+      ],
+      "operations": [
+        "kraken.get-ohlc-data"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to fetch OHLCV data for",
+        "@param {string} timeframe the length of time each candle represents",
+        "@param {int} [since] timestamp in ms of the earliest candle to fetch",
+        "@param {int} [limit] the maximum amount of candles to fetch",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {boolean} [params.paginate] default false, when true will automatically paginate by calling this endpoint multiple times. See in the docs all the [availble parameters](https://github.com/ccxt/ccxt/wiki/Manual#pagination-params)"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_ledger": {
+      "nativeMethods": [
+        "private_post_ledgers"
+      ],
+      "operations": [
+        "kraken.get-ledgers"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} [code] unified currency code, default is undefined",
+        "@param {int} [since] timestamp in ms of the earliest ledger entry, default is undefined",
+        "@param {int} [limit] max number of ledger entries to return, default is undefined",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {int} [params.until] timestamp in ms of the latest ledger entry",
+        "@param {int} [params.end] timestamp in seconds of the latest ledger entry"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_ledger_entries_by_ids": {
+      "nativeMethods": [
+        "private_post_query_ledgers"
+      ],
+      "operations": [
+        "kraken.get-ledgers-info"
+      ],
+      "ccxtParameterDeclarations": [],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_ledger_entry": {
+      "nativeMethods": [
+        "private_post_query_ledgers"
+      ],
+      "operations": [
+        "kraken.get-ledgers-info"
+      ],
+      "ccxtParameterDeclarations": [],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_trades": {
+      "nativeMethods": [
+        "public_get_trades"
+      ],
+      "operations": [
+        "kraken.get-recent-trades"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to fetch trades for",
+        "@param {int} [since] timestamp in ms of the earliest trade to fetch",
+        "@param {int} [limit] the maximum amount of trades to fetch",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_balance": {
+      "nativeMethods": [
+        "private_post_balance_ex"
+      ],
+      "operations": [
+        "kraken.get-extended-balance"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "create_market_order_with_cost": {
+      "nativeMethods": [
+        "private_post_add_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to create an order in (only USD markets are supported)",
+        "@param {string} side 'buy' or 'sell'",
+        "@param {float} cost how much you want to trade in units of the quote currency",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "create_market_buy_order_with_cost": {
+      "nativeMethods": [
+        "private_post_add_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to create an order in",
+        "@param {float} cost how much you want to trade in units of the quote currency",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "create_order": {
+      "nativeMethods": [
+        "private_post_add_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified symbol of the market to create an order in",
+        "@param {string} type 'market' or 'limit'",
+        "@param {string} side 'buy' or 'sell'",
+        "@param {float} amount how much of currency you want to trade in units of base currency",
+        "@param {float} [price] the price at which the order is to be fulfilled, in units of the quote currency, ignored in market orders",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {bool} [params.postOnly] if true, the order will only be posted to the order book and not executed immediately",
+        "@param {bool} [params.reduceOnly] *margin only* indicates if this order is to reduce the size of a position",
+        "@param {float} [params.stopLossPrice] *margin only* the price that a stop loss order is triggered at",
+        "@param {float} [params.takeProfitPrice] *margin only* the price that a take profit order is triggered at",
+        "@param {string} [params.trailingAmount] *margin only* the quote amount to trail away from the current market price",
+        "@param {string} [params.trailingPercent] *margin only* the percent to trail away from the current market price",
+        "@param {string} [params.trailingLimitAmount] *margin only* the quote amount away from the trailingAmount",
+        "@param {string} [params.trailingLimitPercent] *margin only* the percent away from the trailingAmount",
+        "@param {string} [params.offset] *margin only* '+' or '-' whether you want the trailingLimitAmount value to be positive or negative, default is negative '-'",
+        "@param {string} [params.trigger] *margin only* the activation price type, 'last' or 'index', default is 'last'"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "create_orders": {
+      "nativeMethods": [
+        "private_post_add_order_batch"
+      ],
+      "operations": [
+        "kraken.add-order-batch"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {Array} orders list of orders to create, each object should contain the parameters required by createOrder, namely symbol, type, side, amount, price and params",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "edit_order": {
+      "nativeMethods": [
+        "private_post_amend_order"
+      ],
+      "operations": [
+        "kraken.amend-order"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} id order id",
+        "@param {string} symbol unified symbol of the market to create an order in",
+        "@param {string} type 'market' or 'limit'",
+        "@param {string} side 'buy' or 'sell'",
+        "@param {float} [amount] how much of the currency you want to trade in units of the base currency",
+        "@param {float} [price] the price at which the order is to be fulfilled, in units of the quote currency, ignored in market orders",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {float} [params.stopLossPrice] the price that a stop loss order is triggered at",
+        "@param {float} [params.takeProfitPrice] the price that a take profit order is triggered at",
+        "@param {string} [params.trailingAmount] the quote amount to trail away from the current market price",
+        "@param {string} [params.trailingPercent] the percent to trail away from the current market price",
+        "@param {string} [params.trailingLimitAmount] the quote amount away from the trailingAmount",
+        "@param {string} [params.trailingLimitPercent] the percent away from the trailingAmount",
+        "@param {string} [params.offset] '+' or '-' whether you want the trailingLimitAmount value to be positive or negative",
+        "@param {boolean} [params.postOnly] if true, the order will only be posted to the order book and not executed immediately",
+        "@param {string} [params.clientOrderId] the orders client order id"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_order": {
+      "nativeMethods": [
+        "private_post_query_orders"
+      ],
+      "operations": [
+        "kraken.get-orders-info"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} id order id",
+        "@param {string} symbol not used by kraken fetchOrder",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_order_trades": {
+      "nativeMethods": [
+        "private_post_query_trades"
+      ],
+      "operations": [
+        "kraken.get-trades-info"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} id order id",
+        "@param {string} symbol unified market symbol",
+        "@param {int} [since] the earliest time in ms to fetch trades for",
+        "@param {int} [limit] the maximum number of trades to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_orders_by_ids": {
+      "nativeMethods": [
+        "private_post_query_orders"
+      ],
+      "operations": [
+        "kraken.get-orders-info"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string[]} [ids] list of order id",
+        "@param {string} [symbol] unified ccxt market symbol",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_my_trades": {
+      "nativeMethods": [
+        "private_post_trades_history"
+      ],
+      "operations": [
+        "kraken.get-trade-history"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} symbol unified market symbol",
+        "@param {int} [since] the earliest time in ms to fetch trades for",
+        "@param {int} [limit] the maximum number of trades structures to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {int} [params.until] timestamp in ms of the latest trade entry",
+        "@param {int} [params.end] timestamp in seconds of the latest trade entry"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "cancel_order": {
+      "nativeMethods": [
+        "private_post_cancel_order"
+      ],
+      "operations": [
+        "kraken.cancel-order"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} id order id",
+        "@param {string} [symbol] unified symbol of the market the order was made in",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {string} [params.clientOrderId] the orders client order id",
+        "@param {int} [params.userref] the orders user reference id"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "cancel_orders": {
+      "nativeMethods": [
+        "private_post_cancel_order_batch"
+      ],
+      "operations": [
+        "kraken.cancel-order-batch"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string[]} ids open orders transaction ID (txid) or user reference (userref)",
+        "@param {string} symbol unified market symbol",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "cancel_all_orders": {
+      "nativeMethods": [
+        "private_post_cancel_all"
+      ],
+      "operations": [
+        "kraken.cancel-all-orders"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} [symbol] unified market symbol, not used by kraken cancelAllOrders (all open orders are cancelled)",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "cancel_all_orders_after": {
+      "nativeMethods": [
+        "private_post_cancel_all_orders_after"
+      ],
+      "operations": [
+        "kraken.cancel-all-orders-after"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {number} timeout time in milliseconds, 0 represents cancel the timer",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_open_orders": {
+      "nativeMethods": [
+        "private_post_open_orders"
+      ],
+      "operations": [
+        "kraken.get-open-orders"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} [symbol] unified market symbol",
+        "@param {int} [since] the earliest time in ms to fetch open orders for",
+        "@param {int} [limit] the maximum number of  open orders structures to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {string} [params.clientOrderId] the orders client order id",
+        "@param {int} [params.userref] the orders user reference id"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_closed_orders": {
+      "nativeMethods": [
+        "private_post_closed_orders"
+      ],
+      "operations": [
+        "kraken.get-closed-orders"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} [symbol] unified market symbol of the market orders were made in",
+        "@param {int} [since] the earliest time in ms to fetch orders for",
+        "@param {int} [limit] the maximum number of order structures to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {int} [params.until] timestamp in ms of the latest entry",
+        "@param {string} [params.clientOrderId] the orders client order id",
+        "@param {int} [params.userref] the orders user reference id"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_deposits": {
+      "nativeMethods": [
+        "private_post_deposit_status"
+      ],
+      "operations": [
+        "kraken.get-status-recent-deposits"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code",
+        "@param {int} [since] the earliest time in ms to fetch deposits for",
+        "@param {int} [limit] the maximum number of deposits structures to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {int} [params.until] timestamp in ms of the latest transaction entry",
+        "@param {int} [params.end] timestamp in seconds of the latest transaction entry"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_time": {
+      "nativeMethods": [
+        "public_get_time"
+      ],
+      "operations": [
+        "kraken.get-server-time"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_withdrawals": {
+      "nativeMethods": [
+        "private_post_withdraw_status"
+      ],
+      "operations": [
+        "kraken.get-status-recent-withdrawals"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code",
+        "@param {int} [since] the earliest time in ms to fetch withdrawals for",
+        "@param {int} [limit] the maximum number of withdrawals structures to retrieve",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint",
+        "@param {int} [params.until] timestamp in ms of the latest transaction entry",
+        "@param {int} [params.end] timestamp in seconds of the latest transaction entry",
+        "@param {boolean} [params.paginate] default false, when true will automatically paginate by calling this endpoint multiple times"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "create_deposit_address": {
+      "nativeMethods": [
+        "private_post_create_deposit_address"
+      ],
+      "operations": [
+        "kraken.create-deposit-address-legacy"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code of the currency for the deposit address",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_deposit_methods": {
+      "nativeMethods": [
+        "private_post_deposit_methods"
+      ],
+      "operations": [
+        "kraken.get-deposit-methods"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_deposit_address": {
+      "nativeMethods": [
+        "private_post_deposit_addresses",
+        "private_post_deposit_methods"
+      ],
+      "operations": [
+        "kraken.get-deposit-methods",
+        "kraken.get-deposit-addresses"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "withdraw": {
+      "nativeMethods": [
+        "private_post_withdraw"
+      ],
+      "operations": [
+        "kraken.withdraw-funds"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code unified currency code",
+        "@param {float} amount the amount to withdraw",
+        "@param {string} address the address to withdraw to, not required can be '' or undefined/none/null",
+        "@param {string} tag",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "fetch_positions": {
+      "nativeMethods": [
+        "private_post_open_positions"
+      ],
+      "operations": [
+        "kraken.get-open-positions"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string[]} [symbols] not used by fetchPositions ()",
+        "@param {object} [params] extra parameters specific to the exchange API endpoint"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    },
+    "transfer_out": {
+      "nativeMethods": [
+        "private_post_wallet_transfer"
+      ],
+      "operations": [
+        "kraken.wallet-transfer"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {str} code Unified currency code",
+        "@param {float} amount Size of the transfer",
+        "@param {dict} [params] Exchange specific parameters"
+      ],
+      "status": "mapped_transitive_delegate",
+      "note": "Pinned transfer_out delegates to transfer with exact product direction. Fin exposes the closed native equivalent with independently verified account relationships.",
+      "delegates": [
+        "transfer"
+      ]
+    },
+    "transfer": {
+      "nativeMethods": [
+        "private_post_wallet_transfer"
+      ],
+      "operations": [
+        "kraken.wallet-transfer"
+      ],
+      "ccxtParameterDeclarations": [
+        "@param {string} code Unified currency code",
+        "@param {float} amount Size of the transfer",
+        "@param {string} fromAccount 'spot' or 'Spot Wallet'",
+        "@param {string} toAccount 'swap' or 'Futures Wallet'",
+        "@param {object} [params] Exchange specific parameters"
+      ],
+      "status": "mapped_native_options",
+      "note": "Fin uses exact operation-specific native fields; CCXT response normalization and automatic pagination are not execution authority."
+    }
+  },
+  "capabilityBindings": {
+    "cancelAllOrders": {
+      "implementation": true,
+      "unifiedMethod": "cancel_all_orders",
+      "operations": [
+        "kraken.cancel-all-orders"
+      ]
+    },
+    "cancelAllOrdersAfter": {
+      "implementation": true,
+      "unifiedMethod": "cancel_all_orders_after",
+      "operations": [
+        "kraken.cancel-all-orders-after"
+      ]
+    },
+    "cancelOrder": {
+      "implementation": true,
+      "unifiedMethod": "cancel_order",
+      "operations": [
+        "kraken.cancel-order"
+      ]
+    },
+    "cancelOrders": {
+      "implementation": true,
+      "unifiedMethod": "cancel_orders",
+      "operations": [
+        "kraken.cancel-order-batch"
+      ]
+    },
+    "createDepositAddress": {
+      "implementation": true,
+      "unifiedMethod": "create_deposit_address",
+      "operations": [
+        "kraken.create-deposit-address-legacy"
+      ]
+    },
+    "createMarketBuyOrderWithCost": {
+      "implementation": true,
+      "unifiedMethod": "create_market_buy_order_with_cost",
+      "operations": [
+        "kraken.add-order"
+      ]
+    },
+    "createMarketOrderWithCost": {
+      "implementation": true,
+      "unifiedMethod": "create_market_order_with_cost",
+      "operations": [
+        "kraken.add-order"
+      ]
+    },
+    "createOrder": {
+      "implementation": true,
+      "unifiedMethod": "create_order",
+      "operations": [
+        "kraken.add-order"
+      ]
+    },
+    "createOrders": {
+      "implementation": true,
+      "unifiedMethod": "create_orders",
+      "operations": [
+        "kraken.add-order-batch"
+      ]
+    },
+    "createStopLimitOrder": {
+      "implementation": true,
+      "delegates": [
+        "create_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "optionMapping": {
+        "nativeFields": "See operation schema and CCXT parameter declarations"
+      }
+    },
+    "createStopMarketOrder": {
+      "implementation": true,
+      "delegates": [
+        "create_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "optionMapping": {
+        "nativeFields": "See operation schema and CCXT parameter declarations"
+      }
+    },
+    "createStopOrder": {
+      "implementation": true,
+      "delegates": [
+        "create_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "optionMapping": {
+        "nativeFields": "See operation schema and CCXT parameter declarations"
+      }
+    },
+    "createTrailingAmountOrder": {
+      "implementation": true,
+      "delegates": [
+        "create_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "optionMapping": {
+        "nativeFields": "See operation schema and CCXT parameter declarations"
+      }
+    },
+    "createTrailingPercentOrder": {
+      "implementation": true,
+      "delegates": [
+        "create_order"
+      ],
+      "operations": [
+        "kraken.add-order"
+      ],
+      "optionMapping": {
+        "nativeFields": "See operation schema and CCXT parameter declarations"
+      }
+    },
+    "editOrder": {
+      "implementation": true,
+      "unifiedMethod": "edit_order",
+      "operations": [
+        "kraken.amend-order"
+      ]
+    },
+    "fetchBalance": {
+      "implementation": true,
+      "unifiedMethod": "fetch_balance",
+      "operations": [
+        "kraken.get-extended-balance"
+      ]
+    },
+    "fetchClosedOrders": {
+      "implementation": true,
+      "unifiedMethod": "fetch_closed_orders",
+      "operations": [
+        "kraken.get-closed-orders"
+      ]
+    },
+    "fetchCurrencies": {
+      "implementation": true,
+      "unifiedMethod": "fetch_currencies",
+      "operations": [
+        "kraken.get-asset-info"
+      ]
+    },
+    "fetchDepositAddress": {
+      "implementation": true,
+      "unifiedMethod": "fetch_deposit_address",
+      "operations": [
+        "kraken.get-deposit-methods",
+        "kraken.get-deposit-addresses"
+      ]
+    },
+    "fetchDeposits": {
+      "implementation": true,
+      "unifiedMethod": "fetch_deposits",
+      "operations": [
+        "kraken.get-status-recent-deposits"
+      ]
+    },
+    "fetchLedger": {
+      "implementation": true,
+      "unifiedMethod": "fetch_ledger",
+      "operations": [
+        "kraken.get-ledgers"
+      ]
+    },
+    "fetchLedgerEntry": {
+      "implementation": true,
+      "unifiedMethod": "fetch_ledger_entry",
+      "operations": [
+        "kraken.get-ledgers-info"
+      ]
+    },
+    "fetchMarkets": {
+      "implementation": true,
+      "unifiedMethod": "fetch_markets",
+      "operations": [
+        "kraken.get-tradable-asset-pairs"
+      ]
+    },
+    "fetchMyTrades": {
+      "implementation": true,
+      "unifiedMethod": "fetch_my_trades",
+      "operations": [
+        "kraken.get-trade-history"
+      ]
+    },
+    "fetchOHLCV": {
+      "implementation": true,
+      "unifiedMethod": "fetch_ohlcv",
+      "operations": [
+        "kraken.get-ohlc-data"
+      ]
+    },
+    "fetchOpenOrders": {
+      "implementation": true,
+      "unifiedMethod": "fetch_open_orders",
+      "operations": [
+        "kraken.get-open-orders"
+      ]
+    },
+    "fetchOrder": {
+      "implementation": true,
+      "unifiedMethod": "fetch_order",
+      "operations": [
+        "kraken.get-orders-info"
+      ]
+    },
+    "fetchOrderBook": {
+      "implementation": true,
+      "unifiedMethod": "fetch_order_book",
+      "operations": [
+        "kraken.get-order-book"
+      ]
+    },
+    "fetchOrderTrades": {
+      "implementation": "emulated",
+      "unifiedMethod": "fetch_order_trades",
+      "operations": [
+        "kraken.get-trades-info"
+      ]
+    },
+    "fetchPositions": {
+      "implementation": true,
+      "unifiedMethod": "fetch_positions",
+      "operations": [
+        "kraken.get-open-positions"
+      ]
+    },
+    "fetchStatus": {
+      "implementation": true,
+      "unifiedMethod": "fetch_status",
+      "operations": [
+        "kraken.get-system-status"
+      ]
+    },
+    "fetchTicker": {
+      "implementation": true,
+      "unifiedMethod": "fetch_ticker",
+      "operations": [
+        "kraken.get-ticker-information"
+      ]
+    },
+    "fetchTickers": {
+      "implementation": true,
+      "unifiedMethod": "fetch_tickers",
+      "operations": [
+        "kraken.get-ticker-information"
+      ]
+    },
+    "fetchTime": {
+      "implementation": true,
+      "unifiedMethod": "fetch_time",
+      "operations": [
+        "kraken.get-server-time"
+      ]
+    },
+    "fetchTrades": {
+      "implementation": true,
+      "unifiedMethod": "fetch_trades",
+      "operations": [
+        "kraken.get-recent-trades"
+      ]
+    },
+    "fetchTradingFee": {
+      "implementation": true,
+      "unifiedMethod": "fetch_trading_fee",
+      "operations": [
+        "kraken.get-trade-volume"
+      ]
+    },
+    "fetchWithdrawals": {
+      "implementation": true,
+      "unifiedMethod": "fetch_withdrawals",
+      "operations": [
+        "kraken.get-status-recent-withdrawals"
+      ]
+    },
+    "transfer": {
+      "implementation": true,
+      "unifiedMethod": "transfer",
+      "operations": [
+        "kraken.wallet-transfer"
+      ]
+    },
+    "withdraw": {
+      "implementation": true,
+      "unifiedMethod": "withdraw",
+      "operations": [
+        "kraken.withdraw-funds"
+      ]
+    }
+  }
+}

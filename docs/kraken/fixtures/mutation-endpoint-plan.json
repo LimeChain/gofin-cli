@@ -1,0 +1,279 @@
+{
+  "schemaVersion": 1,
+  "scope": "Reviewed static mutation/configuration native endpoint selection. Request expectations derive only from pinned official raw schemas, not generated Fin schemas. No fixture grants dispatch or approval authority.",
+  "endpoints": [
+    {
+      "client": "kraken",
+      "method": "private_post_add_export",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddExport",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_remove_export",
+      "sourceSpec": "spot-rest",
+      "path": "/private/RemoveExport",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_add_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddOrder",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_amend_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AmendOrder",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelOrder",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_all",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelAll",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_all_orders_after",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelAllOrdersAfter",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_add_order_batch",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddOrderBatch",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_order_batch",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelOrderBatch",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_edit_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/EditOrder",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Withdraw",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_cancel",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawCancel",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_wallet_transfer",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WalletTransfer",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_create_subaccount",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CreateSubaccount",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_account_transfer",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AccountTransfer",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_allocate",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Allocate",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_deallocate",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Deallocate",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_sendorder",
+      "sourceSpec": "futures-rest",
+      "path": "/sendorder",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_editorder",
+      "sourceSpec": "futures-rest",
+      "path": "/editorder",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelorder",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelorder",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_transfer",
+      "sourceSpec": "futures-rest",
+      "path": "/transfer",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_transfer_subaccount",
+      "sourceSpec": "futures-rest",
+      "path": "/transfer/subaccount",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_batchorder",
+      "sourceSpec": "futures-rest",
+      "path": "/batchorder",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelallorders",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelallorders",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelallordersafter",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelallordersafter",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_withdrawal",
+      "sourceSpec": "futures-rest",
+      "path": "/withdrawal",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_assignmentprogram_delete",
+      "sourceSpec": "futures-rest",
+      "path": "/assignmentprogram/delete",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_leveragepreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/leveragepreferences",
+      "verb": "PUT"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_pnlpreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/pnlpreferences",
+      "verb": "PUT"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_self_trade_strategy",
+      "sourceSpec": "futures-rest",
+      "path": "/self-trade-strategy",
+      "verb": "PUT"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_subaccount_uid_trading_enabled",
+      "sourceSpec": "futures-rest",
+      "path": "/subaccount/{subaccountUid}/trading-enabled",
+      "verb": "PUT"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_rfq_assignment_max_leverage",
+      "sourceSpec": "futures-rest",
+      "path": "/rfq-assignment/max-leverage",
+      "verb": "PUT"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_delete_rfq_assignment_max_leverage",
+      "sourceSpec": "futures-rest",
+      "path": "/rfq-assignment/max-leverage",
+      "verb": "DELETE"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_put_funding_v1_deposit_address",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/deposit/address",
+      "verb": "PUT"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_post_funding_v1_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_post_funding_v1_withdrawals",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/withdrawals",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_put_funding_v1_addresses_id",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses/{id}",
+      "verb": "PUT"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_delete_funding_v1_addresses_id",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses/{id}",
+      "verb": "DELETE"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_create_deposit_address",
+      "sourceSpec": "spot-rest",
+      "path": "/private/DepositAddresses",
+      "verb": "POST"
+    }
+  ]
+}

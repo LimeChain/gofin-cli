@@ -16,6 +16,7 @@ struct CandidateFailure {
     inner: SyntheticAdapter,
     stage: &'static str,
     failure_code: &'static str,
+    failure_details: Value,
     failures_remaining: AtomicUsize,
     expire_on_failure: bool,
     clock: Arc<RecoveryClock>,
@@ -42,13 +43,15 @@ impl CandidateFailure {
             if self.expire_on_failure {
                 *self.clock.0.lock().unwrap() += chrono::Duration::hours(1);
             }
+            let mut details = self.failure_details.clone();
+            details["synthetic_diagnostic"] = json!(true);
             return Err(FinError::new(
                 self.failure_code,
                 stage,
-                "Synthetic transport timeout.",
+                "Synthetic candidate failure.",
                 "Obtain fresh approval.",
             )
-            .with_details(json!({"synthetic_diagnostic":true})));
+            .with_details(details));
         }
         Ok(())
     }
@@ -181,19 +184,41 @@ async fn recovery_plan_engine(
     (engine, plan.plan_id)
 }
 
+fn usd_ceiling_failure_details() -> Value {
+    json!({
+        "reason":"usd_ceiling_exceeded",
+        "field":"maximum_fee_usd_micros",
+        "observed_usd_micros":"10001",
+        "maximum_usd_micros":"10000"
+    })
+}
+
 #[tokio::test]
 async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_reconciles() {
-    for (stage, failure_code, expires) in [
-        ("revalidation", "VALUE_BOUND_EXCEEDED", false),
-        ("revalidation", "SLIPPAGE_LIMIT", false),
-        ("revalidation", "BINDING_CHANGED", false),
-        ("submission", "RPC_UNAVAILABLE", false),
+    for (stage, failure_code, failure_details, expires) in [
+        ("revalidation", "VALUE_BOUND_EXCEEDED", json!({}), false),
+        (
+            "revalidation",
+            "VALUE_BOUND_EXCEEDED",
+            json!({"reason":"priced_asset_identity_changed"}),
+            false,
+        ),
+        (
+            "revalidation",
+            "VALUE_BOUND_EXCEEDED",
+            usd_ceiling_failure_details(),
+            true,
+        ),
+        ("revalidation", "SLIPPAGE_LIMIT", json!({}), false),
+        ("revalidation", "BINDING_CHANGED", json!({}), false),
+        ("submission", "RPC_UNAVAILABLE", json!({}), false),
     ] {
         let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
         let adapter = Arc::new(CandidateFailure {
             inner: SyntheticAdapter::new(),
             stage,
             failure_code,
+            failure_details,
             failures_remaining: AtomicUsize::new(1),
             expire_on_failure: expires,
             clock: clock.clone(),
@@ -272,6 +297,18 @@ async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_rec
             let record = result.unwrap();
             (record.error.clone().unwrap(), Some(record))
         };
+        assert_eq!(error.code, failure_code);
+        let recorded_plan: FinancialPlanAuthorizationRecord = serde_json::from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .financial_plan(&plan.plan_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recorded_plan.attempts.len(), 1);
         let details = error.details.unwrap();
         assert_eq!(details["synthetic_diagnostic"], true);
         assert_eq!(details["reauthorization_required"], expires);
@@ -348,11 +385,29 @@ async fn candidate_failure_reuses_active_consent_but_uncertain_dispatch_only_rec
 
 #[tokio::test]
 async fn transient_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch("EVIDENCE_TIMEOUT", json!({}))
+        .await;
+}
+
+#[tokio::test]
+async fn usd_ceiling_transient_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
+    check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
+        "VALUE_BOUND_EXCEEDED",
+        usd_ceiling_failure_details(),
+    )
+    .await;
+}
+
+async fn check_plan_candidate_refresh_keeps_one_approval_and_one_dispatch(
+    failure_code: &'static str,
+    failure_details: Value,
+) {
     let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
     let adapter = Arc::new(CandidateFailure {
         inner: SyntheticAdapter::new(),
         stage: "revalidation",
-        failure_code: "EVIDENCE_TIMEOUT",
+        failure_code,
+        failure_details,
         failures_remaining: AtomicUsize::new(1),
         expire_on_failure: false,
         clock: clock.clone(),
@@ -433,6 +488,7 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
         inner: SyntheticAdapter::new(),
         stage: "never-fail",
         failure_code: "SYNTHETIC_UNUSED",
+        failure_details: json!({}),
         failures_remaining: AtomicUsize::new(0),
         expire_on_failure: false,
         clock: clock.clone(),
@@ -510,11 +566,29 @@ async fn expired_plan_candidate_refresh_keeps_one_approval_and_one_dispatch() {
 
 #[tokio::test]
 async fn persistent_candidate_refresh_failure_stops_at_two_and_reports_count() {
+    check_candidate_refresh_failure_stops_at_two_and_reports_count("NONCE_CHANGED", json!({}))
+        .await;
+}
+
+#[tokio::test]
+async fn usd_ceiling_persistent_candidate_refresh_failure_stops_at_two_and_reports_count() {
+    check_candidate_refresh_failure_stops_at_two_and_reports_count(
+        "VALUE_BOUND_EXCEEDED",
+        usd_ceiling_failure_details(),
+    )
+    .await;
+}
+
+async fn check_candidate_refresh_failure_stops_at_two_and_reports_count(
+    failure_code: &'static str,
+    failure_details: Value,
+) {
     let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
     let adapter = Arc::new(CandidateFailure {
         inner: SyntheticAdapter::new(),
         stage: "revalidation",
-        failure_code: "NONCE_CHANGED",
+        failure_code,
+        failure_details,
         failures_remaining: AtomicUsize::new(10),
         expire_on_failure: false,
         clock: clock.clone(),
@@ -541,6 +615,8 @@ async fn persistent_candidate_refresh_failure_stops_at_two_and_reports_count() {
         .await
         .unwrap();
     assert_eq!(operation.status, Status::Failed);
+    assert_eq!(operation.error.as_ref().unwrap().code, failure_code);
+    assert_eq!(adapter.failures_remaining.load(Ordering::SeqCst), 7);
     assert_eq!(
         operation
             .error
@@ -595,11 +671,28 @@ async fn persistent_candidate_refresh_failure_stops_at_two_and_reports_count() {
 
 #[tokio::test]
 async fn uncertain_plan_child_is_reconciled_after_restart_without_replay() {
+    check_plan_child_is_reconciled_after_restart_without_replay("RPC_UNAVAILABLE", json!({})).await;
+}
+
+#[tokio::test]
+async fn usd_ceiling_uncertain_plan_child_is_reconciled_after_restart_without_replay() {
+    check_plan_child_is_reconciled_after_restart_without_replay(
+        "VALUE_BOUND_EXCEEDED",
+        usd_ceiling_failure_details(),
+    )
+    .await;
+}
+
+async fn check_plan_child_is_reconciled_after_restart_without_replay(
+    failure_code: &'static str,
+    failure_details: Value,
+) {
     let clock = Arc::new(RecoveryClock(Mutex::new(Utc::now())));
     let adapter = Arc::new(CandidateFailure {
         inner: SyntheticAdapter::new(),
         stage: "submission",
-        failure_code: "RPC_UNAVAILABLE",
+        failure_code,
+        failure_details,
         failures_remaining: AtomicUsize::new(1),
         expire_on_failure: false,
         clock: clock.clone(),
@@ -628,6 +721,20 @@ async fn uncertain_plan_child_is_reconciled_after_restart_without_replay() {
         .await
         .unwrap();
     assert_eq!(uncertain.status, Status::Unknown);
+    assert_eq!(uncertain.error.as_ref().unwrap().code, failure_code);
+    assert!(uncertain.submission.is_some());
+    let recorded_plan: FinancialPlanAuthorizationRecord = serde_json::from_value(
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .financial_plan(&plan_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(recorded_plan.attempts.len(), 1);
+    engine.revoke_financial_plan(&plan_id).await.unwrap();
     drop(engine);
 
     adapter.inner.completed_response();
@@ -658,6 +765,7 @@ async fn status_and_revoke_bypass_blocked_plan_preparation_and_revoke_prevents_d
         inner: SyntheticAdapter::new(),
         stage: "never-fail",
         failure_code: "SYNTHETIC_UNUSED",
+        failure_details: json!({}),
         failures_remaining: AtomicUsize::new(0),
         expire_on_failure: false,
         clock: clock.clone(),

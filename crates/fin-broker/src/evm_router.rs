@@ -447,7 +447,7 @@ mod tests {
         config.validate().unwrap();
         let applications =
             build_protected_applications(&config, Arc::new(NoCredentialAccess)).unwrap();
-        assert_eq!(applications.adapters.len(), 3);
+        assert_eq!(applications.adapters.len(), 5);
         let exchange = applications
             .adapters
             .iter()

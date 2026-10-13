@@ -1896,7 +1896,7 @@ thread_local! { static IN_CCXT: Cell<bool> = const { Cell::new(false) }; }
     feature = "coinbase",
     feature = "bybit"
 ))]
-fn install_panic_redaction() {
+pub(crate) fn install_panic_redaction() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let previous = std::panic::take_hook();
@@ -1915,7 +1915,7 @@ fn install_panic_redaction() {
     feature = "coinbase",
     feature = "bybit"
 ))]
-struct PanicRedaction;
+pub(crate) struct PanicRedaction;
 #[cfg(any(
     feature = "binance",
     feature = "kraken",
@@ -1925,7 +1925,7 @@ struct PanicRedaction;
     feature = "bybit"
 ))]
 impl PanicRedaction {
-    fn enter() -> Self {
+    pub(crate) fn enter() -> Self {
         IN_CCXT.set(true);
         Self
     }
@@ -2417,7 +2417,7 @@ impl CcxtClient {
     feature = "coinbase",
     feature = "bybit"
 ))]
-fn sanitized(error: ccxt::ExchangeError) -> CcxtError {
+pub(crate) fn sanitized(error: ccxt::ExchangeError) -> CcxtError {
     let kind = if error.is("RateLimitExceeded") || error.is("DDoSProtection") {
         CcxtErrorKind::RateLimited
     } else if error.is("PermissionDenied") {

@@ -10,6 +10,13 @@ use fin_domain::financial_plans::{
 
 const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
 
+#[path = "non_cash_plan_sources.rs"]
+mod non_cash_plan_sources;
+use non_cash_plan_sources::{
+    exact_non_cash_receipt_scope, substantive_plan_source_effects,
+    validate_exact_non_cash_receipt_candidate,
+};
+
 impl Engine {
     /// Prepare balance-independent adapter permissions and return the canonical
     /// review hash. Preview is read-only and never creates an approval request.
@@ -2172,10 +2179,16 @@ impl Engine {
                     &consumed_debits,
                     &remaining_debits,
                     &consumed_obligations,
+                    &step_effects,
                 )?;
             if exhausted {
-                blockers
-                    .push("Remaining step authority cannot satisfy its completion target.".into());
+                blockers.push(if exact_non_cash_receipt_scope(step, permission)
+                    && substantive_plan_source_effects(&step_effects)?
+                {
+                    "This exact noncash receipt step already used its finite source attempt; a remaining receipt requires fresh authority for a separate step or plan.".into()
+                } else {
+                    "Remaining step authority cannot satisfy its completion target.".into()
+                });
             }
             let state = if completed {
                 FinancialPlanStepProgressState::Completed
@@ -2353,6 +2366,15 @@ fn validate_exact_plan_identity(
 }
 
 fn can_auto_refresh_plan_candidate(error: &FinError) -> bool {
+    // A new candidate may reprice within the existing plan and policy bounds.
+    // The shared code also reports identity and malformed-bound failures; those
+    // must not be retried as ordinary USD price movement.
+    if error.code == "VALUE_BOUND_EXCEEDED" {
+        return error
+            .details
+            .as_deref()
+            .is_some_and(|details| details["reason"].as_str() == Some("usd_ceiling_exceeded"));
+    }
     matches!(
         error.code.as_str(),
         "PREVIEW_EXPIRED"
@@ -2826,7 +2848,19 @@ fn validate_exact_scope(scope: &FinancialPlanExactScope) -> Result<()> {
     }
     let mut costs = Vec::new();
     for cost in &scope.maximum_costs {
-        if cost.amount.atoms.is_zero()
+        let valid_text = |value: &str| !value.is_empty() && value.trim() == value;
+        let valid_location = match &cost.location {
+            AccountingLocation::Cash { resource } => valid_text(&resource.0),
+            AccountingLocation::Position {
+                resource, position, ..
+            } => valid_text(&resource.0) && valid_text(position),
+        };
+        let valid_treatment = matches!(cost.location, AccountingLocation::Cash { .. })
+            || matches!(cost.treatment, CostTreatment::IncludedInDebit);
+        if !valid_location
+            || !valid_treatment
+            || !valid_text(&cost.amount.asset.network)
+            || !valid_text(&cost.amount.asset.reference)
             || costs.iter().any(|identity| {
                 identity
                     == &(
@@ -2838,8 +2872,8 @@ fn validate_exact_scope(scope: &FinancialPlanExactScope) -> Result<()> {
         {
             return Err(plan_error(
                 "PLAN_EXACT_SCOPE_INVALID",
-                "Exact cost caps must be positive and unique by location, asset, and treatment.",
-                "Use one positive maximum cost for each exact fee identity.",
+                "Exact cost caps must have valid unique location, asset, and treatment identities; zero preserves exact zero fee authority.",
+                "Use one nonnegative maximum cost for each exact fee identity.",
             ));
         }
         costs.push((
@@ -3295,6 +3329,7 @@ pub(super) fn validate_candidate_plan_caps(
 ) -> Result<()> {
     let permission = permission_for_step(&record.revision, step_id)?;
     let scope = plan_boundary_spec(permission)?;
+    let mut prior_effects = Vec::new();
     let mut spent_debits = Vec::new();
     let mut spent_costs = Vec::new();
     for attempt in record
@@ -3311,6 +3346,7 @@ pub(super) fn validate_candidate_plan_caps(
         };
         let operation: OperationRecord = from_value(raw)?;
         if let Some(verified) = operation.effects {
+            prior_effects.extend(verified.effects.clone());
             let (debits, costs, _) =
                 summarize_plan_effects(&verified.effects, step_id, &record.usage)?;
             spent_debits = add_amounts(&spent_debits, &debits)?;
@@ -3332,6 +3368,7 @@ pub(super) fn validate_candidate_plan_caps(
                 "Use a step from the active revision.",
             )
         })?;
+    validate_exact_non_cash_receipt_candidate(step, permission, prepared, &prior_effects)?;
     if let Some(target) = &step.completion.principal_spend {
         let consumed = spent_debits
             .iter()
@@ -3834,6 +3871,7 @@ fn step_authority_cannot_complete(
     consumed_debits: &[ResourceAmount],
     aggregate_remaining_debits: &[ResourceAmount],
     consumed_obligations: &[ResourceAmount],
+    prior_effects: &[FinancialEffect],
 ) -> Result<bool> {
     let remaining = remaining_debits(
         permission_debits(permission),
@@ -3893,7 +3931,11 @@ fn step_authority_cannot_complete(
             });
         let obligation_receipt_capacity =
             obligation_receipt_capacity(permission, target, consumed_obligations)?;
-        if !any_principal_capacity && !receipt_capacity && !obligation_receipt_capacity {
+        let exact_non_cash = exact_non_cash_receipt_scope(step, permission);
+        if !any_principal_capacity
+            && ((exact_non_cash && substantive_plan_source_effects(prior_effects)?)
+                || (!exact_non_cash && !receipt_capacity && !obligation_receipt_capacity))
+        {
             return Ok(true);
         }
     }
@@ -4134,6 +4176,8 @@ fn completion_met(
     effects: &[FinancialEffect],
     operation_succeeded: bool,
 ) -> Result<bool> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     if completion.operation_succeeded && !operation_succeeded {
         return Ok(false);
     }
@@ -4181,6 +4225,8 @@ fn completion_met(
 }
 
 fn completion_receipt_totals(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     let mut receipts = BTreeMap::<String, BigUint>::new();
     for effect in effects {
         match effect {
@@ -4296,6 +4342,8 @@ fn summarize_plan_effects(
     Vec<CostBound>,
     Vec<FinancialPlanProceeds>,
 )> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     let mut debits = Vec::new();
     let mut costs = Vec::new();
     let mut credits = BTreeMap::<String, (ResourceId, fin_domain::AssetId, BigUint)>::new();
@@ -4434,7 +4482,8 @@ pub(super) fn account_financial_plan_effects(
         ),
     >::new();
     let mut credit_map = BTreeMap::<String, (ResourceId, fin_domain::AssetId, BigUint)>::new();
-    for effect in &verified.effects {
+    let projected = super::conversion_sequences::project_effects(&verified.effects)?;
+    for effect in &projected {
         match effect {
             FinancialEffect::CashDebit { resource, amount } => collect_amount(
                 &mut debit_map,
@@ -5236,6 +5285,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     include!("plan_revision_repair_tests.rs");
+    include!("non_cash_plan_source_tests.rs");
+    include!("exact_zero_cost_tests.rs");
 
     fn asset(reference: &str) -> AssetId {
         AssetId {
@@ -5820,7 +5871,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_scope_without_fees_is_valid_but_zero_fee_caps_remain_invalid() {
+    fn exact_scope_without_fees_or_with_unique_zero_fee_identity_is_valid() {
         let debit = resource_amount("hl:spot:primary", "USDC", "11000000");
         let mut scope = FinancialPlanExactScope {
             mode: financial_plans::FinancialPlanExactMode::Exact,
@@ -5840,6 +5891,8 @@ mod tests {
             },
             treatment: CostTreatment::AdditionalDebit,
         });
+        validate_exact_scope(&scope).unwrap();
+        scope.maximum_costs.push(scope.maximum_costs[0].clone());
         assert_eq!(
             validate_exact_scope(&scope).unwrap_err().code,
             "PLAN_EXACT_SCOPE_INVALID"
@@ -5921,6 +5974,7 @@ mod tests {
                 &progress.0,
                 &aggregate_remaining,
                 &[],
+                &effects,
             )
             .unwrap()
         );
@@ -5945,7 +5999,7 @@ mod tests {
             },
             funding_dependencies: vec![],
         };
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         assert!(permission_debits(&approved).is_empty());
         for target in [
             resource_amount("other", "ETH", "100"),
@@ -5953,11 +6007,11 @@ mod tests {
             resource_amount("destination", "ETH", "101"),
         ] {
             step.completion.minimum_net_receipt = Some(target);
-            assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+            assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         }
         step.completion.minimum_net_receipt = Some(resource_amount("destination", "ETH", "100"));
         approved.permission.as_mut().unwrap().deferred_receipt = None;
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
     }
 
     #[test]
@@ -5991,7 +6045,7 @@ mod tests {
             action_deadline_seconds: None,
         };
 
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         assert!(
             step_authority_cannot_complete(
                 &step,
@@ -5999,6 +6053,7 @@ mod tests {
                 &[],
                 &[],
                 &[resource_amount("wallet:one", "WETH", "200")],
+                &[]
             )
             .unwrap()
         );
@@ -6009,25 +6064,26 @@ mod tests {
                 &[],
                 &[],
                 &[resource_amount("wallet:one", "WETH", "400")],
+                &[]
             )
             .unwrap()
         );
 
         approved.permission.as_mut().unwrap().possible_credits[0].resource =
             ResourceId("wallet:other".into());
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         approved.permission.as_mut().unwrap().possible_credits[0] = FinancialPlanFundingIdentity {
             resource: ResourceId("wallet:one".into()),
             asset: asset("USDC"),
         };
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         approved
             .permission
             .as_mut()
             .unwrap()
             .possible_credits
             .clear();
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
     }
 
     #[test]

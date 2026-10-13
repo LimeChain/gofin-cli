@@ -1,0 +1,650 @@
+{
+  "schemaVersion": 1,
+  "scope": "Static read endpoint selection; requests and expectations are independently derived from the pinned raw official source definitions, never Fin contracts or generated DTO schemas.",
+  "endpoints": [
+    {
+      "client": "kraken",
+      "method": "public_get_time",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Time",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_system_status",
+      "sourceSpec": "spot-rest",
+      "path": "/public/SystemStatus",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_maintenance_schedule",
+      "sourceSpec": "spot-rest",
+      "path": "/public/MaintenanceSchedule",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_assets",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Assets",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_asset_pairs",
+      "sourceSpec": "spot-rest",
+      "path": "/public/AssetPairs",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_ticker",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Ticker",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_ohlc",
+      "sourceSpec": "spot-rest",
+      "path": "/public/OHLC",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_depth",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Depth",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_grouped_book",
+      "sourceSpec": "spot-rest",
+      "path": "/public/GroupedBook",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_trades",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Trades",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_spread",
+      "sourceSpec": "spot-rest",
+      "path": "/public/Spread",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_pre_trade",
+      "sourceSpec": "spot-rest",
+      "path": "/public/PreTrade",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "public_get_post_trade",
+      "sourceSpec": "spot-rest",
+      "path": "/public/PostTrade",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_level3",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Level3",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_balance",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Balance",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_balance_ex",
+      "sourceSpec": "spot-rest",
+      "path": "/private/BalanceEx",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_credit_lines",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CreditLines",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_trade_balance",
+      "sourceSpec": "spot-rest",
+      "path": "/private/TradeBalance",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_open_orders",
+      "sourceSpec": "spot-rest",
+      "path": "/private/OpenOrders",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_closed_orders",
+      "sourceSpec": "spot-rest",
+      "path": "/private/ClosedOrders",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_query_orders",
+      "sourceSpec": "spot-rest",
+      "path": "/private/QueryOrders",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_order_amends",
+      "sourceSpec": "spot-rest",
+      "path": "/private/OrderAmends",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_trades_history",
+      "sourceSpec": "spot-rest",
+      "path": "/private/TradesHistory",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_query_trades",
+      "sourceSpec": "spot-rest",
+      "path": "/private/QueryTrades",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_open_positions",
+      "sourceSpec": "spot-rest",
+      "path": "/private/OpenPositions",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_ledgers",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Ledgers",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_query_ledgers",
+      "sourceSpec": "spot-rest",
+      "path": "/private/QueryLedgers",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_trade_volume",
+      "sourceSpec": "spot-rest",
+      "path": "/private/TradeVolume",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_export_status",
+      "sourceSpec": "spot-rest",
+      "path": "/private/ExportStatus",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_retrieve_export",
+      "sourceSpec": "spot-rest",
+      "path": "/private/RetrieveExport",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_get_api_key_info",
+      "sourceSpec": "spot-rest",
+      "path": "/private/GetApiKeyInfo",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_list_wallet_accounts",
+      "sourceSpec": "spot-rest",
+      "path": "/private/ListWalletAccounts",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_deposit_methods",
+      "sourceSpec": "spot-rest",
+      "path": "/private/DepositMethods",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_deposit_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/private/DepositAddresses",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_deposit_status",
+      "sourceSpec": "spot-rest",
+      "path": "/private/DepositStatus",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_methods",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawMethods",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawAddresses",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_info",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawInfo",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_status",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawStatus",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_allocate_status",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/AllocateStatus",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_deallocate_status",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/DeallocateStatus",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_strategies",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Strategies",
+      "verb": "POST"
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_allocations",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Allocations",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_feeschedules",
+      "sourceSpec": "futures-rest",
+      "path": "/feeschedules",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_instruments",
+      "sourceSpec": "futures-rest",
+      "path": "/instruments",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_instruments_status",
+      "sourceSpec": "futures-rest",
+      "path": "/instruments/status",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_instruments_symbol_status",
+      "sourceSpec": "futures-rest",
+      "path": "/instruments/{symbol}/status",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_orderbook",
+      "sourceSpec": "futures-rest",
+      "path": "/orderbook",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_tickers",
+      "sourceSpec": "futures-rest",
+      "path": "/tickers",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_tickers_symbol",
+      "sourceSpec": "futures-rest",
+      "path": "/tickers/{symbol}",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_history",
+      "sourceSpec": "futures-rest",
+      "path": "/history",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "public_get_historicalfundingrates",
+      "sourceSpec": "futures-rest",
+      "path": "/historical-funding-rates",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_feeschedules_volumes",
+      "sourceSpec": "futures-rest",
+      "path": "/feeschedules/volumes",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_openpositions",
+      "sourceSpec": "futures-rest",
+      "path": "/openpositions",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_notifications",
+      "sourceSpec": "futures-rest",
+      "path": "/notifications",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_accounts",
+      "sourceSpec": "futures-rest",
+      "path": "/accounts",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_openorders",
+      "sourceSpec": "futures-rest",
+      "path": "/openorders",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_recentorders",
+      "sourceSpec": "futures-rest",
+      "path": "/recentorders",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_fills",
+      "sourceSpec": "futures-rest",
+      "path": "/fills",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_transfers",
+      "sourceSpec": "futures-rest",
+      "path": "/transfers",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_leveragepreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/leveragepreferences",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_pnlpreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/pnlpreferences",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_assignmentprogram_current",
+      "sourceSpec": "futures-rest",
+      "path": "/assignmentprogram/current",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_assignmentprogram_history",
+      "sourceSpec": "futures-rest",
+      "path": "/assignmentprogram/history",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_orders_status",
+      "sourceSpec": "futures-rest",
+      "path": "/orders/status",
+      "verb": "POST"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_unwindqueue",
+      "sourceSpec": "futures-rest",
+      "path": "/unwindqueue",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_self_trade_strategy",
+      "sourceSpec": "futures-rest",
+      "path": "/self-trade-strategy",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_subaccounts",
+      "sourceSpec": "futures-rest",
+      "path": "/subaccounts",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_subaccount_uid_trading_enabled",
+      "sourceSpec": "futures-rest",
+      "path": "/subaccount/{subaccountUid}/trading-enabled",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_get_rfq_assignment_max_leverage",
+      "sourceSpec": "futures-rest",
+      "path": "/rfq-assignment/max-leverage",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "charts_get_price_type_symbol_interval",
+      "sourceSpec": "futures-charts-rest",
+      "path": "/{tick_type}/{symbol}/{resolution}",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "charts_get_analytics_liquidity_pool",
+      "sourceSpec": "futures-charts-rest",
+      "path": "/analytics/liquidity-pool",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_orders",
+      "sourceSpec": "futures-history-rest",
+      "path": "/orders",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_executions",
+      "sourceSpec": "futures-history-rest",
+      "path": "/executions",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_triggers",
+      "sourceSpec": "futures-history-rest",
+      "path": "/triggers",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_accountlogcsv",
+      "sourceSpec": "futures-history-rest",
+      "path": "/accountlogcsv",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_account_log",
+      "sourceSpec": "futures-history-rest",
+      "path": "/account-log",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_market_symbol_orders",
+      "sourceSpec": "futures-history-rest",
+      "path": "/market/{tradeable}/orders",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_market_symbol_executions",
+      "sourceSpec": "futures-history-rest",
+      "path": "/market/{tradeable}/executions",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_market_symbol_price",
+      "sourceSpec": "futures-history-rest",
+      "path": "/market/{tradeable}/price",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "history_get_positions",
+      "sourceSpec": "futures-history-rest",
+      "path": "/positions",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_fees_method_id",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/fees/{method_id}",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_withdrawals",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/withdrawals",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_assets_direction",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/assets/{direction}",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v2_deposit_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v2/deposit/addresses",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_limits_deposit_asset_class_asset",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/limits/deposit/{asset_class}/{asset}",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_deposits",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/deposits",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_methods_direction",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/methods/{direction}",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_networks",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/networks",
+      "verb": "GET"
+    },
+    {
+      "client": "kraken",
+      "method": "funding_get_funding_v1_limits_withdrawal_asset_class_asset",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/limits/withdrawal/{asset_class}/{asset}",
+      "verb": "GET"
+    },
+    {
+      "client": "krakenfutures",
+      "method": "auth_get_api_keys_v3_check",
+      "sourceSpec": "futures-auth-rest",
+      "path": "/api-keys/v3/check",
+      "verb": "GET"
+    }
+  ]
+}

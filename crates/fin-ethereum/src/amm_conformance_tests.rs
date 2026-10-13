@@ -891,12 +891,12 @@ async fn long_plan_resolves_short_swap_after_eleven_minutes_and_rejects_insuffic
             )
         )?
     );
-    clock.advance(121);
+    clock.advance(300);
     assert_eq!(
         adapter.revalidate(&prepared).await.unwrap_err().code,
         "PREVIEW_EXPIRED"
     );
-    clock.advance(2700 - 661 - 121 - 599);
+    clock.advance(2700 - 661 - 300 - 599);
     let before = rpc.calls.lock().unwrap().len();
     let error = engine
         .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)

@@ -1208,17 +1208,30 @@ async fn revoked_pending_plan_reconciles_after_restart_without_replay_and_then_c
     );
     drop(engine);
 
-    let restarted = make_engine(
-        venue.clone(),
-        prices,
-        approvals.clone(),
-        Store::open(&database).unwrap(),
+    let reopened_store = Store::open(&database).unwrap();
+    let persisted: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+        serde_json::from_value(
+            reopened_store
+                .financial_plan(&approved.plan_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(persisted.attempts.len(), 1);
+    assert_eq!(persisted.attempts[0].attempt_id, pending.id);
+    assert_eq!(
+        persisted.attempts[0].logical_request_id.as_deref(),
+        Some(original.request_id.as_str())
     );
+    assert_ne!(pending.request_id, original.request_id);
+
+    let restarted = make_engine(venue.clone(), prices, approvals.clone(), reopened_store);
     let retry = restarted
         .execute_financial_plan_step(&approved.plan_id, "buy-eth", original)
         .await
         .unwrap();
     assert_eq!(retry.id, pending.id);
+    assert_eq!(retry.request_id, pending.request_id);
     assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
     assert_eq!(approvals.calls.load(Ordering::SeqCst), 1);
 
@@ -1246,7 +1259,7 @@ async fn revoked_pending_plan_reconciles_after_restart_without_replay_and_then_c
     assert_eq!(reconciled.steps[0].attempts[0].attempt_id, pending.id);
     assert_eq!(
         reconciled.steps[0].attempts[0].request_id,
-        "SYNTHETIC-plan-pending-restart-attempt"
+        pending.request_id
     );
     assert!(!reconciled.steps[0].verified_receipts.is_empty());
     assert_eq!(

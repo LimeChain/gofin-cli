@@ -52,6 +52,16 @@ pub fn parse(source: &str) -> Result<BTreeMap<String, Zeroizing<String>>, String
 }
 
 fn canonical_key(key: &str) -> Option<&str> {
+    for prefix in ["FIN_DEV_KRAKEN_", "FIN_DEV_KRAKENFUTURES_"] {
+        if let Some(rest) = key.strip_prefix(prefix)
+            && let Some((index, field)) = rest.split_once('_')
+            && matches!(index, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
+            && (matches!(field, "API_KEY" | "SECRET" | "ACCOUNT_ID" | "NAME")
+                || (prefix == "FIN_DEV_KRAKEN_" && field == "DEFAULT_WALLET_ACCOUNT_ID"))
+        {
+            return Some(key);
+        }
+    }
     Some(match key {
         "BINANCE_MASTER_ACCOUNT_API_KEY" => "FIN_DEV_BINANCE_API_KEY",
         "BINANCE_MASTER_ACCOUNT_API_PEM" => "FIN_DEV_BINANCE_PRIVATE_KEY_PEM",
@@ -59,7 +69,14 @@ fn canonical_key(key: &str) -> Option<&str> {
         "BINANCE_SUB_ACCOUNT_API_PEM" => "FIN_DEV_BINANCE_SUB_PRIVATE_KEY_PEM",
         "BINANCE_SUB_ACCOUNT_EMAIL" => "FIN_DEV_BINANCE_SUB_EMAIL",
         "ETH_WALLET_PK" => "FIN_DEV_EVM_PRIVATE_KEY",
-        "FIN_DEV_BINANCE_API_KEY"
+        "FIN_DEV_KRAKEN_API_KEY"
+        | "FIN_DEV_KRAKEN_SECRET"
+        | "FIN_DEV_KRAKEN_ACCOUNT_ID"
+        | "FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID"
+        | "FIN_DEV_KRAKENFUTURES_API_KEY"
+        | "FIN_DEV_KRAKENFUTURES_SECRET"
+        | "FIN_DEV_KRAKENFUTURES_ACCOUNT_ID"
+        | "FIN_DEV_BINANCE_API_KEY"
         | "FIN_DEV_BINANCE_SECRET"
         | "FIN_DEV_BINANCE_PRIVATE_KEY_PEM"
         | "FIN_DEV_BINANCE_UID"
@@ -153,6 +170,22 @@ mod tests {
         assert!(parse("BINANCE_SUB_ACCOUNT_EMAIL=child@example.invalid\nFIN_DEV_BINANCE_SUB_EMAIL=other@example.invalid").is_err());
     }
 
+    #[test]
+    fn indexed_kraken_groups_are_closed_and_bounded() {
+        for product in ["KRAKEN", "KRAKENFUTURES"] {
+            for index in 1..=8 {
+                assert!(parse(&format!("FIN_DEV_{product}_{index}_API_KEY=synthetic-only\nFIN_DEV_{product}_{index}_NAME=fixture-name")).is_ok());
+            }
+            for index in ["0", "9", "01", "999"] {
+                assert!(
+                    parse(&format!("FIN_DEV_{product}_{index}_API_KEY=synthetic-only")).is_err()
+                );
+            }
+            assert!(parse(&format!("FIN_DEV_{product}_1_URL=unsupported")).is_err());
+        }
+        assert!(parse("FIN_DEV_KRAKENFUTURES_1_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT").is_err());
+        assert!(parse("FIN_DEV_KRAKEN_1_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT").is_ok());
+    }
     #[test]
     fn errors_do_not_include_secret_values() {
         let error =

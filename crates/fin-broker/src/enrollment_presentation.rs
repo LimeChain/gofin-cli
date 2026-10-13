@@ -18,7 +18,29 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     }
     let action = binding["action"].as_str().unwrap_or("");
     let mut lines = Vec::new();
-    if action == "policy_set" {
+    if action == "configure" {
+        let operation = binding["operation"]
+            .as_str()
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration operation is missing."))?;
+        lines.push(format!(
+            "Configure {} | Account: {}",
+            safe(operation),
+            safe(binding["account"].as_str().unwrap_or(""))
+        ));
+        lines.push(format!(
+            "Product: {} | Physical account: {}",
+            safe(binding["product"].as_str().unwrap_or("")),
+            safe(binding["physical_identity"].as_str().unwrap_or(""))
+        ));
+        let fields = binding["parameters"]
+            .as_object()
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration parameters are missing."))?;
+        for (name, value) in fields {
+            lines.push(format!("{}: {}", safe(name), safe(&value.to_string())));
+        }
+        lines.push(safe(binding["warning"].as_str().unwrap_or("")));
+        lines.push("Touch ID approves this exact venue configuration attempt. No financial plan can authorize it.".into());
+    } else if action == "policy_set" {
         let previous: BrokerPolicy = serde_json::from_value(binding["previous_policy"].clone())
             .map_err(|_| error("INVALID_CHALLENGE", "Previous policy is invalid."))?;
         let next: BrokerPolicy = serde_json::from_value(binding["policy"].clone())
@@ -127,7 +149,45 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             "credentials for connection"
         };
         lines.push(format!("{verb} {subject}: {}", safe(name(&connection))));
+        if let ConnectionConfig::Kraken {
+            default_wallet_account_id: Some(id),
+            ..
+        } = &connection
+        {
+            lines.push(format!("Default Funding wallet: {} | Relationship: human_verified; ownership: venue verified", safe(id)));
+            lines.push("Your selection aliases this wallet to Spot custody; Kraken does not identify the default alias.".into());
+        }
         match &connection {
+            ConnectionConfig::Kraken {
+                name,
+                physical_identity,
+                physical_identity_verified,
+                ..
+            }
+            | ConnectionConfig::KrakenFutures {
+                name,
+                physical_identity,
+                physical_identity_verified,
+                ..
+            } => {
+                lines.push(format!(
+                    "Kraken connection: {} | Account: {}",
+                    safe(name),
+                    safe(physical_identity)
+                ));
+                lines.push(format!(
+                    "Account identity: {}",
+                    if *physical_identity_verified {
+                        "venue verified"
+                    } else {
+                        "human confirmed"
+                    }
+                ));
+                lines.push(
+                    "Product-specific credentials checked with a read; financial writes untested."
+                        .into(),
+                );
+            }
             ConnectionConfig::CoinGecko {
                 api_plan, resource, ..
             } => {
@@ -610,5 +670,19 @@ mod tests {
         binding["financial_movement"] = false.into();
         binding["connection"]["provider"] = "unsupported".into();
         assert!(review(&binding).is_err());
+    }
+    #[test]
+    fn default_wallet_review_discloses_exact_human_relationship() {
+        let binding = json!({"action":"add","financial_movement":false,"future_financial_authority":false,"connection":{"provider":"kraken","name":"spot","resource":"kraken:account:synthetic","credential_ref":"11111111-1111-4111-8111-111111111111","physical_identity":"synthetic","physical_identity_verified":false,"default_wallet_account_id":"WDEFAULT"}});
+        let text = review(&binding).unwrap();
+        assert!(text.contains("Default Funding wallet: WDEFAULT"));
+        assert!(text.contains("Relationship: human_verified; ownership: venue verified"));
+        assert!(text.contains("Kraken does not identify the default alias"));
+        let mut changed = binding.clone();
+        changed["connection"]["default_wallet_account_id"] = json!("WOTHER");
+        assert_ne!(
+            fin_domain::binding_hash(&binding).unwrap(),
+            fin_domain::binding_hash(&changed).unwrap()
+        );
     }
 }

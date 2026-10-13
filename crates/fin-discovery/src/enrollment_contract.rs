@@ -7,6 +7,23 @@ use serde_json::Value;
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicConnection {
+    Kraken {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_wallet_account_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_wallet_relationship_verification: Option<String>,
+        name: String,
+        resource: ResourceId,
+        physical_identity: String,
+        identity_verification: String,
+    },
+    #[serde(rename = "krakenfutures")]
+    KrakenFutures {
+        name: String,
+        resource: ResourceId,
+        physical_identity: String,
+        identity_verification: String,
+    },
     #[serde(rename = "coingecko")]
     CoinGecko {
         name: String,

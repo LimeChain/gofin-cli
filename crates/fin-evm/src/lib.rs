@@ -2179,8 +2179,56 @@ impl EvmRuntime {
         journal: Arc<dyn SubmissionJournal>,
         validated: &RevalidatedOperation,
     ) -> Result<Submission> {
+        self.submit_at_revalidated_binding(transaction, metadata, journal, validated, "")
+            .await
+    }
+
+    /// Submit a composite's exact nested envelope while retaining the complete
+    /// outer candidate's freshness and journal authority through dispatch.
+    /// The composite adapter must have revalidated this nested execution binding.
+    pub async fn submit_nested_revalidated(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: &RevalidatedOperation,
+        binding_pointer: &str,
+    ) -> Result<Submission> {
+        if !binding_pointer.starts_with('/') {
+            return Err(FinError::validation(
+                "A nested execution binding is required.",
+            ));
+        }
+        self.submit_at_revalidated_binding(
+            transaction,
+            metadata,
+            journal,
+            validated,
+            binding_pointer,
+        )
+        .await
+    }
+
+    async fn submit_at_revalidated_binding(
+        &self,
+        transaction: &FrozenTransaction,
+        metadata: Value,
+        journal: Arc<dyn SubmissionJournal>,
+        validated: &RevalidatedOperation,
+        binding_pointer: &str,
+    ) -> Result<Submission> {
         validated.assert_fresh()?;
-        let binding = &validated.prepared().binding;
+        let binding = validated
+            .prepared()
+            .binding
+            .pointer(binding_pointer)
+            .ok_or_else(|| {
+                error(
+                    "BINDING_CHANGED",
+                    "submission",
+                    "The final candidate has no selected execution binding.",
+                )
+            })?;
         if binding.get("permit_template").is_some_and(|v| !v.is_null()) {
             return Err(error(
                 "PERMIT_MATERIALIZATION_REQUIRED",

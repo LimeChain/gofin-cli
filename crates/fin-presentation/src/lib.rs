@@ -602,6 +602,56 @@ impl Ui {
     ) -> io::Result<()> {
         if self.machine {
             write_json(value, output)
+        } else if command == "read"
+            && !self.is_verbose()
+            && value["output"].is_string()
+            && value["sha256"].is_string()
+            && value["bytes"].is_u64()
+        {
+            writeln!(
+                output,
+                "{}",
+                self.styled(
+                    &format!(
+                        "✓ Saved {} ({} bytes).",
+                        safe_text(value["output"].as_str().unwrap_or("")),
+                        value["bytes"].as_u64().unwrap_or(0)
+                    ),
+                    "32"
+                )
+            )
+        } else if command == "status"
+            && !self.is_verbose()
+            && value["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("configuration:"))
+        {
+            let acknowledged = value["status"] == "acknowledged";
+            writeln!(
+                output,
+                "{}",
+                self.styled(
+                    if acknowledged {
+                        "✓ Venue configuration acknowledged."
+                    } else if value["status"] == "unapproved" {
+                        "⚠ Configuration has no approval; no venue change was dispatched."
+                    } else {
+                        "⚠ Configuration outcome is unresolved; no change was replayed."
+                    },
+                    if acknowledged { "32" } else { "33" }
+                )
+            )?;
+            writeln!(
+                output,
+                "Attempt: {} | Account: {}",
+                safe_text(value["id"].as_str().unwrap_or("")),
+                safe_text(value["account"].as_str().unwrap_or(""))
+            )?;
+            writeln!(
+                output,
+                "{}",
+                safe_text(value["nextAction"].as_str().unwrap_or(""))
+            )
         } else if matches!(command, "execute" | "status")
             && !self.is_verbose()
             && let Some(summary) = render_uncertain_operation(value, status_command)
@@ -841,6 +891,18 @@ pub fn render_human(command: &str, value: &Value, verbose: bool) -> String {
         && let Some(rendered) = render_uncertain_operation(value, None)
     {
         return rendered;
+    }
+    if command == "read"
+        && !verbose
+        && value["output"].is_string()
+        && value["sha256"].is_string()
+        && value["bytes"].is_u64()
+    {
+        return format!(
+            "✓ Saved {} ({} bytes).\n",
+            safe_text(value["output"].as_str().unwrap_or("")),
+            value["bytes"].as_u64().unwrap_or(0)
+        );
     }
     if !verbose && matches!(command, "read" | "preview" | "execute" | "status") {
         if let Some(rendered) = render_partial_transfer_failure(value) {
@@ -2677,6 +2739,33 @@ mod tests {
             .unwrap();
         assert!(stdout.is_empty());
         assert!(!stderr.contains(&0x1b));
+    }
+
+    #[test]
+    fn artifact_result_is_concise_safe_semantic_and_machine_preserves_metadata() {
+        let value = json!({"output":"synthetic.zip\nInjected","bytes":300000,"sha256":"a".repeat(64),"contentType":"application/zip"});
+        let mut ui = Ui::new(false, false);
+        ui.terminal.color = true;
+        let mut output = vec![];
+        ui.write_result_to(&value, "read", &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("\x1b[32m✓ Saved"));
+        assert!(text.contains("synthetic.zip\\nInjected"));
+        assert!(!text.contains("sha256"));
+        ui.terminal.color = false;
+        let mut output = vec![];
+        ui.write_result_to(&value, "read", &mut output).unwrap();
+        assert!(!output.contains(&0x1b));
+        let mut output = vec![];
+        Ui::new(true, false)
+            .write_result_to(&value, "read", &mut output)
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
+        let mut output = vec![];
+        Ui::new(false, true)
+            .write_result_to(&value, "read", &mut output)
+            .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains("sha256"));
     }
 
     #[test]

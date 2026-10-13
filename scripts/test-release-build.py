@@ -24,6 +24,7 @@ class ReleaseTests(unittest.TestCase):
         self.output = Path(temporary.name) / "assets"
         self.cargo_version("0.2.0-beta.1")
         self.commands = []
+        self.build_versions = []
         self.status = ""
         self.tag_commit = COMMIT
         self.patches = [patch.object(release, "run", self.tool)]
@@ -36,9 +37,11 @@ class ReleaseTests(unittest.TestCase):
             '[workspace]\nmembers=[]\n[workspace.package]\nversion = "' + version +
             '"\n[workspace.dependencies]\nwrong={version="9.9.9"}\n')
 
-    def tool(self, args, root):
+    def tool(self, args, root, env=None):
         self.assertEqual(root, self.root)
         self.commands.append(args)
+        if args[0] in ("cargo", "/bin/sh"):
+            self.build_versions.append(env["FIN_RELEASE_VERSION"] if env else None)
         if args == ["git", "rev-parse", "HEAD"]:
             return COMMIT
         if args[:3] == ["git", "rev-parse", "--verify"]:
@@ -72,22 +75,45 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release.platform, "system", return_value=system), patch.object(release.platform, "machine", return_value=machine):
             return release.build(self.root, metadata or self.metadata(), target, output or self.output)
 
-    def test_resolve_exact_tag_commit_and_workspace_prerelease(self):
+    def test_resolve_exact_tag_commit_and_prerelease(self):
         metadata = self.metadata()
         self.assertEqual(metadata, {"tag": "v0.2.0-beta.1", "version": "0.2.0-beta.1", "commit": COMMIT,
                                     "prerelease": True, "preview": False})
         self.assertIn(["git", "rev-parse", "--verify", "refs/tags/v0.2.0-beta.1^{commit}"], self.commands)
 
-    def test_reject_version_injection_invalid_semver_and_workspace_mismatch(self):
-        for tag in ("v0.2.0", "v0.2.0-beta.01", "v01.2.0", "--help", "v0.2.0;echo secret", "v0.2.0\n", "v0.2.0-beta/1", "v0.2.0+build"):
+    def test_reject_version_injection_and_invalid_semver(self):
+        for tag in ("v0.2.0-beta.01", "v01.2.0", "--help", "v0.2.0;echo secret", "v0.2.0\n", "v0.2.0-beta/1", "v0.2.0+build"):
             with self.subTest(tag=tag), self.assertRaises(ValueError):
                 release.resolve(self.root, tag)
         self.assertFalse(any(args[:3] == ["git", "rev-parse", "--verify"] for args in self.commands))
 
-    def test_version_is_read_only_from_workspace_package(self):
+    def test_preview_version_is_read_only_from_workspace_package(self):
         (self.root / "Cargo.toml").write_text('[package]\nversion="0.2.0-beta.1"\n')
         with self.assertRaises(ValueError):
-            self.metadata()
+            release.resolve(self.root, preview=True)
+
+    def test_release_tag_is_independent_of_cargo_version_without_rewriting_files(self):
+        lock = self.root / "Cargo.lock"
+        lock.write_text('# synthetic lockfile\nversion = 4\n')
+        cargo = self.root / "Cargo.toml"
+        original = (cargo.read_bytes(), lock.read_bytes())
+        for tag, prerelease in [("v3.0.0", False), ("v4.2.0-beta.7", True)]:
+            with self.subTest(tag=tag):
+                metadata = release.resolve(self.root, tag)
+                self.assertEqual(metadata["version"], tag[1:])
+                self.assertEqual(metadata["prerelease"], prerelease)
+                self.assertEqual(metadata["commit"], COMMIT)
+                for target in release.TARGETS:
+                    archive = self.build(target, self.output / tag, metadata)
+                    release.verify_archive(archive, metadata, target)
+                    self.assertIn(tag, archive.name)
+                    self.assertIn(("release_version=" + tag + "\n").encode(), release.buildinfo(metadata, target))
+                installer = self.root / "install.sh"
+                installer.write_text('#!/bin/sh\n# synthetic\n')
+                release.assemble(metadata, self.output / tag, installer)
+                self.assertIn(tag, (self.output / tag / "SHA256SUMS").read_text())
+        self.assertEqual(self.build_versions, ["3.0.0"] * 3 + ["4.2.0-beta.7"] * 3)
+        self.assertEqual((cargo.read_bytes(), lock.read_bytes()), original)
 
     def test_reject_moved_head_and_dirty_checkout(self):
         self.tag_commit = "1" * 40
@@ -167,8 +193,8 @@ class ReleaseTests(unittest.TestCase):
     def test_native_packager_provenance_must_match_tag_commit(self):
         real_tool = self.tool
 
-        def wrong_provenance(args, root):
-            result = real_tool(args, root)
+        def wrong_provenance(args, root, env=None):
+            result = real_tool(args, root, env=env)
             if args[0] == "/bin/sh":
                 bundle = Path(args[2])
                 (bundle / "BUILDINFO").write_bytes((bundle / "BUILDINFO").read_bytes().replace(b"source_state=clean", b"source_state=modified"))

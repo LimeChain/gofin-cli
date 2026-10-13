@@ -1,4 +1,5 @@
 //! Complete real-adapter named-plan rehearsal over in-memory venue/RPC transports.
+//! Build fin-dev with FIN_DEV_BUILD_ID=synthetic-plan-timing-build first.
 //! Set FIN_TIMING_CLI to the built development CLI to include its actual parser,
 //! socket transport, JSON rendering and broker dispatch. No production paths.
 #![allow(dead_code)] // shared fixtures contain independent regression helpers
@@ -61,7 +62,29 @@ impl Authorizer for Approval {
 }
 const PLAN_SUMMARY: &str =
     "Withdraw 0.006 ETH; swap and bridge at least 9.5 USDC to Arbitrum, gas up to 0.0013 ETH.";
-struct Prices(Arc<ManualClock>, Option<Arc<WorkflowRpc>>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PriceDrift {
+    None,
+    WithinCeiling,
+    RefreshCandidate,
+    ExceedsPolicy,
+}
+impl PriceDrift {
+    fn enabled(self) -> bool {
+        self != Self::None
+    }
+    fn requires_refresh(self) -> bool {
+        matches!(self, Self::RefreshCandidate | Self::ExceedsPolicy)
+    }
+    fn native_price(self) -> &'static str {
+        if self.requires_refresh() {
+            "2025"
+        } else {
+            "2005"
+        }
+    }
+}
+struct Prices(Arc<ManualClock>, Option<Arc<WorkflowRpc>>, PriceDrift);
 #[async_trait]
 impl fin_pricing::UsdPriceSource for Prices {
     async fn quote(&self, a: &AssetId) -> Result<fin_pricing::UsdQuote> {
@@ -71,7 +94,7 @@ impl fin_pricing::UsdPriceSource for Prices {
                     rpc.drift_during_revalidation.load(Ordering::SeqCst)
                         && rpc.quote_calls.load(Ordering::SeqCst) > 1
                 }) {
-                    "2005"
+                    self.2.native_price()
                 } else {
                     "2000"
                 }
@@ -553,17 +576,27 @@ fn run_with_test_stack(future: impl Future<Output = ()> + Send + 'static) {
 
 #[test]
 fn withdrawal_swap_bridge_settles_with_one_45_minute_authorization_and_late_funding() {
-    run_with_test_stack(rehearse(false, false));
+    run_with_test_stack(rehearse(false, PriceDrift::None));
 }
 
 #[test]
 fn plan_settles_with_improved_requote_and_usd_price_drift_without_reapproval() {
-    run_with_test_stack(rehearse(false, true));
+    run_with_test_stack(rehearse(false, PriceDrift::WithinCeiling));
+}
+
+#[test]
+fn plan_refreshes_usd_ceiling_candidate_once_without_reapproval_or_duplicate_submission() {
+    run_with_test_stack(rehearse(false, PriceDrift::RefreshCandidate));
+}
+
+#[test]
+fn refreshed_usd_ceiling_candidate_still_obeys_protected_rolling_policy() {
+    run_with_test_stack(rehearse(false, PriceDrift::ExceedsPolicy));
 }
 
 #[test]
 fn pending_relative_swap_reconciles_after_expiry_and_broker_restart_without_resubmission() {
-    run_with_test_stack(rehearse(true, false));
+    run_with_test_stack(rehearse(true, PriceDrift::None));
 }
 
 #[test]
@@ -582,7 +615,7 @@ async fn rehearse_usdc_withdrawal() {
     *inner.token_balance.lock().unwrap() = U256::ZERO;
     let rpc = Arc::new(WorkflowRpc::reverse(inner.clone(), clock.clone()));
     let prices = Arc::new(
-        SharedUsdValuator::with_source(Arc::new(Prices(clock.clone(), None)))
+        SharedUsdValuator::with_source(Arc::new(Prices(clock.clone(), None, PriceDrift::None)))
             .with_clock(clock.clone()),
     );
     let mut config = EthereumConfig::wallet_only(42161, 1, vec![fixture::ARB_USDC.into()]);
@@ -899,7 +932,7 @@ async fn rehearse_usdc_withdrawal() {
     );
 }
 
-async fn rehearse(pending_swap: bool, price_drift: bool) {
+async fn rehearse(pending_swap: bool, price_drift: PriceDrift) {
     let tmp = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock(Mutex::new(chrono::Utc::now())));
     let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
@@ -915,8 +948,12 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
     let source_runtime = Arc::new(EvmRuntime::new(source.clone(), 1, Some(signer)));
     let destination_runtime = Arc::new(EvmRuntime::new(destination.clone(), 42161, None));
     let prices = Arc::new(
-        SharedUsdValuator::with_source(Arc::new(Prices(clock.clone(), Some(source.clone()))))
-            .with_clock(clock.clone()),
+        SharedUsdValuator::with_source(Arc::new(Prices(
+            clock.clone(),
+            Some(source.clone()),
+            price_drift,
+        )))
+        .with_clock(clock.clone()),
     );
     let mut config = EthereumConfig::wallet_only(1, 1, vec![fixture::ETH_USDC.into()]);
     config.weth = Some(WETH.into());
@@ -1067,13 +1104,20 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
         )
         .unwrap();
     drop(journal);
+    let mut policy = BrokerPolicy::beta();
+    if price_drift == PriceDrift::ExceedsPolicy {
+        // The settled withdrawal charges $12. The first swap candidate fits:
+        // $8.08 movement + $0.74 quoted maximum fee. Repricing must not bypass
+        // this installation-wide cap with its $8.19 + $0.74 replacement.
+        policy.max_run_allocation_usd_micros = "20850000".into();
+    }
     let runtime = compose_runtime_with_clock(
         BrokerConfigV2 {
             version: 2,
             networks: NetworkConfig::reviewed_evm_networks(),
             deployments: vec![DeploymentConfig::ethereum_mainnet()],
             connections: vec![],
-            policy: BrokerPolicy::beta(),
+            policy,
             approver_uid: unsafe { libc::geteuid() },
             extensions: BTreeMap::new(),
         },
@@ -1088,6 +1132,11 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
     )
     .unwrap();
     let client = Client::new(runtime.clone(), tmp.path()).await;
+    if price_drift == PriceDrift::ExceedsPolicy {
+        // Rejection is verified through JSON even when the successful cases
+        // additionally exercise the human progress route.
+        client.human_swap_observed.store(true, Ordering::SeqCst);
+    }
     let recovered = runtime.engine.status(&interrupted.id, false).await.unwrap();
     assert_eq!(recovered.status, Status::Cancelled);
     assert!(recovered.submission.is_none());
@@ -1287,13 +1336,21 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
             input: input.clone(),
             run_id: None,
         };
-        if id == "swap" && price_drift {
+        if id == "swap" && price_drift.enabled() {
+            if price_drift == PriceDrift::ExceedsPolicy {
+                assert_eq!(
+                    runtime.engine.allocation_used_usd_micros().unwrap(),
+                    "12000000",
+                    "Only the settled withdrawal consumes the rolling allocation before the swap"
+                );
+            }
             // Age preparation beyond the 30-second reuse window, forcing
             // final quote/USD refresh while the original candidate stays valid.
             let preparation_clock = clock.clone();
             *source.advance_during_preparation.lock().unwrap() =
                 Some(Box::new(move || preparation_clock.advance(31)));
-            // The refreshed evidence improves by 0.5% / rises by 0.25%.
+            // The quote improves by 0.5%; pricing either remains within the
+            // candidate's 1% USD buffer or crosses it by rising from 2000 to 2025.
             source.quote_calls.store(0, Ordering::SeqCst);
             source
                 .drift_during_revalidation
@@ -1323,6 +1380,9 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
             .await;
         assert!(
             result["status"] == "completed"
+                || (id == "swap"
+                    && price_drift == PriceDrift::ExceedsPolicy
+                    && result["status"] == "failed")
                 || ((id == "withdraw" || (id == "swap" && pending_swap))
                     && result["status"] == "pending"),
             "{id}: {result}"
@@ -1350,19 +1410,149 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
             )
             .await;
         assert_eq!(duplicate["id"], result["id"]);
-        if id == "swap" && price_drift {
-            assert_eq!(source.quote_calls.load(Ordering::SeqCst), 2);
+        if id == "swap" && price_drift.enabled() {
+            assert_eq!(
+                source.quote_calls.load(Ordering::SeqCst),
+                if price_drift.requires_refresh() { 3 } else { 2 }
+            );
             assert_eq!(
                 result["preview"]["valuation"]["movement_usd_micros"],
-                "8080000"
+                if price_drift.requires_refresh() {
+                    "8190000"
+                } else {
+                    "8080000"
+                }
             );
+            if price_drift.requires_refresh() {
+                let journal = Store::open(tmp.path().join("journal.sqlite")).unwrap();
+                let attempts: Vec<OperationRecord> = journal
+                    .list_records()
+                    .unwrap()
+                    .into_iter()
+                    .map(|record| serde_json::from_value(record).unwrap())
+                    .filter(|record: &OperationRecord| record.operation == "uniswap.swap")
+                    .collect();
+                assert_eq!(attempts.len(), 2, "one bounded candidate refresh");
+                let persisted_plan: FinancialPlanAuthorizationRecord =
+                    serde_json::from_value(journal.financial_plan(&plan_id).unwrap().unwrap())
+                        .unwrap();
+                let links: Vec<_> = persisted_plan
+                    .attempts
+                    .iter()
+                    .filter(|link| link.step_id == "swap")
+                    .collect();
+                assert_eq!(links.len(), 2);
+                assert!(links.iter().all(|link| {
+                    link.logical_request_id.as_deref() == Some("SYNTHETIC-swap-attempt")
+                }));
+                assert_eq!(links[1].attempt_id, result["id"].as_str().unwrap());
+                let original = attempts
+                    .iter()
+                    .find(|record| record.id == links[0].attempt_id)
+                    .unwrap();
+                assert_eq!(original.status, Status::Failed);
+                let error = original.error.as_ref().unwrap();
+                assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
+                assert_eq!(
+                    error.details.as_ref().unwrap()["reason"],
+                    "usd_ceiling_exceeded"
+                );
+                assert_eq!(
+                    error.details.as_ref().unwrap()["field"],
+                    "movement_usd_micros"
+                );
+                assert_eq!(
+                    error.details.as_ref().unwrap()["observed_usd_micros"],
+                    "8100000"
+                );
+                assert_eq!(
+                    error.details.as_ref().unwrap()["maximum_usd_micros"],
+                    "8080000"
+                );
+                assert!(original.submission.is_none());
+                assert!(original.dispatch_evidence.is_none());
+                assert!(original.effects.is_none());
+                assert!(journal.submission(&original.id).unwrap().is_none());
+                assert_ne!(result["id"], original.id);
+                assert_ne!(result["request_id"], original.request_id);
+                let refreshed = attempts
+                    .iter()
+                    .find(|record| record.id == result["id"].as_str().unwrap())
+                    .unwrap();
+                if price_drift == PriceDrift::ExceedsPolicy {
+                    for attempt in [original, refreshed] {
+                        assert_eq!(
+                            attempt
+                                .preview
+                                .as_ref()
+                                .unwrap()
+                                .valuation
+                                .as_ref()
+                                .unwrap()
+                                .maximum_fee_usd_micros
+                                .as_str(),
+                            "740000",
+                            "The protected policy reserves the adapter's quoted maximum cost"
+                        );
+                    }
+                    assert_eq!(
+                        refreshed.error.as_ref().map(|error| error.code.as_str()),
+                        Some("ALLOCATION_LIMIT"),
+                        "Refreshed candidate must remain inside policy; original valuation: {:?}; refreshed valuation: {:?}",
+                        original.preview.as_ref().unwrap().valuation,
+                        refreshed.preview.as_ref().unwrap().valuation,
+                    );
+                    assert!(refreshed.submission.is_none());
+                    assert!(refreshed.dispatch_evidence.is_none());
+                    assert!(refreshed.effects.is_none());
+                    assert!(journal.submission(&refreshed.id).unwrap().is_none());
+                    assert_eq!(source.swaps.load(Ordering::SeqCst), 0);
+                    assert_eq!(inner.broadcasts(), 0);
+                    assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
+                    assert_eq!(approval.count.load(Ordering::SeqCst), 1);
+                    assert_eq!(
+                        runtime.engine.allocation_used_usd_micros().unwrap(),
+                        "12000000",
+                        "Unsubmitted failures must not consume or release settled allocation"
+                    );
+                    let status = client
+                        .call(
+                            args(&["plans", "status", &plan_id, "--json"]),
+                            BrokerRequest::PlanStatus {
+                                plan_id: plan_id.clone(),
+                            },
+                        )
+                        .await;
+                    assert_eq!(status["steps"][0]["state"], "completed");
+                    assert!(
+                        status["usage"]["reservations"]
+                            .as_array()
+                            .unwrap()
+                            .is_empty()
+                    );
+                    return;
+                }
+                assert_eq!(refreshed.status, Status::Completed);
+                assert!(refreshed.submission.is_some());
+                assert!(refreshed.effects.is_some());
+                assert!(journal.submission(&refreshed.id).unwrap().is_some());
+                assert_eq!(source.swaps.load(Ordering::SeqCst), 1);
+                assert_eq!(approval.count.load(Ordering::SeqCst), 1);
+            }
             let native_price = result["preview"]["valuation"]["prices"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|row| row["asset"]["reference"] == "native")
                 .unwrap();
-            assert_eq!(native_price["usd_micros_per_unit"], "2005000000");
+            assert_eq!(
+                native_price["usd_micros_per_unit"],
+                if price_drift.requires_refresh() {
+                    "2025000000"
+                } else {
+                    "2005000000"
+                }
+            );
             // This scenario isolates drift during swap revalidation; the
             // bridge's separate, explicitly USD-capped fees keep their fixture price.
             source

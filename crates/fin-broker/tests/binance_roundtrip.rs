@@ -1401,7 +1401,19 @@ impl EvmRpc for ArbitrumErc20ExecutionRpc {
                     .or_else(|| {
                         let store = Store::open(self.durable_store_path.as_ref()?).ok()?;
                         store.list_records().ok()?.into_iter().find_map(|record| {
-                            (record["request_id"] == "synthetic-plan-arbitrum-deposit")
+                            let operation_id = record["id"].as_str()?;
+                            let (plan_id, _, step_id, _) =
+                                store.financial_plan_attempt_owner(operation_id).ok()??;
+                            let plan = store.financial_plan(&plan_id).ok()??;
+                            // Plan retries retain the caller's logical ID in
+                            // their linkage; each candidate has an internal ID.
+                            let linked = plan["attempts"].as_array()?.iter().any(|attempt| {
+                                attempt["attempt_id"] == operation_id
+                                    && attempt["step_id"] == step_id
+                                    && attempt["logical_request_id"]
+                                        == "synthetic-plan-arbitrum-deposit"
+                            });
+                            linked
                                 .then(|| serde_json::from_value(record["submission"].clone()).ok())
                                 .flatten()
                         })

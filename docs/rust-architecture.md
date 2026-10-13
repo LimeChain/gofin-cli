@@ -268,6 +268,13 @@ checks at signing/dispatch, along with current authority and revocation. EVM
 submission rereads the pending nonce and verifies the exact frozen envelope;
 permit templates additionally materialize and simulate signed calldata once.
 Every path persists its immutable submission identity before dispatch.
+Wallet-funded Kraken deposits select the exact nested transfer transaction from
+that immutable binding and retain the validated outer candidate for journal
+authority and price-freshness checks through signing and dispatch.
+
+The shared EVM wallet/swap/Aave preparation path gives transaction previews five
+minutes. Revalidation still refreshes pricing within its independent freshness
+limits and preserves the original onchain deadlines.
 
 Human clients opt into bounded progress frames on the existing authenticated
 broker connection. The engine emits fixed stage enums at actual preparation,
@@ -443,7 +450,11 @@ financially started-step scope. Terminal never-submitted zero-effect attempts
 can be repaired by a freshly approved revision. Completed steps retain their
 historical specification and permission instead of regenerating execution
 permission against changed adapter metadata. Named steps refresh at most two
-proved-unsubmitted transient failures within one invocation and active authority;
+proved-unsubmitted transient failures within one invocation and active authority.
+Numeric USD attempt-ceiling changes also qualify, after validating priced
+asset/unit/provider identities; malformed bounds and identity changes do not.
+Every fresh candidate repeats plan and protected policy checks without widening
+existing authority or rebinding the failed attempt's ceiling. The
 durable logical-request linkage preserves idempotency of the latest candidate.
 Restart never replays work and releases unsubmitted bridge claims atomically with
 operation cancellation and reservations. Expired or revoked plans can still reconcile submitted attempts.
@@ -528,6 +539,8 @@ future is never cancelled by an evidence timeout. Further per-resource execution
 concurrency must preserve nonce control, cumulative policy and deduplication.
 
 Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Preserve supported legacy records through explicit, versioned migrations and verify interrupted-upgrade recovery.
+
+Journal schema 16 merges two historical version-10 layouts: upstream ordered settlement progress and signer nonces, and Kraken immutable native proof events. It recognizes each complete layout and Kraken versions 11–15, validates the exact known table columns, and adds missing tables without rewriting approvals, submissions, proof JSON/digests, ledger effects, consumed-cost watermarks or reservations. Each committed intermediate migration remains reopenable. Incomplete or foreign layouts fail closed; upgrading a journal never dispatches an operation.
 
 ## Verified financial effects and exact arithmetic
 

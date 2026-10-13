@@ -526,9 +526,33 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
     return reason.count <= 300 ? reason : nil
 }
 
+// Exact plans bind their input, schema, connections and accounting scope in
+// the broker. They intentionally have no bounded adapter permission spec.
+// Check that the displayed exact scope agrees with that frozen plan variant;
+// schema/financial enforcement remains in the broker and Rust challenge parser.
+private func validExactAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
+    guard absentPresentationValue(permission["permission"]),
+          let exact = permission["exact"] as? [String: Any],
+          let scope = exact["scope"] as? [String: Any],
+          scope["mode"] as? String == "exact",
+          let variations = step["permitted_variations"] as? [String: Any],
+          NSDictionary(dictionary:scope).isEqual(to:variations),
+          let operation = step["operation"] as? String,
+          let input = step["input"] as? [String: Any] else { return false }
+    if !absentPresentationValue(step["action_deadline_seconds"]) {
+        return ["uniswap.swap", "ramses.swap"].contains(operation)
+            && input["deadline"] == nil
+            && presentationInteger(step["action_deadline_seconds"], minimum:1, maximum:600) != nil
+    }
+    return presentationInteger(input["deadline"], minimum:1) != nil
+}
+
 // Validate the reviewed adapter permission against its hash-bound plan step.
 // Concise plan prompts still reject malformed or mismatched AMM scopes.
 private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
+    if !absentPresentationValue(permission["exact"]) {
+        return validExactAMMPlanStep(step, permission:permission)
+    }
     guard let operation = step["operation"] as? String,
           let venue = ammOperationPresentation(operation),
           let stepID = presentationString(step["step_id"], maximum: 80),
@@ -808,6 +832,13 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
           let action = binding["action"] as? String else { return nil }
     if action == "initialize" { return "finish setup for your Mac account" }
     if action == "policy_set" { return "change your financial policy" }
+    if action == "configure" {
+        guard let operation = binding["operation"] as? String, let account = binding["account"] as? String,
+              let product = binding["product"] as? String, ["kraken", "krakenfutures"].contains(product),
+              operation.hasPrefix(product + "."),
+              !account.isEmpty, account.count <= 96, binding["parameters"] is [String: Any] else { return nil }
+        return compactAuthenticationReason(prefix: "configure ", summary: "\(operation) for account \(account)")
+    }
     guard ["add", "update", "remove"].contains(action),
           let connection = binding["connection"] as? [String: Any],
           let name = connection["name"] as? String, !name.isEmpty, name.count <= 96,
@@ -819,6 +850,8 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "ethereum": providerName = "Ethereum"
     case "evm": providerName = "EVM"
     case "coingecko": providerName = "CoinGecko"
+    case "kraken": providerName = "Kraken"
+    case "krakenfutures": providerName = "Kraken Futures"
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"
@@ -977,7 +1010,7 @@ func terminalConfigurationReviewed(_ review: TerminalConfigurationReview?, bindi
           review.bindingHash == hash, review.nonce == nonce,
           review.operation == operation, review.expiresAt == expiry,
           operation.hasPrefix("configuration:"),
-          let action = binding["action"] as? String, ["initialize", "add", "update", "remove", "policy_set"].contains(action),
+          let action = binding["action"] as? String, ["initialize", "add", "update", "remove", "policy_set", "configure"].contains(action),
           let movement = binding["financial_movement"] as? NSNumber,
           CFGetTypeID(movement) == CFBooleanGetTypeID(), !movement.boolValue,
           let authority = binding["future_financial_authority"] as? NSNumber,

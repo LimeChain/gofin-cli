@@ -919,7 +919,7 @@ not global product limits. Follow the [live-test contract](docs/testing/README.m
 ## Exchange architecture and local verification
 
 Fin uses official **CCXT Rust 4.5.85** through `fin-exchange`, with Binance,
-Kraken, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
+Kraken Spot/Margin and Derivatives, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
 compatible. Shared lifecycle checks, journaling and recovery stay in Fin; CCXT
 handles exchange connectivity and signing. Exact wire responses bypass floating
 point convenience types. See [exchange connectivity](docs/rust-architecture.md#exchange-connectivity-and-extension).
@@ -936,7 +936,9 @@ fin read exchange.ticker --input '{"exchange":"bybit","pair":"BTCUSDT"}' --json
 ```
 
 These use an installed broker and require no exchange credentials. They add no
-account enrollment or writes for these venues. `fin capabilities --json` distinguishes
+private authority for these reads. Kraken additionally has typed product-specific enrollment,
+private operations, administration and exports; see [Kraken REST integration](docs/kraken/README.md).
+`fin capabilities --json` distinguishes
 library reach, Fin's supported operations and verification status. Use the same
 `exchange.markets` command with each exchange name to discover native identifiers.
 OKX/Bybit use spot, Coinbase uses Advanced public products (market discovery is
@@ -1035,7 +1037,10 @@ not evidence those checks passed. Independent feasibility reads run in bounded
 batches. Each execution still validates current state before dispatch.
 
 Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
-transient freshness, nonce or read failures while existing consent remains active.
+transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
+change, while existing consent remains active. Fresh candidates pass all plan
+and protected policy limits again; price identity and malformed-bound failures
+do not qualify for automatic refresh.
 Internal candidates retain separate durable identities linked to the caller's
 original request ID. Reusing that ID returns or reconciles the latest recorded
 candidate; it does not start another retry series. Scope and budget violations,

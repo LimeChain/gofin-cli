@@ -1,16 +1,21 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
+pub mod amendments;
 pub mod authority_expiry;
 pub mod boundaries;
 pub mod clock;
+pub mod compound_mutations;
+pub mod conversion_sequences;
 pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
+pub mod grouped_amendments;
 pub mod money;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
 pub mod submission_validation;
 pub mod unpriced;
+pub mod unresolved_consumption;
 pub mod value_bounds;
 
 #[cfg(test)]
@@ -448,10 +453,25 @@ pub enum Direction {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectConstraint {
+    CompoundSubmissionMutations {
+        children: Vec<compound_mutations::MutationChild>,
+    },
+    GroupedSubmissionAmendments {
+        group: Box<grouped_amendments::GroupedAmendmentGroup>,
+    },
+    ConversionSequence {
+        scope: conversion_sequences::ConversionSequenceConstraint,
+    },
     /// A separately authorized request to remove the remainder of one durable submission.
     SubmissionCancellation {
         operation_id: String,
         submission: Submission,
+    },
+    /// Fresh exact approval for one linked authority revision, never a second fill owner.
+    SubmissionAmendment {
+        operation_id: String,
+        submission: Submission,
+        revision: Box<amendments::AmendmentScope>,
     },
     OriginMovement {
         from: AccountingLocation,
@@ -497,6 +517,15 @@ pub enum EffectConstraint {
     },
     /// Long/short exposure quantities, never custody or borrowed principal.
     DerivativePosition {
+        resource: ResourceId,
+        position: String,
+        asset: AssetId,
+        position_kind: PositionKind,
+        minimum_delta: SignedQuantity,
+        maximum_delta: SignedQuantity,
+    },
+    /// Native-asset segregated margin exposure; the corresponding loan remains separate debt.
+    MarginPosition {
         resource: ResourceId,
         position: String,
         asset: AssetId,
@@ -786,10 +815,25 @@ impl RecoveryBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FinancialEffect {
+    CompoundSubmissionMutations {
+        children: Vec<compound_mutations::MutationChildProof>,
+    },
+    GroupedSubmissionAmendments {
+        proof: grouped_amendments::GroupedAmendmentProof,
+    },
+    ConversionSequence {
+        execution: conversion_sequences::ConversionSequence,
+    },
     /// A separately authorized request to remove the remainder of one durable submission.
     SubmissionCancellation {
         operation_id: String,
         submission: Submission,
+    },
+    /// Proven mutation acknowledgment; monetary fills remain owned by the original operation.
+    SubmissionAmendment {
+        operation_id: String,
+        submission: Submission,
+        successor: Option<Submission>,
     },
     /// Provenance only: matching cash/position/debt effects apply actual balances once.
     OriginMovement {
@@ -1044,6 +1088,10 @@ pub struct Reconciliation {
     pub status: Status,
     pub evidence: Value,
     /// Required for terminal financial results, including cost-only proved failure.
+    /// Pending results may include cumulative verified effects. Such evidence must
+    /// contain immutable `proofEvents` with stable `eventId`s, preserve every prior
+    /// event, and respect the original cumulative caps. Completion minima apply
+    /// only at terminal settlement; unresolved reservations remain owned.
     pub verified: Option<VerifiedEffects>,
 }
 
@@ -1242,6 +1290,30 @@ pub trait Adapter: Send + Sync {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    async fn prepare_with_compound_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &compound_mutations::CompoundAmendmentContext,
+    ) -> Result<PreparedOperation> {
+        self.prepare_with_linked_context(
+            operation,
+            input,
+            context,
+            &amendments::AmendmentContext::default(),
+        )
+        .await
+    }
+    async fn prepare_with_linked_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &amendments::AmendmentContext,
+    ) -> Result<PreparedOperation> {
+        self.prepare_with_context(operation, input, context).await
+    }
     async fn prepare_with_context(
         &self,
         operation: &str,
@@ -1348,6 +1420,21 @@ pub trait Adapter: Send + Sync {
             verified: None,
         })
     }
+    async fn reconcile_with_compound_context(
+        &self,
+        record: &OperationRecord,
+        _context: &compound_mutations::CompoundAmendmentContext,
+    ) -> Result<Reconciliation> {
+        self.reconcile_with_context(record, &amendments::AmendmentContext::default())
+            .await
+    }
+    async fn reconcile_with_context(
+        &self,
+        record: &OperationRecord,
+        _context: &amendments::AmendmentContext,
+    ) -> Result<Reconciliation> {
+        self.reconcile(record).await
+    }
 }
 
 #[derive(
@@ -1365,12 +1452,20 @@ pub enum PositionKind {
     VariableDebt,
     DerivativeLong,
     DerivativeShort,
+    MarginLong,
+    MarginShort,
 }
 impl PositionKind {
+    pub fn is_margin(&self) -> bool {
+        matches!(self, Self::MarginLong | Self::MarginShort)
+    }
     pub fn is_derivative(&self) -> bool {
         matches!(self, Self::DerivativeLong | Self::DerivativeShort)
     }
 }
+
+/// Broker-owned pre-action anchors in the immutable approved execution binding.
+pub const BASELINE_ANCHORS_KEY: &str = "_fin_verified_baseline_anchors";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

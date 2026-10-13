@@ -1,0 +1,6006 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Independent pinned raw official OpenAPI request schemas; no Fin generated contracts/DTO inputs",
+  "scope": "Mapping and strict typed decoding only; no transport dispatch, financial approval, settlement or live evidence.",
+  "sourceInterpretations": [
+    "OpenAPI number inputs become exact decimal strings without rounding; native integer/boolean/null retain type. Decimal business limits require separate financial validation.",
+    "Futures batchOrder is the logical object encoded into official json query text by the reviewed signer; processBefore and broker retain query placement.",
+    "Fin requires explicit order_tag on every Futures batch child for immutable proof ownership, although raw edit/cancel branches do not require the tag.",
+    "AllOf sibling properties and required keys are distributed through meaningful object union branches; current_fee versus quoted_fee uses its explicit source discriminator.",
+    "Legacy new=true is a dedicated protected endpoint alias; discovery removes new and cannot generate an address."
+  ],
+  "excludedInputs": [
+    "nonce",
+    "otp"
+  ],
+  "endpoints": [
+    {
+      "client": "kraken",
+      "method": "private_post_add_export",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddExport",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "addExport",
+      "optionPointers": [
+        "/description",
+        "/endtm",
+        "/fields",
+        "/format",
+        "/report",
+        "/starttm"
+      ],
+      "options": [
+        "description",
+        "endtm",
+        "fields",
+        "format",
+        "report",
+        "starttm"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades"
+          }
+        },
+        {
+          "case": "report:value",
+          "option": "report",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades"
+          }
+        },
+        {
+          "case": "report:enum:ledgers",
+          "option": "report",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "ledgers"
+          }
+        },
+        {
+          "case": "format:value",
+          "option": "format",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "format": "CSV"
+          }
+        },
+        {
+          "case": "format:enum:TSV",
+          "option": "format",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "format": "TSV"
+          }
+        },
+        {
+          "case": "description:value",
+          "option": "description",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades"
+          }
+        },
+        {
+          "case": "fields:value",
+          "option": "fields",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "fields": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "starttm:value",
+          "option": "starttm",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "starttm": 1
+          }
+        },
+        {
+          "case": "starttm:zero",
+          "option": "starttm",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "starttm": 0
+          }
+        },
+        {
+          "case": "endtm:value",
+          "option": "endtm",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "endtm": 1
+          }
+        },
+        {
+          "case": "endtm:zero",
+          "option": "endtm",
+          "native": {
+            "description": "SYNTHETIC",
+            "report": "trades",
+            "endtm": 0
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1AddExport/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_remove_export",
+      "sourceSpec": "spot-rest",
+      "path": "/private/RemoveExport",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "removeExport",
+      "optionPointers": [
+        "/id",
+        "/type"
+      ],
+      "options": [
+        "id",
+        "type"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "id": "SYNTHETIC-ID-ONLY",
+            "type": "cancel"
+          }
+        },
+        {
+          "case": "id:value",
+          "option": "id",
+          "native": {
+            "id": "SYNTHETIC-ID-ONLY",
+            "type": "cancel"
+          }
+        },
+        {
+          "case": "type:value",
+          "option": "type",
+          "native": {
+            "id": "SYNTHETIC-ID-ONLY",
+            "type": "cancel"
+          }
+        },
+        {
+          "case": "type:enum:delete",
+          "option": "type",
+          "native": {
+            "id": "SYNTHETIC-ID-ONLY",
+            "type": "delete"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1RemoveExport/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_add_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddOrder",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "addOrder",
+      "optionPointers": [
+        "/asset_class",
+        "/broker",
+        "/cl_ord_id",
+        "/close[ordertype]",
+        "/close[price2]",
+        "/close[price]",
+        "/deadline",
+        "/displayvol",
+        "/expiretm",
+        "/leverage",
+        "/oflags",
+        "/ordertype",
+        "/pair",
+        "/price",
+        "/price2",
+        "/reduce_only",
+        "/starttm",
+        "/stptype",
+        "/timeinforce",
+        "/trigger",
+        "/type",
+        "/userref",
+        "/validate",
+        "/volume"
+      ],
+      "options": [
+        "asset_class",
+        "broker",
+        "cl_ord_id",
+        "close[ordertype]",
+        "close[price2]",
+        "close[price]",
+        "deadline",
+        "displayvol",
+        "expiretm",
+        "leverage",
+        "oflags",
+        "ordertype",
+        "pair",
+        "price",
+        "price2",
+        "reduce_only",
+        "starttm",
+        "stptype",
+        "timeinforce",
+        "trigger",
+        "type",
+        "userref",
+        "validate",
+        "volume"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "userref:value",
+          "option": "userref",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "userref": 1
+          }
+        },
+        {
+          "case": "userref:zero",
+          "option": "userref",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "userref": 0
+          }
+        },
+        {
+          "case": "cl_ord_id:value",
+          "option": "cl_ord_id",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "cl_ord_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "ordertype:value",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:market",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "market",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:iceberg",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "iceberg",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:stop-loss",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "stop-loss",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:take-profit",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "take-profit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:stop-loss-limit",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "stop-loss-limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:take-profit-limit",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "take-profit-limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:trailing-stop",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "trailing-stop",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:trailing-stop-limit",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "trailing-stop-limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "ordertype:enum:settle-position",
+          "option": "ordertype",
+          "native": {
+            "ordertype": "settle-position",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "type:value",
+          "option": "type",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "type:enum:sell",
+          "option": "type",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "sell",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "volume:value",
+          "option": "volume",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "displayvol:value",
+          "option": "displayvol",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "displayvol": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "pair:value",
+          "option": "pair",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25"
+          }
+        },
+        {
+          "case": "asset_class:value",
+          "option": "asset_class",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "asset_class": "tokenized_asset"
+          }
+        },
+        {
+          "case": "price:value",
+          "option": "price",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "price": "40000.0"
+          }
+        },
+        {
+          "case": "price2:value",
+          "option": "price2",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "price2": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "trigger:value",
+          "option": "trigger",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "trigger": "index"
+          }
+        },
+        {
+          "case": "trigger:enum:last",
+          "option": "trigger",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "trigger": "last"
+          }
+        },
+        {
+          "case": "leverage:value",
+          "option": "leverage",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "leverage": "5"
+          }
+        },
+        {
+          "case": "reduce_only:value",
+          "option": "reduce_only",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "reduce_only": true
+          }
+        },
+        {
+          "case": "reduce_only:false",
+          "option": "reduce_only",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "reduce_only": false
+          }
+        },
+        {
+          "case": "stptype:value",
+          "option": "stptype",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "stptype": "cancel-newest"
+          }
+        },
+        {
+          "case": "stptype:enum:cancel-oldest",
+          "option": "stptype",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "stptype": "cancel-oldest"
+          }
+        },
+        {
+          "case": "stptype:enum:cancel-both",
+          "option": "stptype",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "stptype": "cancel-both"
+          }
+        },
+        {
+          "case": "oflags:value",
+          "option": "oflags",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "oflags": "post"
+          }
+        },
+        {
+          "case": "timeinforce:value",
+          "option": "timeinforce",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "timeinforce": "GTC"
+          }
+        },
+        {
+          "case": "timeinforce:enum:IOC",
+          "option": "timeinforce",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "timeinforce": "IOC"
+          }
+        },
+        {
+          "case": "timeinforce:enum:GTD",
+          "option": "timeinforce",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "timeinforce": "GTD"
+          }
+        },
+        {
+          "case": "timeinforce:enum:FOK",
+          "option": "timeinforce",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "timeinforce": "FOK"
+          }
+        },
+        {
+          "case": "starttm:value",
+          "option": "starttm",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "starttm": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "expiretm:value",
+          "option": "expiretm",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "expiretm": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "close[ordertype]:value",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "limit"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:iceberg",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "iceberg"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:stop-loss",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "stop-loss"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:take-profit",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "take-profit"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:stop-loss-limit",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "stop-loss-limit"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:take-profit-limit",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "take-profit-limit"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:trailing-stop",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "trailing-stop"
+          }
+        },
+        {
+          "case": "close[ordertype]:enum:trailing-stop-limit",
+          "option": "close[ordertype]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[ordertype]": "trailing-stop-limit"
+          }
+        },
+        {
+          "case": "close[price]:value",
+          "option": "close[price]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[price]": "50000.0"
+          }
+        },
+        {
+          "case": "close[price2]:value",
+          "option": "close[price2]",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "close[price2]": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "deadline:value",
+          "option": "deadline",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "deadline": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "validate:value",
+          "option": "validate",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "validate": false
+          }
+        },
+        {
+          "case": "validate:true",
+          "option": "validate",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "validate": true
+          }
+        },
+        {
+          "case": "broker:value",
+          "option": "broker",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "broker": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "broker:null",
+          "option": "broker",
+          "native": {
+            "ordertype": "limit",
+            "pair": "XBTUSD",
+            "type": "buy",
+            "volume": "1.25",
+            "broker": null
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "Limit with conditional stop-loss",
+          "pointer": "/paths/~1private~1AddOrder/post/responses/200/content/application~1json/examples/Limit with conditional stop-loss/value",
+          "businessFailure": false
+        },
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/add-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_amend_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AmendOrder",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "amendOrder",
+      "optionPointers": [
+        "/cl_ord_id",
+        "/deadline",
+        "/display_qty",
+        "/limit_price",
+        "/order_qty",
+        "/pair",
+        "/post_only",
+        "/trigger_price",
+        "/txid"
+      ],
+      "options": [
+        "cl_ord_id",
+        "deadline",
+        "display_qty",
+        "limit_price",
+        "order_qty",
+        "pair",
+        "post_only",
+        "trigger_price",
+        "txid"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "txid:value",
+          "option": "txid",
+          "native": {
+            "txid": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "cl_ord_id:value",
+          "option": "cl_ord_id",
+          "native": {
+            "cl_ord_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "order_qty:value",
+          "option": "order_qty",
+          "native": {
+            "order_qty": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "display_qty:value",
+          "option": "display_qty",
+          "native": {
+            "display_qty": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "limit_price:value",
+          "option": "limit_price",
+          "native": {
+            "limit_price": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "trigger_price:value",
+          "option": "trigger_price",
+          "native": {
+            "trigger_price": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "pair:value",
+          "option": "pair",
+          "native": {
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "post_only:value",
+          "option": "post_only",
+          "native": {
+            "post_only": false
+          }
+        },
+        {
+          "case": "post_only:true",
+          "option": "post_only",
+          "native": {
+            "post_only": true
+          }
+        },
+        {
+          "case": "deadline:value",
+          "option": "deadline",
+          "native": {
+            "deadline": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/amend-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelOrder",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "cancelOrder",
+      "optionPointers": [
+        "/cl_ord_id",
+        "/txid"
+      ],
+      "options": [
+        "cl_ord_id",
+        "txid"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "txid:value",
+          "option": "txid",
+          "native": {
+            "txid": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "txid:oneOf:1:value",
+          "option": "txid",
+          "native": {
+            "txid": 1
+          }
+        },
+        {
+          "case": "txid:oneOf:1:zero",
+          "option": "txid",
+          "native": {
+            "txid": 0
+          }
+        },
+        {
+          "case": "cl_ord_id:value",
+          "option": "cl_ord_id",
+          "native": {
+            "cl_ord_id": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/cancel-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_all",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelAll",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "cancelAllOrders",
+      "optionPointers": [],
+      "options": [],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/cancel-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_all_orders_after",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelAllOrdersAfter",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "cancelAllOrdersAfter",
+      "optionPointers": [
+        "/timeout"
+      ],
+      "options": [
+        "timeout"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "timeout": 1
+          }
+        },
+        {
+          "case": "timeout:value",
+          "option": "timeout",
+          "native": {
+            "timeout": 1
+          }
+        },
+        {
+          "case": "timeout:zero",
+          "option": "timeout",
+          "native": {
+            "timeout": 0
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1CancelAllOrdersAfter/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_add_order_batch",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AddOrderBatch",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "addOrderBatch",
+      "optionPointers": [
+        "/asset_class",
+        "/broker",
+        "/deadline",
+        "/orders",
+        "/orders/*",
+        "/orders/*/cl_ord_id",
+        "/orders/*/displayvol",
+        "/orders/*/expiretm",
+        "/orders/*/leverage",
+        "/orders/*/oflags",
+        "/orders/*/ordertype",
+        "/orders/*/price",
+        "/orders/*/price2",
+        "/orders/*/reduce_only",
+        "/orders/*/starttm",
+        "/orders/*/stptype",
+        "/orders/*/timeinforce",
+        "/orders/*/trigger",
+        "/orders/*/type",
+        "/orders/*/userref",
+        "/orders/*/volume",
+        "/pair",
+        "/validate"
+      ],
+      "options": [
+        "asset_class",
+        "broker",
+        "deadline",
+        "orders",
+        "pair",
+        "validate"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:userref:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "userref": 1
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:userref:zero",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "userref": 0
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:cl_ord_id:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "cl_ord_id": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:limit",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "limit",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:iceberg",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "iceberg",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:stop-loss",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "stop-loss",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:take-profit",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "take-profit",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:stop-loss-limit",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "stop-loss-limit",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:take-profit-limit",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "take-profit-limit",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:trailing-stop",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "trailing-stop",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:trailing-stop-limit",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "trailing-stop-limit",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:ordertype:enum:settle-position",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "settle-position",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:type:enum:sell",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "sell",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:displayvol:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "displayvol": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:price:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "price": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:price2:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "price2": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:trigger:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "trigger": "index"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:trigger:enum:last",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "trigger": "last"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:leverage:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "leverage": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:reduce_only:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "reduce_only": false
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:reduce_only:true",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "reduce_only": true
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:stptype:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "stptype": "cancel-newest"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:stptype:enum:cancel-oldest",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "stptype": "cancel-oldest"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:stptype:enum:cancel-both",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "stptype": "cancel-both"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:oflags:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "oflags": "post"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:timeinforce:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "timeinforce": "GTC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:timeinforce:enum:IOC",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "timeinforce": "IOC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:timeinforce:enum:GTD",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "timeinforce": "GTD"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:starttm:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "starttm": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "orders:child:field:expiretm:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC",
+                "expiretm": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "pair:value",
+          "option": "pair",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD"
+          }
+        },
+        {
+          "case": "asset_class:value",
+          "option": "asset_class",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "asset_class": "tokenized_asset"
+          }
+        },
+        {
+          "case": "deadline:value",
+          "option": "deadline",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "deadline": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "validate:value",
+          "option": "validate",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "validate": false
+          }
+        },
+        {
+          "case": "validate:true",
+          "option": "validate",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "validate": true
+          }
+        },
+        {
+          "case": "broker:value",
+          "option": "broker",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "broker": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "broker:null",
+          "option": "broker",
+          "native": {
+            "orders": [
+              {
+                "ordertype": "market",
+                "type": "buy",
+                "volume": "SYNTHETIC"
+              }
+            ],
+            "pair": "XETHZUSD",
+            "broker": null
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "Limits, one with conditional stop-loss",
+          "pointer": "/paths/~1private~1AddOrderBatch/post/responses/200/content/application~1json/examples/Limits, one with conditional stop-loss/value",
+          "businessFailure": false
+        },
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/batchadd-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_cancel_order_batch",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CancelOrderBatch",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "cancelOrderBatch",
+      "optionPointers": [
+        "/cl_ord_ids",
+        "/cl_ord_ids/*",
+        "/cl_ord_ids/*/cl_ord_id",
+        "/orders",
+        "/orders/*",
+        "/orders/*/txid"
+      ],
+      "options": [
+        "cl_ord_ids",
+        "orders"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "orders:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "txid": "SYNTHETIC-ID-ONLY"
+              }
+            ]
+          }
+        },
+        {
+          "case": "orders:child:field:txid:oneOf:1:value",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "txid": 1
+              }
+            ]
+          }
+        },
+        {
+          "case": "orders:child:field:txid:oneOf:1:zero",
+          "option": "orders",
+          "native": {
+            "orders": [
+              {
+                "txid": 0
+              }
+            ]
+          }
+        },
+        {
+          "case": "cl_ord_ids:value",
+          "option": "cl_ord_ids",
+          "native": {
+            "cl_ord_ids": [
+              {
+                "cl_ord_id": "SYNTHETIC"
+              }
+            ]
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "content-example",
+          "pointer": "/paths/~1private~1CancelOrderBatch/post/responses/200/content/application~1json/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_edit_order",
+      "sourceSpec": "spot-rest",
+      "path": "/private/EditOrder",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "editOrder",
+      "optionPointers": [
+        "/asset_class",
+        "/cancel_response",
+        "/deadline",
+        "/displayvol",
+        "/oflags",
+        "/pair",
+        "/price",
+        "/price2",
+        "/txid",
+        "/userref",
+        "/validate",
+        "/volume"
+      ],
+      "options": [
+        "asset_class",
+        "cancel_response",
+        "deadline",
+        "displayvol",
+        "oflags",
+        "pair",
+        "price",
+        "price2",
+        "txid",
+        "userref",
+        "validate",
+        "volume"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "userref:value",
+          "option": "userref",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "userref": 1
+          }
+        },
+        {
+          "case": "userref:zero",
+          "option": "userref",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "userref": 0
+          }
+        },
+        {
+          "case": "txid:value",
+          "option": "txid",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "txid:oneOf:1:value",
+          "option": "txid",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": 1
+          }
+        },
+        {
+          "case": "txid:oneOf:1:zero",
+          "option": "txid",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": 0
+          }
+        },
+        {
+          "case": "volume:value",
+          "option": "volume",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "volume": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "displayvol:value",
+          "option": "displayvol",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "displayvol": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "pair:value",
+          "option": "pair",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "asset_class:value",
+          "option": "asset_class",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "asset_class": "tokenized_asset"
+          }
+        },
+        {
+          "case": "price:value",
+          "option": "price",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "price": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "price2:value",
+          "option": "price2",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "price2": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "oflags:value",
+          "option": "oflags",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "oflags": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "deadline:value",
+          "option": "deadline",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "deadline": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "cancel_response:value",
+          "option": "cancel_response",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "cancel_response": false
+          }
+        },
+        {
+          "case": "cancel_response:true",
+          "option": "cancel_response",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "cancel_response": true
+          }
+        },
+        {
+          "case": "validate:value",
+          "option": "validate",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "validate": false
+          }
+        },
+        {
+          "case": "validate:true",
+          "option": "validate",
+          "native": {
+            "pair": "XETHZUSD",
+            "txid": "SYNTHETIC-ID-ONLY",
+            "validate": true
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "Limit with conditional stop-loss",
+          "pointer": "/paths/~1private~1EditOrder/post/responses/200/content/application~1json/examples/Limit with conditional stop-loss/value",
+          "businessFailure": false
+        },
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/edit-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Withdraw",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "withdrawFunds",
+      "optionPointers": [
+        "/aclass",
+        "/address",
+        "/amount",
+        "/asset",
+        "/key",
+        "/max_fee",
+        "/rebase_multiplier"
+      ],
+      "options": [
+        "aclass",
+        "address",
+        "amount",
+        "asset",
+        "key",
+        "max_fee",
+        "rebase_multiplier"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "asset:value",
+          "option": "asset",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "aclass:value",
+          "option": "aclass",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "aclass": "currency"
+          }
+        },
+        {
+          "case": "aclass:enum:tokenized_asset",
+          "option": "aclass",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "aclass": "tokenized_asset"
+          }
+        },
+        {
+          "case": "key:value",
+          "option": "key",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "address:value",
+          "option": "address",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "address": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "max_fee:value",
+          "option": "max_fee",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "max_fee": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "rebase_multiplier:value",
+          "option": "rebase_multiplier",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "rebase_multiplier": "rebased"
+          }
+        },
+        {
+          "case": "rebase_multiplier:enum:base",
+          "option": "rebase_multiplier",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "rebase_multiplier": "base"
+          }
+        },
+        {
+          "case": "rebase_multiplier:null",
+          "option": "rebase_multiplier",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "key": "SYNTHETIC",
+            "rebase_multiplier": null
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/withdrawal-2/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_withdraw_cancel",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WithdrawCancel",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "cancelWithdrawal",
+      "optionPointers": [
+        "/asset",
+        "/refid"
+      ],
+      "options": [
+        "asset",
+        "refid"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "asset": "ETH",
+            "refid": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "asset:value",
+          "option": "asset",
+          "native": {
+            "asset": "ETH",
+            "refid": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "refid:value",
+          "option": "refid",
+          "native": {
+            "asset": "ETH",
+            "refid": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1WithdrawCancel/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_wallet_transfer",
+      "sourceSpec": "spot-rest",
+      "path": "/private/WalletTransfer",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "walletTransfer",
+      "optionPointers": [
+        "/amount",
+        "/asset",
+        "/from",
+        "/to"
+      ],
+      "options": [
+        "amount",
+        "asset",
+        "from",
+        "to"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "XBT",
+            "from": "Spot Wallet",
+            "to": "Futures Wallet"
+          }
+        },
+        {
+          "case": "asset:value",
+          "option": "asset",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "XBT",
+            "from": "Spot Wallet",
+            "to": "Futures Wallet"
+          }
+        },
+        {
+          "case": "from:value",
+          "option": "from",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "XBT",
+            "from": "Spot Wallet",
+            "to": "Futures Wallet"
+          }
+        },
+        {
+          "case": "to:value",
+          "option": "to",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "XBT",
+            "from": "Spot Wallet",
+            "to": "Futures Wallet"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "XBT",
+            "from": "Spot Wallet",
+            "to": "Futures Wallet"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1WalletTransfer/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_create_subaccount",
+      "sourceSpec": "spot-rest",
+      "path": "/private/CreateSubaccount",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "createSubaccount",
+      "optionPointers": [
+        "/email",
+        "/username"
+      ],
+      "options": [
+        "email",
+        "username"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "email": "SYNTHETIC",
+            "username": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "username:value",
+          "option": "username",
+          "native": {
+            "email": "SYNTHETIC",
+            "username": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "email:value",
+          "option": "email",
+          "native": {
+            "email": "SYNTHETIC",
+            "username": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1CreateSubaccount/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_account_transfer",
+      "sourceSpec": "spot-rest",
+      "path": "/private/AccountTransfer",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "accountTransfer",
+      "optionPointers": [
+        "/amount",
+        "/asset",
+        "/asset_class",
+        "/from",
+        "/to"
+      ],
+      "options": [
+        "amount",
+        "asset",
+        "asset_class",
+        "from",
+        "to"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "asset:value",
+          "option": "asset",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "asset_class:value",
+          "option": "asset_class",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC",
+            "asset_class": "currency"
+          }
+        },
+        {
+          "case": "asset_class:enum:tokenized_asset",
+          "option": "asset_class",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC",
+            "asset_class": "tokenized_asset"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "from:value",
+          "option": "from",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "to:value",
+          "option": "to",
+          "native": {
+            "amount": "0.000000000000000001",
+            "asset": "ETH",
+            "from": "SYNTHETIC",
+            "to": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1AccountTransfer/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_allocate",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Allocate",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "allocateStrategy",
+      "optionPointers": [
+        "/amount",
+        "/strategy_id"
+      ],
+      "options": [
+        "amount",
+        "strategy_id"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "strategy_id:value",
+          "option": "strategy_id",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1Earn~1Allocate/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_earn_deallocate",
+      "sourceSpec": "spot-rest",
+      "path": "/private/Earn/Deallocate",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "deallocateStrategy",
+      "optionPointers": [
+        "/amount",
+        "/strategy_id"
+      ],
+      "options": [
+        "amount",
+        "strategy_id"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "strategy_id:value",
+          "option": "strategy_id",
+          "native": {
+            "amount": "0.000000000000000001",
+            "strategy_id": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/paths/~1private~1Earn~1Deallocate/post/responses/200/content/application~1json/schema/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_sendorder",
+      "sourceSpec": "futures-rest",
+      "path": "/sendorder",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "sendOrder",
+      "optionPointers": [
+        "/broker",
+        "/cliOrdId",
+        "/limitPrice",
+        "/limitPriceOffsetUnit",
+        "/limitPriceOffsetValue",
+        "/orderType",
+        "/processBefore",
+        "/reduceOnly",
+        "/side",
+        "/size",
+        "/stopPrice",
+        "/symbol",
+        "/trailingStopDeviationUnit",
+        "/trailingStopMaxDeviation",
+        "/triggerSignal"
+      ],
+      "options": [
+        "broker",
+        "cliOrdId",
+        "limitPrice",
+        "limitPriceOffsetUnit",
+        "limitPriceOffsetValue",
+        "orderType",
+        "processBefore",
+        "reduceOnly",
+        "side",
+        "size",
+        "stopPrice",
+        "symbol",
+        "trailingStopDeviationUnit",
+        "trailingStopMaxDeviation",
+        "triggerSignal"
+      ],
+      "query": [
+        "broker",
+        "cliOrdId",
+        "limitPrice",
+        "limitPriceOffsetUnit",
+        "limitPriceOffsetValue",
+        "orderType",
+        "processBefore",
+        "reduceOnly",
+        "side",
+        "size",
+        "stopPrice",
+        "symbol",
+        "trailingStopDeviationUnit",
+        "trailingStopMaxDeviation",
+        "triggerSignal"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "processBefore:value",
+          "option": "processBefore",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "processBefore": "2026-10-10T00:00:00.000Z"
+          }
+        },
+        {
+          "case": "orderType:value",
+          "option": "orderType",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:post",
+          "option": "orderType",
+          "native": {
+            "orderType": "post",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:ioc",
+          "option": "orderType",
+          "native": {
+            "orderType": "ioc",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:mkt",
+          "option": "orderType",
+          "native": {
+            "orderType": "mkt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:stp",
+          "option": "orderType",
+          "native": {
+            "orderType": "stp",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:take_profit",
+          "option": "orderType",
+          "native": {
+            "orderType": "take_profit",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:trailing_stop",
+          "option": "orderType",
+          "native": {
+            "orderType": "trailing_stop",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "orderType:enum:fok",
+          "option": "orderType",
+          "native": {
+            "orderType": "fok",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "symbol:value",
+          "option": "symbol",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "side:value",
+          "option": "side",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "side:enum:sell",
+          "option": "side",
+          "native": {
+            "orderType": "lmt",
+            "side": "sell",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "size:value",
+          "option": "size",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "size:exact-tiny",
+          "option": "size",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0.000000000000000001",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "size:exact-large",
+          "option": "size",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "12345678901234567890.000000000000000001",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "limitPrice:value",
+          "option": "limitPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPrice": "0"
+          }
+        },
+        {
+          "case": "limitPrice:exact-tiny",
+          "option": "limitPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPrice": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "limitPrice:exact-large",
+          "option": "limitPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPrice": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "stopPrice:value",
+          "option": "stopPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "stopPrice": "0"
+          }
+        },
+        {
+          "case": "stopPrice:exact-tiny",
+          "option": "stopPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "stopPrice": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "stopPrice:exact-large",
+          "option": "stopPrice",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "stopPrice": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "cliOrdId:value",
+          "option": "cliOrdId",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "cliOrdId": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "triggerSignal:value",
+          "option": "triggerSignal",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "triggerSignal": "mark"
+          }
+        },
+        {
+          "case": "triggerSignal:enum:index",
+          "option": "triggerSignal",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "triggerSignal": "index"
+          }
+        },
+        {
+          "case": "triggerSignal:enum:last",
+          "option": "triggerSignal",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "triggerSignal": "last"
+          }
+        },
+        {
+          "case": "reduceOnly:value",
+          "option": "reduceOnly",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "reduceOnly": false
+          }
+        },
+        {
+          "case": "reduceOnly:true",
+          "option": "reduceOnly",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "reduceOnly": true
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:value",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "trailingStopMaxDeviation": "0.1"
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:exact-tiny",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "trailingStopMaxDeviation": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:exact-large",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "trailingStopMaxDeviation": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "trailingStopDeviationUnit:value",
+          "option": "trailingStopDeviationUnit",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "trailingStopDeviationUnit": "PERCENT"
+          }
+        },
+        {
+          "case": "trailingStopDeviationUnit:enum:QUOTE_CURRENCY",
+          "option": "trailingStopDeviationUnit",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "trailingStopDeviationUnit": "QUOTE_CURRENCY"
+          }
+        },
+        {
+          "case": "limitPriceOffsetValue:value",
+          "option": "limitPriceOffsetValue",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPriceOffsetValue": "0"
+          }
+        },
+        {
+          "case": "limitPriceOffsetValue:exact-tiny",
+          "option": "limitPriceOffsetValue",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPriceOffsetValue": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "limitPriceOffsetValue:exact-large",
+          "option": "limitPriceOffsetValue",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPriceOffsetValue": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "limitPriceOffsetUnit:value",
+          "option": "limitPriceOffsetUnit",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPriceOffsetUnit": "QUOTE_CURRENCY"
+          }
+        },
+        {
+          "case": "limitPriceOffsetUnit:enum:PERCENT",
+          "option": "limitPriceOffsetUnit",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "limitPriceOffsetUnit": "PERCENT"
+          }
+        },
+        {
+          "case": "broker:value",
+          "option": "broker",
+          "native": {
+            "orderType": "lmt",
+            "side": "buy",
+            "size": "0",
+            "symbol": "PI_XBTUSD",
+            "broker": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "placed",
+          "pointer": "/components/examples/PlacedOrderExample/value",
+          "businessFailure": false
+        },
+        {
+          "label": "rejected",
+          "pointer": "/components/examples/RejectedOrderExample/value",
+          "businessFailure": false
+        },
+        {
+          "label": "executed",
+          "pointer": "/components/examples/ExecutedOrderExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_editorder",
+      "sourceSpec": "futures-rest",
+      "path": "/editorder",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "editOrderSpring",
+      "optionPointers": [
+        "/cliOrdId",
+        "/limitPrice",
+        "/orderId",
+        "/processBefore",
+        "/qtyMode",
+        "/size",
+        "/stopPrice",
+        "/trailingStopDeviationUnit",
+        "/trailingStopMaxDeviation"
+      ],
+      "options": [
+        "cliOrdId",
+        "limitPrice",
+        "orderId",
+        "processBefore",
+        "qtyMode",
+        "size",
+        "stopPrice",
+        "trailingStopDeviationUnit",
+        "trailingStopMaxDeviation"
+      ],
+      "query": [
+        "cliOrdId",
+        "limitPrice",
+        "orderId",
+        "processBefore",
+        "qtyMode",
+        "size",
+        "stopPrice",
+        "trailingStopDeviationUnit",
+        "trailingStopMaxDeviation"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "processBefore:value",
+          "option": "processBefore",
+          "native": {
+            "processBefore": "2026-10-10T00:00:00.000Z"
+          }
+        },
+        {
+          "case": "orderId:value",
+          "option": "orderId",
+          "native": {
+            "orderId": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "cliOrdId:value",
+          "option": "cliOrdId",
+          "native": {
+            "cliOrdId": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "size:value",
+          "option": "size",
+          "native": {
+            "size": "0"
+          }
+        },
+        {
+          "case": "size:exact-tiny",
+          "option": "size",
+          "native": {
+            "size": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "size:exact-large",
+          "option": "size",
+          "native": {
+            "size": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "limitPrice:value",
+          "option": "limitPrice",
+          "native": {
+            "limitPrice": "0"
+          }
+        },
+        {
+          "case": "limitPrice:exact-tiny",
+          "option": "limitPrice",
+          "native": {
+            "limitPrice": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "limitPrice:exact-large",
+          "option": "limitPrice",
+          "native": {
+            "limitPrice": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "stopPrice:value",
+          "option": "stopPrice",
+          "native": {
+            "stopPrice": "0"
+          }
+        },
+        {
+          "case": "stopPrice:exact-tiny",
+          "option": "stopPrice",
+          "native": {
+            "stopPrice": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "stopPrice:exact-large",
+          "option": "stopPrice",
+          "native": {
+            "stopPrice": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:value",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "trailingStopMaxDeviation": "0.1"
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:exact-tiny",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "trailingStopMaxDeviation": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "trailingStopMaxDeviation:exact-large",
+          "option": "trailingStopMaxDeviation",
+          "native": {
+            "trailingStopMaxDeviation": "12345678901234567890.000000000000000001"
+          }
+        },
+        {
+          "case": "trailingStopDeviationUnit:value",
+          "option": "trailingStopDeviationUnit",
+          "native": {
+            "trailingStopDeviationUnit": "PERCENT"
+          }
+        },
+        {
+          "case": "trailingStopDeviationUnit:enum:QUOTE_CURRENCY",
+          "option": "trailingStopDeviationUnit",
+          "native": {
+            "trailingStopDeviationUnit": "QUOTE_CURRENCY"
+          }
+        },
+        {
+          "case": "qtyMode:value",
+          "option": "qtyMode",
+          "native": {
+            "qtyMode": "ABSOLUTE"
+          }
+        },
+        {
+          "case": "qtyMode:enum:RELATIVE",
+          "option": "qtyMode",
+          "native": {
+            "qtyMode": "RELATIVE"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/EditOrderExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelorder",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelorder",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "cancelOrder",
+      "optionPointers": [
+        "/cliOrdId",
+        "/order_id",
+        "/processBefore"
+      ],
+      "options": [
+        "cliOrdId",
+        "order_id",
+        "processBefore"
+      ],
+      "query": [
+        "cliOrdId",
+        "order_id",
+        "processBefore"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "processBefore:value",
+          "option": "processBefore",
+          "native": {
+            "processBefore": "2026-10-10T00:00:00.000Z"
+          }
+        },
+        {
+          "case": "order_id:value",
+          "option": "order_id",
+          "native": {
+            "order_id": "SYNTHETIC-ID-ONLY"
+          }
+        },
+        {
+          "case": "cliOrdId:value",
+          "option": "cliOrdId",
+          "native": {
+            "cliOrdId": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/CancelOrderExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_transfer",
+      "sourceSpec": "futures-rest",
+      "path": "/transfer",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "transfer",
+      "optionPointers": [
+        "/amount",
+        "/fromAccount",
+        "/toAccount",
+        "/unit"
+      ],
+      "options": [
+        "amount",
+        "fromAccount",
+        "toAccount",
+        "unit"
+      ],
+      "query": [
+        "amount",
+        "fromAccount",
+        "toAccount",
+        "unit"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.1",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "fromAccount:value",
+          "option": "fromAccount",
+          "native": {
+            "amount": "0.1",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "toAccount:value",
+          "option": "toAccount",
+          "native": {
+            "amount": "0.1",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "unit:value",
+          "option": "unit",
+          "native": {
+            "amount": "0.1",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.1",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "amount:exact-tiny",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        },
+        {
+          "case": "amount:exact-large",
+          "option": "amount",
+          "native": {
+            "amount": "12345678901234567890.000000000000000001",
+            "fromAccount": "fi_ethusd",
+            "toAccount": "flex",
+            "unit": "eth"
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_transfer_subaccount",
+      "sourceSpec": "futures-rest",
+      "path": "/transfer/subaccount",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "subAccountTransfer",
+      "optionPointers": [
+        "/amount",
+        "/fromAccount",
+        "/fromUser",
+        "/toAccount",
+        "/toUser",
+        "/unit"
+      ],
+      "options": [
+        "amount",
+        "fromAccount",
+        "fromUser",
+        "toAccount",
+        "toUser",
+        "unit"
+      ],
+      "query": [
+        "amount",
+        "fromAccount",
+        "fromUser",
+        "toAccount",
+        "toUser",
+        "unit"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "fromUser:value",
+          "option": "fromUser",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "toUser:value",
+          "option": "toUser",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "fromAccount:value",
+          "option": "fromAccount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "toAccount:value",
+          "option": "toAccount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "unit:value",
+          "option": "unit",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "fromAccount": "SYNTHETIC",
+            "fromUser": "SYNTHETIC",
+            "toAccount": "SYNTHETIC",
+            "toUser": "SYNTHETIC",
+            "unit": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/SuccessExample/value",
+          "businessFailure": false
+        },
+        {
+          "label": "failure",
+          "pointer": "/components/examples/TransferSubaccountFailureExample/value",
+          "businessFailure": true
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_batchorder",
+      "sourceSpec": "futures-rest",
+      "path": "/batchorder",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "sendBatchOrder",
+      "optionPointers": [
+        "/batchOrder",
+        "/batchOrder/*",
+        "/batchOrder/*/cliOrdId",
+        "/batchOrder/*/limitPrice",
+        "/batchOrder/*/order",
+        "/batchOrder/*/orderType",
+        "/batchOrder/*/order_id",
+        "/batchOrder/*/order_tag",
+        "/batchOrder/*/qtyMode",
+        "/batchOrder/*/reduceOnly",
+        "/batchOrder/*/side",
+        "/batchOrder/*/size",
+        "/batchOrder/*/stopPrice",
+        "/batchOrder/*/symbol",
+        "/batchOrder/*/trailingStopDeviationUnit",
+        "/batchOrder/*/trailingStopMaxDeviation",
+        "/batchOrder/*/triggerSignal",
+        "/broker",
+        "/processBefore"
+      ],
+      "options": [
+        "batchOrder",
+        "broker",
+        "processBefore"
+      ],
+      "query": [
+        "broker",
+        "processBefore",
+        "json"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "processBefore:value",
+          "option": "processBefore",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ],
+            "processBefore": "2026-10-10T00:00:00.000Z"
+          }
+        },
+        {
+          "case": "broker:value",
+          "option": "broker",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ],
+            "broker": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "batchOrder:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:order_tag:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:post",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "post",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:ioc",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "ioc",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:mkt",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "mkt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:stp",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "stp",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:take_profit",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "take_profit",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:trailing_stop",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "trailing_stop",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:orderType:enum:fok",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "fok",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:side:enum:sell",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "sell",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:size:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "0",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:limitPrice:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "0",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:stopPrice:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "stopPrice": "0"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:cliOrdId:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "SYNTHETIC"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:triggerSignal:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "triggerSignal": "mark"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:triggerSignal:enum:index",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "triggerSignal": "index"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:triggerSignal:enum:last",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "triggerSignal": "last"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:reduceOnly:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "reduceOnly": false
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:reduceOnly:true",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "reduceOnly": true
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:trailingStopMaxDeviation:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "trailingStopMaxDeviation": "0"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:trailingStopDeviationUnit:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "trailingStopDeviationUnit": "PERCENT"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:trailingStopDeviationUnit:enum:QUOTE_CURRENCY",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "trailingStopDeviationUnit": "QUOTE_CURRENCY"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:cliOrdId:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "cliOrdId": "SYNTHETIC",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:cliOrdId:null",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "cliOrdId": null,
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:size:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "size": "0",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:limitPrice:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "limitPrice": "0",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:stopPrice:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "stopPrice": "0",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:trailingStopMaxDeviation:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "trailingStopMaxDeviation": "0.1",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:trailingStopDeviationUnit:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "trailingStopDeviationUnit": "PERCENT",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:trailingStopDeviationUnit:enum:QUOTE_CURRENCY",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "trailingStopDeviationUnit": "QUOTE_CURRENCY",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:qtyMode:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "qtyMode": "ABSOLUTE",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:qtyMode:enum:RELATIVE",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "qtyMode": "RELATIVE",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:2:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "cancel",
+                "order_id": "e35d61dd-8a30-4d5f-a574-b5593ef0c050",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:2:field:order_id:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "cancel",
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:2:field:cliOrdId:value",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "cancel",
+                "order_id": "e35d61dd-8a30-4d5f-a574-b5593ef0c050",
+                "cliOrdId": "SYNTHETIC",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:size:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "0.000000000000000001",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:size:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "12345678901234567890.000000000000000001",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:limitPrice:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "0.000000000000000001",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:limitPrice:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "12345678901234567890.000000000000000001",
+                "cliOrdId": "my_another_client_id"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:stopPrice:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "stopPrice": "0.000000000000000001"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:stopPrice:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "stopPrice": "12345678901234567890.000000000000000001"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:trailingStopMaxDeviation:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "trailingStopMaxDeviation": "0.000000000000000001"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:0:field:trailingStopMaxDeviation:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order": "send",
+                "order_tag": "1",
+                "orderType": "lmt",
+                "symbol": "PI_XBTUSD",
+                "side": "buy",
+                "size": "1",
+                "limitPrice": "1",
+                "cliOrdId": "my_another_client_id",
+                "trailingStopMaxDeviation": "12345678901234567890.000000000000000001"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:size:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "size": "0.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:size:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "size": "12345678901234567890.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:limitPrice:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "limitPrice": "0.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:limitPrice:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "limitPrice": "12345678901234567890.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:stopPrice:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "stopPrice": "0.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:stopPrice:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "stopPrice": "12345678901234567890.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:trailingStopMaxDeviation:exact-tiny",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "trailingStopMaxDeviation": "0.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        },
+        {
+          "case": "batchOrder:child:oneOf:1:field:trailingStopMaxDeviation:exact-large",
+          "option": "batchOrder",
+          "native": {
+            "batchOrder": [
+              {
+                "order_id": "00000000-0000-0000-0000-000000000001",
+                "order": "edit",
+                "trailingStopMaxDeviation": "12345678901234567890.000000000000000001",
+                "order_tag": "1"
+              }
+            ]
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/BatchOrderExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelallorders",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelallorders",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "cancelAllOrders",
+      "optionPointers": [
+        "/symbol"
+      ],
+      "options": [
+        "symbol"
+      ],
+      "query": [
+        "symbol"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "symbol:value",
+          "option": "symbol",
+          "native": {
+            "symbol": "PI_XBTUSD"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/CancelAllOrdersExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_cancelallordersafter",
+      "sourceSpec": "futures-rest",
+      "path": "/cancelallordersafter",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "cancelAllOrdersAfter",
+      "optionPointers": [
+        "/timeout"
+      ],
+      "options": [
+        "timeout"
+      ],
+      "query": [
+        "timeout"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "timeout:value",
+          "option": "timeout",
+          "native": {
+            "timeout": "60"
+          }
+        },
+        {
+          "case": "timeout:exact-tiny",
+          "option": "timeout",
+          "native": {
+            "timeout": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "timeout:exact-large",
+          "option": "timeout",
+          "native": {
+            "timeout": "12345678901234567890.000000000000000001"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/CancelAllOrdersAfterSuccessExample/value",
+          "businessFailure": false
+        },
+        {
+          "label": "cancel",
+          "pointer": "/components/examples/CancelAllOrdersAfterCancelExample/value",
+          "businessFailure": false
+        },
+        {
+          "label": "failure",
+          "pointer": "/components/examples/CancelAllOrdersAfterFailureExample/value",
+          "businessFailure": true
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_withdrawal",
+      "sourceSpec": "futures-rest",
+      "path": "/withdrawal",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "withdrawal",
+      "optionPointers": [
+        "/amount",
+        "/currency",
+        "/sourceWallet"
+      ],
+      "options": [
+        "amount",
+        "currency",
+        "sourceWallet"
+      ],
+      "query": [
+        "amount",
+        "currency",
+        "sourceWallet"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "amount": "0.1",
+            "currency": "eth"
+          }
+        },
+        {
+          "case": "currency:value",
+          "option": "currency",
+          "native": {
+            "amount": "0.1",
+            "currency": "eth"
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "amount": "0.1",
+            "currency": "eth"
+          }
+        },
+        {
+          "case": "amount:exact-tiny",
+          "option": "amount",
+          "native": {
+            "amount": "0.000000000000000001",
+            "currency": "eth"
+          }
+        },
+        {
+          "case": "amount:exact-large",
+          "option": "amount",
+          "native": {
+            "amount": "12345678901234567890.000000000000000001",
+            "currency": "eth"
+          }
+        },
+        {
+          "case": "sourceWallet:value",
+          "option": "sourceWallet",
+          "native": {
+            "amount": "0.1",
+            "currency": "eth",
+            "sourceWallet": "flex"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/paths/~1withdrawal/post/responses/200/content/application~1json/examples/success/value",
+          "businessFailure": false
+        },
+        {
+          "label": "failure",
+          "pointer": "/components/examples/WithdrawalFailureExample/value",
+          "businessFailure": true
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_post_assignmentprogram_delete",
+      "sourceSpec": "futures-rest",
+      "path": "/assignmentprogram/delete",
+      "verb": "POST",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "deleteAssignmentProgram",
+      "optionPointers": [
+        "/id"
+      ],
+      "options": [
+        "id"
+      ],
+      "query": [
+        "id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "id": "0"
+          }
+        },
+        {
+          "case": "id:value",
+          "option": "id",
+          "native": {
+            "id": "0"
+          }
+        },
+        {
+          "case": "id:exact-tiny",
+          "option": "id",
+          "native": {
+            "id": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "id:exact-large",
+          "option": "id",
+          "native": {
+            "id": "12345678901234567890.000000000000000001"
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_leveragepreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/leveragepreferences",
+      "verb": "PUT",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "setLeverageSetting",
+      "optionPointers": [
+        "/maxLeverage",
+        "/symbol"
+      ],
+      "options": [
+        "maxLeverage",
+        "symbol"
+      ],
+      "query": [
+        "maxLeverage",
+        "symbol"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "symbol:value",
+          "option": "symbol",
+          "native": {
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "maxLeverage:value",
+          "option": "maxLeverage",
+          "native": {
+            "symbol": "PI_XBTUSD",
+            "maxLeverage": "0"
+          }
+        },
+        {
+          "case": "maxLeverage:exact-tiny",
+          "option": "maxLeverage",
+          "native": {
+            "symbol": "PI_XBTUSD",
+            "maxLeverage": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "maxLeverage:exact-large",
+          "option": "maxLeverage",
+          "native": {
+            "symbol": "PI_XBTUSD",
+            "maxLeverage": "12345678901234567890.000000000000000001"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/SuccessExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_pnlpreferences",
+      "sourceSpec": "futures-rest",
+      "path": "/pnlpreferences",
+      "verb": "PUT",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "setPnlCurrencyPreference",
+      "optionPointers": [
+        "/pnlPreference",
+        "/symbol"
+      ],
+      "options": [
+        "pnlPreference",
+        "symbol"
+      ],
+      "query": [
+        "pnlPreference",
+        "symbol"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "pnlPreference": "SYNTHETIC",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "symbol:value",
+          "option": "symbol",
+          "native": {
+            "pnlPreference": "SYNTHETIC",
+            "symbol": "PI_XBTUSD"
+          }
+        },
+        {
+          "case": "pnlPreference:value",
+          "option": "pnlPreference",
+          "native": {
+            "pnlPreference": "SYNTHETIC",
+            "symbol": "PI_XBTUSD"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/SuccessExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_self_trade_strategy",
+      "sourceSpec": "futures-rest",
+      "path": "/self-trade-strategy",
+      "verb": "PUT",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "setSelfTradeStrategy",
+      "optionPointers": [
+        "/strategy"
+      ],
+      "options": [
+        "strategy"
+      ],
+      "query": [
+        "strategy"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "strategy": "REJECT_TAKER"
+          }
+        },
+        {
+          "case": "strategy:value",
+          "option": "strategy",
+          "native": {
+            "strategy": "REJECT_TAKER"
+          }
+        },
+        {
+          "case": "strategy:enum:CANCEL_MAKER_SELF",
+          "option": "strategy",
+          "native": {
+            "strategy": "CANCEL_MAKER_SELF"
+          }
+        },
+        {
+          "case": "strategy:enum:CANCEL_MAKER_CHILD",
+          "option": "strategy",
+          "native": {
+            "strategy": "CANCEL_MAKER_CHILD"
+          }
+        },
+        {
+          "case": "strategy:enum:CANCEL_MAKER_ANY",
+          "option": "strategy",
+          "native": {
+            "strategy": "CANCEL_MAKER_ANY"
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_subaccount_uid_trading_enabled",
+      "sourceSpec": "futures-rest",
+      "path": "/subaccount/{subaccountUid}/trading-enabled",
+      "verb": "PUT",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "updateSubaccountTradingCapability",
+      "optionPointers": [
+        "/subaccountUid",
+        "/tradingEnabled"
+      ],
+      "options": [
+        "subaccountUid",
+        "tradingEnabled"
+      ],
+      "query": [
+        "tradingEnabled"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "subaccountUid": "00000000-0000-0000-0000-000000000001",
+            "tradingEnabled": false
+          }
+        },
+        {
+          "case": "subaccountUid:value",
+          "option": "subaccountUid",
+          "native": {
+            "subaccountUid": "00000000-0000-0000-0000-000000000001",
+            "tradingEnabled": false
+          }
+        },
+        {
+          "case": "tradingEnabled:value",
+          "option": "tradingEnabled",
+          "native": {
+            "subaccountUid": "00000000-0000-0000-0000-000000000001",
+            "tradingEnabled": false
+          }
+        },
+        {
+          "case": "tradingEnabled:true",
+          "option": "tradingEnabled",
+          "native": {
+            "subaccountUid": "00000000-0000-0000-0000-000000000001",
+            "tradingEnabled": true
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_put_rfq_assignment_max_leverage",
+      "sourceSpec": "futures-rest",
+      "path": "/rfq-assignment/max-leverage",
+      "verb": "PUT",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "updateRfqAssignmentMaxLeverage",
+      "optionPointers": [
+        "/maxLeverage"
+      ],
+      "options": [
+        "maxLeverage"
+      ],
+      "query": [
+        "maxLeverage"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "maxLeverage": "0"
+          }
+        },
+        {
+          "case": "maxLeverage:value",
+          "option": "maxLeverage",
+          "native": {
+            "maxLeverage": "0"
+          }
+        },
+        {
+          "case": "maxLeverage:exact-tiny",
+          "option": "maxLeverage",
+          "native": {
+            "maxLeverage": "0.000000000000000001"
+          }
+        },
+        {
+          "case": "maxLeverage:exact-large",
+          "option": "maxLeverage",
+          "native": {
+            "maxLeverage": "12345678901234567890.000000000000000001"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/components/examples/GetRfqAssignmentMaxLeverageExample/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "krakenfutures",
+      "method": "private_delete_rfq_assignment_max_leverage",
+      "sourceSpec": "futures-rest",
+      "path": "/rfq-assignment/max-leverage",
+      "verb": "DELETE",
+      "sourceSha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "operationId": "deleteRfqAssignmentMaxLeverage",
+      "optionPointers": [],
+      "options": [],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "success",
+          "pointer": "/paths/~1rfq-assignment~1max-leverage/delete/responses/200/content/application~1json/examples/success/value",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "funding_put_funding_v1_deposit_address",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/deposit/address",
+      "verb": "PUT",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "claimFundingDepositAddressV1",
+      "optionPointers": [
+        "/account_id",
+        "/method_id"
+      ],
+      "options": [
+        "account_id",
+        "method_id"
+      ],
+      "query": [
+        "account_id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {}
+        },
+        {
+          "case": "account_id:value",
+          "option": "account_id",
+          "native": {
+            "account_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "method_id:value",
+          "option": "method_id",
+          "native": {
+            "method_id": "00000000-0000-0000-0000-000000000001"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "content-example",
+          "pointer": "/paths/~1funding~1v1~1deposit~1address/put/responses/200/content/application~1json/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "funding_post_funding_v1_addresses",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "createFundingAddressV1",
+      "optionPointers": [
+        "/account_id",
+        "/address_details",
+        "/address_details/crypto",
+        "/address_details/crypto/address",
+        "/address_details/crypto/memo",
+        "/address_details/crypto/tag",
+        "/description",
+        "/name",
+        "/scope",
+        "/scope/method_id",
+        "/scope/network_group_id",
+        "/scope/network_id"
+      ],
+      "options": [
+        "account_id",
+        "address_details",
+        "description",
+        "name",
+        "scope"
+      ],
+      "query": [
+        "account_id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            }
+          }
+        },
+        {
+          "case": "account_id:value",
+          "option": "account_id",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            },
+            "account_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "scope:value",
+          "option": "scope",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "method_id": "00000000-0000-0000-0000-000000000001"
+            }
+          }
+        },
+        {
+          "case": "scope:oneOf:1:value",
+          "option": "scope",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "00000000-0000-0000-0000-000000000001"
+            }
+          }
+        },
+        {
+          "case": "scope:oneOf:2:value",
+          "option": "scope",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_group_id": "00000000-0000-0000-0000-000000000001"
+            }
+          }
+        },
+        {
+          "case": "address_details:value",
+          "option": "address_details",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "SYNTHETIC"
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            }
+          }
+        },
+        {
+          "case": "address_details:oneOf:0:field:crypto:field:tag:value",
+          "option": "address_details",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "SYNTHETIC",
+                "tag": "SYNTHETIC"
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            }
+          }
+        },
+        {
+          "case": "address_details:oneOf:0:field:crypto:field:memo:value",
+          "option": "address_details",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "SYNTHETIC",
+                "memo": "SYNTHETIC"
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            }
+          }
+        },
+        {
+          "case": "name:value",
+          "option": "name",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "SYNTHETIC",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            }
+          }
+        },
+        {
+          "case": "description:value",
+          "option": "description",
+          "native": {
+            "address_details": {
+              "crypto": {
+                "address": "0xBef7B36845cA31045E86D0B46DBCac4e6752..."
+              }
+            },
+            "name": "Personal Wallet",
+            "scope": {
+              "network_id": "d9d375da-44b7-4be1-8a00-8b281acfe366"
+            },
+            "description": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "content-example",
+          "pointer": "/paths/~1funding~1v1~1addresses/post/responses/200/content/application~1json/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "funding_post_funding_v1_withdrawals",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/withdrawals",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "createFundingWithdrawalV1",
+      "optionPointers": [
+        "/account_id",
+        "/address_id",
+        "/amount",
+        "/amount/asset_amount",
+        "/amount/asset_amount/amount",
+        "/amount/asset_amount/asset",
+        "/amount/asset_amount/asset/class",
+        "/amount/asset_amount/asset/name",
+        "/amount/rebase_multiplier",
+        "/expected_address",
+        "/fee",
+        "/fee/current_fee",
+        "/fee/current_fee/max_fee",
+        "/fee/current_fee/max_fee/asset_amount",
+        "/fee/current_fee/max_fee/asset_amount/amount",
+        "/fee/current_fee/max_fee/asset_amount/asset",
+        "/fee/current_fee/max_fee/asset_amount/asset/class",
+        "/fee/current_fee/max_fee/asset_amount/asset/name",
+        "/fee/current_fee/max_fee/rebase_multiplier",
+        "/fee/fee_included",
+        "/fee/quoted_fee",
+        "/fee/quoted_fee/rebase_multiplier",
+        "/fee/quoted_fee/token",
+        "/scope",
+        "/scope/method_id",
+        "/scope/network_id"
+      ],
+      "options": [
+        "account_id",
+        "address_id",
+        "amount",
+        "expected_address",
+        "fee",
+        "scope"
+      ],
+      "query": [
+        "account_id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "account_id:value",
+          "option": "account_id",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "account_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "scope:value",
+          "option": "scope",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "00000000-0000-0000-0000-000000000001"
+            }
+          }
+        },
+        {
+          "case": "scope:oneOf:1:value",
+          "option": "scope",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "network_id": "00000000-0000-0000-0000-000000000001"
+            }
+          }
+        },
+        {
+          "case": "address_id:value",
+          "option": "address_id",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "SYNTHETIC"
+                },
+                "amount": "0.000000000000000001"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "amount:field:asset_amount:field:asset:field:class:enum:tokenized_asset",
+          "option": "amount",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "tokenized_asset",
+                  "name": "SYNTHETIC"
+                },
+                "amount": "0.000000000000000001"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "amount:field:rebase_multiplier:value",
+          "option": "amount",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "SYNTHETIC"
+                },
+                "amount": "0.000000000000000001"
+              },
+              "rebase_multiplier": "rebased"
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "amount:field:rebase_multiplier:enum:base",
+          "option": "amount",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "SYNTHETIC"
+                },
+                "amount": "0.000000000000000001"
+              },
+              "rebase_multiplier": "base"
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            }
+          }
+        },
+        {
+          "case": "fee:value",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "current_fee": {
+                "max_fee": {
+                  "asset_amount": {
+                    "asset": {
+                      "class": "currency",
+                      "name": "SYNTHETIC"
+                    },
+                    "amount": "0.000000000000000001"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:0:field:fee_included:true",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": true,
+              "current_fee": {
+                "max_fee": {
+                  "asset_amount": {
+                    "asset": {
+                      "class": "currency",
+                      "name": "SYNTHETIC"
+                    },
+                    "amount": "0.000000000000000001"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:0:field:current_fee:field:max_fee:field:asset_amount:field:asset:field:class:enum:tokenized_asset",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "current_fee": {
+                "max_fee": {
+                  "asset_amount": {
+                    "asset": {
+                      "class": "tokenized_asset",
+                      "name": "SYNTHETIC"
+                    },
+                    "amount": "0.000000000000000001"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:0:field:current_fee:field:max_fee:field:rebase_multiplier:value",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "current_fee": {
+                "max_fee": {
+                  "asset_amount": {
+                    "asset": {
+                      "class": "currency",
+                      "name": "SYNTHETIC"
+                    },
+                    "amount": "0.000000000000000001"
+                  },
+                  "rebase_multiplier": "rebased"
+                }
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:0:field:current_fee:field:max_fee:field:rebase_multiplier:enum:base",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "current_fee": {
+                "max_fee": {
+                  "asset_amount": {
+                    "asset": {
+                      "class": "currency",
+                      "name": "SYNTHETIC"
+                    },
+                    "amount": "0.000000000000000001"
+                  },
+                  "rebase_multiplier": "base"
+                }
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:1:value",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "quoted_fee": {
+                "token": "SYNTHETIC"
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:1:field:fee_included:true",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": true,
+              "quoted_fee": {
+                "token": "SYNTHETIC"
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:1:field:quoted_fee:field:rebase_multiplier:value",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "quoted_fee": {
+                "token": "SYNTHETIC",
+                "rebase_multiplier": "rebased"
+              }
+            }
+          }
+        },
+        {
+          "case": "fee:oneOf:1:field:quoted_fee:field:rebase_multiplier:enum:base",
+          "option": "fee",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "fee": {
+              "fee_included": false,
+              "quoted_fee": {
+                "token": "SYNTHETIC",
+                "rebase_multiplier": "base"
+              }
+            }
+          }
+        },
+        {
+          "case": "expected_address:value",
+          "option": "expected_address",
+          "native": {
+            "address_id": "AB00000-00000-000000",
+            "amount": {
+              "asset_amount": {
+                "asset": {
+                  "class": "currency",
+                  "name": "USDC"
+                },
+                "amount": "5"
+              }
+            },
+            "scope": {
+              "method_id": "d4ec4d52-b159-428e-ba64-f45455a978a1"
+            },
+            "expected_address": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "content-example",
+          "pointer": "/paths/~1funding~1v1~1withdrawals/post/responses/200/content/application~1json/example",
+          "businessFailure": false
+        }
+      ]
+    },
+    {
+      "client": "kraken",
+      "method": "funding_put_funding_v1_addresses_id",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses/{id}",
+      "verb": "PUT",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "updateFundingAddressV1",
+      "optionPointers": [
+        "/account_id",
+        "/description",
+        "/id",
+        "/name"
+      ],
+      "options": [
+        "account_id",
+        "description",
+        "id",
+        "name"
+      ],
+      "query": [
+        "account_id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "id": "AB00000-00000-000000"
+          }
+        },
+        {
+          "case": "id:value",
+          "option": "id",
+          "native": {
+            "id": "AB00000-00000-000000"
+          }
+        },
+        {
+          "case": "account_id:value",
+          "option": "account_id",
+          "native": {
+            "id": "AB00000-00000-000000",
+            "account_id": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "name:value",
+          "option": "name",
+          "native": {
+            "id": "AB00000-00000-000000",
+            "name": "SYNTHETIC"
+          }
+        },
+        {
+          "case": "description:value",
+          "option": "description",
+          "native": {
+            "id": "AB00000-00000-000000",
+            "description": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "kraken",
+      "method": "funding_delete_funding_v1_addresses_id",
+      "sourceSpec": "spot-rest",
+      "path": "/funding/v1/addresses/{id}",
+      "verb": "DELETE",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "deleteFundingAddressV1",
+      "optionPointers": [
+        "/account_id",
+        "/id"
+      ],
+      "options": [
+        "account_id",
+        "id"
+      ],
+      "query": [
+        "account_id"
+      ],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "id": "AB00000-00000-000000"
+          }
+        },
+        {
+          "case": "id:value",
+          "option": "id",
+          "native": {
+            "id": "AB00000-00000-000000"
+          }
+        },
+        {
+          "case": "account_id:value",
+          "option": "account_id",
+          "native": {
+            "id": "AB00000-00000-000000",
+            "account_id": "SYNTHETIC"
+          }
+        }
+      ],
+      "responseExamples": []
+    },
+    {
+      "client": "kraken",
+      "method": "private_post_create_deposit_address",
+      "sourceSpec": "spot-rest",
+      "path": "/private/DepositAddresses",
+      "verb": "POST",
+      "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "operationId": "getDepositAddresses",
+      "optionPointers": [
+        "/aclass",
+        "/amount",
+        "/asset",
+        "/method",
+        "/new"
+      ],
+      "options": [
+        "aclass",
+        "amount",
+        "asset",
+        "method",
+        "new"
+      ],
+      "query": [],
+      "cases": [
+        {
+          "case": "required",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "new": true
+          }
+        },
+        {
+          "case": "asset:value",
+          "option": "asset",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "new": true
+          }
+        },
+        {
+          "case": "aclass:value",
+          "option": "aclass",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "aclass": "currency",
+            "new": true
+          }
+        },
+        {
+          "case": "aclass:enum:tokenized_asset",
+          "option": "aclass",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "aclass": "tokenized_asset",
+            "new": true
+          }
+        },
+        {
+          "case": "method:value",
+          "option": "method",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "new": true
+          }
+        },
+        {
+          "case": "amount:value",
+          "option": "amount",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "amount": "0.000000000000000001",
+            "new": true
+          }
+        },
+        {
+          "case": "amount:oneOf:1:value",
+          "option": "amount",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "amount": 1,
+            "new": true
+          }
+        },
+        {
+          "case": "amount:oneOf:1:zero",
+          "option": "amount",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "amount": 0,
+            "new": true
+          }
+        },
+        {
+          "case": "amount:oneOf:2:value",
+          "option": "amount",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "amount": "0",
+            "new": true
+          }
+        },
+        {
+          "case": "amount:oneOf:2:exact-large",
+          "option": "amount",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "amount": "12345678901234567890.000000000000000001",
+            "new": true
+          }
+        },
+        {
+          "case": "new:true",
+          "option": "new",
+          "native": {
+            "asset": "ETH",
+            "method": "SYNTHETIC",
+            "new": true
+          }
+        }
+      ],
+      "responseExamples": [
+        {
+          "label": "schema-example",
+          "pointer": "/components/schemas/addresses-2/example",
+          "businessFailure": false
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "endpoints": 39,
+    "options": 166,
+    "cases": 405,
+    "nestedOptionPointers": 230
+  }
+}

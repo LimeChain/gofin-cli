@@ -34,6 +34,7 @@ fin-store = { path = "crates/fin-store" }
 fin-engine = { path = "crates/fin-engine" }
 fin-binance = { path = "crates/fin-binance" }
 fin-hyperliquid = { path = "crates/fin-hyperliquid" }
+fin-kraken = { path = "crates/fin-kraken" }
 fin-exchange = { path = "crates/fin-exchange", default-features = false }
 fin-authorization = { path = "crates/fin-authorization" }
 fin-credentials = { path = "crates/fin-credentials" }

@@ -1,9 +1,10 @@
 //! Protected human configuration path. Financial RPC cannot invoke this module.
 use crate::{
-    BrokerConfigV2, BrokerPolicy, CONFIG_PATH, ConnectionConfig, DeploymentConfig, NetworkConfig,
-    ProtectedCredentialProvider, hyperliquid_owner_has_pending_operations, load_protected_config,
-    load_stored_protected_config, lock_protected_configuration, open_protected_store,
-    resource_has_pending_operations, save_protected_config, strip_derived_hyperliquid_links,
+    BrokerConfigV2, BrokerCredentialProvider, BrokerPolicy, CONFIG_PATH, ConnectionConfig,
+    DeploymentConfig, NetworkConfig, ProtectedCredentialProvider,
+    hyperliquid_owner_has_pending_operations, load_protected_config, load_stored_protected_config,
+    lock_protected_configuration, open_protected_store, resource_has_pending_operations,
+    save_protected_config, strip_derived_hyperliquid_links,
 };
 use fin_authorization::{MacOsAuthorizer, validate_installation};
 use fin_binance::{BinanceEndpoint, BinanceRequest, BinanceTransport, CredentialHandle};
@@ -131,11 +132,12 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
             ));
         }
     }
+    crate::kraken_aliases::retain(&mut config)?;
     let store = Arc::new(TrustedCredentialStore::open()?);
     recover_inactive_credentials(&store, &config)?;
     match action {
         "add" | "update" => {
-            let args: AddConnectionArgs = parse(request)?;
+            let mut args: AddConnectionArgs = parse(request)?;
             validate_add(&args)?;
             let mut configuration_warnings = Vec::new();
             if args.provider == Provider::Evm {
@@ -153,6 +155,14 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                 ));
             }
             let old = existing.map(|index| config.connections[index].clone());
+            preserve_default_wallet(&mut args, old.as_ref())?;
+            if args.provider == Provider::Kraken {
+                crate::kraken_aliases::preserve(
+                    &config,
+                    args.account_id.as_deref().unwrap_or_default(),
+                    &mut args.default_wallet_account_id,
+                )?;
+            }
             let material = collect_material(&mut terminal, &args)?;
             // Restore the human terminal before storing, validating or approving
             // the candidate. A failed restoration cannot report enrollment success.
@@ -204,6 +214,7 @@ pub async fn handle_with_ui(action: &str, request: Value, ui: &Ui) -> Result<Val
                     }
                     config.connections[index]=connection.clone();
                 } else { config.connections.push(connection.clone()); }
+                crate::kraken_aliases::retain(&mut config)?;
                 config.validate()?;
                 // Validate the runtime-only aliases before approval and save.
                 // Otherwise a newly enrolled wallet could persist successfully
@@ -335,6 +346,17 @@ async fn configure_human_operation(request: HumanConfigurationRequest, ui: &Ui) 
             "Configuration actions cannot be attached to a financial run or plan.",
         ));
     }
+    if crate::configure::is_kraken_operation(&request.operation) {
+        return crate::configure::handle_with_ui(
+            fin_protocol::ConfigureRequest {
+                request_id: request.request_id,
+                operation: request.operation,
+                input: request.input,
+            },
+            ui,
+        )
+        .await;
+    }
     let _configuration_lock = lock_protected_configuration(false)?;
     let config = load_protected_config()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
@@ -462,6 +484,22 @@ fn collect_material(
         return Ok(None);
     }
     let material = match args.provider {
+        Provider::Kraken | Provider::KrakenFutures => {
+            let api_key = terminal
+                .read_secret("Kraken API key", SecretInput::Line)?
+                .to_string();
+            let secret = terminal
+                .read_secret(
+                    "Kraken base64 API secret (API-level 2FA keys are unsupported)",
+                    SecretInput::Line,
+                )?
+                .to_string();
+            if args.provider == Provider::Kraken {
+                SecretMaterial::KrakenApi { api_key, secret }
+            } else {
+                SecretMaterial::KrakenFuturesApi { api_key, secret }
+            }
+        }
         Provider::CoinGecko => SecretMaterial::CoinGeckoApiKey {
             api_key: terminal
                 .read_secret("CoinGecko API key", SecretInput::Line)?
@@ -840,6 +878,107 @@ async fn validate_connection(
     ui: &Ui,
 ) -> Result<(ConnectionConfig, Vec<Value>, Vec<String>)> {
     match args.provider {
+        Provider::Kraken | Provider::KrakenFutures => {
+            let reference = staged.ok_or_else(|| {
+                error(
+                    "KRAKEN_CREDENTIAL_REQUIRED",
+                    "A staged Kraken key is required.",
+                )
+            })?;
+            use fin_exchange::kraken::{KrakenClient, KrakenEndpoint, KrakenResponse};
+            let futures = args.provider == Provider::KrakenFutures;
+            let credentials = Arc::new(ProtectedCredentialProvider::from_store(store));
+            let client = KrakenClient::new(BrokerCredentialProvider::kraken_nonces(
+                credentials.as_ref(),
+            )?)
+            .map_err(|_| {
+                error(
+                    "KRAKEN_UNAVAILABLE",
+                    "Kraken transport could not initialize.",
+                )
+            })?;
+            let supplied = args.account_id.as_deref().ok_or_else(|| {
+                error(
+                    "KRAKEN_IDENTITY_REQUIRED",
+                    "Kraken needs its nonsecret public account ID.",
+                )
+            })?;
+            let endpoint = if futures {
+                KrakenEndpoint::KrakenfuturesAuthGetApiKeysV3Check
+            } else {
+                KrakenEndpoint::KrakenPrivatePostGetApiKeyInfo
+            };
+            let response = {
+                let _progress = ui.progress("Checking Kraken credentials");
+                client.request(endpoint,Some(fin_exchange::ccxt::CredentialProvider::credentials(credentials.as_ref(),reference.as_str()).map_err(|_|error("KRAKEN_CREDENTIAL_UNAVAILABLE","Staged Kraken credentials are unavailable."))?),json!({}),None).await.map_err(|_|error("KRAKEN_AUTHENTICATION_FAILED","Kraken rejected the read-only credential check; confirm this product's permissions and disable API-level 2FA on this key."))?
+            };
+            let data = match response {
+                KrakenResponse::Json(data) => data,
+                _ => {
+                    return Err(error(
+                        "KRAKEN_INVALID_RESPONSE",
+                        "Kraken did not return account metadata.",
+                    ));
+                }
+            };
+            let verified = verify_kraken_identity(&data, futures, supplied)?;
+            reject_kraken_account_alias(config, &args.name, futures, supplied, &data)?;
+            if let Some(default_id) = &args.default_wallet_account_id {
+                let response = {
+                    let _progress = ui.progress("Checking owned Kraken wallet account");
+                    client.request(KrakenEndpoint::KrakenPrivatePostListWalletAccounts, Some(fin_exchange::ccxt::CredentialProvider::credentials(credentials.as_ref(), reference.as_str()).map_err(|_| error("KRAKEN_CREDENTIAL_UNAVAILABLE", "Staged Kraken credentials are unavailable."))?), json!({}), None).await.map_err(|_| error("KRAKEN_WALLET_OWNERSHIP_UNVERIFIED", "Cannot verify the selected default wallet. Grant ListWalletAccounts permission or omit this optional relationship."))?
+                };
+                let KrakenResponse::Json(wallets) = response else {
+                    return Err(error(
+                        "KRAKEN_WALLET_OWNERSHIP_UNVERIFIED",
+                        "Kraken did not return its authenticated wallet list.",
+                    ));
+                };
+                fin_kraken::funding::validate_default_wallet_relationship(&wallets, default_id)?;
+            }
+            let provider = if futures { "krakenfutures" } else { "kraken" };
+            let resource = ResourceId(format!("{provider}:account:{supplied}"));
+            let connection = if futures {
+                ConnectionConfig::KrakenFutures {
+                    name: args.name.clone(),
+                    resource,
+                    credential_ref: reference.as_str().into(),
+                    physical_identity: supplied.into(),
+                    physical_identity_verified: verified,
+                }
+            } else {
+                ConnectionConfig::Kraken {
+                    default_wallet_account_id: args.default_wallet_account_id.clone(),
+                    name: args.name.clone(),
+                    resource,
+                    credential_ref: reference.as_str().into(),
+                    physical_identity: supplied.into(),
+                    physical_identity_verified: verified,
+                }
+            };
+            Ok((
+                connection,
+                vec![
+                    json!({"name":"Kraken authenticated read","status":"passed","product":provider}),
+                    json!({"name":"account identity","status":if verified{"venue_verified"}else{"human_confirmed"}}),
+                    json!({"name":"default wallet relationship","status":if args.default_wallet_account_id.is_some(){"human_verified"}else{"not_selected"},"ownership":if args.default_wallet_account_id.is_some(){"venue_verified"}else{"not_checked"}}),
+                ],
+                if verified && args.default_wallet_account_id.is_none() {
+                    vec![]
+                } else {
+                    {
+                        let mut warnings = vec![];
+                        if !verified {
+                            warnings.push("Kraken did not return a matching physical account identifier; the account mapping is human-confirmed.".into());
+                        }
+                        if args.default_wallet_account_id.is_some() {
+                            warnings.push("Default wallet relationship is human_verified; Kraken verifies ownership but does not identify the default alias.".into());
+                        }
+                        warnings
+                    }
+                },
+            ))
+        }
         Provider::CoinGecko => {
             let reference = staged.ok_or_else(|| {
                 error(
@@ -1319,7 +1458,7 @@ fn account_uid(identity: &Value) -> Result<String> {
     }
     Ok(uid)
 }
-async fn approve_and_audit(
+pub(crate) async fn approve_and_audit(
     uid: u32,
     binding: &Value,
     summary: &str,
@@ -1419,7 +1558,9 @@ fn name(connection: &ConnectionConfig) -> &str {
         | ConnectionConfig::Ethereum { name, .. }
         | ConnectionConfig::Evm { name, .. }
         | ConnectionConfig::CoinGecko { name, .. }
-        | ConnectionConfig::Hyperliquid { name, .. } => name,
+        | ConnectionConfig::Hyperliquid { name, .. }
+        | ConnectionConfig::Kraken { name, .. }
+        | ConnectionConfig::KrakenFutures { name, .. } => name,
     }
 }
 fn resource(connection: &ConnectionConfig) -> &ResourceId {
@@ -1428,13 +1569,17 @@ fn resource(connection: &ConnectionConfig) -> &ResourceId {
         | ConnectionConfig::Ethereum { resource, .. }
         | ConnectionConfig::Evm { resource, .. }
         | ConnectionConfig::CoinGecko { resource, .. }
-        | ConnectionConfig::Hyperliquid { resource, .. } => resource,
+        | ConnectionConfig::Hyperliquid { resource, .. }
+        | ConnectionConfig::Kraken { resource, .. }
+        | ConnectionConfig::KrakenFutures { resource, .. } => resource,
     }
 }
 fn credential(connection: &ConnectionConfig) -> Option<CredentialRef> {
     match connection {
         ConnectionConfig::Binance { credential_ref, .. }
-        | ConnectionConfig::CoinGecko { credential_ref, .. } => {
+        | ConnectionConfig::CoinGecko { credential_ref, .. }
+        | ConnectionConfig::Kraken { credential_ref, .. }
+        | ConnectionConfig::KrakenFutures { credential_ref, .. } => {
             CredentialRef::new(credential_ref).ok()
         }
         ConnectionConfig::Ethereum { credential_ref, .. }
@@ -1464,8 +1609,55 @@ fn recover_inactive_credentials(
     }
     Ok(())
 }
+fn preserve_default_wallet(
+    args: &mut AddConnectionArgs,
+    old: Option<&ConnectionConfig>,
+) -> Result<()> {
+    if let Some(ConnectionConfig::Kraken {
+        default_wallet_account_id: Some(previous),
+        ..
+    }) = old
+    {
+        if args
+            .default_wallet_account_id
+            .as_ref()
+            .is_some_and(|id| id != previous)
+        {
+            return Err(error(
+                "KRAKEN_DEFAULT_WALLET_CHANGED",
+                "An existing default-wallet alias cannot change because historical custody records retain this identity. Preserve its ID.",
+            ));
+        }
+        args.default_wallet_account_id = Some(previous.clone());
+    }
+    Ok(())
+}
 fn public_connection(connection: &ConnectionConfig) -> Value {
     match connection {
+        ConnectionConfig::Kraken {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            default_wallet_account_id,
+            ..
+        } => {
+            let mut value = json!({"provider":"kraken","name":name,"resource":resource,"physical_identity":physical_identity,"identity_verification":if *physical_identity_verified{"venue_verified"}else{"human_confirmed"}});
+            if let Some(id) = default_wallet_account_id {
+                value["default_wallet_account_id"] = json!(id);
+                value["default_wallet_relationship_verification"] = json!("human_verified");
+            }
+            value
+        }
+        ConnectionConfig::KrakenFutures {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            ..
+        } => {
+            json!({"provider":if matches!(connection,ConnectionConfig::Kraken{..}){"kraken"}else{"krakenfutures"},"name":name,"resource":resource,"physical_identity":physical_identity,"identity_verification":if *physical_identity_verified{"venue_verified"}else{"human_confirmed"}})
+        }
         ConnectionConfig::CoinGecko {
             name,
             resource,
@@ -1530,6 +1722,20 @@ fn immutable_identity(connection: &ConnectionConfig) -> Value {
             json!({"provider":"hyperliquid","name":name,"owner":owner.to_ascii_lowercase(),"execution_scope":execution_scope})
         }
         ConnectionConfig::Binance { .. } => public_connection(connection),
+        ConnectionConfig::Kraken {
+            name,
+            resource,
+            physical_identity,
+            ..
+        }
+        | ConnectionConfig::KrakenFutures {
+            name,
+            resource,
+            physical_identity,
+            ..
+        } => {
+            json!({"provider":if matches!(connection,ConnectionConfig::Kraken{..}){"kraken"}else{"krakenfutures"},"name":name,"resource":resource,"physical_identity":physical_identity})
+        }
         ConnectionConfig::CoinGecko { name, resource, .. } => {
             json!({"provider":"coingecko","name":name,"resource":resource})
         }
@@ -1587,6 +1793,95 @@ fn outcome(
     })
     .expect("safe enrollment result serialization")
 }
+fn reject_kraken_account_alias(
+    config: &BrokerConfigV2,
+    name: &str,
+    futures: bool,
+    supplied: &str,
+    data: &Value,
+) -> Result<()> {
+    let native = data.get("result").filter(|v| v.is_object()).unwrap_or(data);
+    let mut identities = std::collections::BTreeSet::new();
+    for id in std::iter::once(Some(supplied))
+        .chain([
+            native["accountUid"].as_str(),
+            native["iiban"].as_str(),
+            native["iban"].as_str(),
+        ])
+        .flatten()
+    {
+        identities.insert(fin_kraken::contracts::canonical_account_identity(id));
+    }
+    for connection in &config.connections {
+        let identity = match connection {
+            ConnectionConfig::Kraken {
+                name: existing,
+                physical_identity,
+                ..
+            } if !futures && existing != name => physical_identity,
+            ConnectionConfig::KrakenFutures {
+                name: existing,
+                physical_identity,
+                ..
+            } if futures && existing != name => physical_identity,
+            _ => continue,
+        };
+        if identities.contains(&fin_kraken::contracts::canonical_account_identity(identity)) {
+            return Err(error(
+                "KRAKEN_DUPLICATE_CUSTODY_ALIAS",
+                "This product account is already enrolled under another name or native account identifier. Use or update that connection to avoid duplicate custody accounting.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_kraken_identity(data: &Value, futures: bool, supplied: &str) -> Result<bool> {
+    let normalized = |id: &str| {
+        id.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let supplied_normalized = normalized(supplied);
+    let result = data.get("result").filter(|v| v.is_object()).unwrap_or(data);
+    let reported = result
+        .get("iiban")
+        .or_else(|| result.get("iban"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if futures {
+        let uid = result["accountUid"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .ok_or_else(|| {
+                error(
+                    "KRAKEN_INVALID_RESPONSE",
+                    "The Derivatives credential check omitted its authoritative account UID.",
+                )
+            })?;
+        if let Ok(selected_uid) = uuid::Uuid::parse_str(supplied) {
+            if selected_uid != uid {
+                return Err(error(
+                    "KRAKEN_IDENTITY_MISMATCH",
+                    "The Derivatives key belongs to another account UID.",
+                ));
+            }
+            return Ok(true);
+        }
+    }
+    if let Some(reported) = reported {
+        if normalized(reported) != supplied_normalized {
+            return Err(error(
+                "KRAKEN_IDENTITY_MISMATCH",
+                "The key's reported account identity differs from --account-id.",
+            ));
+        }
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2780,5 +3075,101 @@ mod tests {
         let mut unknown = old;
         unknown["v3_deployments"] = json!({"unreviewed":{}});
         assert!(serde_json::from_value::<DeploymentConfig>(unknown).is_err());
+    }
+    #[test]
+    fn default_wallet_config_is_backward_compatible_public_and_cannot_retarget() {
+        let raw = json!({"provider":"kraken","name":"spot","resource":"kraken:account:synthetic","credential_ref":"11111111-1111-4111-8111-111111111111","physical_identity":"synthetic","physical_identity_verified":false});
+        let old: ConnectionConfig = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&old).unwrap(), raw);
+        let mut args: AddConnectionArgs = serde_json::from_value(json!({"provider":"kraken","name":"spot","account_id":"synthetic","default_wallet_account_id":"WDEFAULT"})).unwrap();
+        preserve_default_wallet(&mut args, Some(&old)).unwrap();
+        let mut selected = raw.clone();
+        selected["default_wallet_account_id"] = json!("WDEFAULT");
+        let selected: ConnectionConfig = serde_json::from_value(selected).unwrap();
+        args.default_wallet_account_id = None;
+        preserve_default_wallet(&mut args, Some(&selected)).unwrap();
+        assert_eq!(args.default_wallet_account_id.as_deref(), Some("WDEFAULT"));
+        let public = public_connection(&selected);
+        assert_eq!(public["default_wallet_account_id"], "WDEFAULT");
+        assert_eq!(
+            public["default_wallet_relationship_verification"],
+            "human_verified"
+        );
+        assert!(public.get("credential_ref").is_none());
+        serde_json::from_value::<fin_discovery::enrollment_contract::PublicConnection>(public)
+            .unwrap();
+        args.default_wallet_account_id = Some("OTHER".into());
+        assert!(preserve_default_wallet(&mut args, Some(&selected)).is_err());
+        let mut futures = raw;
+        futures["provider"] = json!("krakenfutures");
+        futures["default_wallet_account_id"] = json!("WDEFAULT");
+        assert!(serde_json::from_value::<ConnectionConfig>(futures).is_err());
+    }
+
+    #[test]
+    fn kraken_product_identity_check_verifies_uuid_or_iiban_without_guessing_relationships() {
+        let uid = "123e4567-e89b-42d3-a456-426614174000";
+        let data =
+            json!({"accountUid":uid,"iiban":"SYNTH ETIC","permissions":{"general":"READ_ONLY"}});
+        assert!(verify_kraken_identity(&data, true, uid).unwrap());
+        assert!(verify_kraken_identity(&data, true, "SYNTHETIC").unwrap());
+        assert_eq!(
+            verify_kraken_identity(&data, true, "00000000-0000-0000-0000-000000000000")
+                .unwrap_err()
+                .code,
+            "KRAKEN_IDENTITY_MISMATCH"
+        );
+        assert_eq!(
+            verify_kraken_identity(&data, true, "OTHER")
+                .unwrap_err()
+                .code,
+            "KRAKEN_IDENTITY_MISMATCH"
+        );
+        assert!(
+            !verify_kraken_identity(
+                &json!({"accountUid":uid,"iiban":null}),
+                true,
+                "HUMAN-CONFIRMED"
+            )
+            .unwrap()
+        );
+        assert!(
+            verify_kraken_identity(&json!({"result":{"iban":"SYNTH ETIC"}}), false, "SYNTHETIC")
+                .unwrap()
+        );
+        assert_eq!(
+            verify_kraken_identity(&json!({"result":{"accounts":{}}}), true, uid)
+                .unwrap_err()
+                .code,
+            "KRAKEN_INVALID_RESPONSE"
+        );
+    }
+
+    #[test]
+    fn kraken_enrollment_refuses_native_uuid_iiban_and_spacing_aliases() {
+        let uid = "123e4567-e89b-42d3-a456-426614174000";
+        let mut config = pricing_config(pricing_connection(
+            "demo",
+            "11111111-1111-4111-8111-111111111111",
+        ));
+        config.connections.push(serde_json::from_value(json!({"provider":"krakenfutures","name":"existing","resource":"krakenfutures:original","credential_ref":"11111111-1111-4111-8111-111111111111","physical_identity":"SYNTH ETIC","physical_identity_verified":true})).unwrap());
+        let data = json!({"accountUid":uid,"iiban":"SYNTHETIC"});
+        assert_eq!(
+            reject_kraken_account_alias(&config, "new", true, uid, &data)
+                .unwrap_err()
+                .code,
+            "KRAKEN_DUPLICATE_CUSTODY_ALIAS"
+        );
+        assert!(reject_kraken_account_alias(&config, "existing", true, uid, &data).is_ok());
+        assert!(
+            reject_kraken_account_alias(
+                &config,
+                "spot",
+                false,
+                "SYNTHETIC",
+                &json!({"result":{"iban":"SYNTHETIC"}})
+            )
+            .is_ok()
+        );
     }
 }
