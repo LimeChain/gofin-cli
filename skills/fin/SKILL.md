@@ -66,6 +66,19 @@ or resubmit. After each verified step, state the outcome and next action, then
 continue under the existing approval. Finish with received amounts, actual fees
 and any unresolved work.
 
+When Fin returns a submitted onchain transaction hash, include a clickable link
+to that transaction on the correct network's trusted explorer. Use the exact
+hash and network from Fin's result; verify the explorer mapping if uncertain.
+Label the observed state clearly: submitted, awaiting confirmation, or confirmed.
+An explorer link does not establish settlement; continue Fin's verification.
+For cross-system actions, link each available onchain leg and distinguish source
+confirmation from destination credit. For example: "Deposit submitted: [View on
+Etherscan](TRANSACTION_URL). Waiting for Kraken to credit the USDC."
+For exchange-internal operations without an onchain transaction, show the venue
+reference when useful instead of inventing an explorer link. Include links in
+meaningful milestone updates and the final recap, without repeating them on every
+unchanged status check.
+
 
 EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
