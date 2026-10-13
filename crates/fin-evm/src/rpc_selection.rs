@@ -605,6 +605,6 @@ impl HttpRpc {
             let unsupported=state.unsupported.iter().filter(|((i,_),until)|*i==index && **until>Instant::now()).map(|((_,key),_)|key.clone()).collect::<Vec<_>>();
             json!({"endpoint_id":format!("rpc-{}",index+1),"identity_verified":verified.as_ref().is_some_and(|v|v.contains(url)),"status":status,"last_error_code":code,"retry_after_ms":remaining.map(|d|d.as_nanos().div_ceil(1_000_000)),"unsupported_methods":unsupported})
         }).collect::<Vec<_>>();
-        json!({"chain_id":self.expected_chain_id,"read_timeout_ms":self.read_timeout.as_millis(),"endpoints":endpoints,"last_read":state.last_read,"last_failover":state.last_failover})
+        json!({"chain_id":self.expected_chain_id,"read_timeout_ms":null,"endpoints":endpoints,"last_read":state.last_read,"last_failover":state.last_failover})
     }
 }

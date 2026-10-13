@@ -1,4 +1,5 @@
-//! At most two concurrent, validated read attempts; dropping the pool cancels them.
+//! At most two concurrent, validated reads without a transport-level deadline.
+//! A winner or caller cancellation drops all remaining scoped attempts.
 use super::*;
 use std::{
     future::{Future, poll_fn},
@@ -29,11 +30,9 @@ impl HttpRpc {
         params: Value,
         requirements: RpcReadRequirements,
     ) -> Result<Value> {
-        let deadline = tokio::time::Instant::now() + self.read_timeout;
         let anchor = Mutex::new(self.cached_anchor(method, &params));
         let mut trace = ReadTrace::new(self, method);
-        let mut active = BTreeSet::new();
-        let attempt = async {
+        let result = async {
             let key = rpc_selection::capability(method, &params);
             let mut eligible = Vec::new();
             let mut retry_after: Option<Duration> = None;
@@ -78,29 +77,13 @@ impl HttpRpc {
             loop {
                 while pending.len() < 2 && next < eligible.len() {
                     let (index, url) = eligible[next];
-                    // Keep a later provider reachable if both initial providers
-                    // stall. With two providers each can use the full deadline.
-                    let waves = (eligible.len() - next + pending.len()).div_ceil(2);
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let budget = remaining / u32::try_from(waves).unwrap_or(u32::MAX);
                     let request = params.clone();
                     let anchor = &anchor;
                     let future = async move {
-                        let read = async {
-                            self.ensure_endpoint(url).await?;
-                            self.eligible_read(index, url, method, request, requirements, anchor)
-                                .await
-                        };
-                        if waves == 1 {
-                            return read.await;
-                        }
-                        tokio::time::timeout(budget, read).await.unwrap_or_else(|_| Err(RpcAttemptFailure {
-                            retryable: true,
-                            error: error("RPC_ENDPOINT_TIMEOUT", "rpc", "RPC endpoint exceeded its allotted read time; trying another eligible endpoint.")
-                                .with_details(json!({"chain_id":self.expected_chain_id,"method":method,"timeout_ms":budget.as_nanos().div_ceil(1_000_000)})),
-                        }))
+                        self.ensure_endpoint(url).await?;
+                        self.eligible_read(index, url, method, request, requirements, anchor)
+                            .await
                     };
-                    active.insert(index);
                     trace.attempt(index, "cancelled");
                     pending.push(Attempt {
                         index,
@@ -112,7 +95,7 @@ impl HttpRpc {
                     break;
                 }
                 // Poll both attempts before choosing a completed one. No spawned
-                // task outlives this read, its deadline or caller cancellation.
+                // task outlives this read or caller cancellation.
                 let completed = poll_fn(|context| {
                     let mut completed = Vec::new();
                     for attempt in &mut pending {
@@ -134,7 +117,6 @@ impl HttpRpc {
                 // A semantic rejection already observed in the same poll must
                 // not be hidden by another ready result's configured order.
                 for (index, result) in &completed {
-                    active.remove(index);
                     match result {
                         Ok(value) => {
                             self.record_health(*index, None);
@@ -184,18 +166,8 @@ impl HttpRpc {
             } else {
                 Err(failure)
             }
-        };
-        let result = match tokio::time::timeout_at(deadline, attempt).await {
-            Ok(result) => result,
-            Err(_) => {
-                let failure = self.read_timeout_error(method);
-                for index in active {
-                    self.record_health(index, Some(&failure));
-                    trace.attempt(index, "timeout");
-                }
-                Err(failure)
-            }
-        };
+        }
+        .await;
         match result {
             Ok((value, selected)) => {
                 trace.finish(if selected.is_some() { "ok" } else { "missing" }, selected);

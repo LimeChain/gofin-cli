@@ -142,7 +142,7 @@ async fn robinhood_publicnode_matches_pinned_state_and_original_transaction_evid
             .unwrap()["hash"],
         receipt_block["hash"]
     );
-    assert_eq!(publicnode.diagnostics()["read_timeout_ms"], 10000);
+    assert!(publicnode.diagnostics()["read_timeout_ms"].is_null());
     // Default composition uses the same ordered pool, not a separate sidecar.
     let default_runtime = EvmRuntime::new(defaults, CHAIN, None);
     default_runtime.assert_chain().await.unwrap();
@@ -257,7 +257,7 @@ async fn robinhood_429_fails_over_to_live_publicnode_and_retains_original_receip
     let health = rpc.diagnostics();
     assert_eq!(health["last_read"]["selected_endpoint"], "rpc-2");
     assert_eq!(health["last_read"]["attempts"][0]["reason"], "rate_limited");
-    assert_eq!(health["read_timeout_ms"], 10000);
+    assert!(health["read_timeout_ms"].is_null());
     assert_eq!(primary.requests.load(Ordering::SeqCst), 1);
     // The next read skips the cooling primary and queries that same hash.
     assert_eq!(

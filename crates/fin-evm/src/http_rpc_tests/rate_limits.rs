@@ -283,7 +283,7 @@ async fn two_pruned_endpoints_reach_archive_with_same_canonical_block() {
 }
 
 #[tokio::test]
-async fn slow_primary_read_fails_over_within_total_deadline() {
+async fn slow_primary_read_loses_to_faster_backup() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
         Reply::result("0xaa").delayed(Duration::from_secs(2)),
@@ -294,16 +294,16 @@ async fn slow_primary_read_fails_over_within_total_deadline() {
     ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(600);
-
-    let started = Instant::now();
     assert_eq!(
-        rpc.request("eth_getBalance", balance_params())
-            .await
-            .unwrap(),
+        tokio::time::timeout(
+            Duration::from_millis(600),
+            rpc.request("eth_getBalance", balance_params()),
+        )
+        .await
+        .expect("a faster valid backup should finish the read")
+        .unwrap(),
         json!("0x2a")
     );
-    assert!(started.elapsed() < Duration::from_millis(600));
     for server in [&primary, &backup] {
         let requests = server.requests();
         assert_eq!(requests.len(), 2);
@@ -322,12 +322,14 @@ async fn slow_primary_identity_check_loses_to_verified_backup() {
     ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(600);
-
     assert_eq!(
-        rpc.request("eth_getBalance", balance_params())
-            .await
-            .unwrap(),
+        tokio::time::timeout(
+            Duration::from_millis(600),
+            rpc.request("eth_getBalance", balance_params()),
+        )
+        .await
+        .expect("a verified backup should beat slow primary identity")
+        .unwrap(),
         json!("0x2a")
     );
     let requests = primary.requests();
@@ -340,7 +342,7 @@ async fn slow_primary_identity_check_loses_to_verified_backup() {
 }
 
 #[tokio::test]
-async fn slow_all_providers_stop_at_total_deadline() {
+async fn caller_can_cancel_when_all_providers_remain_pending() {
     let replies = || {
         vec![
             Reply::result("0x1"),
@@ -351,26 +353,24 @@ async fn slow_all_providers_stop_at_total_deadline() {
     let backup = Server::new(replies());
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(600);
-
-    let started = Instant::now();
-    let error = rpc
-        .request("eth_getBalance", balance_params())
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "RPC_READ_TIMEOUT");
-    assert!(started.elapsed() < Duration::from_millis(900));
-    let details = error.details.as_deref().unwrap();
-    assert_eq!(details["chain_id"], 1);
-    assert_eq!(details["method"], "eth_getBalance");
-    assert_eq!(details["timeout_ms"], 600);
-    let trace = &details["rpc_health"]["last_read"];
-    assert_eq!(trace["outcome"], "error");
+    // This timeout belongs to the test's caller. Fin has no read deadline.
+    let cancellation = tokio::time::timeout(
+        Duration::from_millis(100),
+        rpc.request("eth_getBalance", balance_params()),
+    )
+    .await;
+    assert!(cancellation.is_err());
+    let health = rpc.diagnostics();
+    let trace = &health["last_read"];
+    assert_eq!(trace["outcome"], "cancelled");
+    assert_eq!(trace["selected_endpoint"], Value::Null);
     assert_eq!(
         trace["attempts"],
-        json!([{"endpoint_id":"rpc-1","reason":"timeout"},{"endpoint_id":"rpc-2","reason":"timeout"}])
+        json!([{"endpoint_id":"rpc-1","reason":"cancelled"},{"endpoint_id":"rpc-2","reason":"cancelled"}])
     );
-    let encoded = serde_json::to_string(&error).unwrap();
+    // Cancelled scoped futures must not schedule another HTTP request or retry.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let encoded = health.to_string();
     for server in [&primary, &backup] {
         assert_eq!(server.requests().len(), 2, "both providers must be tried");
         assert!(!encoded.contains(&server.url));
@@ -378,7 +378,7 @@ async fn slow_all_providers_stop_at_total_deadline() {
 }
 
 #[tokio::test]
-async fn slow_backup_can_use_remaining_deadline_after_fast_primary_failure() {
+async fn slow_backup_can_finish_after_fast_primary_failure() {
     let primary = Server::new(vec![Reply::result("0x1"), Reply::rate_limit(Some("120"))]);
     let backup = Server::new(vec![
         Reply::result("0x1"),
@@ -386,8 +386,6 @@ async fn slow_backup_can_use_remaining_deadline_after_fast_primary_failure() {
     ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(600);
-
     assert_eq!(
         rpc.request("eth_getBalance", balance_params())
             .await
@@ -402,19 +400,18 @@ async fn slow_backup_can_use_remaining_deadline_after_fast_primary_failure() {
 async fn slow_primary_does_not_allow_wrong_chain_backup() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
-        Reply::result("0xaa").delayed(Duration::from_secs(2)),
+        Reply::result("0xaa").delayed(Duration::from_millis(200)),
     ]);
     let backup = Server::new(vec![Reply::result("0x2")]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(600);
-
-    let error = rpc
-        .request("eth_getBalance", balance_params())
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "RPC_READ_TIMEOUT");
-    assert!(error.details.as_deref().unwrap()["rpc_health"]["last_read"]["attempts"]
+    assert_eq!(
+        rpc.request("eth_getBalance", balance_params())
+            .await
+            .unwrap(),
+        json!("0xaa")
+    );
+    assert!(rpc.diagnostics()["last_read"]["attempts"]
         .as_array().unwrap().iter().any(|attempt| attempt["endpoint_id"] == "rpc-2"
             && attempt["reason"] == "incompatible"));
     assert_eq!(primary.requests().len(), 2);
@@ -426,7 +423,7 @@ async fn slow_primary_does_not_allow_wrong_chain_backup() {
 }
 
 #[tokio::test]
-async fn slow_broadcast_is_not_cancelled_or_redirected_by_read_deadlines() {
+async fn slow_broadcast_is_not_cancelled_or_redirected_after_identity_is_checked() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
         Reply::result("0x1234").delayed(Duration::from_millis(300)),
@@ -434,7 +431,7 @@ async fn slow_broadcast_is_not_cancelled_or_redirected_by_read_deadlines() {
     let backup = Server::new(vec![]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
-    rpc.read_timeout = Duration::from_millis(100);
+    rpc.write_identity_timeout = Duration::from_millis(100);
     let input = json!(["0xdeadbeef"]);
 
     assert_eq!(

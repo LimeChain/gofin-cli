@@ -113,22 +113,24 @@ inline multiplied stack usage and crashed deposit revalidation on ordinary
 socket dispatch, progress delivery and real HTTP transport on that same stack
 budget. Validation, approval, timeout and recovery rules remain unchanged.
 
-Bound external evidence collection, including RPC retries/fallback, while leaving
-financial dispatch and durable reconciliation under their original identities.
-EVM reads keep one 10-second deadline across all endpoints. Start the first two
-eligible endpoints concurrently, with at most two attempts active. A failed or
-missing response releases its slot for the next configured provider. The first
+Higher-level evidence collection retains its own snapshot, preparation and
+reconciliation deadlines while financial dispatch and durable reconciliation
+keep their original identities. RPC reads have no overall or per-endpoint deadline
+and no HTTP total-response timeout. Start the first two eligible endpoints
+concurrently, with at most two attempts active. A failed or missing response
+releases its slot for the next configured provider. The first
 usable response to pass transport identity, shape, freshness and evidence checks
 wins; cancel the remaining attempts. Reject malformed or wrong-chain responses
 individually, while a semantic contract revert observed before a winner still
-fails the read closed. With more than two eligible endpoints, divide remaining
-time into parallel waves so a stalled pair leaves an opportunity for later
-providers; with only two, both may use the full remaining deadline. Each attempt
-includes chain verification, the requested read and its bounded retries. Preserve
-exact parameters and each request's immutable canonical anchor even when header
-lookups race or the shared anchor cache evicts it.
-Financial broadcasts keep their original endpoint and are not cancelled by these
-read deadlines; their pre-dispatch identity check remains bounded separately.
+fails the read closed. Further providers start only when an active slot becomes
+available. If both active providers stall, the read waits until a response or
+caller cancellation; the caller's separate evidence deadline may cancel it.
+Each attempt includes chain verification, the requested read and its bounded
+retries. Preserve exact parameters and each request's immutable canonical anchor
+even when header lookups race or the shared anchor cache evicts it.
+Financial broadcasts keep their original endpoint and are not cancelled by
+read cancellation. Their pre-dispatch identity check remains bounded at 10 seconds,
+and their original HTTP transport timeout remains 30 seconds.
 The EVM HTTP transport records a monotonic, in-memory read cooldown after HTTP
 429. A valid Retry-After supplies seconds or an HTTP date, capped at 24 hours;
 missing or invalid values fall back to 30 seconds. Zero or past dates impose no

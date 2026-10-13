@@ -99,16 +99,17 @@ legacy chain-scoped Ethereum connections remain limited to their configured
 network. The same pure derivation runs on startup and protected reload so a
 broker update can expose newly shipped reviewed coverage without reenrollment.
 
-The EVM transport owns bounded endpoint eligibility, freshness checks, read
+The EVM transport owns endpoint eligibility, freshness checks, read
 capability cooldowns and credential-free health observations. It races the first
 two eligible endpoints, with at most two active attempts, and replaces failed or
 missing attempts with the next configured provider. The first usable response
 that passes transport validation wins and cancels its competitors. Invalid shape
 or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
-before a winner fails the read closed. One 10-second deadline covers the race.
-With more than two eligible providers, remaining time is shared across parallel
-waves so a stalled pair cannot consume the entire budget; with only two, each
-may use the full remaining deadline. Typed state reads resolve one canonical hash
+before a winner fails the read closed. RPC reads have no overall or per-endpoint
+deadline and no HTTP total-response timeout. Further providers start when a
+failed or missing attempt releases a slot; a stalled pair waits for a response
+or caller cancellation. Separate snapshot, command and evidence deadlines can
+still cancel the caller's read. Typed state reads resolve one canonical hash
 and retain it across racing header lookups, provider changes and shared-cache
 eviction. The bounded cache is not the authority for an in-flight request.
 Adapters continue to interpret original-envelope, receipt, financial effects and
@@ -118,7 +119,8 @@ from the actual wallet/bridge clients without probing networks. Attempt IDs foll
 configured order, including cancelled competitors. `last_failover` records an
 actual non-primary winner independently of the latest read; a later primary win
 does not erase it. Broadcasts remain primary-only and unresolved writes use the
-existing journal and reconciliation path.
+existing journal and reconciliation path. Their 10-second pre-dispatch identity
+check and original 30-second HTTP transport timeout remain separate from reads.
 When the effective config changes, the existing reload path recomposes adapters
 against the same journal; pending submission identities remain in place and
 are never replayed as a consequence of coverage derivation.
@@ -510,9 +512,11 @@ and submission admission are ordered by the store's atomic authority/CAS checks;
 revocation cannot recall an already admitted submission. Snapshot observers run
 concurrently with a 10-second evidence deadline and report partial coverage.
 Preparation/revalidation, reconciliation observations and external reads have
-120-second deadlines; RPC reads share a 10-second budget across identity, retries
-and concurrent endpoint selection. Independent EVM reads overlap within each
-phase, with original request tags and final pending-nonce checks retained. The financial submission
+120-second deadlines. The EVM snapshot observer separately retains its 8-second
+deadline. The RPC transport itself imposes no overall, per-endpoint or HTTP
+total-response timeout on reads; these higher-layer deadlines remain in force.
+Independent EVM reads overlap within each phase, with original request tags and
+final pending-nonce checks retained. The financial submission
 future is never cancelled by an evidence timeout. Further per-resource execution
 concurrency must preserve nonce control, cumulative policy and deduplication.
 

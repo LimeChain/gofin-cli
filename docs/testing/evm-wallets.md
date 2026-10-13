@@ -66,7 +66,8 @@ probes returned HTTP 403 or unavailable-state errors for some older contract
 state while older transaction receipts were available. Missing historical
 evidence remains unresolved; recovery never infers failure or resubmits from
 that absence. No account, enrollment, credentials or live writes are used by
-these checks, and the existing 10-second per-read budget remains unchanged.
+these checks. RPC reads themselves have no elapsed-time deadline; the caller's
+separate evidence deadlines remain in force.
 
 The protected broker refreshes an exact previously shipped Base/Arbitrum/Robinhood
 single-endpoint default list in its effective configuration on startup/reload.
@@ -81,15 +82,17 @@ Reads start the first two eligible endpoints simultaneously, with at most two
 active attempts. The first usable response that passes transport validation wins
 and cancels the remaining read. If an endpoint fails or returns missing evidence,
 its slot goes to the next configured provider. Identity, response shape, freshness,
-capability and evidence checks remain inside the unchanged 10-second deadline.
-With only two eligible providers, each may use all the remaining time. With more
-than two, the remaining deadline is divided into parallel waves so later providers
-get a chance when the initial pair stalls. Retries stay within each attempt's time
-share. The deadline applies to each RPC read, not the whole user command. Once the
-full budget expires, Fin returns `RPC_READ_TIMEOUT` without starting another
-provider attempt or resetting
-the clock. A submitted transaction remains unresolved until its original
-identity can be reconciled; timeout does not establish transaction failure.
+capability and evidence checks apply before accepting a response. There is no
+overall or per-endpoint RPC read deadline and no HTTP total-response timeout for
+reads. Later providers start only when a failed or missing attempt releases a
+slot. If both active providers stall, the read waits until one responds or its
+caller cancels it. Higher-level bounds remain separate: the broker snapshot
+observer retains its 10-second deadline, the EVM snapshot observer retains its
+8-second deadline, and preparation/revalidation, reconciliation observations and
+external-read stages retain their 120-second deadlines. Approval expiry is
+unchanged. A submitted transaction remains unresolved until its original
+identity can be reconciled; caller cancellation does not establish transaction
+failure.
 Each endpoint has up to two retries (100/250 ms); a positive `Retry-After`
 advances immediately. Rate limits
 cool down reads for 30 seconds by default; valid seconds or HTTP dates override
@@ -97,7 +100,8 @@ this up to 24 hours. The primary becomes eligible again after expiry. Wrong-chai
 or malformed responses reject their endpoint, allowing another valid response to
 win. A semantic contract revert observed before a winner still fails the read
 closed. Broadcasts have no read failover or retry and retain the primary even
-during its read cooldown.
+during its read cooldown. Their pre-dispatch identity check remains bounded at
+10 seconds, and their original HTTP transport timeout remains 30 seconds.
 
 Latest observations must have a block timestamp no older than 60 seconds and
 no more than 30 seconds ahead of the local clock. Same-endpoint freshness is
@@ -109,9 +113,9 @@ carry the original operation's minimum required height, so a lagging provider
 cannot satisfy them. Unsupported read capabilities are avoided for 30 seconds
 and tracked per method/tag (missing `finalized` does not disable `latest`).
 
-Missing receipts, transactions and blocks cause bounded alternate reads. If
-no provider sees the receipt, the operation remains unresolved; a null result
-never authorizes signing or submitting again. Pinned transaction, block and
+Missing receipts, transactions and blocks cause alternate reads across the
+configured provider list. If no provider sees the receipt, the operation remains
+unresolved; a null result never authorizes signing or submitting again. Pinned transaction, block and
 financial evidence requirements remain fixed. Typed historical state reads
 resolve a block hash before use and send canonical EIP-1898 hash tags across
 providers. A numeric-only provider must match that hash on its own endpoint
@@ -129,8 +133,9 @@ missing required historical/finality evidence stays unresolved.
 
 `fin doctor` reports observed endpoint health and the latest read selection;
 `fin doctor --verbose` shows details and `fin doctor --json` retains structured
-`rpc_health`. Endpoint IDs (`rpc-1`, `rpc-2`, ...) and attempt records follow
-configured order, including losers marked `cancelled`. The latest actual
+`rpc_health`; `read_timeout_ms` remains present as `null` to indicate that the RPC
+transport has no read deadline. Endpoint IDs (`rpc-1`, `rpc-2`, ...) and attempt
+records follow configured order, including losers marked `cancelled`. The latest actual
 non-primary winner is retained separately as `last_failover`, even if the primary
 was merely cancelled; a later healthy primary win does not erase it.
 Pinned hashes are owned by each request and survive eviction from the shared

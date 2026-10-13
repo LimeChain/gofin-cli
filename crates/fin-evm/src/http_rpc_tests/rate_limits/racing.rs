@@ -1,6 +1,139 @@
 use super::*;
 
 #[tokio::test]
+async fn concurrent_read_can_finish_after_former_rpc_and_http_deadlines() {
+    let primary = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0xaa").delayed(Duration::from_secs(1)),
+    ]);
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2a").delayed(Duration::from_millis(250)),
+    ]);
+    let rpc = Arc::new(
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap(),
+    );
+    let read = tokio::spawn({
+        let rpc = rpc.clone();
+        async move { rpc.request("eth_getBalance", balance_params()).await }
+    });
+    // Wait for both real HTTP requests before advancing only Tokio's clock.
+    // The fixture's wall-clock responses remain pending, without a 31s test.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while primary.requests().len() < 2 || backup.requests().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("both providers must start the same read");
+    let started = tokio::time::Instant::now();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert!(started.elapsed() >= Duration::from_secs(31));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), read)
+            .await
+            .expect("the backup response should complete the read")
+            .unwrap()
+            .expect("a valid read must survive the former 10s and 30s deadlines"),
+        json!("0x2a")
+    );
+    for server in [&primary, &backup] {
+        let requests = server.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "neither provider should retry a slow read"
+        );
+        assert_eq!(requests[1]["params"], balance_params());
+    }
+    assert_eq!(rpc.diagnostics()["last_read"]["selected_endpoint"], "rpc-2");
+    assert!(rpc.diagnostics()["read_timeout_ms"].is_null());
+}
+
+#[tokio::test]
+async fn broadcast_keeps_http_timeout_without_retry_or_backup() {
+    let primary = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x1234").delayed(Duration::from_secs(1)),
+    ]);
+    let backup = Server::new(vec![]);
+    let rpc = Arc::new(
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap(),
+    );
+    let broadcast = tokio::spawn({
+        let rpc = rpc.clone();
+        async move {
+            rpc.request("eth_sendRawTransaction", json!(["0xdeadbeef"]))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while primary.requests().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the primary must receive the single broadcast");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    let failure = tokio::time::timeout(Duration::from_millis(500), broadcast)
+        .await
+        .expect("the existing write HTTP timeout must still apply")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(failure.code, "RPC_UNAVAILABLE");
+    let requests = primary.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "a timed-out broadcast must not be retried"
+    );
+    assert_eq!(requests[1]["method"], "eth_sendRawTransaction");
+    assert_eq!(requests[1]["params"], json!(["0xdeadbeef"]));
+    assert!(backup.requests().is_empty());
+}
+
+#[tokio::test]
+async fn primary_write_identity_timeout_prevents_any_broadcast() {
+    let primary = Server::new(vec![Reply::result("0x1").delayed(Duration::from_secs(1))]);
+    let backup = Server::new(vec![]);
+    let rpc = Arc::new(
+        HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap(),
+    );
+    let broadcast = tokio::spawn({
+        let rpc = rpc.clone();
+        async move {
+            rpc.request("eth_sendRawTransaction", json!(["0xdeadbeef"]))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while primary.requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the primary identity check must start before dispatch");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    tokio::time::resume();
+    let failure = tokio::time::timeout(Duration::from_millis(500), broadcast)
+        .await
+        .expect("the existing primary identity bound must still apply")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(failure.code, "RPC_READ_TIMEOUT");
+    assert_eq!(failure.details.as_deref().unwrap()["method"], "eth_chainId");
+    let requests = primary.requests();
+    assert_eq!(requests.len(), 1, "identity timeout must prevent dispatch");
+    assert_eq!(requests[0]["method"], "eth_chainId");
+    assert!(backup.requests().is_empty());
+}
+
+#[tokio::test]
 async fn concurrent_reads_start_both_providers_and_accept_faster_valid_backup() {
     // A waits two seconds; B answers in 50 ms. The old sequential selection
     // cannot finish inside the observation window, despite a healthy backup.

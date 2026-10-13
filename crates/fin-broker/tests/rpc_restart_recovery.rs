@@ -701,7 +701,7 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     );
     let health = &doctor["rpc_health"][0];
     assert_eq!(health["chain_id"], chain_id);
-    assert_eq!(health["read_timeout_ms"], 10000);
+    assert!(health["read_timeout_ms"].is_null());
     assert_eq!(health["last_failover"]["selected_endpoint"], "rpc-2");
     assert_eq!(health["last_failover"]["outcome"], "ok");
     if missing_receipts {

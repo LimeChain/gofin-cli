@@ -477,9 +477,10 @@ pub struct HttpRpc {
     urls: Vec<String>,
     expected_chain_id: u64,
     client: reqwest::Client,
+    write_client: reqwest::Client,
     verified: Mutex<BTreeSet<String>>,
     read_cooldowns: Mutex<BTreeMap<String, Instant>>,
-    read_timeout: Duration,
+    write_identity_timeout: Duration,
     selection: Mutex<SelectionState>,
 }
 
@@ -497,7 +498,7 @@ fn endpoint_access_failure(error: &FinError) -> bool {
         .is_some_and(|status| matches!(status, 401 | 403 | 404 | 405))
 }
 
-const RPC_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_WRITE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 const RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_RPC_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_READ_RETRIES_PER_ENDPOINT: usize = 2;
@@ -730,29 +731,36 @@ impl HttpRpc {
                 ));
             }
         }
+        let transport_error = |_| {
+            error(
+                "RPC_UNAVAILABLE",
+                "configuration",
+                "Could not initialize the public RPC transport.",
+            )
+        };
+        // Reads wait for usable evidence or caller cancellation. Keep the
+        // existing HTTP timeout on the separate financial broadcast client.
         let client = reqwest::Client::builder()
+            .build()
+            .map_err(transport_error)?;
+        let write_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|_| {
-                error(
-                    "RPC_UNAVAILABLE",
-                    "configuration",
-                    "Could not initialize the public RPC transport.",
-                )
-            })?;
+            .map_err(transport_error)?;
         Ok(Self {
             urls,
             expected_chain_id,
             client,
+            write_client,
             verified: Mutex::new(BTreeSet::new()),
             read_cooldowns: Mutex::new(BTreeMap::new()),
-            read_timeout: RPC_READ_TIMEOUT,
+            write_identity_timeout: RPC_WRITE_IDENTITY_TIMEOUT,
             selection: Mutex::new(SelectionState::default()),
         })
     }
-    fn read_timeout_error(&self, method: &str) -> FinError {
-        error("RPC_READ_TIMEOUT", "rpc", "The selected network read exceeded its deadline; no evidence was accepted.")
-            .with_details(json!({"chain_id": self.expected_chain_id, "method": method, "timeout_ms": self.read_timeout.as_millis()}))
+    fn write_identity_timeout_error(&self) -> FinError {
+        error("RPC_READ_TIMEOUT", "rpc", "The primary RPC identity check exceeded its pre-dispatch deadline; no transaction was sent.")
+            .with_details(json!({"chain_id": self.expected_chain_id, "method": "eth_chainId", "timeout_ms": self.write_identity_timeout.as_millis()}))
     }
     fn read_cooldown_remaining(&self, url: &str) -> Result<Option<Duration>> {
         let mut cooldowns = self.read_cooldowns.lock().map_err(|_| {
@@ -795,8 +803,12 @@ impl HttpRpc {
         params: Value,
         historical_state_fallback: bool,
     ) -> std::result::Result<Value, RpcAttemptFailure> {
-        let response = self
-            .client
+        let client = if method == "eth_sendRawTransaction" {
+            &self.write_client
+        } else {
+            &self.client
+        };
+        let response = client
             .post(url)
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
             .send()
@@ -1025,10 +1037,13 @@ impl HttpRpc {
             ));
         }
         let result = if method == "eth_sendRawTransaction" {
-            // No read race, retry or global read cancellation can replay a write.
+            // No read race or automatic retry can replay a write. Identity is
+            // bounded before dispatch; the broadcast keeps its HTTP timeout.
             let primary = &self.urls[0];
-            match tokio::time::timeout(self.read_timeout, self.ensure_endpoint(primary)).await {
-                Err(_) => Err(self.read_timeout_error("eth_chainId")),
+            match tokio::time::timeout(self.write_identity_timeout, self.ensure_endpoint(primary))
+                .await
+            {
+                Err(_) => Err(self.write_identity_timeout_error()),
                 Ok(Err(failure)) => Err(failure.error),
                 Ok(Ok(())) => self
                     .at(primary, method, params, 0, false)
@@ -3270,9 +3285,10 @@ mod http_rpc_tests {
             ],
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
+            write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
-            read_timeout: rpc.read_timeout,
+            write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
         (rpc, first_worker, second_worker)
@@ -3336,16 +3352,17 @@ mod http_rpc_tests {
             ],
             expected_chain_id: rpc.expected_chain_id,
             client: rpc.client,
+            write_client: rpc.write_client,
             verified: rpc.verified,
             read_cooldowns: rpc.read_cooldowns,
-            read_timeout: rpc.read_timeout,
+            write_identity_timeout: rpc.write_identity_timeout,
             selection: rpc.selection,
         };
         (rpc, first_worker, second_worker)
     }
 
     #[tokio::test]
-    async fn read_deadline_covers_identity_retries_and_identifies_network() {
+    async fn caller_can_cancel_a_pending_read_identity_check() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
@@ -3353,24 +3370,27 @@ mod http_rpc_tests {
             let request = read_request(&mut stream);
             let request: Value = serde_json::from_slice(&request).unwrap();
             assert_eq!(request["method"], "eth_chainId");
-            // Never respond: even initial endpoint identity is bounded.
+            // No identity response arrives before the caller cancels the read.
             std::thread::sleep(Duration::from_millis(100));
         });
-        let mut rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
-        rpc.read_timeout = Duration::from_millis(25);
-        let started = std::time::Instant::now();
-        let failure = rpc
-            .request("eth_getBalance", json!(["0x0", "latest"]))
-            .await
-            .unwrap_err();
-        assert_eq!(failure.code, "RPC_READ_TIMEOUT");
-        assert_eq!(failure.details.as_deref().unwrap()["chain_id"], 1);
-        assert!(started.elapsed() < Duration::from_millis(90));
+        let rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(25),
+            rpc.request("eth_getBalance", json!(["0x0", "latest"])),
+        )
+        .await;
         assert!(
-            !serde_json::to_string(&failure)
-                .unwrap()
-                .contains(&address.to_string())
+            cancelled.is_err(),
+            "the caller should cancel the pending read"
         );
+        let diagnostics = rpc.diagnostics();
+        assert_eq!(diagnostics["chain_id"], 1);
+        assert_eq!(diagnostics["last_read"]["outcome"], "cancelled");
+        assert_eq!(
+            diagnostics["last_read"]["attempts"],
+            json!([{"endpoint_id":"rpc-1","reason":"cancelled"}])
+        );
+        assert!(!diagnostics.to_string().contains(&address.to_string()));
         worker.join().unwrap();
     }
 

@@ -2,7 +2,7 @@ use super::*;
 
 fn doctor() -> Value {
     json!({"configurationVersion":2,"financialReadiness":"requires-live-probes","rpc_health":[{
-        "chain_id":42161,"read_timeout_ms":10000,"endpoints":[
+        "chain_id":42161,"read_timeout_ms":null,"endpoints":[
             {"endpoint_id":"rpc-1","identity_verified":true,"status":"cooling_down","retry_after_ms":12000,"last_error_code":"RPC_RATE_LIMITED","unsupported_methods":[]},
             {"endpoint_id":"rpc-2","identity_verified":true,"status":"healthy","retry_after_ms":0,"last_error_code":null,"unsupported_methods":[]}
         ],"last_read":{"method":"eth_call","selected_endpoint":"rpc-2","attempts":[{"endpoint_id":"rpc-1","reason":"rate_limited"},{"endpoint_id":"rpc-2","reason":"ok"}],"outcome":"ok"}

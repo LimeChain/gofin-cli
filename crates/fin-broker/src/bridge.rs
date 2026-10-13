@@ -7173,7 +7173,7 @@ mod tests {
     #[test]
     fn bridge_diagnostics_read_existing_sidecar_transport_without_network_probes() {
         let health = Arc::new(Mutex::new(json!({
-            "chain_id":42161,"read_timeout_ms":10000,
+            "chain_id":42161,"read_timeout_ms":null,
             "endpoints":[{"endpoint_id":"rpc-1","identity_verified":true,"status":"healthy","retry_after_ms":0,"last_error_code":null,"unsupported_methods":[]}],
             "last_read":{"method":"eth_call","selected_endpoint":"rpc-1","attempts":[{"endpoint_id":"rpc-1","reason":"ok"}],"outcome":"ok"}
         })));
