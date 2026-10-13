@@ -29,12 +29,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
 const FINANCIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
+const VERSION: &str = match option_env!("FIN_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "fin",
     color = clap::ColorChoice::Never,
-    version,
+    version = VERSION,
     about = "Discover and safely operate Fin's protected financial broker"
 )]
 struct Cli {
@@ -1610,7 +1614,7 @@ fn plan_review_for_display(preview: &Value, request_id: &str) -> Value {
 fn completion_definition() -> clap::Command {
     let definition = Cli::command();
     clap::Command::new("fin")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(VERSION)
         .args(definition.get_arguments().cloned())
         .subcommands(
             definition
@@ -2050,7 +2054,7 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         {
             if machine {
                 let value = if error.kind() == ErrorKind::DisplayVersion {
-                    json!({"name":"fin", "version":env!("CARGO_PKG_VERSION")})
+                    json!({"name":"fin", "version":VERSION})
                 } else {
                     json!({"help":error.to_string()})
                 };

@@ -38,6 +38,38 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn version_uses_compiled_release_identity_in_human_json_and_stream_output() {
+    let expected = option_env!("FIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    let human = run(&["--version"]);
+    assert!(human.status.success());
+    assert!(human.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap(),
+        format!("fin {expected}\n")
+    );
+    for args in [
+        vec!["--version", "--json"],
+        vec!["--version", "--json", "--stream"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fin"))
+            .args(&args)
+            // Runtime environment cannot change the compiled release identity.
+            .env("FIN_RELEASE_VERSION", "0.0.0-runtime-must-not-override")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = if args.contains(&"--stream") {
+            &value["result"]
+        } else {
+            &value
+        };
+        assert_eq!(result["version"], expected);
+    }
+}
+
+#[test]
 fn deposit_discovery_exposes_exact_evm_routes_without_service_or_prompts() {
     let output = run(&["schema", "binance.deposit", "--json", "--verbose"]);
     assert!(output.status.success());

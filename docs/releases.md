@@ -19,18 +19,25 @@ they do not establish independent publisher provenance or notarization.
 
 ## Cutting a release
 
-1. Merge and review the release source. Set `[workspace.package].version` in
-   `Cargo.toml`, refresh the workspace package versions in `Cargo.lock`, and run
-   `make check`, `make test`, and `make test-delivery`.
-2. In GitHub Releases, draft a release using `v<workspace-version>` at that exact
-   commit. Mark beta versions as prereleases.
+1. Merge and review the release source, then run `make check`, `make test`, and
+   `make test-delivery`. No Cargo version bump is required.
+2. In GitHub Releases, draft a release using a version tag such as `v0.3.0-beta.1`
+   at that exact commit. The tag determines the release version independently
+   of `Cargo.toml` and `Cargo.lock`. The release title can be chosen freely.
+   Mark beta versions as prereleases.
    An existing annotated tag is also supported. Never move a release tag.
 3. Click **Publish release**. The `release: published` event starts CI for both
    stable releases and prereleases. Creating a draft or pushing a tag alone does
    not start release packaging. Ordinary branch pushes still run regression CI.
-4. CI validates the tag/version, builds on native Apple Silicon/Intel macOS
+4. CI validates the version tag and exact source commit, builds on native Apple Silicon/Intel macOS
    runners and Ubuntu 22.04, then attaches the archives, installer and checksums
    to the same published release. Download links are usable after CI finishes.
+
+Archive names, `BUILDINFO` and the packaged CLI's `fin --version` (including JSON)
+use the tag's version. The builder supplies `FIN_RELEASE_VERSION` at compile time;
+it never rewrites Cargo manifests or the lockfile. Ordinary source builds retain
+their Cargo package version. Untagged `--preview` builds still derive their
+generated preview name from Cargo and the source commit.
 
 Formatting, strict Clippy, workspace tests, synthetic delivery tests and macOS
 installer/native checks must pass before upload. A published release may appear
