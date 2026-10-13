@@ -6,7 +6,7 @@ First-release scope: **items 1–15, 18–20, 22, 23, 31–33**. Next release: *
 
 Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 57% complete (13/23 items)
+## First release — 65% complete (15/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -19,12 +19,12 @@ Completion is the number of items marked implemented divided by the total items 
 | 7 | [Aave support](aave-support.md) | Implemented — user reported |
 | 8 | [Uniswap liquidity provision](uniswap-liquidity-provision.md) | Requested; define network/version coverage and position-management scope |
 | 9 | [Hyperliquid support and Arbitrum USDC deposits](hyperliquid-support.md) | Implemented — user reported |
-| 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | Requested; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
+| 10 | [CCTP transfers and Hyperliquid funding](cctp-hyperliquid-funding.md) | In progress — user reported; supported Fin networks, with per-route CCTP availability to verify; reuse item 9's deposit integration |
 | 11 | [Kraken support](kraken-support.md) | Implemented — user reported; full CCXT-supported action suite, deposits and withdrawals; extensive ask-ogi consultation |
 | 12 | [Coinbase support](integration-roadmap.md#12-coinbase-support) | Roadmap — scope to define |
-| 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | In progress — user reported; foundation for Solana integrations |
+| 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | Implemented — user reported; foundation for Solana integrations |
 | 14 | [Solana Meteora support](integration-roadmap.md#14-solana-meteora-support) | Roadmap — scope to define |
-| 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | In progress — user reported; interpreted from “Jupyter” |
+| 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | Implemented — user reported; interpreted from “Jupyter” |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
 | 20 | [Solana Kamino lending and borrowing](integration-roadmap.md#20-solana-kamino-lending-and-borrowing) | Roadmap — first release; vaults tracked separately as item 35 |

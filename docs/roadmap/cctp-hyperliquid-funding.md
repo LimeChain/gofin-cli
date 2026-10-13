@@ -1,6 +1,6 @@
 # Support CCTP transfers across Fin networks and funding Hyperliquid
 
-Status: Requested on 2026-10-09. Current CCTP network coverage, protocol versions and Hyperliquid deposit routes have not been verified by this backlog task.
+Status: In progress, reported by the user on 2026-10-13. Requested on 2026-10-09. Current CCTP network coverage, protocol versions and Hyperliquid deposit routes have not been verified by this backlog task.
 
 ## Description
 

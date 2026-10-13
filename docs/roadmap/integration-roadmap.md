@@ -25,7 +25,7 @@ Extend and verify Coinbase integration. Confirm the intended Coinbase product/AP
 
 ## 13. Solana wallet and transactions
 
-Status: In progress, reported by the user on 2026-10-11.
+Status: Implemented, reported complete by the user on 2026-10-13. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered operation coverage.
 
 Provide Solana wallet and transaction support through Fin, including the protected signing and transaction lifecycle needed by subsequent Solana integrations. Define native/token holdings and transfer scope, supported token programs, fee handling, confirmation and uncertain-submission recovery. Treat this as the foundation for on-chain Solana operations.
 
@@ -35,7 +35,7 @@ Integrate Meteora on Solana. Agree the intended products and actions—such as s
 
 ## 15. Solana Jupiter support
 
-Status: In progress, reported by the user on 2026-10-11.
+Status: Implemented, reported complete by the user on 2026-10-13. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered operation coverage.
 
 Integrate Jupiter on Solana. “Jupyter” is interpreted as Jupiter based on the user's Solana integration context; this interpretation remains correctable. Define the intended Jupiter products and action coverage rather than assuming every product is included. Reuse item 13 where on-chain execution is required.
 
