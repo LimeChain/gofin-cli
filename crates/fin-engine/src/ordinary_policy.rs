@@ -73,6 +73,17 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
         let approved_cost = valuation.maximum_fee_usd_micros.integer();
         return Ok(charge(prepared)? - &approved_cost + approved_cost.max(actual_cost));
     }
+    // A terminal proof with no financial effects proves that no principal,
+    // exposure or fees were consumed. Keep its immutable submission identity,
+    // but do not charge an unused approval ceiling as rolling expenditure.
+    if record.status == Status::Failed
+        && record
+            .effects
+            .as_ref()
+            .is_some_and(|proof| proof.effects.is_empty())
+    {
+        return Ok(BigUint::zero());
+    }
     let bounded = prepared
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
@@ -109,7 +120,7 @@ pub(super) fn record_charge(record: &OperationRecord) -> Result<BigUint> {
     actual_effect_charge(&verified.effects, &valuation.prices)
 }
 
-fn actual_effect_charge(
+pub(super) fn actual_effect_charge(
     effects: &[fin_domain::FinancialEffect],
     prices: &[fin_domain::AssetPrice],
 ) -> Result<BigUint> {
@@ -120,9 +131,44 @@ fn actual_effect_charge(
                 total += amount_usd(amount, prices)?;
             }
             fin_domain::FinancialEffect::Cost {
+                location,
+                amount,
                 treatment: CostTreatment::IncludedInDebit,
                 ..
-            } => {} // Already included in a typed gross debit.
+            } => {
+                // Signed net settlements contain gross losses which later gains
+                // may offset. Charge those losses unless another typed gross
+                // origin already contains them; rebates/positive net settlement
+                // cannot erase consumed expenditure.
+                let settlement = matches!(location, AccountingLocation::Cash { resource }
+                    if effects.iter().any(|effect| matches!(effect, fin_domain::FinancialEffect::Settlement { resource:r, asset, .. } if r==resource && asset==&amount.asset)));
+                let gross_origin = effects.iter().any(|effect| match (location, effect) {
+                    (
+                        AccountingLocation::Cash { resource },
+                        fin_domain::FinancialEffect::CashDebit {
+                            resource: r,
+                            amount: debit,
+                        },
+                    ) => r == resource && debit.asset == amount.asset,
+                    (
+                        AccountingLocation::Cash { resource },
+                        fin_domain::FinancialEffect::Transfer { from, debit, .. },
+                    ) => from == resource && debit.asset == amount.asset,
+                    (
+                        AccountingLocation::Cash { resource },
+                        fin_domain::FinancialEffect::Conversion {
+                            resource: r, spent, ..
+                        },
+                    ) => r == resource && spent.asset == amount.asset,
+                    (_, fin_domain::FinancialEffect::OriginMovement { from, debit, .. }) => {
+                        from == location && debit.asset == amount.asset
+                    }
+                    _ => false,
+                });
+                if settlement && !gross_origin {
+                    total += amount_usd(amount, prices)?;
+                }
+            }
             fin_domain::FinancialEffect::Cost { amount, .. } => {
                 total += amount_usd(amount, prices)?;
             }
@@ -131,6 +177,16 @@ fn actual_effect_charge(
             }
             fin_domain::FinancialEffect::Conversion { spent, .. } => {
                 total += amount_usd(spent, prices)?;
+            }
+            fin_domain::FinancialEffect::ConversionSequence { execution } => {
+                for leg in &execution.legs {
+                    total += amount_usd(&leg.spent, prices)?;
+                }
+                for cost in &execution.costs {
+                    if cost.treatment != CostTreatment::IncludedInDebit {
+                        total += amount_usd(&cost.amount, prices)?;
+                    }
+                }
             }
             fin_domain::FinancialEffect::DebtChange { asset, delta, .. }
                 if !delta.is_negative() && !delta.is_zero() =>
@@ -151,7 +207,10 @@ fn actual_effect_charge(
     Ok(total)
 }
 
-fn amount_usd(amount: &fin_domain::Amount, prices: &[fin_domain::AssetPrice]) -> Result<BigUint> {
+pub(super) fn amount_usd(
+    amount: &fin_domain::Amount,
+    prices: &[fin_domain::AssetPrice],
+) -> Result<BigUint> {
     let price = prices
         .iter()
         .find(|price| price.asset == amount.asset)
@@ -167,7 +226,7 @@ fn amount_usd(amount: &fin_domain::Amount, prices: &[fin_domain::AssetPrice]) ->
         .integer())
 }
 
-fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
+pub(super) fn resources(intent: &FinancialIntent) -> BTreeSet<ResourceId> {
     let mut result: BTreeSet<_> = intent.locks.iter().cloned().collect();
     result.extend(intent.debits.iter().map(|v| v.resource.clone()));
     result.extend(intent.maximum_costs.iter().map(|v| match &v.location {
@@ -185,6 +244,64 @@ fn counted(record: &OperationRecord, instant: DateTime<Utc>) -> Result<bool> {
     // Submitted fees and turnover remain charged even for proven failed writes.
     Ok(record.submission.is_some()
         && parse_time(&record.updated_at)? > instant - chrono::Duration::hours(24))
+}
+
+fn counted_with_amendment_owner(
+    record: &OperationRecord,
+    records: &BTreeMap<String, OperationRecord>,
+    instant: DateTime<Utc>,
+) -> Result<bool> {
+    if record.status.terminal()
+        && record.submission.is_some()
+        && let Some(prepared) = &record.preview
+        && let Some(children) = compound_mutations::children(&prepared.intent)?
+    {
+        for child in children {
+            let original = records.get(&child.operation_id).ok_or_else(|| {
+                budget_error(
+                    "AMENDMENT_OWNER_MISSING",
+                    "A compound mutation's original accounting owner is missing.",
+                )
+            })?;
+            if counted(original, instant)? {
+                return Ok(true);
+            }
+        }
+    }
+    if record.status.terminal()
+        && record.submission.is_some()
+        && let Some(prepared) = &record.preview
+    {
+        for group in grouped_amendments::groups(&prepared.intent)? {
+            let owner = records.get(&group.operation_id).ok_or_else(|| {
+                budget_error(
+                    "AMENDMENT_OWNER_MISSING",
+                    "The grouped original owner is missing.",
+                )
+            })?;
+            if counted(owner, instant)? {
+                return Ok(true);
+            }
+        }
+    }
+    if record.status == Status::Completed
+        && let Some((original_id, _, _)) = record
+            .preview
+            .as_ref()
+            .and_then(|p| amendments::target(&p.intent))
+    {
+        let original=records.get(original_id).ok_or_else(||budget_error("AMENDMENT_OWNER_MISSING","A proved amendment's original accounting owner is missing; its allocation cannot expire safely."))?;
+        // Positive amendment reserves transfer to the original unresolved order.
+        // Preserve the delta beyond24h and through the original final settlement window.
+        return counted(original, instant);
+    }
+    counted(record, instant)
+}
+fn operation_index(records: Vec<OperationRecord>) -> BTreeMap<String, OperationRecord> {
+    records
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect()
 }
 
 fn unpriced(prepared: &PreparedOperation) -> bool {
@@ -208,8 +325,9 @@ impl Engine {
     pub fn allocation_unpriced_operations(&self) -> Result<u64> {
         let instant = self.clock.now();
         let mut count = 0;
-        for record in self.operations()? {
-            if counted(&record, instant)? {
+        let records = operation_index(self.operations()?);
+        for record in records.values() {
+            if counted_with_amendment_owner(record, &records, instant)? {
                 let preview = record.preview.as_ref().ok_or_else(|| budget_error("VALUATION_UNAVAILABLE", "A historical submission has no recorded valuation; preserve and reconcile it."))?;
                 if unpriced(preview) {
                     count += 1;
@@ -242,14 +360,19 @@ impl Engine {
                 .collect::<Result<Vec<_>>>()?;
             (owners, operation_ids, transfers, operations)
         };
-        for record in operations {
+        let operation_index = operation_index(operations);
+        for record in operation_index.values() {
             // The row's single allocation charge moved atomically to its bridge
             // transfer owner after source proof; never count both identities.
             if owner_operations.contains(&record.id) {
                 continue;
             }
-            if counted(&record, instant)? {
-                total += record_charge(&record)?;
+            if counted_with_amendment_owner(record, &operation_index, instant)? {
+                let store = self
+                    .store
+                    .lock()
+                    .map_err(|_| internal("store lock poisoned"))?;
+                total += unresolved_consumption::record_charge(&store, record)?;
             }
         }
         for (owner, transfer) in owners.iter().zip(transfers.iter()) {
@@ -328,14 +451,27 @@ impl Engine {
             ));
         }
         let requested_resources = resources(&prepared.intent);
+        let linked_original = amendments::target(&prepared.intent).map(|(id, _, _)| id);
+        let compound_children = compound_mutations::children(&prepared.intent)?;
+        let grouped_owners = grouped_amendments::groups(&prepared.intent)?
+            .iter()
+            .map(|g| g.operation_id.as_str())
+            .collect::<Vec<_>>();
+
         let mut store = self
             .store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?;
         let snapshot = store.list_records().map_err(map_store)?;
         let mut total = own_charge;
-        for value in &snapshot {
-            let other: OperationRecord = from_value(value.clone())?;
+        let records = operation_index(
+            snapshot
+                .iter()
+                .cloned()
+                .map(from_value::<OperationRecord>)
+                .collect::<Result<Vec<_>>>()?,
+        );
+        for other in records.values() {
             if other.id == record.id {
                 continue;
             }
@@ -347,6 +483,11 @@ impl Engine {
                     ));
                 };
                 if Some(other.id.as_str()) != replacement_parent
+                    && linked_original != Some(other.id.as_str())
+                    && !grouped_owners.contains(&other.id.as_str())
+                    && !compound_children.is_some_and(|children| {
+                        children.iter().any(|child| child.operation_id == other.id)
+                    })
                     && !requested_resources.is_disjoint(&resources(&preview.intent))
                 {
                     return Err(budget_error(
@@ -355,8 +496,8 @@ impl Engine {
                     ));
                 }
             }
-            if counted(&other, instant)? {
-                total += record_charge(&other)?;
+            if counted_with_amendment_owner(other, &records, instant)? {
+                total += unresolved_consumption::record_charge(&store, other)?;
             }
         }
         if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {
@@ -397,26 +538,49 @@ impl Engine {
         );
         record.preview = Some(prepared.clone());
         record.updated_at = now();
-        let persist = if let Some(parent_id) = recovery_parent {
-            store.persist_operation_reservation_with_recovery_parent(
-                &record.id,
-                &rows,
-                &to_value(record)?,
-                &snapshot,
-                &record.updated_at,
-                parent_id,
-            )
+        if !grouped_owners.is_empty() || compound_children.is_some() {
+            store
+                .persist_mutation_batch_reservation(
+                    &record.id,
+                    &rows,
+                    &to_value(record)?,
+                    &snapshot,
+                    &record.updated_at,
+                )
+                .map_err(map_store)
+        } else if let Some(original_id) = linked_original {
+            store
+                .persist_amendment_reservation(
+                    &record.id,
+                    original_id,
+                    &rows,
+                    &to_value(record)?,
+                    &snapshot,
+                    &record.updated_at,
+                )
+                .map_err(map_store)
         } else {
-            store.persist_operation_reservation_with_parent(
-                &record.id,
-                &rows,
-                &to_value(record)?,
-                &snapshot,
-                &record.updated_at,
-                replacement_parent,
-            )
-        };
-        persist.map_err(map_store)
+            let persist = if let Some(parent_id) = recovery_parent {
+                store.persist_operation_reservation_with_recovery_parent(
+                    &record.id,
+                    &rows,
+                    &to_value(record)?,
+                    &snapshot,
+                    &record.updated_at,
+                    parent_id,
+                )
+            } else {
+                store.persist_operation_reservation_with_parent(
+                    &record.id,
+                    &rows,
+                    &to_value(record)?,
+                    &snapshot,
+                    &record.updated_at,
+                    replacement_parent,
+                )
+            };
+            persist.map_err(map_store)
+        }
     }
 }
 
@@ -461,8 +625,15 @@ pub(super) fn validate_boundary_candidate_policy(
     if allocation_limit.is_some() {
         let requested_resources = resources(&prepared.intent);
         let mut total = charge(prepared)?;
-        for value in store.list_records().map_err(map_store)? {
-            let other: OperationRecord = from_value(value)?;
+        let records = operation_index(
+            store
+                .list_records()
+                .map_err(map_store)?
+                .into_iter()
+                .map(from_value::<OperationRecord>)
+                .collect::<Result<Vec<_>>>()?,
+        );
+        for other in records.values() {
             if other.id == operation_id {
                 continue;
             }
@@ -480,8 +651,8 @@ pub(super) fn validate_boundary_candidate_policy(
                     ));
                 }
             }
-            if counted(&other, instant)? {
-                total += record_charge(&other)?;
+            if counted_with_amendment_owner(other, &records, instant)? {
+                total += unresolved_consumption::record_charge(store, other)?;
             }
         }
         if allocation_limit.is_some_and(|limit| total > BigUint::from(limit)) {

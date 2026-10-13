@@ -189,6 +189,9 @@ impl EthereumAdapter {
             supply_anchor: None,
             debt_anchor: None,
             debt_rounding_maximum: None,
+            verified_baseline_anchors: original
+                .map(|old| old.verified_baseline_anchors.clone())
+                .unwrap_or_default(),
             value_bounds: original.and_then(|binding| binding.value_bounds.clone()),
             boundary_authorization: original
                 .and_then(|binding| binding.boundary_authorization.clone()),
@@ -974,6 +977,23 @@ impl EthereumAdapter {
                     )
                     .await?,
                 );
+                if original.is_none() {
+                    let relevant = match operation {
+                        "aave.borrow" | "aave.repay" => b.debt_anchor.as_ref(),
+                        "aave.supply" | "aave.withdraw" => b.supply_anchor.as_ref(),
+                        _ => None,
+                    };
+                    if let Some(anchor) = relevant
+                        && !context.positions.iter().any(|old| {
+                            old.resource == anchor.resource
+                                && old.position == anchor.position
+                                && old.position_kind == anchor.position_kind
+                                && old.principal.asset == anchor.principal.asset
+                        })
+                    {
+                        b.verified_baseline_anchors.push(anchor.clone());
+                    }
+                }
                 require(
                     b.supply_anchor
                         .as_ref()
@@ -1782,7 +1802,7 @@ impl EthereumAdapter {
                     .expect("validated observation timestamp")
             })
             .expect("principal and fee observations");
-        let expires = (self.clock.now() + chrono::Duration::seconds(120))
+        let expires = (self.clock.now() + chrono::Duration::seconds(300))
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if matches!(
             operation,

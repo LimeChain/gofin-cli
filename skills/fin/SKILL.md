@@ -2,7 +2,7 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.5.1"
+  version: "1.5.2"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
@@ -35,6 +35,11 @@ Start with `fin --help` and `fin capabilities --json`, even before setup exists.
 Setup and credential changes belong to the human's fresh Terminal. Explain the supported command with safe metadata flags, such as `fin connections add --provider binance --name main --role main --credential-type ed25519`. Binance accepts HMAC, RSA, and Ed25519. A standalone subaccount needs only its own credentials: `fin connections add binance --name sub --role sub --credential-type ed25519`. No main credentials are required. Optionally supply both `--parent` and `--email` to link an enrolled main connection for hierarchy verification and main-authorized reads. The human enters secrets directly in the protected hidden prompt and separately approves configuration. Never ask for credentials in chat, arguments, JSON, environment variables, or an agent-controlled terminal. A bare add command guides public metadata; complete flags skip those prompts. Installation/enrollment moves no funds and grants no future financial authorization. Later `connections update` rotates credentials for the same identity/relationships; unresolved operations refuse changes. Cancelled or invalid rotation preserves the prior connection; an uncertain commit requires checking the original configuration outcome. Check `fin connections list --json` and `fin doctor --json` afterward. Missing platform support fails closed.
 
 Use `fin explain OPERATION --json` and `fin schema OPERATION --json` for financial inputs, units, completion criteria, and limits. Read configured connections only after setup; discovery itself requires no broker or credentials.
+
+Prefer direct `fin` CLI calls. Use scripts only when they materially simplify
+generating structured inputs or processing results. Keep financial execution and
+status commands direct where practical, preserve live `--json --stream` output,
+and avoid buffering progress until completion.
 
 When installed discovery advertises streaming, use `--json --stream` for financial
 execution and status reconciliation so the human can hear meaningful milestones.
@@ -93,6 +98,12 @@ human-reviewed relationship enrollment. Linking grants no financial authority.
 Read the installed `hyperliquid.*` schemas and fresh account state before planning
 funding or trades; legacy Arbitrum USDC deposits and Arbitrum withdrawals remain
 separate reviewed financial writes with correlated destination proof.
+
+Kraken Spot/Margin (`kraken`) and Derivatives (`krakenfutures`) have separate protected keys and exact account/product identities. The human enrolls each product in their own Terminal with `fin connections add --provider kraken --name spot --account-id ACCOUNT_ID` or `--provider krakenfutures --name derivatives --account-id ACCOUNT_ID`; secrets remain in Fin's hidden enrollment prompt. Use discovery for current typed operation names, native option fields, permissions and verification limits. No raw REST paths or arbitrary parameter bags are financial authority. Preserve decimal strings and exact method/network/address, memo/tag and wallet identities. New Funding workflows and persisted legacy requests keep their own API versions.
+
+Kraken administrative authority changes use `fin configure OPERATION --input JSON` in the human's Terminal with separate fresh configuration approval. Its `--json` response hands off to the human; a financial plan cannot authorize these changes. Export reads use `--output PATH` for a private create-new local artifact; never ask Fin to overwrite an existing file. Dead-man switches configure only the approved timer; never renew them automatically.
+
+Wallet-funded Kraken deposits require correlated usable venue credit. A wallet transaction receipt or isolated balance increase does not complete them. Withdrawals default to independent destination proof. Unsupported observers require the human's explicit `verificationRequirement: "venue_only"` choice bound into the exact approval and plan; report that destination delivery remains unverified. Earn mutations are serialized by account/strategy until reconciled. Standing fills, amendments and partial native batches retain immutable identities and unresolved reservations; do not replay a child or create a new request ID after response loss. Linked order authority revisions require fresh exact approval outside plans. Conditional conversion sequences spend their parent's verified proceeds; their later leg still consumes gross turnover.
 
 ## Bridge transfers
 
@@ -234,7 +245,7 @@ be prepared, use the installed operation's documented fee semantics; preview
 each concrete step once its funds are available. Plan schema review checks every
 step's input format before approval, while live balances and fees remain deferred.
 
-For a user's coherent intent that requires multiple linked financial actions, strongly recommend one bounded named plan. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
+For a user's coherent intent that requires multiple linked financial actions, default to one bounded named plan. Prepare and preview the complete sequence before requesting authorization; do not start its first action under standalone authorization. For steps with dedicated adapter-reviewed plan bounds, use those bounds rather than the generic exact wrapper; use exact scopes for the remaining steps. If exact future proceeds cannot be represented, prefer fixed downstream amounts covered by verified predecessor receipts, with disclosed leftovers and the human's agreement. Explain any capability limitation before proposing staged standalone approvals. One terminal review and Touch ID approval covers the complete ordered revision, which is clearer and smoother than approving each linked action separately. The agent still previews and explicitly submits each eligible step; approval never starts or automatically runs the plan. Keep unrelated actions in separate plans or standalone requests, and do not turn a one-off action into a plan without a reason.
 
 Name each plan for the human intent and add one short `summary` sentence with
 its financial input, outcome and material fee limit. Together they should read

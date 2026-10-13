@@ -30,6 +30,10 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Configure {
+        #[arg(long)]
+        request: String,
+    },
     Enrollment {
         #[command(subcommand)]
         action: EnrollmentAction,
@@ -134,6 +138,42 @@ async fn run(args: Args) -> fin_domain::Result<()> {
         return Ok(());
     }
 
+    if let Some(Command::Configure { ref request }) = args.command {
+        if args.json {
+            return Err(FinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "configuration",
+                "Configuration requires your own interactive Terminal.",
+                "Run fin configure yourself without --json.",
+            ));
+        }
+        let public = validate_public_enrollment_request(request)?;
+        let request: fin_protocol::ConfigureRequest = serde_json::from_value(public)
+            .map_err(|_| FinError::validation("Use the typed public configuration request."))?;
+        let ui = Ui::new(false, args.verbose);
+        let result = fin_broker::configure::handle_with_ui(request, &ui).await?;
+        if result["status"] == "acknowledged" {
+            let _ = ui.success("Venue configuration acknowledged.");
+        } else {
+            let _ =
+                ui.warning("Configuration outcome is unresolved; keep its original request ID.");
+        }
+        println!(
+            "Attempt: {} | Request: {}",
+            result["id"].as_str().unwrap_or(""),
+            result["requestId"].as_str().unwrap_or("")
+        );
+        println!("{}", result["nextAction"].as_str().unwrap_or(""));
+        if args.verbose {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|_| FinError::validation(
+                    "Configuration result could not be displayed."
+                ))?
+            );
+        }
+        return Ok(());
+    }
     if let Some(Command::Enrollment { action }) = args.command {
         if args.json {
             return Err(FinError::new(
@@ -157,11 +197,23 @@ async fn run(args: Args) -> fin_domain::Result<()> {
         if action_name == "configure" {
             let operation = result["operation"]
                 .as_str()
-                .unwrap_or("Hyperliquid configuration");
+                .unwrap_or("Venue configuration");
             let status = result["status"].as_str().unwrap_or("recorded");
-            ui.success(&format!("{operation}: {status}")).map_err(|_| {
-                FinError::validation("The configuration result could not be displayed; inspect fin operations before retrying.")
+            let message = format!("{operation}: {status}");
+            let displayed = if matches!(status, "acknowledged" | "completed") {
+                ui.success(&message)
+            } else {
+                ui.warning(&message)
+            };
+            displayed.map_err(|_| {
+                FinError::validation("The configuration result could not be displayed; inspect its original attempt ID before retrying.")
             })?;
+            if let Some(id) = result["id"]
+                .as_str()
+                .filter(|id| id.starts_with("configuration:"))
+            {
+                println!("Inspect: fin status {id}");
+            }
             ui.detail(&serde_json::to_string(&result).unwrap_or_default());
             return Ok(());
         }
@@ -246,7 +298,9 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
             | PublicConnection::Ethereum { name, .. }
             | PublicConnection::Evm { name, .. }
             | PublicConnection::CoinGecko { name, .. }
-            | PublicConnection::Hyperliquid { name, .. } => name,
+            | PublicConnection::Hyperliquid { name, .. }
+            | PublicConnection::Kraken { name, .. }
+            | PublicConnection::KrakenFutures { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",
@@ -326,6 +380,21 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(run(args).await.unwrap_err().code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn machine_configuration_stops_before_input_parse_or_protected_access() {
+        let args = Args::try_parse_from([
+            "fin-broker",
+            "configure",
+            "--request",
+            "INVALID_SYNTHETIC_INPUT",
+            "--json",
+        ])
+        .unwrap();
+        let failure = run(args).await.unwrap_err();
+        assert_eq!(failure.code, "HUMAN_TERMINAL_REQUIRED");
+        assert_eq!(failure.stage, "configuration");
     }
 
     fn saved_connection(action: &str) -> Value {

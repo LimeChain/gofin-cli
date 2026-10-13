@@ -8,7 +8,7 @@ rust-version.workspace = true
 default = []
 ccxt = ["dep:ccxt", "dep:tokio", "dep:reqwest", "dep:zeroize", "dep:percent-encoding", "dep:ed25519-dalek", "dep:base64", "dep:rsa", "dep:indexmap"]
 binance = ["ccxt", "ccxt/binance"]
-kraken = ["ccxt", "ccxt/kraken"]
+kraken = ["ccxt", "ccxt/kraken", "ccxt/krakenfutures", "dep:hmac"]
 hyperliquid = ["ccxt", "ccxt/hyperliquid"]
 okx = ["ccxt", "ccxt/okx"]
 coinbase = ["ccxt", "ccxt/coinbase"]
@@ -36,6 +36,8 @@ ed25519-dalek = { workspace = true, optional = true }
 base64 = { version = "=0.22.1", optional = true }
 rsa = { version = "0.9", features = ["pem", "sha2"], optional = true }
 indexmap = { version = "2", optional = true }
+
+hmac = { version = "0.12.1", optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

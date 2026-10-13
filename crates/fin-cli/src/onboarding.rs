@@ -52,8 +52,30 @@ fn guided_add_with(
         execution_address: None,
         credential_type: None,
         api_plan: None,
+        account_id: None,
+        default_wallet_account_id: None,
     };
     match args.provider {
+        Provider::Kraken | Provider::KrakenFutures => {
+            args.account_id = Some(prompt(
+                input,
+                output,
+                "Public Kraken account ID (confirmed by you)",
+                None,
+            )?);
+            if args.provider == Provider::Kraken {
+                let wallet = prompt(
+                    input,
+                    output,
+                    "Default Funding wallet account ID (your verified selection; optional, leave blank)",
+                    None,
+                )?;
+                if !wallet.is_empty() {
+                    args.default_wallet_account_id = Some(wallet);
+                }
+            }
+            args.credential_type = Some(CredentialType::Hmac);
+        }
         Provider::CoinGecko => {
             args.credential_type = Some(CredentialType::ApiKey);
             args.api_plan = Some(prompt(input, output, "API plan (demo/pro)", Some("demo"))?);
@@ -270,7 +292,9 @@ mod tests {
         let (result, output) = run("evm\nwallet\n\n\n");
         let args = result.unwrap();
         assert!(args.network.is_none());
-        assert!(output.contains("Provider (binance/evm/coingecko/hyperliquid)"));
+        assert!(
+            output.contains("Provider (binance/evm/coingecko/hyperliquid/kraken/krakenfutures)")
+        );
         assert!(!output.contains("Network"));
         assert!(!output.contains("Private key:"));
         assert_eq!(args.credential_type, Some(CredentialType::PrivateKey));
@@ -369,5 +393,19 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(!output.contains("Provider"));
         assert!(output.contains("Connection name"));
+    }
+    #[test]
+    fn kraken_guidance_collects_only_optional_spot_default_relationship() {
+        let (result, output) = run("kraken\nspot\nsynthetic\nWDEFAULT\n");
+        assert_eq!(
+            result.unwrap().default_wallet_account_id.as_deref(),
+            Some("WDEFAULT")
+        );
+        assert!(output.contains("your verified selection; optional"));
+        let (result, _) = run("kraken\nspot\nsynthetic\n\n");
+        assert!(result.unwrap().default_wallet_account_id.is_none());
+        let (result, output) = run("krakenfutures\nfutures\nsynthetic\n");
+        assert!(result.unwrap().default_wallet_account_id.is_none());
+        assert!(!output.contains("Default Funding wallet"));
     }
 }

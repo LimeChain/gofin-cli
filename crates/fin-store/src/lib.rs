@@ -13,16 +13,26 @@ use thiserror::Error;
 /// Persisted allocation-owner ledger row, in the order returned by SQLite.
 pub type BridgeAllocationOwnerRow = (String, String, String, String, Option<String>);
 
+mod amendments;
 #[cfg(test)]
 mod base_recovery_tests;
 #[cfg(test)]
 mod boundary_migration_tests;
 #[cfg(test)]
 mod bridge_state_tests;
+pub mod compound_amendments;
 pub mod execution_state;
-pub mod legacy;
+pub mod grouped_amendments;
+#[cfg(test)]
+mod schema_merge_tests;
 
-const SCHEMA_VERSION: i64 = 10;
+pub mod legacy;
+pub mod mutation_batches;
+pub mod nonces;
+mod progress;
+pub mod unresolved_consumption;
+
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -240,6 +250,14 @@ pub struct ProgressSettlement {
     pub plan_id: Option<String>,
     pub expected_plan: Option<Value>,
     pub plan_record: Option<Value>,
+}
+
+enum ReservationLink<'a> {
+    Ordinary,
+    Single(&'a str),
+    Compound,
+    Grouped,
+    MutationBatch,
 }
 
 pub struct Store {
@@ -583,6 +601,117 @@ impl Store {
                     ["operation_id", "kind", "reference", "data_json"].as_slice(),
                 ),
             ];
+            if version >= 11 {
+                expected.push((
+                    "operation_amendments",
+                    [
+                        "original_operation_id",
+                        "revision",
+                        "amendment_operation_id",
+                        "revision_json",
+                        "proof_json",
+                        "successor_kind",
+                        "successor_reference",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 15 {
+                expected.extend([
+                    (
+                        "unresolved_cost_consumption",
+                        [
+                            "operation_id",
+                            "proof_json",
+                            "additional_usd_micros",
+                            "updated_at",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "unresolved_cost_events",
+                        ["operation_id", "event_id", "event_json"].as_slice(),
+                    ),
+                ]);
+            }
+            if version >= 14 {
+                expected.push((
+                    "grouped_amendment_scopes",
+                    [
+                        "amendment_operation_id",
+                        "original_operation_id",
+                        "group_json",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            if version >= 13 {
+                expected.extend([
+                    (
+                        "grouped_amendments",
+                        [
+                            "amendment_operation_id",
+                            "original_operation_id",
+                            "group_json",
+                        ]
+                        .as_slice(),
+                    ),
+                    (
+                        "grouped_amendment_children",
+                        ["amendment_operation_id", "child_tag", "proof_json"].as_slice(),
+                    ),
+                    (
+                        "grouped_amendment_revisions",
+                        [
+                            "amendment_operation_id",
+                            "original_operation_id",
+                            "revision",
+                            "revision_json",
+                            "proof_json",
+                        ]
+                        .as_slice(),
+                    ),
+                ]);
+            }
+            if version >= 12 {
+                expected.push((
+                    "compound_amendment_children",
+                    [
+                        "amendment_operation_id",
+                        "child_tag",
+                        "original_operation_id",
+                        "child_kind",
+                        "link_json",
+                        "outcome",
+                        "revision",
+                        "revision_json",
+                        "proof_json",
+                        "successor_kind",
+                        "successor_reference",
+                    ]
+                    .as_slice(),
+                ));
+            }
+            // Version 10 existed in two compatible Fin branches. Kraken's
+            // family has native proof events; upstream's family has ordered
+            // progress and signer nonces. Validate present recognized columns
+            // before the additive v16 merge, never reinterpret or rewrite rows.
+            let has_native_events = names.iter().any(|name| name == "operation_proof_events");
+            let has_ordered_progress = names.iter().any(|name| name == "settlement_progress");
+            let has_signer_nonces = names.iter().any(|name| name == "signer_nonces");
+            if has_ordered_progress != has_signer_nonces
+                || (version == 10 && !has_native_events && !has_ordered_progress)
+                || (version >= 11 && !has_native_events)
+                || (version >= 16 && !has_ordered_progress)
+            {
+                return Err(StoreError::ForeignDatabase);
+            }
+            if version >= 10 && has_native_events {
+                expected.push((
+                    "operation_proof_events",
+                    ["operation_id", "event_id", "event_json"].as_slice(),
+                ));
+            }
             if version >= 2 {
                 expected.extend([
                     (
@@ -725,36 +854,7 @@ impl Store {
                     ),
                 ]);
             }
-            if version >= 10 {
-                expected.extend([
-                    (
-                        "settlement_progress",
-                        [
-                            "operation_id",
-                            "sequence",
-                            "snapshot_id",
-                            "proof_digest",
-                            "proof_json",
-                            "effects_json",
-                            "created_at",
-                        ]
-                        .as_slice(),
-                    ),
-                    ("signer_nonces", ["signer_scope", "last_nonce"].as_slice()),
-                ]);
-            } else if names
-                .iter()
-                .any(|name| name == "settlement_progress" || name == "signer_nonces")
-            {
-                // A known older schema can be temporarily downgraded for a
-                // migration fixture while retaining newer Fin-owned tables.
-                // Accept only the complete recognized extension pair and
-                // validate its exact columns; preserve its rows on upgrade.
-                if !names.iter().any(|name| name == "settlement_progress")
-                    || !names.iter().any(|name| name == "signer_nonces")
-                {
-                    return Err(StoreError::ForeignDatabase);
-                }
+            if has_ordered_progress {
                 expected.extend([
                     (
                         "settlement_progress",
@@ -1107,25 +1207,94 @@ impl Store {
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(
                 "CREATE TABLE IF NOT EXISTS settlement_progress (
-                    operation_id TEXT NOT NULL REFERENCES operations(id),
-                    sequence INTEGER NOT NULL,
-                    snapshot_id TEXT NOT NULL,
-                    proof_digest TEXT NOT NULL,
-                    proof_json TEXT NOT NULL,
-                    effects_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY(operation_id, sequence),
-                    UNIQUE(operation_id, snapshot_id),
-                    UNIQUE(operation_id, proof_digest)
-                 );
-                 CREATE TABLE IF NOT EXISTS signer_nonces (
-                    signer_scope TEXT PRIMARY KEY NOT NULL,
-                    last_nonce INTEGER NOT NULL CHECK(last_nonce >= 0)
-                 );
-                 PRAGMA user_version = 10;",
+                    operation_id TEXT NOT NULL REFERENCES operations(id),sequence INTEGER NOT NULL,snapshot_id TEXT NOT NULL,proof_digest TEXT NOT NULL,proof_json TEXT NOT NULL,effects_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation_id,sequence),UNIQUE(operation_id,snapshot_id),UNIQUE(operation_id,proof_digest));
+                 CREATE TABLE IF NOT EXISTS signer_nonces(signer_scope TEXT PRIMARY KEY NOT NULL,last_nonce INTEGER NOT NULL CHECK(last_nonce>=0));
+                 CREATE TABLE IF NOT EXISTS operation_proof_events (
+                operation_id TEXT NOT NULL REFERENCES operations(id),
+                event_id TEXT NOT NULL,
+                event_json TEXT NOT NULL,
+                PRIMARY KEY(operation_id, event_id)
+            ); PRAGMA user_version = 10;",
             )?;
             tx.commit()?;
         }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 10 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS operation_proof_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id));
+                 CREATE TABLE operation_amendments (
+                original_operation_id TEXT NOT NULL REFERENCES operations(id),
+                revision INTEGER NOT NULL,
+                amendment_operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),
+                revision_json TEXT NOT NULL,
+                proof_json TEXT NOT NULL,
+                successor_kind TEXT,
+                successor_reference TEXT,
+                UNIQUE(original_operation_id,revision),
+                UNIQUE(successor_kind,successor_reference)
+            ); PRAGMA user_version = 11;",
+            )?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 11 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE compound_amendment_children (
+                amendment_operation_id TEXT NOT NULL REFERENCES operations(id),
+                child_tag TEXT NOT NULL,
+                original_operation_id TEXT NOT NULL REFERENCES operations(id),
+                child_kind TEXT NOT NULL CHECK(child_kind IN ('amend','cancel')),
+                link_json TEXT NOT NULL,
+                outcome TEXT NOT NULL DEFAULT 'pending' CHECK(outcome IN ('pending','accepted','rejected')),
+                revision INTEGER,
+                revision_json TEXT,
+                proof_json TEXT,
+                successor_kind TEXT,
+                successor_reference TEXT,
+                PRIMARY KEY(amendment_operation_id,child_tag),
+                UNIQUE(amendment_operation_id,original_operation_id),
+                UNIQUE(original_operation_id,revision),
+                UNIQUE(successor_kind,successor_reference)
+            ); PRAGMA user_version = 12;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 12 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE grouped_amendments(amendment_operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),original_operation_id TEXT NOT NULL REFERENCES operations(id),group_json TEXT NOT NULL);
+            CREATE TABLE grouped_amendment_children(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),child_tag TEXT NOT NULL,proof_json TEXT,PRIMARY KEY(amendment_operation_id,child_tag));
+            CREATE TABLE grouped_amendment_revisions(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),revision INTEGER NOT NULL,revision_json TEXT NOT NULL,proof_json TEXT NOT NULL,PRIMARY KEY(original_operation_id,revision)); PRAGMA user_version=13;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 13 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE grouped_amendment_scopes(amendment_operation_id TEXT NOT NULL REFERENCES grouped_amendments(amendment_operation_id),original_operation_id TEXT NOT NULL REFERENCES operations(id),group_json TEXT NOT NULL,PRIMARY KEY(amendment_operation_id,original_operation_id)); PRAGMA user_version=14;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 14 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE unresolved_cost_consumption(operation_id TEXT PRIMARY KEY NOT NULL REFERENCES operations(id),proof_json TEXT NOT NULL,additional_usd_micros TEXT NOT NULL,updated_at TEXT NOT NULL); CREATE TABLE unresolved_cost_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); PRAGMA user_version=15;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 15 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS settlement_progress (
+                operation_id TEXT NOT NULL REFERENCES operations(id),sequence INTEGER NOT NULL,snapshot_id TEXT NOT NULL,proof_digest TEXT NOT NULL,proof_json TEXT NOT NULL,effects_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(operation_id,sequence),UNIQUE(operation_id,snapshot_id),UNIQUE(operation_id,proof_digest));
+                CREATE TABLE IF NOT EXISTS signer_nonces(signer_scope TEXT PRIMARY KEY NOT NULL,last_nonce INTEGER NOT NULL CHECK(last_nonce>=0));
+                CREATE TABLE IF NOT EXISTS operation_proof_events(operation_id TEXT NOT NULL REFERENCES operations(id),event_id TEXT NOT NULL,event_json TEXT NOT NULL,PRIMARY KEY(operation_id,event_id)); PRAGMA user_version=16;")?;
+            tx.commit()?;
+        }
+
         Ok(())
     }
 
@@ -1375,20 +1544,35 @@ impl Store {
         expected_records: &[Value],
         timestamp: &str,
     ) -> Result<()> {
-        self.persist_operation_reservation_with_parent(
+        self.persist_operation_reservation_impl(
             operation_id,
             reservations,
             record,
             expected_records,
             timestamp,
+            ReservationLink::Ordinary,
+        )
+    }
+    fn persist_operation_reservation_impl(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        link: ReservationLink<'_>,
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            link,
+            None,
             None,
         )
     }
-
-    /// Atomically reserve an operation while allowing a collision with the
-    /// one exact parent submission carried in trusted replacement metadata.
-    /// The parent keeps its complete reservation; this only serializes the
-    /// relationship and prevents unrelated reservation conflicts.
     pub fn persist_operation_reservation_with_parent(
         &mut self,
         operation_id: &str,
@@ -1404,15 +1588,11 @@ impl Store {
             record,
             expected_records,
             timestamp,
+            ReservationLink::Ordinary,
             replacement_parent,
             None,
         )
     }
-
-    /// Atomically persist a zero-principal recovery child with its exact
-    /// unresolved parent identity. Recovery links do not bypass ordinary
-    /// conflicts or budgets; this only commits the relationship and enforces
-    /// one child per parent.
     pub fn persist_operation_reservation_with_recovery_parent(
         &mut self,
         operation_id: &str,
@@ -1428,14 +1608,14 @@ impl Store {
             record,
             expected_records,
             timestamp,
+            ReservationLink::Ordinary,
             None,
             Some(recovery_parent),
         )
     }
-
     #[expect(
         clippy::too_many_arguments,
-        reason = "This private transaction helper carries the operation, CAS snapshot, and two mutually exclusive typed relationship targets."
+        reason = "Atomic reservation identities and mutually exclusive parent contracts remain explicit."
     )]
     fn persist_operation_reservation_with_link(
         &mut self,
@@ -1444,15 +1624,72 @@ impl Store {
         record: &Value,
         expected_records: &[Value],
         timestamp: &str,
+        link: ReservationLink<'_>,
         replacement_parent: Option<&str>,
         recovery_parent: Option<&str>,
     ) -> Result<()> {
-        if replacement_parent.is_some() && recovery_parent.is_some() {
+        if replacement_parent.is_some() && recovery_parent.is_some()
+            || (!matches!(link, ReservationLink::Ordinary)
+                && (replacement_parent.is_some() || recovery_parent.is_some()))
+        {
             return Err(StoreError::ReservationConflict);
         }
+
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let compound_children = if matches!(link, ReservationLink::Compound) {
+            Some(compound_amendments::validate_linked_record(
+                record,
+                expected_records,
+            )?)
+        } else {
+            None
+        };
+        let grouped_original = if matches!(link, ReservationLink::Grouped) {
+            Some(grouped_amendments::validate_linked_records(
+                record,
+                expected_records,
+            )?)
+        } else {
+            None
+        };
+        let linked_originals = match link {
+            ReservationLink::Ordinary => vec![],
+            ReservationLink::Grouped => grouped_original.expect("group validated"),
+            ReservationLink::MutationBatch => {
+                mutation_batches::validate_links(record, expected_records)?
+            }
+            ReservationLink::Single(original_id) => {
+                let original = expected_records
+                    .iter()
+                    .find(|row| row["id"] == original_id)
+                    .ok_or(StoreError::OperationNotFound)?;
+                amendments::validate_linked_record(record, original, original_id)?;
+                vec![original_id.to_owned()]
+            }
+            ReservationLink::Compound => compound_children
+                .as_ref()
+                .expect("compound validated")
+                .iter()
+                .map(|child| child.operation_id.clone())
+                .collect(),
+        };
+        if !linked_originals.is_empty() {
+            compound_amendments::validate_pending_links(
+                record,
+                expected_records,
+                &linked_originals,
+            )?;
+        }
+        if compound_children.is_some()
+            || matches!(
+                link,
+                ReservationLink::Grouped | ReservationLink::MutationBatch
+            )
+        {
+            compound_amendments::validate_lock_reservations(record, reservations)?;
+        }
         if list_records_conn(&tx)? != expected_records {
             return Err(StoreError::ConcurrentReservation);
         }
@@ -1518,12 +1755,17 @@ impl Store {
             return Err(StoreError::ReservationConflict);
         }
         for reservation in &requested {
-            let held: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM reservations WHERE resource=?1 AND operation_id!=?2 AND (?3 IS NULL OR operation_id!=?3))",
-                params![reservation.resource, operation_id, replacement_parent],
-                |r| r.get(0),
+            let mut owners = tx.prepare(
+                "SELECT operation_id FROM reservations WHERE resource=?1 AND operation_id!=?2",
             )?;
-            if held {
+            let owners = owners
+                .query_map(params![reservation.resource, operation_id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if owners.iter().any(|owner| {
+                !linked_originals.contains(owner) && replacement_parent != Some(owner.as_str())
+            }) {
                 return Err(StoreError::ConcurrentReservation);
             }
         }
@@ -1534,6 +1776,15 @@ impl Store {
                     params![operation_id, reservation.resource, reservation.units, reservation.fee_units],
                 )?;
             }
+        }
+        if matches!(link, ReservationLink::Grouped) {
+            grouped_amendments::persist_link_tx(&tx, operation_id, record)?;
+        }
+        if matches!(link, ReservationLink::MutationBatch) {
+            mutation_batches::persist_links_tx(&tx, operation_id, record)?;
+        }
+        if let Some(children) = compound_children {
+            compound_amendments::persist_links_tx(&tx, operation_id, &children)?;
         }
         tx.execute(
             "UPDATE operations SET record_json=?1, updated_at=?2 WHERE id=?3",
@@ -5836,6 +6087,8 @@ fn commit_settlement_tx(
     let current_record: Value = serde_json::from_str(&current_record)?;
     validate_dispatch_evidence_transition(&current_record, &settlement.terminal_record)?;
     append_terminal_progress_tx(tx, settlement, &current_record, timestamp)?;
+    progress::persist_events_tx(tx, &settlement.operation_id, &settlement.proof)?;
+
     let status = json_string(&settlement.terminal_record, "status").unwrap_or("unknown");
     if !is_terminal(status) {
         return Err(StoreError::AlreadySettled);

@@ -1556,6 +1556,7 @@ mod tests {
             max_priority_fee_per_gas: Quantity::from_u64(1),
         };
         let binding = Binding {
+            verified_baseline_anchors: vec![],
             transaction: tx.clone(),
             resource: resource.clone(),
             token: native.clone(),

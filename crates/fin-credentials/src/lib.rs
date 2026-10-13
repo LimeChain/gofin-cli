@@ -24,6 +24,14 @@ fn error(code: &str, message: &str) -> FinError {
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretMaterial {
+    KrakenApi {
+        api_key: String,
+        secret: String,
+    },
+    KrakenFuturesApi {
+        api_key: String,
+        secret: String,
+    },
     BinanceHmac {
         api_key: String,
         secret: String,
@@ -53,6 +61,17 @@ impl fmt::Debug for SecretMaterial {
 impl SecretMaterial {
     pub fn validate_present(&self) -> Result<()> {
         let valid = match self {
+            Self::KrakenApi { api_key, secret } | Self::KrakenFuturesApi { api_key, secret } => {
+                use base64::Engine;
+                !api_key.is_empty()
+                    && api_key.len() <= 256
+                    && api_key
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"+/=_-".contains(&b))
+                    && base64::engine::general_purpose::STANDARD
+                        .decode(secret)
+                        .is_ok_and(|key| !key.is_empty() && key.len() <= 256)
+            }
             Self::BinanceHmac { api_key, secret } => !api_key.is_empty() && !secret.is_empty(),
             Self::BinanceRsa {
                 api_key,

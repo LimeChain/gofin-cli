@@ -253,6 +253,106 @@ mod final_submission_valuation_tests {
         );
     }
 
+    struct MovingClock(Mutex<chrono::DateTime<chrono::Utc>>);
+    impl fin_domain::clock::Clock for MovingClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+    struct ClockedPrices(Arc<MovingClock>);
+    #[async_trait]
+    impl WalletValuation for ClockedPrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            Ok((
+                units.mul_div_ceil(
+                    &Quantity::from_u64(3_000_000_000),
+                    &quantity(pow10(asset.decimals)?),
+                )?,
+                "synthetic-clocked-eth-price".into(),
+            ))
+        }
+        async fn quote_observation(
+            &self,
+            asset: &AssetId,
+            units: Quantity,
+        ) -> Result<(Quantity, String, String)> {
+            let (value, source) = self.quote_usd(asset, units).await?;
+            Ok((value, source, self.0.0.lock().unwrap().to_rfc3339()))
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_transfer_preview_lasts_300_seconds_with_fresh_revalidation() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let start = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+        let clock = Arc::new(MovingClock(Mutex::new(start)));
+        let adapter = counted_adapter(rpc.clone(), signer.clone())
+            .with_clock(clock.clone())
+            .with_wallet_valuation(Arc::new(ClockedPrices(clock.clone())));
+        let prepared = adapter
+            .prepare("wallet.transfer", &coin_transfer_input())
+            .await
+            .unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&prepared.expires_at).unwrap(),
+            start + chrono::Duration::seconds(300),
+        );
+        let journal = Arc::new(CountingJournal::default());
+        for elapsed in [121, 299] {
+            *clock.0.lock().unwrap() = start + chrono::Duration::seconds(elapsed);
+            let fresh = adapter.revalidate(&prepared).await.unwrap();
+            assert_eq!(fresh.binding, prepared.binding);
+            assert_eq!(fresh.intent, prepared.intent);
+            // The original two-minute price observation has expired; only a
+            // freshly obtained quote lets this longer-lived envelope execute.
+            assert_eq!(
+                fin_domain::value_bounds::validate_at(&prepared, *clock.0.lock().unwrap())
+                    .unwrap_err()
+                    .code,
+                "STALE_VALUATION",
+            );
+            fin_domain::value_bounds::validate_at(&fresh, *clock.0.lock().unwrap()).unwrap();
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SYNTHETIC_SIGNER_REACHED"
+            );
+        }
+        assert_eq!(signer.0.load(Ordering::SeqCst), 2);
+        let reads = rpc.calls.lock().unwrap().len();
+        let authorizations = journal.authorized.load(Ordering::SeqCst);
+        for elapsed in [300, 301] {
+            *clock.0.lock().unwrap() = start + chrono::Duration::seconds(elapsed);
+            assert_eq!(
+                adapter.revalidate(&prepared).await.unwrap_err().code,
+                "PREVIEW_EXPIRED"
+            );
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "PREVIEW_EXPIRED"
+            );
+        }
+        let mut malformed = prepared.clone();
+        malformed.expires_at = "not-a-timestamp".into();
+        assert_eq!(
+            adapter.revalidate(&malformed).await.unwrap_err().code,
+            "PREVIEW_EXPIRED"
+        );
+        assert_eq!(rpc.calls.lock().unwrap().len(), reads);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), authorizations);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 2);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
     #[tokio::test]
     async fn engine_wallet_submission_reuses_fresh_preparation_without_duplicate_simulation() {
         let rpc = Arc::new(Fixture::new());

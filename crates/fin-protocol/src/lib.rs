@@ -29,6 +29,20 @@ pub enum BrokerRequest {
         operation: String,
         input: Value,
     },
+    /// Begin a bounded export read; no caller file paths cross the broker boundary.
+    ReadArtifact {
+        operation: String,
+        input: Value,
+    },
+    /// Fetch one bounded chunk from an immutable, expiring export handle.
+    ArtifactChunk {
+        artifact_id: String,
+        offset: u64,
+    },
+    /// Release an export handle after verified local delivery.
+    ReleaseArtifact {
+        artifact_id: String,
+    },
     Preview {
         operation: String,
         input: Value,
@@ -129,6 +143,15 @@ pub enum BrokerRequest {
     },
     DaemonStart,
     DaemonStop,
+}
+
+/// Public metadata only; administrative approval is never accepted over IPC.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureRequest {
+    pub operation: String,
+    pub input: Value,
+    pub request_id: String,
 }
 
 /// Retired wire payload retained so old clients receive an explicit retirement error.

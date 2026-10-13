@@ -5,7 +5,9 @@
 //! point exists for synthetic adapter/credential harnesses.
 
 mod amm_deployments;
+mod artifacts;
 mod bridge;
+pub mod configure;
 pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
@@ -13,6 +15,10 @@ mod evm_router;
 pub mod hyperliquid_deposit;
 mod hyperliquid_transport;
 pub mod hyperliquid_withdrawal;
+pub mod kraken;
+mod kraken_aliases;
+mod kraken_deposit;
+mod kraken_pricing;
 mod policy;
 mod pricing;
 mod pricing_cache;
@@ -124,6 +130,24 @@ pub struct DeploymentConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConnectionConfig {
+    Kraken {
+        /// Human-selected default alias; authenticated owned-wallet membership is checked on use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_wallet_account_id: Option<String>,
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+    },
+    #[serde(rename = "krakenfutures")]
+    KrakenFutures {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+    },
     Binance {
         name: String,
         resource: ResourceId,
@@ -293,6 +317,7 @@ impl BrokerPolicy {
 
 impl BrokerConfigV2 {
     pub fn validate(&self) -> fin_domain::Result<()> {
+        kraken_aliases::validate(self)?;
         if self.version != 2 || self.approver_uid < 501 {
             return Err(error(
                 "CONFIG_VERSION_OR_APPROVER_INVALID",
@@ -361,6 +386,59 @@ impl BrokerConfigV2 {
         let mut identities = BTreeSet::new();
         for connection in &self.connections {
             let (name, resource) = match connection {
+                ConnectionConfig::Kraken {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    ..
+                }
+                | ConnectionConfig::KrakenFutures {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    ..
+                } => {
+                    if let ConnectionConfig::Kraken {
+                        default_wallet_account_id: Some(id),
+                        ..
+                    } = connection
+                        && (id.is_empty()
+                            || id.len() > 128
+                            || !id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+                    {
+                        return Err(error(
+                            "CONFIG_KRAKEN_CONNECTION_INVALID",
+                            "configuration",
+                            "The default wallet account ID is invalid.",
+                            "Update the relationship in your human Terminal.",
+                        ));
+                    }
+                    let provider = if matches!(connection, ConnectionConfig::Kraken { .. }) {
+                        "kraken"
+                    } else {
+                        "krakenfutures"
+                    };
+                    if physical_identity.is_empty()
+                        || physical_identity.len() > 128
+                        || !physical_identity
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                        || resource.0 != format!("{provider}:account:{physical_identity}")
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_KRAKEN_CONNECTION_INVALID",
+                            "configuration",
+                            "Kraken product, account identity or credential reference is invalid.",
+                            "Repair this connection in your human Terminal.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::CoinGecko {
                     name,
                     resource,
@@ -583,6 +661,9 @@ impl BrokerConfigV2 {
 pub fn operation_definitions() -> Vec<Definition> {
     let mut definitions = fin_binance::operation_definitions();
     definitions.extend(fin_exchange::DefaultExchangeProfile::definitions());
+    definitions.extend(fin_kraken::contracts::definitions("kraken"));
+    definitions.extend(fin_kraken::contracts::definitions("krakenfutures"));
+    definitions.push(fin_kraken::funding::deposit_definition());
     definitions.extend(fin_ethereum::operation_definitions());
     definitions.push(BinanceEthereumDepositAdapter::operation_definition());
     definitions.push(snapshot_definition());
@@ -667,6 +748,11 @@ fn canonical_uid(value: &str) -> bool {
 }
 
 pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Send + Sync {
+    fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+        Err(FinError::validation(
+            "This credential provider has no durable Kraken nonce allocator.",
+        ))
+    }
     fn usd_price_source(
         &self,
         _credential: &fin_credentials::CredentialRef,
@@ -728,7 +814,9 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
         self.store
             .with_material(&reference, |material| {
                 let (api_key, secret) = match material {
-                    fin_credentials::SecretMaterial::BinanceHmac { api_key, secret } => {
+                    fin_credentials::SecretMaterial::BinanceHmac { api_key, secret }
+                    | fin_credentials::SecretMaterial::KrakenApi { api_key, secret }
+                    | fin_credentials::SecretMaterial::KrakenFuturesApi { api_key, secret } => {
                         (api_key, secret)
                     }
                     fin_credentials::SecretMaterial::BinanceRsa {
@@ -755,6 +843,11 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+        Ok(Arc::new(kraken::DurableKrakenNonces::open(
+            std::path::Path::new("/Library/Fin/private/kraken-nonces.sqlite"),
+        )?))
+    }
     fn usd_price_source(
         &self,
         credential: &fin_credentials::CredentialRef,
@@ -802,7 +895,9 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 fin_credentials::SecretMaterial::BinanceHmac { .. }
                 | fin_credentials::SecretMaterial::BinanceRsa { .. }
                 | fin_credentials::SecretMaterial::BinanceEd25519 { .. }
-                | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. } => Err(error(
+                | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. }
+                | fin_credentials::SecretMaterial::KrakenApi { .. }
+                | fin_credentials::SecretMaterial::KrakenFuturesApi { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
@@ -1005,7 +1100,7 @@ pub fn build_applications_with_transports(
             "Supplied EVM transports must exactly match the configured network scope.",
         ));
     }
-    let binance_prices = Arc::new(SharedUsdValuator::with_source(source));
+    let binance_prices = Arc::new(SharedUsdValuator::with_source(source.clone()));
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<fin_ethereum::EthereumAdapter>>::new();
@@ -1308,6 +1403,15 @@ pub fn build_applications_with_transports(
             )));
         }
     }
+    adapters.extend(kraken::adapters(
+        config,
+        credentials.clone(),
+        Arc::new(kraken_pricing::KrakenCollateralPrices(source.clone())),
+        ethereum_adapters
+            .values()
+            .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+            .collect(),
+    )?);
     let valuator: Arc<dyn AssetValuator> = binance_prices;
     Ok(ProtectedApplications {
         adapters,
@@ -1584,6 +1688,8 @@ pub struct BrokerRuntime {
     mutation_gate: AsyncMutex<()>,
     verified_account_names: Mutex<BTreeSet<String>>,
     account_identity_gates: BTreeMap<String, AsyncMutex<()>>,
+    artifacts: Arc<Mutex<artifacts::ArtifactCache>>,
+    artifact_profiles: Mutex<Vec<Arc<fin_kraken::KrakenProfile>>>,
 }
 
 struct ValuatorPriceProvider {
@@ -1690,6 +1796,8 @@ pub fn compose_runtime_with_clock(
         mutation_gate: AsyncMutex::new(()),
         verified_account_names: Mutex::new(BTreeSet::new()),
         account_identity_gates,
+        artifacts: Arc::new(Mutex::new(artifacts::ArtifactCache::default())),
+        artifact_profiles: Mutex::new(vec![]),
     }))
 }
 
@@ -1707,6 +1815,7 @@ async fn protected_runtime_from_config(
     validate_installation()?;
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
+    let artifact_profiles = kraken::profiles(&config, credentials.clone(), None, None)?;
     let applications = build_protected_applications(&config, credentials)?;
     let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
     let runtime = compose_runtime(
@@ -1719,12 +1828,31 @@ async fn protected_runtime_from_config(
             bridge: applications.bridge,
         },
     )?;
+    runtime.attach_kraken_artifacts(artifact_profiles)?;
     runtime.protected_config_check.store(true, Ordering::SeqCst);
     runtime.require_account_identity_verification();
     Ok(runtime)
 }
 
 impl BrokerRuntime {
+    /// Synthetic and protected composition attach only typed product profiles.
+    pub fn attach_kraken_artifacts(
+        &self,
+        profiles: Vec<fin_kraken::KrakenProfile>,
+    ) -> fin_domain::Result<()> {
+        let mut attached = self
+            .artifact_profiles
+            .lock()
+            .map_err(|_| internal_error())?;
+        if !attached.is_empty() || self.protected_config_check.load(Ordering::SeqCst) {
+            return Err(FinError::validation(
+                "Artifact providers cannot be replaced after protected startup.",
+            ));
+        }
+        *attached = profiles.into_iter().map(Arc::new).collect();
+        Ok(())
+    }
+
     /// Gate account operations on verified venue identity. Local discovery and
     /// recovery inventory remain available while a venue is unavailable.
     pub fn require_account_identity_verification(&self) {
@@ -1936,7 +2064,9 @@ impl BrokerRuntime {
                 | R::BoundaryStatus { .. }
                 | R::PlanStatus { .. }
                 | R::RevokePlan { .. }
-        );
+                | R::ArtifactChunk { .. }
+                | R::ReleaseArtifact { .. }
+        ) || matches!(&request,R::Status { id } if id.starts_with("configuration:"));
         let public_market_read = matches!(&request, R::Read { operation, .. }
             if matches!(operation.as_str(), "exchange.order-book" | "exchange.markets" | "exchange.ticker"));
         if !local_management && !public_market_read {
@@ -2012,9 +2142,81 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.read(&operation, &input).await?)
                     .map_err(|_| internal_error())
             }
+            R::ReadArtifact { operation, input } => {
+                let profile = self
+                    .artifact_profiles
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .iter()
+                    .find(|profile| {
+                        fin_exchange::ExchangeProfile::definitions(profile.as_ref())
+                            .iter()
+                            .any(|d| d.name == operation)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        FinError::new(
+                            "ARTIFACT_PROVIDER_UNAVAILABLE",
+                            "read",
+                            "This runtime has no export provider for the selected operation.",
+                            "Use a supported enrolled Kraken product and explicit --output path.",
+                        )
+                    })?;
+                let reservation = artifacts::Reservation::begin(self.artifacts.clone())?;
+                let (content_type, bytes) = profile.artifact(&operation, &input).await?;
+                let provider =
+                    fin_kraken::contracts::contract(fin_kraken::contracts::endpoint(&operation)?)
+                        .client
+                        .as_str();
+                reservation.publish(provider, &content_type, bytes)
+            }
+            R::ArtifactChunk {
+                artifact_id,
+                offset,
+            } => self
+                .artifacts
+                .lock()
+                .map_err(|_| internal_error())?
+                .chunk(&artifact_id, offset),
+            R::ReleaseArtifact { artifact_id } => Ok(self
+                .artifacts
+                .lock()
+                .map_err(|_| internal_error())?
+                .release(&artifact_id)),
             R::Preview { operation, input } => {
                 serde_json::to_value(self.engine.preview(&operation, &input).await?)
                     .map_err(|_| internal_error())
+            }
+            R::ConfigurationPreview { operation, input }
+                if configure::is_kraken_operation(&operation) =>
+            {
+                let profile = self
+                    .artifact_profiles
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .iter()
+                    .find(|profile| {
+                        fin_exchange::ExchangeProfile::definitions(profile.as_ref())
+                            .iter()
+                            .any(|definition| definition.name == operation)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        FinError::new(
+                            "CONFIGURATION_PROVIDER_UNAVAILABLE",
+                            "configuration",
+                            "The selected Kraken configuration profile is unavailable.",
+                            "Enroll the matching Kraken product before previewing its settings.",
+                        )
+                    })?;
+                let prepared = tokio::time::timeout(
+                    OBSERVER_READ_TIMEOUT, configure::preview(&profile, &operation, &input)
+                ).await.map_err(|_| FinError::new(
+                    "CONFIGURATION_PREVIEW_TIMEOUT", "configuration",
+                    "The configuration permission check exceeded its deadline; no change was submitted.",
+                    "Retry the same dry-run after venue connectivity recovers.",
+                ))??;
+                serde_json::to_value(prepared).map_err(|_| internal_error())
             }
             R::ConfigurationPreview { operation, input } => serde_json::to_value(
                 self.engine
@@ -2121,6 +2323,14 @@ impl BrokerRuntime {
             .map_err(|_| internal_error()),
             R::Execute { request } => serde_json::to_value(self.engine.execute(request).await?)
                 .map_err(|_| internal_error()),
+            R::Status { id } if id.starts_with("configuration:") => {
+                if !self.protected_config_check.load(Ordering::SeqCst) {
+                    return Err(FinError::validation(
+                        "Protected configuration attempts are not available in this synthetic runtime.",
+                    ));
+                }
+                configure::status(&self.config, &id).await
+            }
             R::Status { id } => serde_json::to_value(self.engine.status(&id, true).await?)
                 .map_err(|_| internal_error()),
             R::Operations => {
@@ -2820,6 +3030,9 @@ fn protocol_methods() -> Vec<&'static str> {
         "policy_show",
         "doctor",
         "read",
+        "read_artifact",
+        "artifact_chunk",
+        "release_artifact",
         "preview",
         "configuration_preview",
         "preview_boundary_authorization",

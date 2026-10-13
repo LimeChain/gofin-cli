@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "snapshotDate": "2026-10-10",
+  "ccxtVersion": "4.5.85",
+  "records": [
+    {
+      "file": "futures-auth-rest.json",
+      "url": "https://docs.kraken.com/openapi/futures-auth-rest.yaml",
+      "sha256": "6e0d8c73d8a8a30f551449d78ff40854169c15499d2342fac299fe740fb8ac9e",
+      "representation": "Normalized JSON of official YAML OpenAPI schema; financial values are not modified in source snapshots"
+    },
+    {
+      "file": "futures-charts-rest.json",
+      "url": "https://docs.kraken.com/openapi/futures-charts-rest.yaml",
+      "sha256": "65ca44c39c679f03d82afcd12ff07495f41682377d145e673386ff3289523cb8",
+      "representation": "Normalized JSON of official YAML OpenAPI schema; financial values are not modified in source snapshots"
+    },
+    {
+      "file": "futures-history-rest.json",
+      "url": "https://docs.kraken.com/openapi/futures-history-rest.yaml",
+      "sha256": "fad23ad4fa241e1d621168efb24f169d066b007b9c7f320a4ed2b2faf626cb66",
+      "representation": "Normalized JSON of official YAML OpenAPI schema; financial values are not modified in source snapshots"
+    },
+    {
+      "file": "futures-rest.json",
+      "url": "https://docs.kraken.com/openapi/futures-rest.yaml",
+      "sha256": "0e231cce0bbf68352679b6f790cd9c4c4e23b6e85a021bcd9edd52b086dceab9",
+      "representation": "Normalized JSON of official YAML OpenAPI schema; financial values are not modified in source snapshots"
+    },
+    {
+      "file": "spot-rest.json",
+      "url": "https://docs.kraken.com/openapi/spot-rest.yaml",
+      "sha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+      "representation": "Normalized JSON of official YAML OpenAPI schema; financial values are not modified in source snapshots"
+    },
+    {
+      "file": "kraken-ccxt.json",
+      "source": "https://github.com/ccxt/ccxt/tree/v4.5.85",
+      "sourceSha256": "48430cc7d00c8499250147222fb6968861ba009f2e30567e13cf6d60a53418a3",
+      "representation": "Methods, capability flags, native costs and reviewed transitive bindings extracted from pinned ccxt-base Rust source; parameter declarations refreshed from the nearest matching function documentation block",
+      "sha256": "6f4c3a44b3f09a8c176908ac504a5bc21d3d1a6b88433cf1bc4735e6967274f7"
+    },
+    {
+      "file": "krakenfutures-ccxt.json",
+      "source": "https://github.com/ccxt/ccxt/tree/v4.5.85",
+      "sourceSha256": "0e4ab3f4633c8feadc3b5d10c2832670946afa7b1e26eed0c838d63f7f1d3228",
+      "representation": "Methods, capability flags, native costs and reviewed transitive bindings extracted from pinned ccxt-base Rust source; parameter declarations refreshed from the nearest matching function documentation block",
+      "sha256": "020b8b3019c51c4f130b3b3c6024b509bb307289aaadfe519b9f0c2ef331aed9"
+    }
+  ]
+}

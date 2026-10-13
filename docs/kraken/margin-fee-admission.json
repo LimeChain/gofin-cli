@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "snapshotDate": "2026-10-10",
+  "sourceSpec": "docs/kraken/spot-rest.json",
+  "sourceSha256": "997c92bbd60937d8afb53523365b717d8c07a05dde59dd150757cba1320f0719",
+  "currentTradingRate": "authenticated protected Spot GetTradeVolume fees/fees_maker exact native pair, worse nonnegative percentage",
+  "nativeUnits": "exact 36-decimal base/quote quantity; percentage denominator 100 with rational ceiling",
+  "batchScope": "entire command/revised original owner, including conditional children; each fee asset cap consumed once cumulatively",
+  "openingAdmission": {
+    "status": "incomplete_upstream_api_rate_unavailable",
+    "reason": "No dynamic margin opening/rollover rate in current pinned REST schemas; VIP drawn-credit/undrawn-reserve rates do not establish margin schedule"
+  },
+  "rolloverAuthority": {
+    "finiteGuaranteedCumulativeCeiling": false,
+    "automaticRenewal": false,
+    "disclosure": "Intentionally retained venue margin liability persists independently of finite Fin command authority"
+  },
+  "verification": {
+    "synthetic": "36/36 margin-filtered tests passed, including six independent fee/source-semantic tests (2026-10-10)",
+    "fork": "not run",
+    "readOnlyLive": "not run",
+    "automaticDevelopmentLiveWrite": "not run",
+    "nativeTouchId": "not run",
+    "clippy": "Final stable full fin-kraken --lib --tests Clippy passed with -D warnings (2026-10-10); includes margin_fee_admission.rs."
+  },
+  "commands": [
+    "cargo test -p fin-kraken margin_ -- --nocapture",
+    "cargo clippy -p fin-kraken --lib --tests -- -D warnings"
+  ],
+  "ogi": {
+    "model": "glm-5.3-flash",
+    "status": "completed",
+    "elapsedSeconds": 123.24,
+    "answerFile": "work/kraken-margin-fee-ogi-answer.txt",
+    "accepted": [
+      "deferred child price/tier timing disclosure",
+      "dual-asset conservative reservation disclosure",
+      "settlement distinct from executed close"
+    ],
+    "rejectedAgainstPrimarySource": [
+      "minfee is percentage tier, not absolute per-order minimum",
+      "fee_volume_currency is volume-discount currency, not guaranteed charged fee denomination"
+    ]
+  },
+  "sources": [
+    "https://support.kraken.com/articles/206161568-what-are-the-fees-opening-and-rollover-for-trading-using-margin-",
+    "https://support.kraken.com/articles/us-margin-fees"
+  ]
+}

@@ -6,6 +6,7 @@ use fin_presentation::Ui;
 use fin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod artifacts;
 mod companion_skill;
 mod daemon;
 pub(crate) mod json_stream;
@@ -91,7 +92,7 @@ enum Command {
         name: Option<String>,
     },
     /// Read balances, positions or other financial data.
-    Read(OperationArgs),
+    Read(ReadArgs),
     /// Review a financial operation without moving funds.
     Preview(OperationArgs),
     /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
@@ -157,6 +158,12 @@ enum SkillCommand {
 #[derive(Args, Debug)]
 #[command(group(clap::ArgGroup::new("provider_choice").args(["provider_positional", "provider"]).multiple(false)))]
 struct ConnectionCommandArgs {
+    /// Public Kraken account identifier; credentials remain private.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    account_id: Option<String>,
+    /// Exact Kraken Spot default Funding wallet ID; ownership is checked during protected enrollment.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    default_wallet_account_id: Option<String>,
     /// Provider to enroll; omit to choose it interactively.
     #[arg(value_enum, value_name = "PROVIDER")]
     provider_positional: Option<fin_discovery::Provider>,
@@ -215,6 +222,8 @@ impl ConnectionCommandArgs {
             execution_address: self.execution_address,
             credential_type: self.credential_type,
             api_plan: self.api_plan,
+            account_id: self.account_id,
+            default_wallet_account_id: self.default_wallet_account_id,
         })
     }
 }
@@ -227,15 +236,23 @@ struct OperationArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReadArgs {
+    #[command(flatten)]
+    operation: OperationArgs,
+    /// Save a bounded export privately; existing paths are never overwritten.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+#[derive(Args, Debug)]
 struct ConfigureArgs {
-    /// Exact human-interactive configuration operation from `fin capabilities`.
+    /// Exact human-interactive configuration operation from capabilities.
     operation: String,
     #[arg(long)]
     input: String,
-    /// Stable identity for this configuration action; retries must reuse it.
-    #[arg(long, required_unless_present = "dry_run")]
+    /// Stable request identity for recovery; generated and returned when omitted.
+    #[arg(long)]
     id: Option<String>,
-    /// Prepare a safe read-only configuration preview without authorization or dispatch.
+    /// Read-only configuration preview; no approval or dispatch.
     #[arg(long)]
     dry_run: bool,
 }
@@ -775,6 +792,7 @@ fn broker_unavailable() -> FinError {
 }
 pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
+        BrokerRequest::Status { id } if id.starts_with("configuration:") => OBSERVER_TIMEOUT,
         BrokerRequest::Read { operation, .. }
             if matches!(operation.as_str(), "bridge.quotes" | "bridge.status") =>
         {
@@ -787,7 +805,8 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         | BrokerRequest::AuthorizePlan { .. }
         | BrokerRequest::ExecutePlanStep { .. }
         | BrokerRequest::ReplacePlanCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
-        BrokerRequest::RunBegin { .. }
+        BrokerRequest::ReadArtifact { .. }
+        | BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot
         | BrokerRequest::Status { .. }
@@ -1180,12 +1199,17 @@ async fn dispatch_with_review_hash(
             },
         },
         Command::Read(args) => {
-            client
-                .call(BrokerRequest::Read {
-                    operation: args.operation,
-                    input: parse_input(&args.input)?,
-                })
-                .await
+            let input = parse_input(&args.operation.input)?;
+            if let Some(output) = args.output {
+                artifacts::download(client, args.operation.operation, input, &output).await
+            } else {
+                client
+                    .call(BrokerRequest::Read {
+                        operation: args.operation.operation,
+                        input,
+                    })
+                    .await
+            }
         }
         Command::Preview(args) => {
             client
@@ -1284,7 +1308,7 @@ async fn dispatch_with_review_hash(
             } else {
                 launch_human_privileged(
                     PrivilegedAction::Configure(OperationRequest {
-                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        request_id: args.id.unwrap_or_else(artifacts::new_request_id),
                         operation: args.operation,
                         input,
                         run_id: None,
@@ -1798,11 +1822,11 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         PrivilegedAction::Update(_) => {
             "Fin needs administrator access to securely update this connection."
         }
+        PrivilegedAction::Configure(_) => {
+            "Fin needs administrator access for the protected configuration attempt. Touch ID separately approves the exact venue settings."
+        }
         PrivilegedAction::PolicySet(_) => {
             "Fin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
-        }
-        PrivilegedAction::Configure(_) => {
-            "Fin needs administrator access to review and configure this Hyperliquid account. Touch ID separately approves the exact venue setting."
         }
         PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
@@ -1942,6 +1966,7 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
             argument.to_str(),
             Some(
                 "--input"
+                    | "--output"
                     | "--bounds"
                     | "--valid-for"
                     | "--replaces"
@@ -1960,6 +1985,9 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
                     | "--network"
                     | "--address"
                     | "--credential-type"
+                    | "--account-id"
+                    | "--default-wallet-account-id"
+                    | "--api-plan"
             )
         );
     }
@@ -2080,6 +2108,23 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
     let stream = stream.map(|stream| stream.with_context(stream_context(&cli.command)));
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    if cli.json
+        && matches!(
+            &cli.command,
+            Command::Configure(ConfigureArgs { dry_run: false, .. })
+        )
+    {
+        return emit(
+            Err(FinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "configuration",
+                "This administrative change requires fresh configuration approval in your own interactive Terminal.",
+                "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
+            )),
+            &ui,
+            name,
+        );
+    }
     if client.development_mode() && !development_command_allowed(&cli.command) {
         let error = FinError::new(
             "DEVELOPMENT_COMMAND_UNAVAILABLE",
@@ -2136,6 +2181,7 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         );
     let progress = if !offline && !human_only(&cli.command) && !human_execution && !stage_progress {
         Some(ui.progress(match &cli.command {
+            Command::Read(args) if args.output.is_some() => "Downloading export...",
             Command::Daemon {
                 command: DaemonCommand::Start,
             } => "Starting Fin daemon...",
@@ -2219,7 +2265,10 @@ fn stream_context(command: &Command) -> Value {
                 context["step_id"] = json!(id);
             }
         }
-        Command::Read(args) | Command::Preview(args) => {
+        Command::Read(args) => {
+            context["operation"] = json!(args.operation.operation);
+        }
+        Command::Preview(args) => {
             context["operation"] = json!(args.operation);
         }
         Command::Status { id } => context["operation_id"] = json!(id),
@@ -3254,6 +3303,58 @@ mod tests {
         assert!(!error.next_action.contains("daemon status"));
     }
 
+    #[tokio::test]
+    async fn configure_machine_handoff_and_export_help_are_offline() {
+        struct NoBroker;
+        #[async_trait]
+        impl Client for NoBroker {
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("configuration JSON must never execute");
+            }
+            async fn call(&self, _: BrokerRequest) -> Result<Value, FinError> {
+                panic!("configuration JSON must not contact broker");
+            }
+        }
+        let parsed=Cli::try_parse_from(["fin","configure","kraken.create-subaccount","--input","{\"account\":\"synthetic\",\"username\":\"synthetic\",\"email\":\"synthetic@example.invalid\"}","--id","synthetic-config","--json"]).unwrap();
+        assert!(human_only(&parsed.command));
+        assert_eq!(
+            dispatch(parsed, &NoBroker).await.unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        let action = PrivilegedAction::Configure(OperationRequest {
+            operation: "kraken.create-subaccount".into(),
+            input: json!({}),
+            request_id: "synthetic-config".into(),
+            run_id: None,
+        });
+        assert_eq!(
+            launch_human_privileged_with_terminal(action, false, false, false)
+                .unwrap_err()
+                .code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        let read = Cli::try_parse_from([
+            "fin",
+            "read",
+            "kraken.retrieve-export",
+            "--input",
+            "{\"account\":\"synthetic\",\"id\":\"synthetic-report\"}",
+            "--output",
+            "synthetic.zip",
+            "--json",
+        ])
+        .unwrap();
+        assert!(!human_only(&read.command));
+        assert!(
+            Cli::command()
+                .find_subcommand("read")
+                .unwrap()
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("output"))
+        );
+        assert!(find_definition("configure").is_some());
+    }
+
     #[test]
     fn enrollment_dtos_reject_secret_fields_and_unknown_flags() {
         let args: fin_discovery::AddConnectionArgs = serde_json::from_value(json!({
@@ -3405,6 +3506,61 @@ mod tests {
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, false, false, false)
                 .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn default_wallet_machine_and_redirected_enrollment_handoff_before_privilege() {
+        for tty in [true, false] {
+            let args:fin_discovery::AddConnectionArgs=serde_json::from_value(json!({"provider":"kraken","name":"spot","account_id":"synthetic","default_wallet_account_id":"WDEFAULT"})).unwrap();
+            assert_eq!(
+                launch_human_privileged_with_terminal(
+                    PrivilegedAction::Add(args),
+                    tty,
+                    true,
+                    false
+                )
+                .unwrap_err()
+                .code,
+                "HUMAN_TERMINAL_REQUIRED"
+            );
+        }
+        let parsed = Cli::try_parse_from([
+            "fin",
+            "connections",
+            "add",
+            "kraken",
+            "--name",
+            "spot",
+            "--account-id",
+            "synthetic",
+            "--default-wallet-account-id",
+            "WDEFAULT",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Connections {
+            command: Some(ConnectionsCommand::Add(args)),
+        } = parsed.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(
+            args.connection()
+                .unwrap()
+                .default_wallet_account_id
+                .as_deref(),
+            Some("WDEFAULT")
+        );
+        assert!(!requested_json(
+            &[
+                "fin",
+                "connections",
+                "add",
+                "--default-wallet-account-id",
+                "--json"
+            ]
+            .map(Into::into)
+        ));
     }
 
     #[test]

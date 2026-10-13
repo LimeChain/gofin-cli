@@ -28,6 +28,10 @@ pub enum Provider {
     #[value(name = "coingecko")]
     CoinGecko,
     Hyperliquid,
+    Kraken,
+    #[serde(rename = "krakenfutures")]
+    #[value(name = "krakenfutures")]
+    KrakenFutures,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +64,12 @@ pub enum HyperliquidScopeKind {
 #[derive(Args, Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AddConnectionArgs {
+    /// Public Kraken account identifier, confirmed by the human during enrollment.
+    #[arg(long)]
+    pub account_id: Option<String>,
+    /// Exact Kraken Spot default Funding wallet ID selected by the human; ownership is checked.
+    #[arg(long)]
+    pub default_wallet_account_id: Option<String>,
     /// Provider to enroll. Secret values are never command arguments.
     #[arg(long, value_enum)]
     pub provider: Provider,
@@ -239,6 +249,21 @@ pub struct OperationInput {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ReadInput {
+    pub operation: String,
+    pub input: Value,
+    pub output: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureInput {
+    pub operation: String,
+    pub input: Value,
+    pub request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecuteInput {
     pub operation: String,
     /// Validated against the selected operation's bundled input schema.
@@ -384,7 +409,51 @@ pub fn validate_add(args: &AddConnectionArgs) -> Result<()> {
             "Hyperliquid scope options belong only to a Hyperliquid connection.",
         ));
     }
+    if !matches!(args.provider, Provider::Kraken | Provider::KrakenFutures)
+        && args.account_id.is_some()
+    {
+        return Err(FinError::validation(
+            "--account-id is Kraken account metadata.",
+        ));
+    }
+    if let Some(id) = &args.default_wallet_account_id
+        && (args.provider != Provider::Kraken
+            || id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+    {
+        return Err(FinError::validation(
+            "--default-wallet-account-id requires Kraken Spot and an exact 1-128 character wallet ID.",
+        ));
+    }
     match args.provider {
+        Provider::Kraken | Provider::KrakenFutures => {
+            if args.role.is_some()
+                || args.parent.is_some()
+                || args.email.is_some()
+                || args.network.is_some()
+                || args.address.is_some()
+                || !matches!(args.credential_type, None | Some(CredentialType::Hmac))
+            {
+                return Err(FinError::validation(
+                    "Kraken uses product-specific HMAC keys; Binance relationships and wallet metadata do not apply.",
+                ));
+            }
+            if !args.account_id.as_deref().is_some_and(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            }) {
+                return Err(FinError::validation(
+                    "Kraken requires its public --account-id, confirmed by the human; Fin never guesses account relationships.",
+                ));
+            }
+        }
+
         Provider::Hyperliquid => {
             if args.role.is_some()
                 || args.parent.is_some()
@@ -574,7 +643,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         "provider":"macOS sudo",
         "explanation":MACOS_ADMIN_PASSWORD_HELP,
         "password_prompt":MACOS_ADMIN_PASSWORD_PROMPT,
-        "scope":"Setup, policy set and connection add/update/remove only. Everyday commands use the protected background service without sudo.",
+        "scope":"Setup, policy set, connection add/update/remove and administrative configure. Everyday reads and financial execution use the protected background service without sudo.",
         "configuration_approval":"A separate Touch ID approval follows administrator authentication.",
         "financial_approval":"Standalone financial writes require fresh exact approval. Creating or replacing supported bounded authorizations and named plans requires fresh Touch ID. An explicitly submitted attempt under active authority does not require another prompt, but Fin rechecks current evidence, authority and protected policy before dispatch."
     });
@@ -599,12 +668,16 @@ pub fn operation_definitions() -> Vec<Definition> {
             "fin connections add --provider binance --name savings --role sub --credential-type hmac",
             "fin connections add --provider binance --name savings --role sub --parent main --email subaccount@example.invalid --credential-type hmac",
             "fin connections add --provider coingecko --name pricing --credential-type api_key --api-plan demo",
+            "fin connections add --provider kraken --name spot --credential-type hmac --account-id PUBLIC_ACCOUNT_ID",
+            "fin connections add --provider kraken --name spot --credential-type hmac --account-id PUBLIC_ACCOUNT_ID --default-wallet-account-id OWNED_WALLET_ID",
+            "fin connections add --provider krakenfutures --name derivatives --credential-type hmac --account-id PUBLIC_ACCOUNT_ID",
             "fin connections add --provider evm --name wallet --credential-type private_key",
             "fin connections add --provider evm --name watch --credential-type read_only --address 0x1111111111111111111111111111111111111111",
             "fin connections add --provider hyperliquid --name hl-main --credential-type read_only --address 0x1111111111111111111111111111111111111111",
             "fin connections add --provider hyperliquid --name hl-sub --address 0x1111111111111111111111111111111111111111 --hyperliquid-scope subaccount --execution-address 0x2222222222222222222222222222222222222222"
         ],
         "binance":{"wallet_type":"SPOT","default_credential_type":"hmac","supported_credential_types":["hmac","rsa","ed25519"],"mandatory_fields":["role=main|sub"],"credentials_required":["API key","HMAC secret, RSA PEM signing key, or Ed25519 private signing key"],"roles":["main","sub"],"main_rejects":["parent","email"],"subaccount_modes":{"standalone":{"parent_required":false,"email_required":false,"identity":"the authenticated subaccount's own verified UID","hierarchy_authority":"none inferred"},"parent_linked":{"parent_required":true,"email_required":true,"check":"optional parent main key verifies the supplied email association"}},"checks":["read-only authentication","reported API restrictions","account identity; optional parent mapping"],"prerequisites":["machine outbound IP allowed","main universal-transfer permission only for main-authorized internal transfers","withdrawal permission and whitelisted destination for withdrawals"],"unknown_permissions":"Explicitly reported; enrollment performs no trial transfer or withdrawal. A main key is needed only for explicitly parent-authorized hierarchy operations, not for standalone subaccount reads or enrollment."},
+        "kraken":{"products":["kraken","krakenfutures"],"credential_type":"hmac","credentials_required":["API key","base64 API secret"],"api_2fa_supported":false,"account_identity":"--account-id is public metadata; signed IIBAN is matched where available, otherwise human confirmation is explicit.","checks":["product-specific authenticated account read","selected default-wallet authenticated ownership"],"default_wallet_relationship":{"argument":"--default-wallet-account-id","product":"kraken Spot only","optional":true,"relationship_verification":"human_verified","ownership":"authenticated ListWalletAccounts","alias":"Only the exact protected selected ID shares legacy Spot custody; Kraken does not identify which wallet is its default.","replacement":"Omitting an existing selection preserves it; retargeting is rejected to preserve custody history."},"financial_writes":"Separate financial authorization is required; enrollment grants no authority"},
         "coingecko":{"provider":"coingecko","resource":"market-data:coingecko","api_plans":["demo","pro"],"default_api_plan":"demo","credential_type":"api_key","credentials_required":["CoinGecko API key"],"scope":"Market-data requests only; this key grants no exchange or wallet access. Requests can consume the selected plan quota/billing.","checks":["read-only authenticated CoinGecko ping","fresh ETH/USD quote"],"authentication":"Optional protected human enrollment. Without it, anonymous public pricing remains best effort; missing/stale/rate-limited quotes block writes."},
         "evm":{"provider":"evm","legacy_provider_alias":"ethereum","wallet_scope":"One address and signing key reusable across reviewed EVM networks; choose a network for each operation. A Hyperliquid owner account is linked automatically with the same signer/read-only status, without granting financial authority.","network_argument":format!("Optional read-only enrollment check; defaults to {default_evm_network} and does not scope the wallet key."),"networks":evm_network_ids,"network_profiles":evm_network_profiles(),"credential_types":["private_key","read_only"],"checks":["public RPC chain identity","derived signing address matches resolved wallet","reported native balance"],"dapp_scope":"Uniswap v3/v4 availability follows reviewed per-network deployment configuration and exact route liquidity. Ramses v3 is available on Robinhood Chain only when its reviewed deployment is configured. Sushi v3 is available on Ethereum and Arbitrum. PancakeSwap v3 is available on Ethereum, Arbitrum and Robinhood Chain; Robinhood uses its reviewed SmartRouter deployment. These routes require configured reviewed deployments and exact pool liquidity. Aave V3 exposes reviewed Ethereum, Base and Arbitrum markets; exact deployed reserve compatibility is checked before writes. Tokens are supplied by exact contract identity."},
         "hyperliquid":{"provider":"hyperliquid","network":"hyperliquid:mainnet","owner_required":true,"credential_types":["private_key","read_only"],"execution_scopes":{"owner":"Automatically linked reusable EVM wallet address, or an explicitly enrolled independent owner.","subaccount":"Human enrollment reuses an existing protected master signer after exact owner-scoped subAccounts verification.","vault":"Human enrollment reuses an existing protected master signer after exact vaultDetails leader verification."},"scope":"Signer identity and nonce namespace remain the master owner; delegated trading reads/resources and signed vaultAddress use the reviewed execution address. Relationship is refreshed before dispatch. Delegated accounts permit trading, isolated margin and TWAP/cancel only; account authority and transfers remain owner-scoped.","checks":["owner address format","protected signer address matches owner when private_key is selected","delegated account relationship verified through fixed official reads"],"enrollment_network_call":true,"automatic_evm_link":{"supported":true,"scope":"reusable_evm_owner_only","account_argument":"existing EVM wallet name","separate_public_connection":false,"credential_reentry":false,"inherits_read_only":true,"financial_authority":false,"existing_owner_aliases":"preserved without permission elevation or duplicate observations","persistence":"runtime effective-config overlay; follows parent wallet rotation/removal"},"note":"Reusable EVM wallets link automatically to their Hyperliquid owner account. Delegated subaccount/vault enrollment remains explicitly human-reviewed and reuses an existing protected master signer."},
@@ -645,13 +718,13 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({"name":"connections.add"}),
             json!({"service_required":false,"secret_input":"none","financial_movement":false,"without_name":"Help and examples; machine output is a help object, as with --help.","catalog_command":"fin capabilities"}),
         ),
-        definition::<OperationInput>(
+        definition::<ReadInput>(
             "read",
             "Read one supported financial operation with fin read OPERATION --input JSON through the protected broker.",
             OperationKind::Read,
             ExecutionActor::AgentReadable,
             json!({"operation":"binance.balances","input":{"account":"main"}}),
-            json!({"input_validation":"operation-specific bundled schema","service_required":true,"financial_authorization":false,"command_line_example":"fin read binance.balances --input '{\"account\":\"main\"}'","arguments":["operation","--input JSON"],"account_selection":"The operation-specific input schema defines account selection; there is no generic --account flag."}),
+            json!({"input_validation":"operation-specific bundled schema","service_required":true,"financial_authorization":false,"command_line_example":"fin read binance.balances --input '{\"account\":\"main\"}'","arguments":["operation","--input JSON","--output PATH"],"artifact_output":{"required_for":["kraken.retrieve-export","krakenfutures.account-log-csv"],"maximum_bytes":33554432,"permissions":"0600","overwrite":false,"completion":"SHA-256 verified before publication"},"account_selection":"The operation-specific input schema defines account selection; there is no generic --account flag."}),
         ),
         definition::<OperationInput>(
             "preview",
@@ -831,12 +904,13 @@ pub fn operation_definitions() -> Vec<Definition> {
             json!({
                 "command_line_examples":[
                     "fin configure hyperliquid.account.set_agent_abstraction --input '{\"account\":\"hl-main\",\"enabled\":true}' --dry-run --json",
-                    "fin configure hyperliquid.account.set_agent_abstraction --input '{\"account\":\"hl-main\",\"enabled\":true}' --id CONFIG_REQUEST_ID"
+                    "fin configure hyperliquid.account.set_agent_abstraction --input '{\"account\":\"hl-main\",\"enabled\":true}' --id CONFIG_REQUEST_ID",
+                    "fin configure krakenfutures.set-self-trade-strategy --input '{\"account\":\"derivatives\",\"strategy\":\"REJECT_TAKER\"}' --id CONFIG_REQUEST_ID"
                 ],
                 "human_only":true,
                 "dry_run":{"broker_method":"configuration_preview","read_only":true,"json_allowed":true},
-                "actual":{"requires_human_terminal":true,"requires_fresh_touch_id":true,"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery","run_id":null,"financial_plan":false},
-                "allowed_operations":"Only exact definitions marked OperationKind::Configuration and ExecutionActor::HumanInteractive can pass the protected engine route. The Hyperliquid admin operations are listed individually in capabilities."
+                "actual":{"requires_human_terminal":true,"requires_fresh_touch_id":true,"json":"returns HUMAN_TERMINAL_REQUIRED before protected access","request_id":"stable operation identity for duplicate recovery; generated and returned when omitted","run_id":null,"financial_plan":false},
+                "allowed_operations":"Only exact definitions marked OperationKind::Configuration and ExecutionActor::HumanInteractive can pass the protected configuration route. Hyperliquid and Kraken product admin operations are listed individually in capabilities."
             }),
         ),
         definition::<AddConnectionArgs>(
@@ -906,8 +980,15 @@ pub fn operation_definitions() -> Vec<Definition> {
     ];
     definitions.extend(companion_skill::definitions());
     let mut connection_schema = schema::<AddConnectionArgs>();
-    connection_schema["$defs"]["Provider"]["enum"] =
-        json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"]);
+    connection_schema["$defs"]["Provider"]["enum"] = json!([
+        "binance",
+        "evm",
+        "ethereum",
+        "coingecko",
+        "hyperliquid",
+        "kraken",
+        "krakenfutures"
+    ]);
     connection_schema["allOf"] = json!([
         {
             "if": {"properties":{"provider":{"const":"binance"}},"required":["provider"]},
@@ -951,6 +1032,16 @@ pub fn operation_definitions() -> Vec<Definition> {
             }
         }
     ]);
+    connection_schema["allOf"].as_array_mut().expect("conditions").push(json!({
+        "if":{"properties":{"provider":{"enum":["kraken","krakenfutures"]}},"required":["provider"]},
+        "then":{"required":["account_id"],"properties":{"account_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"},"credential_type":{"enum":["hmac",null]}},"not":{"anyOf":[{"required":["role"]},{"required":["parent"]},{"required":["email"]},{"required":["network"]},{"required":["address"]},{"required":["api_plan"]}]}},
+        "else":{"properties":{"account_id":{"type":"null"}}}
+    }));
+    connection_schema["allOf"].as_array_mut().expect("conditions").push(json!({
+        "if":{"properties":{"provider":{"const":"kraken"}},"required":["provider"]},
+        "then":{"properties":{"default_wallet_account_id":{"type":["string","null"],"minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"}}},
+        "else":{"properties":{"default_wallet_account_id":{"type":"null"}}}
+    }));
     for item in &mut definitions {
         item.semantics["machine_contract"] = machine_contract();
         if item.name == "execute" {
@@ -1015,7 +1106,7 @@ pub fn operation_definitions() -> Vec<Definition> {
 /// Library reach is deliberately separate from Fin's reviewed named operations.
 pub fn exchange_capabilities() -> serde_json::Value {
     let mut value = serde_json::json!({
-        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
+        "library": {"name":"ccxt-base", "version":"4.5.85", "source":"https://github.com/ccxt/ccxt", "compiled_exchanges":["binance","kraken","krakenfutures","hyperliquid","okx","coinbase","bybit"], "all_library_methods_exposed":false},
         "fin": {"binance": {"scope":"SPOT funding, account discovery, trading reads and bounded SPOT/USDT perpetual orders", "authentication":["hmac","rsa","ed25519"], "market_data":{"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":["spot","perpetual"],"maximum_depth":100}, "spot":{"execution":"LIMIT IOC/FOK orders; named plans bind exact input, schema and protected connection identity", "ioc_partial_fills":"Each attempt settles through the verified operation journal; plan completion requires its declared cumulative targets"}, "futures":{"execution":"USD-M USDT perpetual LIMIT IOC/FOK", "margin":"isolated, leverage 1, one-way, automatic additions disabled", "configuration_changes":false,"concurrent_positions_per_account":1}, "cancellation":"New approval for the exact original unresolved Fin order; original reservation persists through fill reconciliation", "deposit_address_creation":false, "withdrawal_whitelist_editing":false,
             "address_management":{"reads":["binance.deposit-address","binance.deposit-addresses","binance.whitelist"],"mutations":"No documented public Binance endpoint for new-address creation or whitelist add/remove; human Binance website/app action required.","deposit_creation":{"human_action":"Use Binance Deposit Crypto, select the coin/network and claim a new address when available.","recheck":"fin read binance.deposit-addresses --input JSON --json"},"whitelist_editing":{"human_action":"Use Binance withdrawal Address Management to add/remove or change whitelist entries; complete Binance security checks.","recheck":"fin read binance.whitelist --input JSON --json"},"whitelist_limits":"Per-address flags only; account-wide enforcement and activation/cooldown are not proved."}, "operations":"See the explicit binance.* entries in operations; other CCXT methods are unavailable."}},
         "verification": {"automated":"synthetic transport and lifecycle fixtures", "authenticated_live":"not_run_for_this_refactor", "human_onboarding":"pending", "touch_id":"pending"}
@@ -1048,6 +1139,29 @@ pub fn exchange_capabilities() -> serde_json::Value {
         };
         value["fin"][venue] = serde_json::json!({"operations":["exchange.markets","exchange.ticker","exchange.order-book"],"market_types":[market_type],"maximum_order_book_depth":100,"scope":scope,"public_only":true,"account_enrollment":false,"writes":false});
     }
+    value["fin"]["kraken"] = serde_json::json!({
+        "operations":["exchange.markets","exchange.ticker","exchange.order-book"],
+        "operation_prefix":"kraken.","operations_catalog":"fin capabilities --json operations",
+        "market_types":["spot","margin"],"maximum_order_book_depth":100,
+        "scope":"Typed Spot/Margin REST, current and legacy funding, Earn, administration and exports",
+        "public_only":false,"account_enrollment":true,"writes":true,
+        "authentication":["product-specific API key and Base64 HMAC secret"],
+        "administration":"fin configure; separate protected human configuration approval, never financial plans",
+        "financial_authorization":"Protected preview/execute/status; supported finite named plans, otherwise fresh exact approval",
+        "exclusions":["WebSockets/token issuance","API-level 2FA","assignment-program enrollment"],
+        "financial_limitations":["Tokenized base/rebased ticker denomination unproven","Attached conditional parent amendments unavailable at venue","Issued-child principal expansion beyond original generated-credit ceiling incomplete","VIP credit-line liability coverage incomplete"],
+        "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
+    });
+    value["fin"]["krakenfutures"] = serde_json::json!({
+        "operation_prefix":"krakenfutures.","operations_catalog":"fin capabilities --json operations",
+        "market_types":["perpetual","future"],"scope":"Typed Derivatives REST, contract/collateral accounting, wallet/subaccount transfers, histories, administration and CSV exports",
+        "public_only":false,"account_enrollment":true,"writes":true,
+        "authentication":["separate product-specific API key and Base64 secret; optional venue nonce omitted"],
+        "administration":"fin configure; separate protected human configuration approval, never financial plans",
+        "financial_authorization":"Protected preview/execute/status; linked authority revisions require fresh exact approval",
+        "financial_limitations":["Option markets unsupported by pinned CCXT client","Non-USD converted fee legs incomplete","Deficit repayment/conversion incomplete","Preferred FEE-credit spending incomplete","Other negative currency liabilities incomplete"],
+        "verification":"Synthetic native lifecycle and independent request mapping; live private/write and native Touch ID unrun"
+    });
     value
 }
 
@@ -1155,7 +1269,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             definition.input_schema["allOf"].as_array().unwrap().len(),
-            4
+            6
         );
         assert_eq!(
             definition.output_schema,
@@ -1459,7 +1573,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             add.input_schema["$defs"]["Provider"]["enum"],
-            json!(["binance", "evm", "ethereum", "coingecko", "hyperliquid"])
+            json!([
+                "binance",
+                "evm",
+                "ethereum",
+                "coingecko",
+                "hyperliquid",
+                "kraken",
+                "krakenfutures"
+            ])
         );
         assert_eq!(
             add.input_schema["allOf"][2]["then"]["required"],
@@ -1773,5 +1895,45 @@ mod tests {
         );
         let contract = definition.semantics["completeness"].as_str().unwrap();
         assert!(contract.contains("partial state") && contract.contains("incomplete evidence"));
+    }
+    #[test]
+    fn default_wallet_metadata_is_spot_only_exact_and_discoverable() {
+        let mut input = json!({"provider":"kraken","name":"spot","account_id":"synthetic","default_wallet_account_id":"WDEFAULT"});
+        validate_add(&serde_json::from_value(input.clone()).unwrap()).unwrap();
+        for provider in [
+            "krakenfutures",
+            "binance",
+            "evm",
+            "coingecko",
+            "hyperliquid",
+        ] {
+            input["provider"] = json!(provider);
+            assert!(validate_add(&serde_json::from_value(input.clone()).unwrap()).is_err());
+        }
+        input["provider"] = json!("kraken");
+        for id in ["", "bad/path", "hidden\n", &"a".repeat(129)] {
+            input["default_wallet_account_id"] = json!(id);
+            assert!(validate_add(&serde_json::from_value(input.clone()).unwrap()).is_err());
+        }
+        let definitions = operation_definitions();
+        let schema = &definitions
+            .iter()
+            .find(|d| d.name == "connections.add")
+            .unwrap()
+            .input_schema;
+        assert!(schema["properties"]["default_wallet_account_id"].is_object());
+        let constraint = schema["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|condition| {
+                condition["if"]["properties"]["provider"]["const"] == "kraken"
+                    && condition["then"]["properties"]["default_wallet_account_id"].is_object()
+            })
+            .expect("Kraken default wallet constraint");
+        assert_eq!(
+            constraint["then"]["properties"]["default_wallet_account_id"]["pattern"],
+            "^[A-Za-z0-9_-]+$"
+        );
     }
 }

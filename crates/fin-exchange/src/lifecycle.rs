@@ -136,6 +136,30 @@ pub trait ExchangeProfile: Send + Sync {
     ) -> Result<Option<fin_domain::RecoveryBinding>, FinError> {
         Ok(None)
     }
+    async fn prepare_with_compound_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &fin_domain::compound_mutations::CompoundAmendmentContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.prepare_with_linked_context(
+            operation,
+            input,
+            context,
+            &fin_domain::amendments::AmendmentContext::default(),
+        )
+        .await
+    }
+    async fn prepare_with_linked_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &fin_domain::amendments::AmendmentContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.prepare_with_context(operation, input, context).await
+    }
     async fn prepare_with_context(
         &self,
         operation: &str,
@@ -212,6 +236,22 @@ pub trait ExchangeProfile: Send + Sync {
         Ok(unknown(
             "This exchange profile has no supported reconciliation operation.",
         ))
+    }
+    async fn reconcile_submission_with_compound_context(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        _context: &fin_domain::compound_mutations::CompoundAmendmentContext,
+    ) -> Result<Reconciliation, FinError> {
+        self.reconcile_submission(record, submission).await
+    }
+    async fn reconcile_submission_with_context(
+        &self,
+        record: &OperationRecord,
+        submission: &Submission,
+        _context: &fin_domain::amendments::AmendmentContext,
+    ) -> Result<Reconciliation, FinError> {
+        self.reconcile_submission(record, submission).await
     }
 }
 
@@ -296,6 +336,39 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<(), FinError> {
         self.profile.attach_execution_state(state)
     }
+    async fn prepare_with_compound_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        linked: &fin_domain::compound_mutations::CompoundAmendmentContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.require_kind(operation, OperationKind::Write, "preview")?;
+        self.profile
+            .prepare_with_compound_context(operation, input, context, linked)
+            .await
+    }
+    async fn reconcile_with_compound_context(
+        &self,
+        record: &OperationRecord,
+        context: &fin_domain::compound_mutations::CompoundAmendmentContext,
+    ) -> Result<Reconciliation, FinError> {
+        let Some(submission) = &record.submission else {
+            return Ok(unknown("No persisted exchange submission identity exists."));
+        };
+        if submission.kind != self.profile.submission_kind()
+            || self
+                .require_kind(&record.operation, OperationKind::Write, "reconciliation")
+                .is_err()
+        {
+            return Ok(unknown(
+                "Original exchange identity is not supported by this profile.",
+            ));
+        }
+        self.profile
+            .reconcile_submission_with_compound_context(record, submission, context)
+            .await
+    }
     fn definitions(&self) -> Vec<Definition> {
         self.profile.definitions()
     }
@@ -377,6 +450,18 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<PreparedOperation, FinError> {
         self.require_configuration(operation, "configuration")?;
         self.profile.prepare(operation, input).await
+    }
+    async fn prepare_with_linked_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        linked: &fin_domain::amendments::AmendmentContext,
+    ) -> Result<PreparedOperation, FinError> {
+        self.require_kind(operation, OperationKind::Write, "preview")?;
+        self.profile
+            .prepare_with_linked_context(operation, input, context, linked)
+            .await
     }
     async fn prepare_with_context(
         &self,
@@ -577,6 +662,27 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         self.profile
             .validate_response(&plan.submission, &response)?;
         Ok(plan.submission)
+    }
+    async fn reconcile_with_context(
+        &self,
+        record: &OperationRecord,
+        context: &fin_domain::amendments::AmendmentContext,
+    ) -> Result<Reconciliation, FinError> {
+        let Some(submission) = &record.submission else {
+            return Ok(unknown("No persisted exchange submission identity exists."));
+        };
+        if submission.kind != self.profile.submission_kind()
+            || self
+                .require_kind(&record.operation, OperationKind::Write, "reconciliation")
+                .is_err()
+        {
+            return Ok(unknown(
+                "Original exchange identity is not supported by this profile.",
+            ));
+        }
+        self.profile
+            .reconcile_submission_with_context(record, submission, context)
+            .await
     }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation, FinError> {
         let Some(submission) = &record.submission else {

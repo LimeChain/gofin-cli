@@ -1943,6 +1943,7 @@ dependencies = [
  "fin-exchange",
  "fin-human-terminal",
  "fin-hyperliquid",
+ "fin-kraken",
  "fin-networks",
  "fin-presentation",
  "fin-pricing",
@@ -1980,17 +1981,21 @@ dependencies = [
  "fin-presentation",
  "fin-protocol",
  "fin-store",
+ "hex",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
 name = "fin-credentials"
 version = "0.2.0-beta.1"
 dependencies = [
+ "base64 0.22.1",
  "ed25519-dalek",
  "fin-authorization",
  "fin-domain",
@@ -2155,6 +2160,31 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "fin-kraken"
+version = "0.2.0-beta.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "fin-domain",
+ "fin-engine",
+ "fin-exchange",
+ "fin-pricing",
+ "fin-store",
+ "hex",
+ "jsonschema",
+ "num-bigint",
+ "num-traits",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

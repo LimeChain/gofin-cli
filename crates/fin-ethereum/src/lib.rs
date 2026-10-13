@@ -956,6 +956,13 @@ struct Binding {
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
+    /// Native pre-action anchors explicitly bound by this protected preview.
+    #[serde(
+        default,
+        rename = "_fin_verified_baseline_anchors",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub verified_baseline_anchors: Vec<PositionAnchor>,
     #[serde(
         default,
         rename = "_fin_usd_ceiling_v1",
@@ -1152,7 +1159,8 @@ impl Adapter for EthereumAdapter {
             )
         })?;
         require(
-            prepared.expires_at > self.clock.now().to_rfc3339(),
+            chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
+                .is_ok_and(|expires| expires > self.clock.now()),
             "PREVIEW_EXPIRED",
             "Original preview has expired.",
         )?;

@@ -1,0 +1,20 @@
+# Margin fee admission
+
+Fin checks current authenticated Spot `GetTradeVolume` rates before margin dispatch, independently of declared cost reservations. It takes the worse nonnegative maker/taker percentage and estimates fees in both canonical traded assets because `fcib`/`fciq` are preferences. It sums the entire command, including each conditional child and every member of the revised original batch, against each whole-command `maximumFees` ceiling. A missing exact pair/rate/cap or aggregate excess fails before dispatch. Declared fees remain reserved independently of the admission estimate.
+
+Native base quantities and quote notionals use exact 36-decimal exchange quantities; percentage arithmetic uses one rational multiply/divide with ceiling. Current ticker and absolute order prices supply quote estimates. A standing sell can execute above its current estimate, and a deferred child can encounter a different price or fee tier. These observations are checked again before dispatch and normalized independently of immutable native identities, quantities and approved caps. Native loan, collateral and conditional-loss limits retain their separate admission checks.
+
+The current REST schemas expose current trading fee tiers, leverage/margin eligibility and the next rollover timestamp. They do not expose a current dynamic margin opening/rollover rate. Credit-line reserve/rollover fields describe drawn/undrawn VIP credit, so Fin does not use them to invent a margin opening schedule. The opening estimate is explicitly unavailable in the binding and terminal review. Kraken describes opening/rollover fees as dynamic, based on the full margin extension rather than net collateral, and distinguishes trade closing from fee-free native settlement. [Kraken margin fees](https://support.kraken.com/articles/206161568-what-are-the-fees-opening-and-rollover-for-trading-using-margin-), [US margin fee timing](https://support.kraken.com/articles/us-margin-fees).
+
+`maximumFees` reserves and constrains the costs proven for this command; it does not guarantee a finite cumulative rollover ceiling for an intentionally retained venue position. Venue standing orders, liquidation exposure and future rollover liabilities persist. Fin does not silently close the position or renew a dead-man timer. A venue charge outside its exact approved asset/amount remains an unresolved proof/policy outcome. Fresh bounded plan authorization is distinct from Kraken's continued custody and margin liability after the command.
+
+Reproducible synthetic verification:
+
+```sh
+cargo test -p fin-kraken margin_ -- --nocapture
+cargo clippy -p fin-kraken --lib --tests -- -D warnings
+```
+
+The latest margin-filtered synthetic suite passed **36/36**, including six new fee/source-semantic tests. The final stable full `fin-kraken` lib/test Clippy check passed with `-D warnings`, including `margin_fee_admission.rs`. The new independent fixtures check aggregate batch excess even when each singleton fits, separate quote/base insufficiency, missing alternate asset caps, higher maker rates, rebates, absent pair rates, canonical quantity units, current quote observations and fee-free native settlement. Existing margin fixtures now publish independent synthetic TradeVolume rates and both native caps. No live credentials, signed requests, financial API writes or RPC broadcasts are used. Fork, live-write and native Touch ID evidence remain unrun.
+
+Ogi (`glm-5.3-flash`, medium reasoning) completed the sanitized financial review in 123 seconds. Its accepted observations reinforced deferred-child pricing/rate timing, conservative dual-asset reservation disclosure and native settlement-versus-closing distinctions. The saved answer is `work/kraken-margin-fee-ogi-answer.txt`. Two suggested interpretations were rejected using the pinned primary schema: `TradeVolume.minfee` is the lowest percentage tier, not an absolute minimum charge; `AssetPairs.fee_volume_currency` is volume-discount currency, not proof of the asset actually charged. A source semantic test preserves these distinctions. The review does not establish live venue behavior.
