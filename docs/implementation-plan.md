@@ -119,6 +119,213 @@ Plan review performs schema/scope and selected identity metadata checks; deploym
 current balances, execution pricing/fees and simulations stay at step execution.
 This additive API needs no journal migration and grants no new financial authority.
 
+## Solana and Jupiter integration in progress
+
+The agreed extension adds a `fin-solana` runtime/wallet library and a
+`fin-jupiter` application library. Solana identities use `solana:mainnet-beta`
+and case-sensitive mint addresses. A broker wallet-family router composes
+Solana with the existing EVM network router, retaining existing EVM inputs and
+persisted recovery bindings. Token parsing uses maintained SPL interfaces for
+both original Token and Token-2022; extension-specific requirements remain
+explicit.
+
+Jupiter access defaults to keyless transport with a shared 30-request/minute
+budget and a separate Swap v2 execute bucket. Any optional API key belongs to
+the enrolling user and stays in protected service credentials. Swap routing is
+agent-selected between Meta-Aggregator and Router. Trigger V1 escrow orders,
+native JLP liquidity and JLP-backed perpetuals are in scope; lending/borrowing,
+custodial Trigger V2, DCA and GUM markets are deferred.
+
+Current Jupiter route arguments are decoded from the version-pinned published
+IDL with bounded nested Borsh traversal. V2 exact-input and legacy envelopes
+have separate account validation; exact-output instructions cannot fulfill an
+exact-input intent. Platform fee accounts bind the quote's input/output mint,
+and nonzero positive-slippage fees require a future explicit intent contract.
+Optional empty blockhash-route expiry strings do not relax RFQ expiry checks.
+
+Use frozen legacy/v0 messages, verified lookup tables and exact signer slots.
+Persist submission identities before dispatch, including provider request IDs
+and known signatures for sponsored messages. Confirmed inclusion is progress;
+terminal settlement requires finalized transaction and application evidence.
+Blockhash expiry or missing history never authorizes replay. Account funding,
+network fees and token transfer fees have distinct accounting meanings.
+Solana RPC transport retries only an explicit read-method allowlist and simulation,
+up to three attempts within the existing 20-second total request deadline.
+Submission and unknown methods retain a single 20-second attempt. Retry-After
+cannot extend that deadline, message identity, quote expiry or approval scope.
+Safe HTTP status, numeric RPC code and validation stages aid diagnosis without
+exposing request parameters, response bodies or transaction bytes.
+
+Fresh Meta candidates may select a different underlying router within the same
+approved financial scope. The router selected by a previous preview is not an
+additional authorization restriction. Each concrete candidate still binds its
+own immutable message and provider identity for signing and recovery.
+
+Jupiter swap submission reuses a fully reviewed frozen transaction through a
+bounded, one-shot in-process cache, only when handed an engine-revalidated
+operation. Its key includes exact input, financial intent, adapter binding and
+original timestamps; broker-added valuation and presentation do not change that
+transaction identity. A missing or expired entry falls back to full validation.
+Cache hits retain fresh fee, lifetime, approval and dispatch-journal checks, and
+never refresh a blockhash or extend consent. Nothing in this cache is persisted
+or trusted during restart recovery.
+
+Implementation is split between Luna agents for runtime, broker integration
+and Jupiter adapters, with integration review and verification in the parent
+task. These design decisions do not claim implemented CLI coverage. Synthetic
+workflow rehearsals precede the explicitly authorized
+spot/perps live verification in `DEV_ENV=solana`; live limit-order/JLP writes
+and human protected-runtime checks remain separate acceptance cases.
+
+The Rust runtime uses the modular Solana transaction/message and maintained
+SPL Token-2022 interface crates. Versioned durable submission bindings include
+known chain signatures before dispatch, so a provider request reference does
+not discard a locally known transaction identity. Synthetic transports are
+internal typed dependencies; production requests cannot override endpoints.
+The [verification guide](testing/solana-jupiter.md) tracks acceptance scope.
+
+Enrollment review metadata and success output share one exhaustive typed public
+connection conversion, including Solana and Jupiter. New provider support must
+cover native approval presentation and human/machine success rendering; missing
+output variants must fail compilation rather than panic after credentials save.
+
+Solana submission references bind the serialized message hash across RPC and
+Jupiter landing paths. Provider request IDs and chain signatures remain in the
+versioned binding; changing the provider ID must not permit accounting for one
+transaction twice. Recovery continues to accept older persisted references.
+
+Binance and Kraken funding reuse the existing deposit and withdrawal operations
+for native SOL and canonical mainnet USDC. A shared Solana recipient verifier
+checks finalized transaction instructions and exact owner/mint balance effects;
+the broker composes it above existing EVM observers. Managed deposits retain
+their original child message and signature under the outer operation identity,
+then require correlated usable exchange credit. USDC deposits currently select
+the source associated token account. Network fees and actual refundable account
+funding remain separate. Additive optional binding fields omit their defaults
+so persisted EVM identities retain their serialized form; no journal reset or
+credential re-enrollment is required. The public CLI funding target covers both
+assets and venues, including future-funded plans and restart without rebroadcast.
+
+Perpetual position size and locked margin retain the protocol's exact USD
+accounting units, with market identity on each position. These are nontransferable
+position units, not token mint addresses or an assumption that USDC equals one
+dollar. Wallet cash uses actual token atoms. Internal collateral conversion,
+protocol fees, realized PnL and refundable account funding need separate verified
+effects and evidence.
+
+Included protocol fees carry an exact executed-conversion proof linking gross
+token funding, net position margin and the fee. External USD prices do not prove
+that conversion. A separate evidence-only cost denomination retains the fee's
+collateral-token atom cap even when its USD value rounds to zero; neither marker
+creates another debit. Realized position PnL is likewise distinct from wallet
+credits and is tied to the finalized position event.
+
+Refundable account funding uses the existing cash/position effect machinery
+with a distinct position kind and a finalized anchor identifying the account
+and refund authority. Funding a wallet-owned token account settles immediately
+into that position; it may outlive the order that created it. Returning funding
+requires verified closure and exact returned lamports, separate from network
+fees and token principal.
+
+TP/SL cancellation returns request funding while leaving the position open.
+Position-account rent is a conditional refund: only an actual finalized full
+close proves its negative position change and corresponding wallet credit.
+These meanings apply equally to standalone and plan execution.
+
+A named plan may authorize an ordered sequence of recovery children against
+one unresolved parent, such as amending then cancelling the same TP/SL request.
+Every intervening step must declare that exact parent; completed durable child
+attempts are required before a later child can dispatch. The approved revision,
+original submission and parent binding remain fixed across restart. This does
+not permit skipping an uncertain write or executing an unrelated plan step.
+
+Existing positions and refundable accounts need a durable prior state even
+when Fin did not create them. The engine captures missing anchors from registered,
+scoped observers before dispatch and stores a versioned baseline with the
+operation. Previously verified history remains authoritative; ordinary accrual
+semantics are preserved. Recovery uses the saved baseline and cannot reconstruct
+it from a fresh post-submission snapshot. Legacy records retain their original
+recovery behavior through additive serialization defaults.
+
+Paired protection requests can consume an exact finalized sibling reduction as
+their transition's prior state. An evidence-only predecessor marker binds the
+source operation, original submission, accepted proof digest, position anchor
+and canonical transaction order. The engine checks the original pair link and
+uses the source anchor only for that transition; it preserves the captured
+baseline and does not count the sibling's proceeds again. Empty ordering metadata
+is omitted so older shared settlement records retain their serialization.
+
+Fee-bearing submission cancellation uses its own approval, cost reservation and
+rolling budget charge while retaining the original unresolved operation's
+reservation. The shared engine grants only an exact-parent conflict exception;
+application adapters remain responsible for proving fills and returned funds.
+
+Escrowed orders require a protocol-independent cumulative lifecycle contract:
+the original wallet and escrow, exact input/output assets, bounded deposit,
+approved exchange ratio, filled input/output, refunds and remaining escrow.
+Conservation and monotonic counters prevent duplicate credits across progress
+and restart. Terminal closure requires no remaining escrow and verified closure
+evidence; only proved proceeds can fund later plan steps. Ordinary typed costs
+remain separate. The existing durable progress journal carries this contract.
+
+Refundable funding that spans asynchronous placement and settlement uses a
+cumulative account lifecycle: exact account and position identity, original
+funding, returned funding and remaining principal. The engine enforces
+conservation, immutable funding and monotone refunds, and derives only newly
+observed debits or credits. Finalized anchors retain any pre-existing principal;
+terminal order settlement need not close a surviving token account. Cancellation
+children account for their own costs, while the original operation owns its
+escrow and funding refunds.
+
+Limit-order fills into perpetual positions use an escrow-to-position contract.
+Locked margin and derivative exposure have exact position anchors; neither is
+a spendable wallet credit. Only verified token proceeds or refunds can fund a
+later plan step. Known resting-order escrow is distinguishable from a request
+whose financial execution remains uncertain.
+
+A proved resting order retains its exact order lock and unspent fee caps while
+releasing the broad wallet lock. A later overlapping cash request requires a
+fresh, complete scoped wallet balance and atomic comparison against all durable
+cash reservations. Cash costs and debits use the same resource/asset identity;
+legacy cost-key rows are interpreted from their saved prepared bindings until
+progress rewrites them. Refunds do not replenish the rolling gross budget.
+
+Limit-order amendments are separate approved operations. The original order's
+frozen message remains immutable; recovery reads only completed amendment
+children linked to its exact durable submission. Caller-supplied child IDs do
+not establish amendment authority.
+
+Realized derivative PnL has a separate non-cash effect with the exact position,
+market, denomination, event identity and finalized anchor. It cannot create
+wallet proceeds or duplicate an actual token payout. Cumulative request progress
+preserves previously observed PnL events across restart; profits cannot conceal
+a loss beyond the approved bound. Conditional requests may cancel without a
+fill or fabricated zero PnL, while a proved zero-PnL fill remains explicit.
+
+An included conversion fee retains an explicit cost effect plus a provenance
+record tying one gross cash debit or filled escrow amount to the exact position.
+The adapter proves the executed gross conversion, net position amount and fee
+from finalized protocol evidence. Shared accounting checks their units and
+arithmetic and rejects reused source amounts; the provenance record creates no
+balance or budget entry. Market-price valuation cannot substitute for this
+executed conversion evidence. Historical same-asset included-cost behavior
+remains compatible.
+
+Cancellation recovery finds children by their durable cancellation constraint
+and the complete original submission binding. A matching request address or
+caller-supplied operation ID alone is insufficient. Parent settlement checks
+the completed child's stored proof and exact submission before crediting refunds.
+
+Paired TP/SL requests need a narrow protection-sharing contract, not a general
+exception to position locks. The [official Perps API](https://perps-api.jup.ag/v1/docs)
+describes closing all or part of an existing position and permits two TP/SL
+requests. The pinned instruction/account definitions bind each request to that
+position. Opposite trigger directions may share one bounded reduction envelope;
+each retains its request identity, funding and fee reservation. A missing or
+closed position does not establish sibling cancellation. Keep the position
+locked against ordinary mutation or reopening until exact finalized evidence
+resolves both requests.
+
 ## Extending an integration
 
 1. Define the operation's exact asset, network, account and unit identities.

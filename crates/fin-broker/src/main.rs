@@ -300,7 +300,9 @@ fn render_enrollment_result(value: Value, json: bool) -> fin_domain::Result<Stri
             | PublicConnection::CoinGecko { name, .. }
             | PublicConnection::Hyperliquid { name, .. }
             | PublicConnection::Kraken { name, .. }
-            | PublicConnection::KrakenFutures { name, .. } => name,
+            | PublicConnection::KrakenFutures { name, .. }
+            | PublicConnection::Solana { name, .. }
+            | PublicConnection::Jupiter { name, .. } => name,
         };
         let verb = match result.action.as_str() {
             "add" => "added",
@@ -438,6 +440,44 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.json);
+    }
+
+    #[test]
+    fn enrollment_result_renders_solana_and_jupiter_for_all_actions() {
+        for (connection, name) in [
+            (
+                serde_json::json!({"provider":"solana","name":"observer","resource":"solana:mainnet-beta:observer","address":"SyntheticAddress","network":"solana:mainnet-beta","signing_enabled":false}),
+                "observer",
+            ),
+            (
+                serde_json::json!({"provider":"solana","name":"signer","resource":"solana:mainnet-beta:signer","address":"SyntheticSignerAddress","network":"solana:mainnet-beta","signing_enabled":true}),
+                "signer",
+            ),
+            (
+                serde_json::json!({"provider":"jupiter","name":"jupiter-service","resource":"jupiter:service","credential_configured":true}),
+                "jupiter-service",
+            ),
+        ] {
+            for (action, verb) in [
+                ("add", "added"),
+                ("update", "updated"),
+                ("remove", "removed"),
+            ] {
+                let mut result = saved_connection(action);
+                result["connection"] = connection.clone();
+                assert_eq!(
+                    render_enrollment_result(result.clone(), false).unwrap(),
+                    format!("Connection {name:?} {verb}.")
+                );
+                assert_eq!(
+                    serde_json::from_str::<Value>(
+                        &render_enrollment_result(result.clone(), true).unwrap()
+                    )
+                    .unwrap(),
+                    result
+                );
+            }
+        }
     }
 
     #[test]

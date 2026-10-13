@@ -9,59 +9,11 @@ fn invalid() -> FinError {
     )
 }
 fn allowed(anchor: &PositionAnchor, intent: &FinancialIntent) -> bool {
-    intent.expected.iter().any(|expected| match expected {
-        EffectConstraint::DerivativePosition {
-            resource,
-            position,
-            asset,
-            position_kind,
-            ..
-        }
-        | EffectConstraint::MarginPosition {
-            resource,
-            position,
-            asset,
-            position_kind,
-            ..
-        } => {
-            anchor.resource == *resource
-                && anchor.position == *position
-                && anchor.principal.asset == *asset
-                && anchor.position_kind == *position_kind
-        }
-        EffectConstraint::Position {
-            resource,
-            position,
-            asset,
-            ..
-        } => {
-            anchor.resource == *resource
-                && anchor.position == *position
-                && anchor.principal.asset == *asset
-                && anchor.position_kind == PositionKind::Supply
-        }
-        EffectConstraint::Debt {
-            resource,
-            debt,
-            asset,
-            ..
-        } => {
-            anchor.resource == *resource
-                && anchor.position == *debt
-                && anchor.principal.asset == *asset
-                && matches!(
-                    anchor.position_kind,
-                    PositionKind::VariableDebt | PositionKind::StableDebt
-                )
-        }
-        EffectConstraint::OriginMovement { from, to, debit_asset, credit_asset, .. } => {
-            [(from,debit_asset),(to,credit_asset)].into_iter().any(|(location,asset)| matches!(location,
-                AccountingLocation::Position {resource,position,position_kind}
-                if anchor.resource==*resource && anchor.position==*position && anchor.position_kind==*position_kind && anchor.principal.asset==*asset))
-        }
-        _ => false,
-    })
+    super::position_anchor_requirements(intent)
+        .iter()
+        .any(|requirement| requirement.matches(anchor))
 }
+
 fn rows(prepared: &PreparedOperation) -> Result<Vec<PositionAnchor>> {
     if prepared
         .input

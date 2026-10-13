@@ -128,6 +128,36 @@ publishes a private file without replacing existing files or symlinks.
 
 ## Limits and verification
 
+### Solana funding
+
+An enrolled Solana mainnet-beta wallet can fund an existing claimed Kraken
+address through `kraken.deposit`. Inspect current funding methods and claimed
+addresses first; Fin does not create an address as a side effect of preparation.
+The reviewed funding scope is native SOL and canonical mainnet USDC. Managed
+USDC deposits currently use the wallet's associated token account; broader
+wallet Token-2022 support does not imply support for those CEX funding routes.
+Use `network: "solana"`, `cluster: "mainnet-beta"`, `maxFeeSol`, and an exact
+`mint` for USDC. Native SOL omits `mint`. Bound refundable token-account funding
+with `maxAccountFundingSol` when needed. EVM inputs continue to use `chainId`
+and `maxFeeEth`.
+
+```sh
+fin schema kraken.deposit --json
+fin execute kraken.deposit --dry-run --input '{"requestId":"deposit-sol-001","account":"kraken-spot","wallet":"dev-solana-wallet","methodId":"RETURNED_SOLANA_METHOD_ID","network":"solana","cluster":"mainnet-beta","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"2","maxFeeSol":"0.0001","maxAccountFundingSol":"0.003"}' --json
+```
+
+Replace the method ID and illustrative amounts with discovered route details
+and preview bounds. Withdrawal operations reuse Kraken's saved address/key or
+address ID and default recipient verification. With a configured Solana observer,
+Fin verifies finalized recipient effects independently of Kraken's success
+status. Adding and activating a withdrawal address remains a Kraken account
+action. A confirmed source transaction alone does not complete a deposit:
+correlated usable Kraken credit and ledger evidence are also required. Missing
+history remains pending under the original identity, including after restart.
+
+Solana funding live-write acceptance is separate from the earlier exchange
+SOL/USDC trading evidence below.
+
 WebSockets/token issuance, API-level 2FA and assignment-program enrollment are
 excluded; assignment reads and removal remain included. Endpoint reach does not
 establish live financial acceptance. Incomplete capabilities include tokenized

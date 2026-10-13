@@ -9,6 +9,7 @@ rust-version = "1.97"
 repository = "https://github.com/LimeChain/fin-cli"
 
 [workspace.dependencies]
+bs58 = "0.5.1"
 async-trait = "0.1.89"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
@@ -41,6 +42,8 @@ fin-credentials = { path = "crates/fin-credentials" }
 fin-discovery = { path = "crates/fin-discovery" }
 fin-protocol = { path = "crates/fin-protocol" }
 fin-evm = { path = "crates/fin-evm" }
+fin-solana = { path = "crates/fin-solana" }
+fin-jupiter = { path = "crates/fin-jupiter" }
 fin-bridge = { path = "crates/fin-bridge" }
 fin-ethereum = { path = "crates/fin-ethereum" }
 fin-broker = { path = "crates/fin-broker" }

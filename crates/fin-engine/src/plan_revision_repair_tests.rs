@@ -3,19 +3,25 @@ fn plan_revision_repair_allows_failed_unsubmitted_zero_effect_input_and_window_u
     let mut prior = prior_record();
     prior.revision.spec.steps[0].action_deadline_seconds = Some(60);
     prior.revision.spec.steps[0].input = json!({"request_id":"expired-request","deadline":1});
-    for status in [Status::Failed, Status::Expired, Status::Cancelled, Status::Rejected] {
-    let mut store = Store::in_memory().unwrap();
-    persist_plan_attempt(&mut store, "attempt-1", status, None, None);
+    for status in [
+        Status::Failed,
+        Status::Expired,
+        Status::Cancelled,
+        Status::Rejected,
+    ] {
+        let mut store = Store::in_memory().unwrap();
+        persist_plan_attempt(&mut store, "attempt-1", status, None, None);
 
-    let mut next = prior.revision.spec.clone();
-    next.steps[0].input = json!({"request_id":"fresh-request","deadline":2});
-    next.steps[0].action_deadline_seconds = Some(300);
-    let permissions = vec![permission(
-        json!({"account":"a"}),
-        json!({"qty":"1..50"}),
-        "30",
-    )];
-    validate_revision_transition(Some(&prior), &next, &permissions, &prior.usage, &store).unwrap();
+        let mut next = prior.revision.spec.clone();
+        next.steps[0].input = json!({"request_id":"fresh-request","deadline":2});
+        next.steps[0].action_deadline_seconds = Some(300);
+        let permissions = vec![permission(
+            json!({"account":"a"}),
+            json!({"qty":"1..50"}),
+            "30",
+        )];
+        validate_revision_transition(Some(&prior), &next, &permissions, &prior.usage, &store)
+            .unwrap();
     }
 }
 
@@ -209,6 +215,7 @@ fn persist_plan_attempt(
         last_reconciliation_evidence: None,
         error: None,
         run_id: None,
+        position_baseline: None,
     };
     store
         .create_request(

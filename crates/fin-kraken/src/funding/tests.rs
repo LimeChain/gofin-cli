@@ -1,6 +1,50 @@
 //! Independent financial and original-identity lifecycle fixtures.
 use super::*;
 
+#[test]
+fn solana_deposit_input_needs_no_evm_dummy_fields_and_legacy_input_still_decodes() {
+    let solana: KrakenDepositInput = serde_json::from_value(json!({
+        "requestId":"sol-deposit-1", "account":"spot", "wallet":"sol-wallet",
+        "methodId":"sol-method", "network":"solana", "cluster":"mainnet-beta",
+        "amount":"1.25", "maxFeeSol":"0.00001"
+    }))
+    .unwrap();
+    assert_eq!(solana.chain_id, 0);
+    assert!(solana.max_fee_eth.is_empty());
+    assert_eq!(solana.max_fee_sol.as_deref(), Some("0.00001"));
+
+    let evm: KrakenDepositInput = serde_json::from_value(json!({
+        "requestId":"evm-deposit-1", "account":"spot", "wallet":"eth-wallet",
+        "methodId":"eth-method", "chainId":1, "amount":"0.1", "maxFeeEth":"0.001"
+    }))
+    .unwrap();
+    assert_eq!(evm.chain_id, 1);
+    assert_eq!(evm.max_fee_eth, "0.001");
+
+    let schema = deposit_definition().input_schema;
+    let required = schema["required"].as_array().unwrap();
+    assert!(
+        !required
+            .iter()
+            .any(|field| field == "chainId" || field == "maxFeeEth")
+    );
+}
+
+#[test]
+fn kraken_legacy_evm_destination_roundtrip_omits_additive_solana_fields() {
+    let legacy = json!({
+        "enrolled":true,
+        "resource":"ethereum:1:0x1111111111111111111111111111111111111111",
+        "address":"0x1111111111111111111111111111111111111111",
+        "chain_id":1,
+        "asset":{"network":"ethereum:1","reference":"native","decimals":18},
+        "confirmations":12
+    });
+    let destination: KrakenDestination = serde_json::from_value(legacy.clone()).unwrap();
+    let encoded = serde_json::to_value(destination).unwrap();
+    assert_eq!(encoded, legacy);
+}
+
 #[cfg(test)]
 mod reconciliation {
     use super::*;
@@ -109,6 +153,7 @@ mod reconciliation {
             status: Status::Unknown,
             created_at: now(),
             updated_at: now(),
+            position_baseline: None,
             preview: None,
             approval: None,
             submission: Some(submission.clone()),
@@ -255,6 +300,9 @@ mod reconciliation {
             resource: ResourceId("ethereum:1:synthetic-enrolled-wallet".into()),
             address: withdrawal(VerificationRequirement::DestinationReceipt).address,
             chain_id: 1,
+            network: Some("ethereum:1".into()),
+            cluster: None,
+            mint: None,
             asset: AssetId {
                 network: "ethereum:1".into(),
                 reference: "native".into(),
@@ -885,6 +933,9 @@ mod funding_options_tests {
                 resource: ResourceId(format!("ethereum:1:{address}")),
                 address: address.into(),
                 chain_id: 1,
+                network: Some("ethereum:1".into()),
+                cluster: None,
+                mint: None,
                 asset: AssetId {
                     network: "ethereum:1".into(),
                     reference: "native".into(),
@@ -2114,6 +2165,7 @@ mod protected_funding_lifecycle {
             status: Status::Pending,
             created_at: now(),
             updated_at: now(),
+            position_baseline: None,
             preview: Some(p),
             approval: None,
             submission: Some(s),

@@ -4,6 +4,8 @@
 //! interpretation belongs to `fin-engine` and typed application evidence; this
 //! crate only enforces durable identity and atomic persistence boundaries.
 
+use num_bigint::BigUint;
+use num_traits::Zero;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::path::Path;
@@ -12,6 +14,15 @@ use thiserror::Error;
 
 /// Persisted allocation-owner ledger row, in the order returned by SQLite.
 pub type BridgeAllocationOwnerRow = (String, String, String, String, Option<String>);
+
+/// A fresh, exact cash balance ceiling under which overlapping cash
+/// reservations may be acquired atomically. Resource keys are canonical
+/// resource/asset identities produced by fin-engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CashReservationCapacity {
+    pub resource: String,
+    pub maximum_total_units: String,
+}
 
 mod amendments;
 #[cfg(test)]
@@ -24,6 +35,8 @@ mod cctp_state;
 pub mod compound_amendments;
 pub mod execution_state;
 pub mod grouped_amendments;
+#[cfg(test)]
+mod plan_recovery_attempt_tests;
 #[cfg(test)]
 mod schema_merge_tests;
 
@@ -53,6 +66,8 @@ pub enum StoreError {
     ReservationConflict,
     #[error("operation state changed or another operation already holds a resource reservation")]
     ConcurrentReservation,
+    #[error("operation reservation conflict: {reason}")]
+    ConcurrentReservationAt { reason: &'static str },
     #[error("another non-restored run already exists")]
     ActiveRunExists,
     #[error("bridge transfer identity or state conflicts with durable state")]
@@ -1593,6 +1608,100 @@ impl Store {
             None,
         )
     }
+
+    /// Atomically reserve cash against scoped fresh-balance ceilings. Existing
+    /// cash reservations may overlap only when their aggregate plus this
+    /// reservation stays within each supplied exact balance; lock rows remain
+    /// exclusive. The caller's complete operation snapshot is still CAS-bound.
+    pub fn persist_operation_reservation_with_cash_capacities(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        capacities: &[CashReservationCapacity],
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_links_and_cash_capacities(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            None,
+            None,
+            None,
+            None,
+            capacities,
+        )
+    }
+
+    /// Reserve the second member of an explicitly reviewed reduce-only
+    /// protection pair. The first member keeps its full reservations; only
+    /// the exact position lock may overlap.
+    #[expect(clippy::too_many_arguments)]
+    pub fn persist_operation_reservation_with_protection_parent(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        protection_parent: &str,
+        capacities: &[CashReservationCapacity],
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link_and_amendment(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            ReservationLink::Ordinary,
+            None,
+            None,
+            None,
+            None,
+            Some(protection_parent),
+            capacities,
+        )
+    }
+
+    /// Cash-capacity form that also preserves exactly one existing typed
+    /// operation relationship (replacement, recovery child, or cancellation).
+    #[expect(clippy::too_many_arguments)]
+    pub fn persist_operation_reservation_with_links_and_cash_capacities(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        replacement_parent: Option<&str>,
+        recovery_parent: Option<&str>,
+        cancellation_parent: Option<&str>,
+        amendment_parent: Option<&str>,
+        capacities: &[CashReservationCapacity],
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link_and_amendment(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            ReservationLink::Ordinary,
+            replacement_parent,
+            recovery_parent,
+            cancellation_parent,
+            amendment_parent,
+            None,
+            capacities,
+        )
+    }
+
+    /// Atomically reserve an operation while allowing a collision with the
+    /// one exact parent submission carried in trusted replacement metadata.
+    /// The parent keeps its complete reservation; this only serializes the
+    /// relationship and prevents unrelated reservation conflicts.
     pub fn persist_operation_reservation_with_parent(
         &mut self,
         operation_id: &str,
@@ -1633,6 +1742,35 @@ impl Store {
             Some(recovery_parent),
         )
     }
+
+    /// Atomically reserve a fee-bearing cancellation child against the exact
+    /// unresolved submission named by its immutable SubmissionCancellation
+    /// effect. Only the parent's shared lock rows may overlap; cash reservations
+    /// remain independent and the parent reservation is never altered.
+    pub fn persist_operation_reservation_with_cancellation_parent(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        cancellation_parent: &str,
+    ) -> Result<()> {
+        self.persist_operation_reservation_with_link_and_amendment(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            ReservationLink::Ordinary,
+            None,
+            None,
+            Some(cancellation_parent),
+            None,
+            None,
+            &[],
+        )
+    }
     #[expect(
         clippy::too_many_arguments,
         reason = "Atomic reservation identities and mutually exclusive parent contracts remain explicit."
@@ -1648,9 +1786,46 @@ impl Store {
         replacement_parent: Option<&str>,
         recovery_parent: Option<&str>,
     ) -> Result<()> {
-        if replacement_parent.is_some() && recovery_parent.is_some()
-            || (!matches!(link, ReservationLink::Ordinary)
-                && (replacement_parent.is_some() || recovery_parent.is_some()))
+        self.persist_operation_reservation_with_link_and_amendment(
+            operation_id,
+            reservations,
+            record,
+            expected_records,
+            timestamp,
+            link,
+            replacement_parent,
+            recovery_parent,
+            None,
+            None,
+            None,
+            &[],
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn persist_operation_reservation_with_link_and_amendment(
+        &mut self,
+        operation_id: &str,
+        reservations: &[ReservationRow],
+        record: &Value,
+        expected_records: &[Value],
+        timestamp: &str,
+        link: ReservationLink<'_>,
+        replacement_parent: Option<&str>,
+        recovery_parent: Option<&str>,
+        cancellation_parent: Option<&str>,
+        amendment_parent: Option<&str>,
+        protection_parent: Option<&str>,
+        cash_capacities: &[CashReservationCapacity],
+    ) -> Result<()> {
+        if [replacement_parent, recovery_parent, cancellation_parent]
+            .into_iter()
+            .flatten()
+            .count()
+            + usize::from(amendment_parent.is_some())
+            + usize::from(protection_parent.is_some())
+            + usize::from(!matches!(link, ReservationLink::Ordinary))
+            > 1
         {
             return Err(StoreError::ReservationConflict);
         }
@@ -1711,7 +1886,9 @@ impl Store {
             compound_amendments::validate_lock_reservations(record, reservations)?;
         }
         if list_records_conn(&tx)? != expected_records {
-            return Err(StoreError::ConcurrentReservation);
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "record_snapshot_changed",
+            });
         }
         let durable: Option<(String, String, String)> = tx
             .query_row(
@@ -1749,6 +1926,33 @@ impl Store {
         if let Some(parent_id) = recovery_parent {
             validate_recovery_child_link(&tx, operation_id, record, expected_records, parent_id)?;
         }
+        if let Some(parent_id) = cancellation_parent {
+            validate_cancellation_parent_lease(
+                &tx,
+                operation_id,
+                record,
+                expected_records,
+                parent_id,
+            )?;
+        }
+        if let Some(parent_id) = amendment_parent {
+            validate_amendment_parent_lease(
+                &tx,
+                operation_id,
+                record,
+                expected_records,
+                parent_id,
+            )?;
+        }
+        if let Some(parent_id) = protection_parent {
+            validate_protection_parent_lease(
+                &tx,
+                operation_id,
+                record,
+                expected_records,
+                parent_id,
+            )?;
+        }
         let mut requested = reservations.to_vec();
         requested.sort_by(|a, b| a.resource.cmp(&b.resource));
         if requested
@@ -1774,19 +1978,182 @@ impl Store {
         if !current.is_empty() && current != requested {
             return Err(StoreError::ReservationConflict);
         }
-        for reservation in &requested {
-            let mut owners = tx.prepare(
-                "SELECT operation_id FROM reservations WHERE resource=?1 AND operation_id!=?2",
+        let mut capacity_map = std::collections::BTreeMap::<String, BigUint>::new();
+        for capacity in cash_capacities {
+            let maximum = capacity
+                .maximum_total_units
+                .parse::<BigUint>()
+                .map_err(|_| StoreError::ReservationConflict)?;
+            if capacity.resource.trim().is_empty()
+                || capacity.resource.starts_with("lock:")
+                || capacity_map
+                    .insert(capacity.resource.clone(), maximum)
+                    .is_some()
+            {
+                return Err(StoreError::ReservationConflict);
+            }
+        }
+        for (resource, maximum) in &capacity_map {
+            let requested_units = requested
+                .iter()
+                .filter(|row| &row.resource == resource)
+                .try_fold(BigUint::zero(), |sum, row| {
+                    let units = row
+                        .units
+                        .parse::<BigUint>()
+                        .map_err(|_| StoreError::ReservationConflict)?;
+                    let fee_units = row
+                        .fee_units
+                        .parse::<BigUint>()
+                        .map_err(|_| StoreError::ReservationConflict)?;
+                    Ok::<_, StoreError>(sum + units + fee_units)
+                })?;
+            if requested_units.is_zero() {
+                return Err(StoreError::ReservationConflict);
+            }
+            let mut statement = tx.prepare(
+                "SELECT r.resource, r.units, r.fee_units, o.record_json FROM reservations r JOIN operations o ON o.id=r.operation_id WHERE r.operation_id!=?1",
             )?;
-            let owners = owners
-                .query_map(params![reservation.resource, operation_id], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            if owners.iter().any(|owner| {
-                !linked_originals.contains(owner) && replacement_parent != Some(owner.as_str())
-            }) {
-                return Err(StoreError::ConcurrentReservation);
+            let rows = statement.query_map([operation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            let mut existing_units = BigUint::zero();
+            for row in rows {
+                let (row_resource, units, fee_units, record_json) = row?;
+                let maps_to_key = if row_resource == *resource {
+                    true
+                } else {
+                    legacy_cash_cost_resource(&record_json, &row_resource)?.as_deref()
+                        == Some(resource.as_str())
+                };
+                if !maps_to_key {
+                    continue;
+                }
+                existing_units += units
+                    .parse::<BigUint>()
+                    .map_err(|_| StoreError::ReservationConflict)?;
+                existing_units += fee_units
+                    .parse::<BigUint>()
+                    .map_err(|_| StoreError::ReservationConflict)?;
+            }
+            if existing_units + requested_units > *maximum {
+                return Err(StoreError::ConcurrentReservationAt {
+                    reason: "cash_capacity_exceeded",
+                });
+            }
+        }
+        let cancellation_overlap_keys = if cancellation_parent.is_some() {
+            cancellation_parent_reservation_keys(record)?
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        let amendment_overlap_keys = if amendment_parent.is_some() {
+            amendment_parent_reservation_keys(record)?
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        let protection_overlap_keys = if protection_parent.is_some() {
+            protection_parent_reservation_keys(record)?
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        for reservation in &requested {
+            if capacity_map.contains_key(&reservation.resource) {
+                continue;
+            }
+            let parent_holds_same_key = if let Some(parent_id) = cancellation_parent {
+                if cancellation_overlap_keys.contains(&reservation.resource) {
+                    tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+                        params![parent_id, reservation.resource],
+                        |row| row.get::<_, bool>(0),
+                    )?
+                } else {
+                    false
+                }
+            } else if let Some(parent_id) = amendment_parent {
+                if amendment_overlap_keys.contains(&reservation.resource) {
+                    tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+                        params![parent_id, reservation.resource],
+                        |row| row.get::<_, bool>(0),
+                    )?
+                } else {
+                    false
+                }
+            } else if let Some(parent_id) = protection_parent {
+                if protection_overlap_keys.contains(&reservation.resource) {
+                    tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+                        params![parent_id, reservation.resource],
+                        |row| row.get::<_, bool>(0),
+                    )?
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            let shared_parent = if parent_holds_same_key {
+                cancellation_parent
+                    .or(amendment_parent)
+                    .or(protection_parent)
+            } else {
+                None
+            };
+            let held_by: Vec<String> = {
+                let mut statement = tx.prepare(
+                    "SELECT DISTINCT operation_id FROM reservations WHERE resource=?1 AND operation_id!=?2",
+                )?;
+                statement
+                    .query_map(params![reservation.resource, operation_id], |row| {
+                        row.get(0)
+                    })?
+                    .collect::<std::result::Result<Vec<String>, _>>()?
+            };
+            for other_id in held_by {
+                if Some(other_id.as_str()) == shared_parent
+                    || Some(other_id.as_str()) == replacement_parent
+                    || linked_originals.contains(&other_id)
+                {
+                    continue;
+                }
+                let paired_sibling_overlap = if let Some(parent_id) = amendment_parent {
+                    valid_linked_protection_sibling_overlap_tx(
+                        &tx,
+                        record,
+                        parent_id,
+                        &other_id,
+                        &reservation.resource,
+                    )?
+                } else if let Some(parent_id) = cancellation_parent {
+                    valid_linked_protection_sibling_overlap_tx(
+                        &tx,
+                        record,
+                        parent_id,
+                        &other_id,
+                        &reservation.resource,
+                    )?
+                } else {
+                    false
+                };
+                let protected_pair_overlap = protection_parent.is_some()
+                    && valid_protection_pair_tx(
+                        &tx,
+                        operation_id,
+                        &other_id,
+                        &reservation.resource,
+                    )?;
+                if !paired_sibling_overlap && !protected_pair_overlap {
+                    return Err(StoreError::ConcurrentReservationAt {
+                        reason: "reservation_row_held",
+                    });
+                }
             }
         }
         if current.is_empty() {
@@ -2393,6 +2760,69 @@ impl Store {
         list_records_conn(&self.conn)
     }
 
+    /// Check whether a prepared exact-parent amendment/cancellation may share
+    /// one protection sibling's position lock. This read-only preflight helper
+    /// is repeated inside reservation persistence, where the full operation
+    /// snapshot is CAS-bound.
+    pub fn linked_protection_sibling_overlap_allowed(
+        &self,
+        candidate: &Value,
+        parent_id: &str,
+        sibling_id: &str,
+        reservation_resource: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut records = list_records_conn(&tx)?;
+        let child_id = candidate
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::ReservationConflict)?;
+        if let Some(existing) = records
+            .iter_mut()
+            .find(|record| record.get("id").and_then(Value::as_str) == Some(child_id))
+        {
+            *existing = candidate.clone();
+        } else {
+            records.push(candidate.clone());
+        }
+        valid_linked_protection_sibling_overlap_tx(
+            &tx,
+            candidate,
+            parent_id,
+            sibling_id,
+            reservation_resource,
+        )
+    }
+
+    /// Find prepared records by an exact value in their immutable operation
+    /// binding. The query returns candidates only; application adapters still
+    /// validate the bound wallet, submission and on-chain identity.
+    pub fn operations_by_prepared_binding(
+        &self,
+        operation: &str,
+        binding_pointer: &str,
+        value: &Value,
+    ) -> Result<Vec<Value>> {
+        if operation.trim().is_empty() || !binding_pointer.starts_with('/') {
+            return Err(StoreError::ReservationConflict);
+        }
+        let mut records = list_records_conn(&self.conn)?
+            .into_iter()
+            .filter(|record| {
+                record.get("operation").and_then(Value::as_str) == Some(operation)
+                    && record
+                        .pointer(binding_pointer)
+                        .is_some_and(|bound| bound == value)
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            left.get("id")
+                .and_then(Value::as_str)
+                .cmp(&right.get("id").and_then(Value::as_str))
+        });
+        Ok(records)
+    }
+
     /// Find the unique durable recovery child for a parent operation. The
     /// child remains queryable after terminal settlement so its adapter can
     /// inspect the persisted receipt while reconciling the parent.
@@ -2437,6 +2867,144 @@ impl Store {
                 })
         });
         Ok(matches.pop())
+    }
+
+    /// Find durable operations whose immutable prepared intent authorizes
+    /// cancellation of this exact parent submission. The query is a candidate
+    /// index only: adapters must still verify child status, finalized proof,
+    /// and the `SubmissionCancellation` effect before consuming it.
+    pub fn cancellation_children(
+        &self,
+        parent_operation_id: &str,
+        submission: &fin_domain::Submission,
+    ) -> Result<Vec<Value>> {
+        let submission = serde_json::to_value(submission)?;
+        let Some(parent) = self.get_record(parent_operation_id)? else {
+            return Ok(Vec::new());
+        };
+        if parent.get("submission") != Some(&submission) {
+            return Ok(Vec::new());
+        }
+        let mut matches = list_records_conn(&self.conn)?
+            .into_iter()
+            .filter(|record| {
+                record
+                    .pointer("/preview/intent/expected")
+                    .and_then(Value::as_array)
+                    .is_some_and(|expected| {
+                        expected.iter().any(|constraint| {
+                            constraint.get("kind").and_then(Value::as_str)
+                                == Some("submission_cancellation")
+                                && constraint.get("operation_id").and_then(Value::as_str)
+                                    == Some(parent_operation_id)
+                                && constraint.get("submission") == Some(&submission)
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            left.get("created_at")
+                .and_then(Value::as_str)
+                .cmp(&right.get("created_at").and_then(Value::as_str))
+                .then_with(|| {
+                    left.get("id")
+                        .and_then(Value::as_str)
+                        .cmp(&right.get("id").and_then(Value::as_str))
+                })
+        });
+        Ok(matches)
+    }
+
+    /// Return durable amendment candidates for an exact parent submission.
+    /// The result is a stable, unordered set; callers determine effective
+    /// amendment order from finalized protocol evidence. A raw candidate ID
+    /// or caller-provided child list is never authoritative; both the stored
+    /// parent submission and child metadata must agree, and an actual child
+    /// submission row must exist. Pending/failed candidates are included so
+    /// callers cannot overlook an uncertain write.
+    pub fn amendment_children(
+        &self,
+        parent_operation_id: &str,
+        operation: &str,
+    ) -> Result<Vec<Value>> {
+        let Some(parent) = self.get_record(parent_operation_id)? else {
+            return Ok(Vec::new());
+        };
+        let Some(parent_submission) = parent.get("submission").filter(|value| !value.is_null())
+        else {
+            return Ok(Vec::new());
+        };
+        let records = self.list_records()?;
+        let mut result = Vec::new();
+        for record in records {
+            if record.get("operation").and_then(Value::as_str) != Some(operation)
+                || record.get("submission").is_none_or(Value::is_null)
+            {
+                continue;
+            }
+            let Some(binding) = record.pointer("/preview/binding/__fin_amendment") else {
+                continue;
+            };
+            if binding.get("version").and_then(Value::as_u64) != Some(1)
+                || binding.get("parent_operation_id").and_then(Value::as_str)
+                    != Some(parent_operation_id)
+                || binding.get("parent_submission") != Some(parent_submission)
+            {
+                continue;
+            }
+            let durable_submission: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM submissions WHERE operation_id=?1)",
+                [record.get("id").and_then(Value::as_str).unwrap_or_default()],
+                |row| row.get(0),
+            )?;
+            if durable_submission {
+                result.push(record);
+            }
+        }
+        result.sort_by(|left, right| {
+            left.get("id")
+                .and_then(Value::as_str)
+                .cmp(&right.get("id").and_then(Value::as_str))
+        });
+        Ok(result)
+    }
+
+    /// Return operation rows whose immutable preparation binds a protected
+    /// pending request to this exact position identity. This is an index, not
+    /// authority: adapters must verify the stored submission and finalized
+    /// request progress before accepting a sibling.
+    pub fn protection_candidates(
+        &self,
+        resource: &fin_domain::ResourceId,
+        position: &str,
+    ) -> Result<Vec<Value>> {
+        let resource = serde_json::to_value(resource)?;
+        let mut result = Vec::new();
+        for record in self.list_records()? {
+            let Some(expected) = record
+                .pointer("/preview/intent/expected")
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+            let binds_position = expected.iter().any(|constraint| {
+                constraint.get("kind").and_then(Value::as_str) == Some("pending_request_lifecycle")
+                    && constraint.pointer("/protection/position_anchor/resource") == Some(&resource)
+                    && constraint
+                        .pointer("/protection/position_anchor/position")
+                        .and_then(Value::as_str)
+                        == Some(position)
+            });
+            if binds_position {
+                result.push(record);
+            }
+        }
+        result.sort_by(|left, right| {
+            left.get("id")
+                .and_then(Value::as_str)
+                .cmp(&right.get("id").and_then(Value::as_str))
+        });
+        Ok(result)
     }
 
     /// Insert/update bridge-owned state using a monotonic transfer version.
@@ -3992,7 +4560,21 @@ impl Store {
             .get("revision")
             .and_then(|revision| json_string(revision, "revision_id"))
             != Some(revision_id)
-            || json_string(updated_plan, "active_attempt_id") != Some(operation_id)
+        {
+            return Err(StoreError::RequestConflict);
+        }
+        let recovery_parent = validate_new_plan_recovery_attempt_tx(
+            &tx,
+            plan_id,
+            revision_id,
+            step_id,
+            operation_id,
+            expected_plan,
+            updated_plan,
+        )?;
+        if recovery_parent.is_none()
+            && (json_string(updated_plan, "active_attempt_id") != Some(operation_id)
+                || json_string(expected_plan, "active_attempt_id").is_some())
         {
             return Err(StoreError::RequestConflict);
         }
@@ -4001,12 +4583,21 @@ impl Store {
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
         if json_string(expected_revision, "status") != Some("active")
             || expected_expiry.is_none_or(|expires| expires <= chrono::Utc::now())
-            || json_string(expected_plan, "active_attempt_id").is_some()
+            || (recovery_parent.is_none()
+                && json_string(expected_plan, "active_attempt_id").is_some())
         {
             return Err(StoreError::ConcurrentReservation);
         }
-        let unresolved: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved')", [plan_id], |row| row.get(0))?;
-        if unresolved {
+        let unresolved: Vec<String> = {
+            let mut statement = tx.prepare("SELECT operation_id FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved'")?;
+            statement
+                .query_map([plan_id], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?
+        };
+        if recovery_parent.as_deref().is_some_and(|parent| {
+            unresolved.len() != 1 || unresolved.first().map(String::as_str) != Some(parent)
+        }) || (recovery_parent.is_none() && !unresolved.is_empty())
+        {
             return Err(StoreError::ConcurrentReservation);
         }
         if let Some(existing) = get_request_tx(&tx, request_id)? {
@@ -4394,19 +4985,37 @@ impl Store {
         let expiry = json_string(revision, "expires_at")
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
         let status = json_string(revision, "status");
+        let recovery_parent =
+            recovery_parent_for_existing_attempt_tx(&tx, plan_id, operation_id, expected_plan)?;
         if current
             .as_deref()
             .map(serde_json::from_str::<Value>)
             .transpose()?
             != Some(expected_plan.clone())
-            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
-            || json_string(revision, "revision_id").is_none()
+        {
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_submission_expected_record_changed",
+            });
+        }
+        if json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            && recovery_parent.as_deref() != json_string(expected_plan, "active_attempt_id")
+        {
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_submission_attempt_not_active",
+            });
+        }
+        if json_string(revision, "revision_id").is_none()
             || json_string(revision, "expires_at") != Some(approved_expires_at)
             || status != Some("active")
             || expiry.is_none_or(|expires| expires <= chrono::Utc::now())
             || chrono::DateTime::parse_from_rfc3339(timestamp).is_err()
+            || recovery_parent.as_deref().is_some_and(|parent| {
+                json_string(updated_plan, "active_attempt_id") != Some(parent)
+            })
         {
-            return Err(StoreError::ConcurrentReservation);
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_submission_revision_or_expiry_changed",
+            });
         }
         persist_submission_tx(&tx, operation_id, submission, timestamp)?;
         tx.execute(
@@ -4445,16 +5054,31 @@ impl Store {
         let revision = expected_plan.get("revision").unwrap_or(&Value::Null);
         let expiry = json_string(revision, "expires_at")
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+        let recovery_parent =
+            recovery_parent_for_existing_attempt_tx(&tx, plan_id, operation_id, expected_plan)?;
         if current
             .as_deref()
             .map(serde_json::from_str::<Value>)
             .transpose()?
             != Some(expected_plan.clone())
-            || json_string(expected_plan, "active_attempt_id") != Some(operation_id)
-            || json_string(revision, "status") != Some("active")
+        {
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_candidate_expected_record_changed",
+            });
+        }
+        if json_string(expected_plan, "active_attempt_id") != Some(operation_id)
+            && recovery_parent.as_deref() != json_string(expected_plan, "active_attempt_id")
+        {
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_candidate_attempt_not_active",
+            });
+        }
+        if json_string(revision, "status") != Some("active")
             || expiry.is_none_or(|expires| expires <= chrono::Utc::now())
         {
-            return Err(StoreError::ConcurrentReservation);
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "plan_candidate_revision_or_expiry_changed",
+            });
         }
         let status: Option<String> = tx
             .query_row(
@@ -6023,9 +6647,77 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Return all exact reservation rows with their operation owner. Engine
+    /// policy uses this read-only view to subtract unresolved cash caps from a
+    /// fresh scoped balance before permitting an overlapping acquisition.
+    pub fn all_reservations(&self) -> Result<Vec<(String, ReservationRow)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.operation_id, r.resource, r.units, r.fee_units, o.record_json FROM reservations r JOIN operations o ON o.id=r.operation_id ORDER BY r.resource, r.operation_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut output = Vec::new();
+        for row in rows {
+            let (operation_id, resource, units, fee_units, record_json) = row?;
+            let resource = legacy_cash_cost_resource(&record_json, &resource)?.unwrap_or(resource);
+            output.push((
+                operation_id,
+                ReservationRow {
+                    resource,
+                    units,
+                    fee_units,
+                },
+            ));
+        }
+        Ok(output)
+    }
+
     pub fn close(self) -> Result<()> {
         self.conn.close().map_err(|(_, e)| StoreError::from(e))
     }
+}
+
+/// Older in-progress records stored cash-cost reservations under a typed
+/// cost key instead of the wallet resource/asset key. Interpret those rows
+/// from their immutable prepared record until their next progress update
+/// rewrites them into the canonical namespace.
+fn legacy_cash_cost_resource(record_json: &str, reservation_key: &str) -> Result<Option<String>> {
+    let Ok(record) = serde_json::from_str::<Value>(record_json) else {
+        return Ok(None);
+    };
+    let Some(costs) = record
+        .pointer("/preview/intent/maximum_costs")
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    for value in costs {
+        let Ok(bound) = serde_json::from_value::<fin_domain::CostBound>(value.clone()) else {
+            continue;
+        };
+        let fin_domain::AccountingLocation::Cash { resource } = &bound.location else {
+            continue;
+        };
+        if bound.treatment != fin_domain::CostTreatment::AdditionalDebit {
+            continue;
+        }
+        let old_key =
+            serde_json::to_string(&(&bound.location, &bound.amount.asset, &bound.treatment))
+                .map_err(|_| StoreError::ReservationConflict)?;
+        if old_key == reservation_key {
+            return serde_json::to_string(&(resource.0.as_str(), &bound.amount.asset))
+                .map(Some)
+                .map_err(|_| StoreError::ReservationConflict);
+        }
+    }
+    Ok(None)
 }
 
 fn persist_submission_tx(
@@ -6259,12 +6951,142 @@ fn validate_progress_reservations(
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         for other_id in held {
-            if !valid_replacement_pair_tx(tx, operation_id, &other_id)? {
+            if !valid_replacement_pair_tx(tx, operation_id, &other_id)?
+                && !valid_protection_pair_tx(tx, operation_id, &other_id, &row.resource)?
+            {
                 return Err(StoreError::ConcurrentReservation);
             }
         }
     }
     Ok(())
+}
+
+/// Progress refreshes for either member of a verified TP/SL protection pair
+/// may retain the one exact shared position lock. This does not grant new
+/// sibling membership: the persisted child binding, finalized open parent
+/// proof, exact position lock, parent reservation and no-third-child checks
+/// are revalidated inside the same SQLite transaction.
+fn valid_protection_pair_tx(
+    tx: &Transaction<'_>,
+    first_id: &str,
+    second_id: &str,
+    reservation_resource: &str,
+) -> Result<bool> {
+    let records = list_records_conn(tx)?;
+    let first = records
+        .iter()
+        .find(|record| record.get("id").and_then(Value::as_str) == Some(first_id));
+    let second = records
+        .iter()
+        .find(|record| record.get("id").and_then(Value::as_str) == Some(second_id));
+    let (Some(first), Some(second)) = (first, second) else {
+        return Ok(false);
+    };
+    if first
+        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .and_then(Value::as_str)
+        == Some(second_id)
+    {
+        let expected_lock = protected_request_constraint(second)?
+            .protection
+            .position_lock_resource;
+        if reservation_resource != format!("lock:{}", expected_lock.0) {
+            return Ok(false);
+        }
+        validate_protection_parent_lease(tx, first_id, first, &records, second_id)?;
+        return Ok(true);
+    }
+    if second
+        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .and_then(Value::as_str)
+        == Some(first_id)
+    {
+        let expected_lock = protected_request_constraint(first)?
+            .protection
+            .position_lock_resource;
+        if reservation_resource != format!("lock:{}", expected_lock.0) {
+            return Ok(false);
+        }
+        validate_protection_parent_lease(tx, second_id, second, &records, first_id)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Permit an exact amendment or cancellation child of one protection request
+/// to share only that request group's verified position lock with its Open
+/// sibling. The child's ordinary request/wallet locks and every unrelated
+/// reservation remain exclusive.
+fn valid_linked_protection_sibling_overlap_tx(
+    tx: &Transaction<'_>,
+    candidate: &Value,
+    parent_id: &str,
+    sibling_id: &str,
+    reservation_resource: &str,
+) -> Result<bool> {
+    let Some(child_id) = candidate.get("id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    if sibling_id == parent_id || sibling_id == child_id {
+        return Ok(false);
+    }
+    let records = list_records_conn(tx)?;
+    let parent = records
+        .iter()
+        .find(|record| record.get("id").and_then(Value::as_str) == Some(parent_id));
+    let sibling = records
+        .iter()
+        .find(|record| record.get("id").and_then(Value::as_str) == Some(sibling_id));
+    let (Some(parent), Some(sibling)) = (parent, sibling) else {
+        return Ok(false);
+    };
+    let amendment_parent = candidate
+        .pointer("/preview/binding/__fin_amendment/parent_operation_id")
+        .and_then(Value::as_str)
+        == Some(parent_id);
+    let cancellation_parent = candidate
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array)
+        .is_some_and(|effects| {
+            effects.iter().any(|effect| {
+                effect.get("kind").and_then(Value::as_str) == Some("submission_cancellation")
+                    && effect.get("operation_id").and_then(Value::as_str) == Some(parent_id)
+            })
+        });
+    if !amendment_parent && !cancellation_parent {
+        return Ok(false);
+    }
+    let sibling_is_child = sibling
+        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .and_then(Value::as_str)
+        == Some(parent_id);
+    let parent_is_child = parent
+        .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+        .and_then(Value::as_str)
+        == Some(sibling_id);
+    // The first protection owns the durable group root, but either member may
+    // later be amended or cancelled. Accept exactly one persisted link
+    // direction; unrelated historical requests with the same position are
+    // never enough to grant the overlap.
+    if sibling_is_child == parent_is_child {
+        return Ok(false);
+    }
+    let constraint = protected_request_constraint(parent)?;
+    let exact_lock = format!("lock:{}", constraint.protection.position_lock_resource.0);
+    if reservation_resource != exact_lock
+        || !candidate
+            .pointer("/preview/intent/locks")
+            .and_then(Value::as_array)
+            .is_some_and(|locks| {
+                locks
+                    .iter()
+                    .any(|lock| lock.as_str() == Some(&exact_lock[5..]))
+            })
+        || !proved_open_pending_request_released_wallet_lock(sibling, &constraint.wallet_resource.0)
+    {
+        return Ok(false);
+    }
+    valid_protection_pair_tx(tx, sibling_id, parent_id, reservation_resource)
 }
 
 fn valid_replacement_pair_tx(
@@ -7153,6 +7975,705 @@ fn validate_recovery_child_link(
     Ok(())
 }
 
+fn validate_cancellation_parent_lease(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    child: &Value,
+    expected_records: &[Value],
+    parent_id: &str,
+) -> Result<()> {
+    let expected = child
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array)
+        .filter(|effects| effects.len() == 1)
+        .and_then(|effects| effects.first())
+        .filter(|effect| {
+            effect.get("kind").and_then(Value::as_str) == Some("submission_cancellation")
+                && effect.get("operation_id").and_then(Value::as_str) == Some(parent_id)
+        })
+        .ok_or(StoreError::ReservationConflict)?;
+    if child.get("id").and_then(Value::as_str) != Some(operation_id)
+        || parent_id == operation_id
+        || !child
+            .pointer("/preview/intent/debits")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        || child
+            .pointer("/preview/intent/maximum_costs")
+            .and_then(Value::as_array)
+            .is_none_or(|costs| {
+                costs.iter().any(|cost| {
+                    cost.pointer("/location/kind").and_then(Value::as_str) != Some("cash")
+                        || cost.pointer("/treatment")
+                            != Some(&Value::String("additional_debit".into()))
+                })
+            })
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent = expected_records
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some(parent_id))
+        .ok_or(StoreError::ReservationConflict)?;
+    if !matches!(
+        parent.get("status").and_then(Value::as_str),
+        Some("submitted" | "pending" | "unknown")
+    ) || parent.get("submission") != expected.get("submission")
+        || parent.get("run_id") != child.get("run_id")
+        || parent.pointer("/preview/intent/locks") != child.pointer("/preview/intent/locks")
+        || parent
+            .pointer("/preview/intent/locks")
+            .and_then(Value::as_array)
+            .is_none_or(|locks| locks.is_empty())
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let has_sibling = expected_records.iter().any(|other| {
+        if other.get("id").and_then(Value::as_str) == Some(operation_id)
+            || other.get("id").and_then(Value::as_str) == Some(parent_id)
+            || other
+                .pointer("/preview/intent/expected")
+                .and_then(Value::as_array)
+                .is_none_or(|effects| {
+                    !effects.iter().any(|effect| {
+                        effect.get("kind").and_then(Value::as_str)
+                            == Some("submission_cancellation")
+                            && effect.get("operation_id").and_then(Value::as_str) == Some(parent_id)
+                    })
+                })
+        {
+            return false;
+        }
+        !matches!(
+            other.get("status").and_then(Value::as_str),
+            Some("failed" | "rejected" | "expired")
+        )
+    });
+    if has_sibling {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent_locks = parent
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    for lock in parent_locks {
+        let lock = lock.as_str().ok_or(StoreError::ReservationConflict)?;
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+            params![parent_id, format!("lock:{lock}")],
+            |row| row.get(0),
+        )?;
+        if !held
+            && !proved_open_escrow_released_wallet_lock(parent, lock)
+            && !proved_open_pending_request_released_wallet_lock(parent, lock)
+        {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    // Cash fee rows may share the exact parent lock scope and cash asset row.
+    // Their amounts remain separate per operation; unrelated operations still
+    // collide with both reservations.
+    cancellation_parent_reservation_keys(child)?;
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Err(StoreError::ReservationConflict);
+    };
+    if serde_json::from_str::<Value>(&persisted)? != *parent {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "cancellation_parent_record_changed",
+        });
+    }
+    Ok(())
+}
+
+/// Escrow placement transfers the approved principal out of wallet custody.
+/// Its exact open lifecycle proof permits that wallet lock to be released while
+/// the escrow/order lock remains held for its recovery child.
+fn proved_open_escrow_released_wallet_lock(parent: &Value, lock: &str) -> bool {
+    let constraints = parent
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array);
+    let effects = parent.pointer("/effects/effects").and_then(Value::as_array);
+    let (Some(constraints), Some(effects)) = (constraints, effects) else {
+        return false;
+    };
+    let matching_constraint = constraints.iter().any(|constraint| {
+        matches!(
+            constraint.get("kind").and_then(Value::as_str),
+            Some("escrow_lifecycle" | "escrow_to_position")
+        ) && constraint.get("wallet_resource").and_then(Value::as_str) == Some(lock)
+    });
+    matching_constraint
+        && effects.iter().any(|effect| {
+            let expected_kind = match effect.get("kind").and_then(Value::as_str) {
+                Some("escrow_progress") => "escrow_lifecycle",
+                Some("escrow_position_progress") => "escrow_to_position",
+                _ => return false,
+            };
+            let proved_wallet = effect.get("wallet_resource").and_then(Value::as_str);
+            let deposit = effect
+                .get("escrow_deposit")
+                .and_then(Value::as_str)
+                .is_some_and(|amount| amount != "0");
+            let remaining = effect
+                .get("remaining_input")
+                .and_then(Value::as_str)
+                .is_some_and(|amount| amount != "0");
+            let is_open = effect.get("state").and_then(Value::as_str) == Some("open");
+            proved_wallet == Some(lock)
+                && deposit
+                && remaining
+                && is_open
+                && constraints.iter().any(|constraint| {
+                    constraint.get("kind").and_then(Value::as_str) == Some(expected_kind)
+                        && constraint.get("wallet_resource").and_then(Value::as_str) == Some(lock)
+                        && constraint.get("escrow_resource") == effect.get("escrow_resource")
+                        && constraint.get("input_asset") == effect.get("input_asset")
+                })
+        })
+}
+
+/// A finalized Open keeper request releases only the wallet-wide lock. Its
+/// exact request and position locks remain required by the caller's lease
+/// checks, so unrelated wallet activity can proceed while the request is
+/// still cancellable under its original submission identity.
+fn proved_open_pending_request_released_wallet_lock(parent: &Value, lock: &str) -> bool {
+    let Some(submission_value) = parent.get("submission").filter(|value| !value.is_null()) else {
+        return false;
+    };
+    let Some(effects_value) = parent.get("effects").filter(|value| !value.is_null()) else {
+        return false;
+    };
+    let (Ok(submission), Ok(verified)) = (
+        serde_json::from_value::<fin_domain::Submission>(submission_value.clone()),
+        serde_json::from_value::<fin_domain::VerifiedEffects>(effects_value.clone()),
+    ) else {
+        return false;
+    };
+    let digest_matches = fin_domain::verified_effect_digest(&verified)
+        .is_ok_and(|digest| digest == verified.proof_digest);
+    if parent.get("status").and_then(Value::as_str) != Some("pending")
+        || verified.submission != submission
+        || !digest_matches
+    {
+        return false;
+    }
+    let expected = parent
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array);
+    let Some(expected) = expected else {
+        return false;
+    };
+    let requests = expected
+        .iter()
+        .filter_map(|value| {
+            serde_json::from_value::<fin_domain::EffectConstraint>(value.clone()).ok()
+        })
+        .filter_map(|constraint| match constraint {
+            fin_domain::EffectConstraint::PendingRequestLifecycle {
+                wallet_resource,
+                request_resource,
+                request_id,
+                request_kind,
+                conditional_positions,
+                protection,
+                ..
+            } if wallet_resource.0 == lock => Some((
+                wallet_resource,
+                request_resource,
+                request_id,
+                request_kind,
+                conditional_positions,
+                protection,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if requests.len() != 1 {
+        return false;
+    }
+    let (_, request_resource, request_id, request_kind, positions, protection) = &requests[0];
+    let matching = verified
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            fin_domain::FinancialEffect::PendingRequestProgress {
+                wallet_resource,
+                request_resource: actual_resource,
+                request_id: actual_id,
+                request_kind: actual_kind,
+                state: fin_domain::PendingRequestState::Open,
+                positions: actual_positions,
+                credits,
+                realized_pnl,
+                protection: actual_protection,
+            } if wallet_resource.0 == lock
+                && actual_resource == request_resource
+                && actual_id == request_id
+                && actual_kind == request_kind
+                && actual_protection == protection
+                && credits.is_empty()
+                && realized_pnl.is_empty()
+                // The approved position bounds describe possible future fill
+                // outcomes. An Open request must not claim those movements or
+                // fabricate zero-delta position snapshots as settled effects.
+                && actual_positions.is_empty()
+                && protection.as_ref().is_none_or(|protection| {
+                    !protection.position_lock_resource.0.is_empty()
+                        && positions.iter().any(|bound| {
+                            bound.resource == protection.position_anchor.resource
+                                && bound.position == protection.position_anchor.position
+                                && bound.position_kind == protection.position_anchor.position_kind
+                                && bound.asset == protection.position_anchor.principal.asset
+                        })
+                }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .count();
+    matching == 1
+}
+
+/// Validate a generic, explicitly prepared amendment against its immutable
+/// unresolved parent. Only the exact shared locks named by the adapter may
+/// overlap; cash reservations and every other exclusive row stay independent.
+fn validate_amendment_parent_lease(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    child: &Value,
+    expected_records: &[Value],
+    parent_id: &str,
+) -> Result<()> {
+    let binding = child
+        .pointer("/preview/binding/__fin_amendment")
+        .ok_or(StoreError::ReservationConflict)?;
+    if binding.as_object().is_none_or(|object| object.len() != 5)
+        || binding.get("version").and_then(Value::as_u64) != Some(1)
+        || binding.get("parent_operation_id").and_then(Value::as_str) != Some(parent_id)
+        || binding.get("parent_submission").is_none_or(Value::is_null)
+        || binding
+            .get("request_id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || child.get("id").and_then(Value::as_str) != Some(operation_id)
+        || parent_id == operation_id
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent = expected_records
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some(parent_id))
+        .ok_or(StoreError::ReservationConflict)?;
+    if !matches!(
+        parent.get("status").and_then(Value::as_str),
+        Some("submitted" | "pending" | "unknown")
+    ) || parent.get("submission") != binding.get("parent_submission")
+        || parent.get("submission").is_none_or(Value::is_null)
+        || parent.get("run_id") != child.get("run_id")
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let request_id = binding
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::ReservationConflict)?;
+    let parent_binding = parent
+        .pointer("/preview/binding")
+        .ok_or(StoreError::ReservationConflict)?;
+    let child_binding = child
+        .pointer("/preview/binding")
+        .ok_or(StoreError::ReservationConflict)?;
+    if parent_binding.get("request").and_then(Value::as_str) != Some(request_id)
+        || child_binding.get("request").and_then(Value::as_str) != Some(request_id)
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent_locks = parent
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let child_locks = child
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let shared_locks = binding
+        .get("shared_locks")
+        .and_then(Value::as_array)
+        .filter(|locks| !locks.is_empty())
+        .ok_or(StoreError::ReservationConflict)?;
+    let mut unique = std::collections::BTreeSet::new();
+    for lock in shared_locks {
+        let Some(lock) = lock.as_str().filter(|lock| !lock.trim().is_empty()) else {
+            return Err(StoreError::ReservationConflict);
+        };
+        if !unique.insert(lock.to_owned())
+            || !parent_locks
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(lock))
+            || !child_locks
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(lock))
+        {
+            return Err(StoreError::ReservationConflict);
+        }
+        let reservation_key = format!("lock:{lock}");
+        let parent_holds: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+            params![parent_id, reservation_key],
+            |row| row.get(0),
+        )?;
+        if !parent_holds {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Err(StoreError::ReservationConflict);
+    };
+    let persisted: Value = serde_json::from_str(&persisted)?;
+    if persisted != *parent {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    Ok(())
+}
+
+/// Validate the exact second member of a reduce-only protection pair. The
+/// first request must already have a durable finalized Open proof; this lease
+/// authorizes only the shared position-lock row, never wallet/request locks or
+/// unrelated reservations.
+fn validate_protection_parent_lease(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    child: &Value,
+    expected_records: &[Value],
+    parent_id: &str,
+) -> Result<()> {
+    let binding = child
+        .pointer("/preview/binding/__fin_protection_parent")
+        .ok_or(StoreError::ReservationConflict)?;
+    if binding.as_object().is_none_or(|object| object.len() != 5)
+        || binding.get("version").and_then(Value::as_u64) != Some(1)
+        || binding.get("parent_operation_id").and_then(Value::as_str) != Some(parent_id)
+        || binding.get("parent_submission").is_none_or(Value::is_null)
+        || binding
+            .get("parent_request_id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || child.get("id").and_then(Value::as_str) != Some(operation_id)
+        || parent_id == operation_id
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent = expected_records
+        .iter()
+        .find(|value| value.get("id").and_then(Value::as_str) == Some(parent_id))
+        .ok_or(StoreError::ReservationConflict)?;
+    if parent.get("status").and_then(Value::as_str) != Some("pending")
+        || parent.get("submission") != binding.get("parent_submission")
+        || parent.get("submission").is_none_or(Value::is_null)
+        || parent.get("run_id") != child.get("run_id")
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent_request = binding
+        .get("parent_request_id")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::ReservationConflict)?;
+    let parent_constraint = protected_request_constraint(parent)?;
+    let child_constraint = protected_request_constraint(child)?;
+    let child_binding_protection: fin_domain::PendingRequestProtection = serde_json::from_value(
+        child
+            .pointer("/preview/binding/protection")
+            .cloned()
+            .ok_or(StoreError::ReservationConflict)?,
+    )
+    .map_err(|_| StoreError::ReservationConflict)?;
+    if parent_constraint.request_id != parent_request
+        || parent
+            .pointer("/preview/binding/request")
+            .and_then(Value::as_str)
+            != Some(parent_request)
+        || child_constraint.request_id == parent_request
+        || !parent_constraint
+            .protection
+            .compatible_sibling(&child_constraint.protection)
+        || child_binding_protection != child_constraint.protection
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let verified: fin_domain::VerifiedEffects = serde_json::from_value(
+        parent
+            .get("effects")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .ok_or(StoreError::ReservationConflict)?,
+    )
+    .map_err(|_| StoreError::ReservationConflict)?;
+    let parent_submission: fin_domain::Submission = serde_json::from_value(
+        parent
+            .get("submission")
+            .cloned()
+            .ok_or(StoreError::ReservationConflict)?,
+    )
+    .map_err(|_| StoreError::ReservationConflict)?;
+    if verified.submission != parent_submission
+        || verified.proof_digest
+            != fin_domain::verified_effect_digest(&verified)
+                .map_err(|_| StoreError::ReservationConflict)?
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let open_proofs = verified
+        .effects
+        .iter()
+        .filter(|effect| {
+            matches!(effect,
+                fin_domain::FinancialEffect::PendingRequestProgress {
+                    wallet_resource,
+                    request_resource,
+                    request_id,
+                    request_kind,
+                    state: fin_domain::PendingRequestState::Open,
+                    positions,
+                    credits,
+                    realized_pnl,
+                    protection: Some(actual),
+                    ..
+                } if wallet_resource == &parent_constraint.wallet_resource
+                    && request_resource == &parent_constraint.request_resource
+                    && request_id == parent_request
+                    && request_kind == &parent_constraint.request_kind
+                    && positions.is_empty()
+                    && credits.is_empty()
+                    && realized_pnl.is_empty()
+                    && actual == &parent_constraint.protection)
+        })
+        .count();
+    if open_proofs != 1 {
+        return Err(StoreError::ReservationConflict);
+    }
+    let parent_locks = parent
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let child_locks = child
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let shared_locks = binding
+        .get("shared_locks")
+        .and_then(Value::as_array)
+        .filter(|locks| locks.len() == 1)
+        .ok_or(StoreError::ReservationConflict)?;
+    let shared = shared_locks[0]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(StoreError::ReservationConflict)?;
+    if shared != parent_constraint.protection.position_lock_resource.0
+        || shared.is_empty()
+        || shared == parent_constraint.wallet_resource.0
+        || shared == parent_constraint.request_resource.0
+        || shared == child_constraint.wallet_resource.0
+        || shared == child_constraint.request_resource.0
+        || !parent_locks
+            .iter()
+            .any(|value| value.as_str() == Some(shared))
+        || !child_locks
+            .iter()
+            .any(|value| value.as_str() == Some(shared))
+    {
+        return Err(StoreError::ReservationConflict);
+    }
+    let lock_key = format!("lock:{shared}");
+    let parent_holds: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reservations WHERE operation_id=?1 AND resource=?2)",
+        params![parent_id, lock_key],
+        |row| row.get(0),
+    )?;
+    if !parent_holds {
+        return Err(StoreError::ReservationConflict);
+    }
+    for existing in expected_records {
+        if existing.get("id").and_then(Value::as_str) == Some(parent_id)
+            || existing.get("id").and_then(Value::as_str) == Some(operation_id)
+            || existing
+                .pointer("/preview/binding/__fin_protection_parent/parent_operation_id")
+                .and_then(Value::as_str)
+                != Some(parent_id)
+        {
+            continue;
+        }
+        let terminal = existing
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "completed" | "failed" | "cancelled"));
+        if !terminal || has_open_protection_progress(existing) {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    let persisted: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(persisted) = persisted else {
+        return Err(StoreError::ReservationConflict);
+    };
+    if serde_json::from_str::<Value>(&persisted)? != *parent {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    Ok(())
+}
+
+struct ProtectedRequestConstraint {
+    wallet_resource: fin_domain::ResourceId,
+    request_resource: fin_domain::ResourceId,
+    request_id: String,
+    request_kind: String,
+    protection: fin_domain::PendingRequestProtection,
+}
+
+fn protected_request_constraint(record: &Value) -> Result<ProtectedRequestConstraint> {
+    let expected = record
+        .pointer("/preview/intent/expected")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let constraints = expected
+        .iter()
+        .filter_map(|value| {
+            serde_json::from_value::<fin_domain::EffectConstraint>(value.clone()).ok()
+        })
+        .filter_map(|constraint| match constraint {
+            fin_domain::EffectConstraint::PendingRequestLifecycle {
+                wallet_resource,
+                request_resource,
+                request_id,
+                request_kind,
+                protection: Some(protection),
+                ..
+            } => Some(ProtectedRequestConstraint {
+                wallet_resource,
+                request_resource,
+                request_id,
+                request_kind,
+                protection,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if constraints.len() != 1 {
+        return Err(StoreError::ReservationConflict);
+    }
+    Ok(constraints.into_iter().next().unwrap())
+}
+
+fn has_open_protection_progress(record: &Value) -> bool {
+    record
+        .pointer("/effects/effects")
+        .and_then(Value::as_array)
+        .is_some_and(|effects| {
+            effects.iter().any(|effect| {
+                effect.get("kind").and_then(Value::as_str) == Some("pending_request_progress")
+                    && effect.get("state").and_then(Value::as_str) == Some("open")
+                    && effect
+                        .get("protection")
+                        .is_some_and(|value| !value.is_null())
+            })
+        })
+}
+
+fn protection_parent_reservation_keys(
+    record: &Value,
+) -> Result<std::collections::BTreeSet<String>> {
+    let shared_locks = record
+        .pointer("/preview/binding/__fin_protection_parent/shared_locks")
+        .and_then(Value::as_array)
+        .filter(|locks| locks.len() == 1)
+        .ok_or(StoreError::ReservationConflict)?;
+    let mut keys = std::collections::BTreeSet::new();
+    for lock in shared_locks {
+        let Some(lock) = lock.as_str().filter(|lock| !lock.trim().is_empty()) else {
+            return Err(StoreError::ReservationConflict);
+        };
+        if !keys.insert(format!("lock:{lock}")) {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    Ok(keys)
+}
+
+fn amendment_parent_reservation_keys(record: &Value) -> Result<std::collections::BTreeSet<String>> {
+    let shared_locks = record
+        .pointer("/preview/binding/__fin_amendment/shared_locks")
+        .and_then(Value::as_array)
+        .filter(|locks| !locks.is_empty())
+        .ok_or(StoreError::ReservationConflict)?;
+    let mut keys = std::collections::BTreeSet::new();
+    for lock in shared_locks {
+        let Some(lock) = lock.as_str().filter(|lock| !lock.trim().is_empty()) else {
+            return Err(StoreError::ReservationConflict);
+        };
+        if !keys.insert(format!("lock:{lock}")) {
+            return Err(StoreError::ReservationConflict);
+        }
+    }
+    Ok(keys)
+}
+
+fn cancellation_parent_reservation_keys(
+    record: &Value,
+) -> Result<std::collections::BTreeSet<String>> {
+    let locks = record
+        .pointer("/preview/intent/locks")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?;
+    let mut keys = locks
+        .iter()
+        .map(|lock| {
+            lock.as_str()
+                .map(|value| format!("lock:{value}"))
+                .ok_or(StoreError::ReservationConflict)
+        })
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    for cost in record
+        .pointer("/preview/intent/maximum_costs")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ReservationConflict)?
+    {
+        let resource = cost
+            .pointer("/location/resource")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::ReservationConflict)?;
+        if !locks.iter().any(|lock| lock.as_str() == Some(resource)) {
+            return Err(StoreError::ReservationConflict);
+        }
+        let asset = cost
+            .pointer("/amount/asset")
+            .cloned()
+            .ok_or(StoreError::ReservationConflict)?;
+        let asset: fin_domain::AssetId =
+            serde_json::from_value(asset).map_err(|_| StoreError::ReservationConflict)?;
+        keys.insert(serde_json::to_string(&(resource.to_owned(), asset))?);
+    }
+    Ok(keys)
+}
+
 fn is_terminal(status: &str) -> bool {
     matches!(
         status,
@@ -7185,6 +8706,525 @@ fn validate_dispatch_evidence_transition(current: &Value, updated: &Value) -> Re
     } else {
         Err(StoreError::DispatchEvidenceConflict)
     }
+}
+
+fn stored_recovery_chain_is_contiguous(
+    plan: &Value,
+    parent_step_id: &str,
+    child_step_id: &str,
+) -> bool {
+    let Some(steps) = plan
+        .pointer("/revision/spec/steps")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let Some(parent_index) = steps
+        .iter()
+        .position(|step| step.get("step_id").and_then(Value::as_str) == Some(parent_step_id))
+    else {
+        return false;
+    };
+    let Some(child_index) = steps
+        .iter()
+        .position(|step| step.get("step_id").and_then(Value::as_str) == Some(child_step_id))
+    else {
+        return false;
+    };
+    if parent_index >= child_index {
+        return false;
+    }
+    let Some(permissions) = plan
+        .pointer("/revision/permissions")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    steps[parent_index + 1..=child_index].iter().all(|step| {
+        let Some(step_id) = step.get("step_id").and_then(Value::as_str) else {
+            return false;
+        };
+        permissions
+            .iter()
+            .find(|permission| permission.get("step_id").and_then(Value::as_str) == Some(step_id))
+            .and_then(|permission| permission.pointer("/permission/recovery_parent/step_id"))
+            .and_then(Value::as_str)
+            == Some(parent_step_id)
+    })
+}
+
+/// A later recovery child can be admitted only after every earlier child in
+/// the same parent-bound chain has durably settled. The plan JSON describes
+/// which steps may form the chain; this checks that each step is backed by one
+/// completed operation and by the original parent's immutable submission.
+fn stored_recovery_prefix_is_completed_tx(
+    tx: &Transaction<'_>,
+    plan_id: &str,
+    revision_id: &str,
+    expected_plan: &Value,
+    parent_step_id: &str,
+    parent_operation_id: &str,
+    child_step_id: &str,
+) -> Result<bool> {
+    let Some(steps) = expected_plan
+        .pointer("/revision/spec/steps")
+        .and_then(Value::as_array)
+    else {
+        return Ok(false);
+    };
+    let Some(parent_index) = steps
+        .iter()
+        .position(|step| step.get("step_id").and_then(Value::as_str) == Some(parent_step_id))
+    else {
+        return Ok(false);
+    };
+    let Some(child_index) = steps
+        .iter()
+        .position(|step| step.get("step_id").and_then(Value::as_str) == Some(child_step_id))
+    else {
+        return Ok(false);
+    };
+    if parent_index >= child_index
+        || !stored_recovery_chain_is_contiguous(expected_plan, parent_step_id, child_step_id)
+    {
+        return Ok(false);
+    }
+    let permissions = expected_plan
+        .pointer("/revision/permissions")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ConcurrentReservation)?;
+    let parent_raw: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_operation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(parent_raw) = parent_raw else {
+        return Ok(false);
+    };
+    let parent: fin_domain::OperationRecord = serde_json::from_str(&parent_raw)?;
+    let Some(parent_submission) = parent.submission.as_ref() else {
+        return Ok(false);
+    };
+    let attempts = expected_plan
+        .get("attempts")
+        .and_then(Value::as_array)
+        .ok_or(StoreError::ConcurrentReservation)?;
+
+    for step in &steps[parent_index + 1..child_index] {
+        let Some(step_id) = step.get("step_id").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(permission) = permissions
+            .iter()
+            .find(|permission| permission.get("step_id").and_then(Value::as_str) == Some(step_id))
+        else {
+            return Ok(false);
+        };
+        let Some(recovery_value) = permission
+            .pointer("/permission/recovery_parent")
+            .filter(|value| !value.is_null())
+        else {
+            return Ok(false);
+        };
+        let recovery: fin_domain::financial_plans::FinancialPlanRecoveryParent =
+            serde_json::from_value(recovery_value.clone())?;
+        if recovery.step_id != parent_step_id {
+            return Ok(false);
+        }
+        let attempt_rows: Vec<(String, String)> = {
+            let mut statement = tx.prepare(
+                "SELECT operation_id,candidate_state FROM financial_plan_attempts WHERE plan_id=?1 AND revision_id=?2 AND step_id=?3",
+            )?;
+            statement
+                .query_map(params![plan_id, revision_id, step_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if attempt_rows.is_empty() {
+            return Ok(false);
+        }
+        let mut completed_count = 0;
+        for (operation_id, candidate_state) in &attempt_rows {
+            if !attempts.iter().any(|attempt| {
+                attempt.get("attempt_id").and_then(Value::as_str) == Some(operation_id)
+                    && attempt.get("plan_id").and_then(Value::as_str) == Some(plan_id)
+                    && attempt.get("revision_id").and_then(Value::as_str) == Some(revision_id)
+                    && attempt.get("step_id").and_then(Value::as_str) == Some(step_id)
+            }) {
+                return Ok(false);
+            }
+            let operation_raw: Option<String> = tx
+                .query_row(
+                    "SELECT record_json FROM operations WHERE id=?1",
+                    [operation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(operation_raw) = operation_raw else {
+                return Ok(false);
+            };
+            let operation: fin_domain::OperationRecord = serde_json::from_str(&operation_raw)?;
+            let durable_submission = has_durable_submission(tx, operation_id)?;
+            if candidate_state == "settled"
+                && operation.status == fin_domain::Status::Completed
+                && operation.submission.is_some()
+                && durable_submission
+            {
+                let Some(preview) = operation.preview.as_ref() else {
+                    return Ok(false);
+                };
+                if preview
+                    .binding
+                    .pointer(&recovery.operation_id_pointer)
+                    .and_then(Value::as_str)
+                    != Some(parent_operation_id)
+                    || preview.binding.pointer(&recovery.submission_pointer)
+                        != Some(&serde_json::to_value(parent_submission)?)
+                {
+                    return Ok(false);
+                }
+                completed_count += 1;
+            } else if !matches!(candidate_state.as_str(), "failed" | "rejected" | "expired")
+                || !recovery_attempt_releases_lease(
+                    &serde_json::to_value(&operation)?,
+                    durable_submission,
+                )
+            {
+                return Ok(false);
+            }
+        }
+        if completed_count != 1 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_new_plan_recovery_attempt_tx(
+    tx: &Transaction<'_>,
+    plan_id: &str,
+    revision_id: &str,
+    child_step_id: &str,
+    child_operation_id: &str,
+    expected_plan: &Value,
+    updated_plan: &Value,
+) -> Result<Option<String>> {
+    let recovery_value = expected_plan
+        .pointer("/revision/permissions")
+        .and_then(Value::as_array)
+        .and_then(|permissions| {
+            permissions.iter().find(|permission| {
+                permission.get("step_id").and_then(Value::as_str) == Some(child_step_id)
+            })
+        })
+        .and_then(|permission| permission.pointer("/permission/recovery_parent"))
+        .filter(|value| !value.is_null());
+    let Some(recovery_value) = recovery_value else {
+        return Ok(None);
+    };
+    let recovery: fin_domain::financial_plans::FinancialPlanRecoveryParent =
+        serde_json::from_value(recovery_value.clone())?;
+    let expected: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+        serde_json::from_value(expected_plan.clone())?;
+    let parent_id = expected
+        .active_attempt_id
+        .clone()
+        .ok_or(StoreError::ConcurrentReservation)?;
+    let parent = expected
+        .attempts
+        .iter()
+        .find(|attempt| {
+            attempt.attempt_id == parent_id
+                && attempt.step_id == recovery.step_id
+                && attempt.revision_id == revision_id
+        })
+        .ok_or(StoreError::ConcurrentReservation)?;
+    let updated: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+        serde_json::from_value(updated_plan.clone())?;
+    if expected.revision.plan_id != plan_id
+        || expected.revision.revision_id != revision_id
+        || updated.revision != expected.revision
+        || !stored_recovery_chain_is_contiguous(expected_plan, &recovery.step_id, child_step_id)
+        || updated.active_attempt_id.as_deref() != Some(parent_id.as_str())
+        || !updated.attempts.iter().any(|attempt| {
+            attempt.attempt_id == child_operation_id
+                && attempt.step_id == child_step_id
+                && attempt.revision_id == revision_id
+                && attempt.plan_id == plan_id
+        })
+        || updated
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.attempt_id == parent_id)
+            .count()
+            != 1
+    {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    ensure_unresolved_plan_recovery_parent_tx(
+        tx,
+        plan_id,
+        revision_id,
+        &parent_id,
+        &recovery.step_id,
+    )?;
+    if !stored_recovery_prefix_is_completed_tx(
+        tx,
+        plan_id,
+        revision_id,
+        expected_plan,
+        &recovery.step_id,
+        &parent_id,
+        child_step_id,
+    )? {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_chain_prefix_incomplete",
+        });
+    }
+    let unresolved: Vec<String> = {
+        let mut statement = tx.prepare("SELECT operation_id FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved'")?;
+        statement
+            .query_map([plan_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?
+    };
+    if unresolved.len() != 1 || unresolved.first().map(String::as_str) != Some(parent_id.as_str()) {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    let _ = parent;
+    Ok(Some(parent_id))
+}
+
+fn recovery_parent_for_existing_attempt_tx(
+    tx: &Transaction<'_>,
+    plan_id: &str,
+    operation_id: &str,
+    expected_plan: &Value,
+) -> Result<Option<String>> {
+    let linkage: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT revision_id,step_id,candidate_state FROM financial_plan_attempts WHERE plan_id=?1 AND operation_id=?2",
+            params![plan_id, operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((revision_id, child_step_id, candidate_state)) = linkage else {
+        return Ok(None);
+    };
+    if candidate_state != "unresolved" {
+        return Ok(None);
+    }
+    let recovery_value = expected_plan
+        .pointer("/revision/permissions")
+        .and_then(Value::as_array)
+        .and_then(|permissions| {
+            permissions.iter().find(|permission| {
+                permission.get("step_id").and_then(Value::as_str) == Some(child_step_id.as_str())
+            })
+        })
+        .and_then(|permission| permission.pointer("/permission/recovery_parent"))
+        .filter(|value| !value.is_null());
+    let Some(recovery_value) = recovery_value else {
+        return Ok(None);
+    };
+    let recovery: fin_domain::financial_plans::FinancialPlanRecoveryParent =
+        serde_json::from_value(recovery_value.clone())?;
+    let record: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+        serde_json::from_value(expected_plan.clone())?;
+    if record.revision.plan_id != plan_id || record.revision.revision_id != revision_id {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_plan_revision_mismatch",
+        });
+    }
+    let child_raw: String = tx.query_row(
+        "SELECT record_json FROM operations WHERE id=?1",
+        [operation_id],
+        |row| row.get(0),
+    )?;
+    let child: fin_domain::OperationRecord = serde_json::from_str(&child_raw)?;
+    // A plan recovery child may intentionally omit the parent fields from its
+    // public input. The adapter resolves them from the earlier approved step
+    // and records the resolved identity in its immutable prepared binding. Use
+    // that broker-validated binding here; never require a user-supplied copy.
+    let child_binding = child
+        .preview
+        .as_ref()
+        .map(|preview| &preview.binding)
+        .ok_or(StoreError::ConcurrentReservationAt {
+            reason: "recovery_child_prepared_binding_missing",
+        })?;
+    let parent_id = child_binding
+        .pointer(&recovery.operation_id_pointer)
+        .and_then(Value::as_str)
+        .ok_or(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_operation_binding_missing",
+        })?
+        .to_owned();
+    let parent_submission: fin_domain::Submission = serde_json::from_value(
+        child_binding
+            .pointer(&recovery.submission_pointer)
+            .cloned()
+            .ok_or(StoreError::ConcurrentReservationAt {
+                reason: "recovery_parent_submission_binding_missing",
+            })?,
+    )?;
+    if !record.attempts.iter().any(|attempt| {
+        attempt.attempt_id == parent_id
+            && attempt.step_id == recovery.step_id
+            && attempt.revision_id == revision_id
+    }) {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_not_declared_in_plan_attempts",
+        });
+    }
+    if !stored_recovery_chain_is_contiguous(expected_plan, &recovery.step_id, &child_step_id) {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    let parent_linkage: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT revision_id,step_id,candidate_state FROM financial_plan_attempts WHERE plan_id=?1 AND operation_id=?2",
+            params![plan_id, parent_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((parent_revision, parent_step, parent_candidate_state)) = parent_linkage else {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_attempt_linkage_missing",
+        });
+    };
+    if parent_revision != revision_id || parent_step != recovery.step_id {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_attempt_linkage_mismatch",
+        });
+    }
+    let parent_raw: String = tx.query_row(
+        "SELECT record_json FROM operations WHERE id=?1",
+        [&parent_id],
+        |row| row.get(0),
+    )?;
+    let parent: fin_domain::OperationRecord = serde_json::from_str(&parent_raw)?;
+    if parent.submission.as_ref() != Some(&parent_submission) {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_submission_mismatch",
+        });
+    }
+    if !stored_recovery_prefix_is_completed_tx(
+        tx,
+        plan_id,
+        &revision_id,
+        expected_plan,
+        &recovery.step_id,
+        &parent_id,
+        &child_step_id,
+    )? {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_chain_prefix_incomplete",
+        });
+    }
+    let parent_binding = parent
+        .preview
+        .as_ref()
+        .map(|preview| &preview.binding)
+        .ok_or(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_prepared_binding_missing",
+        })?;
+    for field in &recovery.parent_binding_fields {
+        if child_binding.pointer(&field.child_input_pointer)
+            != parent_binding.pointer(&field.parent_binding_pointer)
+        {
+            return Err(StoreError::ConcurrentReservationAt {
+                reason: "recovery_parent_binding_fields_mismatch",
+            });
+        }
+    }
+    let parent_unresolved = matches!(
+        parent.status,
+        fin_domain::Status::Submitted | fin_domain::Status::Pending | fin_domain::Status::Unknown
+    );
+    let child_has_durable_submission = child.submission.is_some()
+        && matches!(
+            child.status,
+            fin_domain::Status::Submitted
+                | fin_domain::Status::Pending
+                | fin_domain::Status::Unknown
+                | fin_domain::Status::Completed
+                | fin_domain::Status::Failed
+                | fin_domain::Status::Cancelled
+        );
+    if (parent_unresolved && parent_candidate_state != "unresolved")
+        || (!parent_unresolved
+            && (parent_candidate_state == "unresolved" || !child_has_durable_submission))
+        || (parent_unresolved && record.active_attempt_id.as_deref() != Some(parent_id.as_str()))
+        || (!parent_unresolved
+            && record.active_attempt_id.as_deref() != Some(parent_id.as_str())
+            && record.active_attempt_id.is_some())
+    {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_parent_or_child_attempt_state_changed",
+        });
+    }
+    let unresolved: Vec<String> = {
+        let mut statement = tx.prepare("SELECT operation_id FROM financial_plan_attempts WHERE plan_id=?1 AND candidate_state='unresolved'")?;
+        statement
+            .query_map([plan_id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<String>, _>>()?
+    };
+    if (parent_unresolved
+        && (unresolved.len() != 2
+            || !unresolved.iter().any(|id| id == &parent_id)
+            || !unresolved.iter().any(|id| id == operation_id)))
+        || (!parent_unresolved
+            && (unresolved.len() != 1
+                || unresolved.first().map(String::as_str) != Some(operation_id)))
+    {
+        return Err(StoreError::ConcurrentReservationAt {
+            reason: "recovery_attempt_set_changed",
+        });
+    }
+    Ok(Some(parent_id))
+}
+
+fn ensure_unresolved_plan_recovery_parent_tx(
+    tx: &Transaction<'_>,
+    plan_id: &str,
+    revision_id: &str,
+    parent_id: &str,
+    parent_step_id: &str,
+) -> Result<()> {
+    let linkage: Option<(String, String)> = tx
+        .query_row(
+            "SELECT revision_id,step_id FROM financial_plan_attempts WHERE plan_id=?1 AND operation_id=?2 AND candidate_state='unresolved'",
+            params![plan_id, parent_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((stored_revision, stored_step)) = linkage else {
+        return Err(StoreError::ConcurrentReservation);
+    };
+    if stored_revision != revision_id || stored_step != parent_step_id {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    let raw: Option<String> = tx
+        .query_row(
+            "SELECT record_json FROM operations WHERE id=?1",
+            [parent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Err(StoreError::ConcurrentReservation);
+    };
+    let parent: fin_domain::OperationRecord = serde_json::from_str(&raw)?;
+    if !matches!(
+        parent.status,
+        fin_domain::Status::Submitted | fin_domain::Status::Pending | fin_domain::Status::Unknown
+    ) || parent.submission.is_none()
+    {
+        return Err(StoreError::ConcurrentReservation);
+    }
+    Ok(())
 }
 
 fn json_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -7964,6 +10004,706 @@ mod tests {
         value
     }
 
+    #[test]
+    fn prepared_binding_lookup_is_exact_and_operation_scoped() {
+        let mut store = Store::in_memory().unwrap();
+        let mut parent = ordinary_request(&mut store, "trigger-placement");
+        parent["operation"] = json!("jupiter.trigger.create");
+        parent["preview"] = json!({"binding":{
+            "wallet_address":"wallet-address",
+            "order_key":"order-account"
+        }});
+        store
+            .update_record("trigger-placement", &parent, "t1-prepared")
+            .unwrap();
+
+        let matches = store
+            .operations_by_prepared_binding(
+                "jupiter.trigger.create",
+                "/preview/binding/order_key",
+                &json!("order-account"),
+            )
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0]["id"], "trigger-placement");
+        assert!(
+            store
+                .operations_by_prepared_binding(
+                    "jupiter.trigger.create",
+                    "/preview/binding/order_key",
+                    &json!("another-order"),
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .operations_by_prepared_binding(
+                    "jupiter.trigger.cancel",
+                    "/preview/binding/order_key",
+                    &json!("order-account"),
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn amendment_shares_only_exact_parent_position_lock() {
+        let mut store = Store::in_memory().unwrap();
+        let mut parent = ordinary_request(&mut store, "limit-create-parent");
+        parent["operation"] = json!("jupiter.perps.limit.create");
+        parent["preview"] = json!({
+            "binding":{"request":"request-pda"},
+            "intent":{"locks":["wallet", "position:request-pda"]}
+        });
+        store
+            .update_record("limit-create-parent", &parent, "t1-prepared")
+            .unwrap();
+        let parent_rows = [ReservationRow {
+            resource: "lock:position:request-pda".into(),
+            units: "0".into(),
+            fee_units: "0".into(),
+        }];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation(
+                "limit-create-parent",
+                &parent_rows,
+                &parent,
+                &snapshot,
+                "t1-reserved",
+            )
+            .unwrap();
+        let parent_submission = SubmissionRow {
+            kind: "synthetic_tx".into(),
+            reference: "request-create-signature".into(),
+            data: json!({"message":"immutable"}),
+        };
+        store
+            .persist_submission("limit-create-parent", &parent_submission, "t2-submit")
+            .unwrap();
+        let mut parent = store.get_record("limit-create-parent").unwrap().unwrap();
+        parent["status"] = json!("pending");
+        store
+            .update_record("limit-create-parent", &parent, "t3-open")
+            .unwrap();
+
+        let mut child = ordinary_request(&mut store, "limit-update-child");
+        child["operation"] = json!("jupiter.perps.limit.update");
+        child["preview"] = json!({
+            "binding":{
+                "request":"request-pda",
+                "__fin_amendment":{
+                    "version":1,
+                    "parent_operation_id":"limit-create-parent",
+                    "parent_submission":parent["submission"],
+                    "request_id":"request-pda",
+                    "shared_locks":["position:request-pda"]
+                }
+            },
+            "intent":{"locks":["wallet", "position:request-pda"], "debits":[], "maximum_costs":[]}
+        });
+        let child_rows = [
+            ReservationRow {
+                resource: "lock:wallet".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:position:request-pda".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_links_and_cash_capacities(
+                "limit-update-child",
+                &child_rows,
+                &child,
+                &snapshot,
+                "t4-update-reserved",
+                None,
+                None,
+                None,
+                Some("limit-create-parent"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store.reservations("limit-create-parent").unwrap(),
+            parent_rows
+        );
+        assert_eq!(store.reservations("limit-update-child").unwrap(), {
+            let mut expected = child_rows.to_vec();
+            expected.sort_by(|left, right| left.resource.cmp(&right.resource));
+            expected
+        });
+
+        let mut second_child = ordinary_request(&mut store, "second-limit-update-child");
+        second_child["operation"] = json!("jupiter.perps.limit.update");
+        second_child["preview"] = child["preview"].clone();
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_links_and_cash_capacities(
+                "second-limit-update-child",
+                &child_rows,
+                &second_child,
+                &snapshot,
+                "t4b-second-child",
+                None,
+                None,
+                None,
+                Some("limit-create-parent"),
+                &[],
+            ),
+            Err(StoreError::ConcurrentReservationAt {
+                reason: "reservation_row_held"
+            })
+        ));
+
+        let mut expanded = ordinary_request(&mut store, "expanded-limit-update-child");
+        expanded["operation"] = json!("jupiter.perps.limit.update");
+        expanded["preview"] = child["preview"].clone();
+        expanded["preview"]["binding"]["__fin_amendment"]["shared_locks"] =
+            json!(["position:request-pda", "position:unrelated"]);
+        expanded["preview"]["intent"]["locks"] =
+            json!(["wallet", "position:request-pda", "position:unrelated"]);
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_links_and_cash_capacities(
+                "expanded-limit-update-child",
+                &child_rows,
+                &expanded,
+                &snapshot,
+                "t4c-expanded-child",
+                None,
+                None,
+                None,
+                Some("limit-create-parent"),
+                &[],
+            ),
+            Err(StoreError::ReservationConflict)
+        ));
+
+        let mut unrelated = ordinary_request(&mut store, "unrelated-position-write");
+        unrelated["preview"] = json!({"intent":{"locks":["position:request-pda"]}});
+        let conflicting = [ReservationRow {
+            resource: "lock:position:request-pda".into(),
+            units: "0".into(),
+            fee_units: "0".into(),
+        }];
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation(
+                "unrelated-position-write",
+                &conflicting,
+                &unrelated,
+                &snapshot,
+                "t5-unrelated",
+            ),
+            Err(StoreError::ConcurrentReservationAt {
+                reason: "reservation_row_held"
+            })
+        ));
+
+        let mut forged = ordinary_request(&mut store, "forged-amendment");
+        forged["preview"] = child["preview"].clone();
+        forged["preview"]["binding"]["__fin_amendment"]["parent_submission"]["reference"] =
+            json!("different-signature");
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_links_and_cash_capacities(
+                "forged-amendment",
+                &child_rows,
+                &forged,
+                &snapshot,
+                "t6-forged",
+                None,
+                None,
+                None,
+                Some("limit-create-parent"),
+                &[],
+            ),
+            Err(StoreError::ReservationConflict)
+        ));
+    }
+
+    fn protected_request_record(
+        id: &str,
+        request: &str,
+        direction: fin_domain::PendingRequestTriggerDirection,
+        protection_parent: Option<Value>,
+        open: bool,
+    ) -> (Value, Vec<ReservationRow>) {
+        let wallet = fin_domain::ResourceId("solana:mainnet-beta:wallet:protection-test".into());
+        let request_resource =
+            fin_domain::ResourceId(format!("solana:mainnet-beta:request:{request}"));
+        let anchor = fin_domain::PositionAnchor {
+            resource: wallet.clone(),
+            position: "verified-position-pda".into(),
+            position_kind: fin_domain::PositionKind::DerivativeLong,
+            principal: fin_domain::Amount {
+                asset: fin_domain::AssetId {
+                    network: "solana:mainnet-beta".into(),
+                    reference: "jupiter:position-usd:btc".into(),
+                    decimals: 6,
+                },
+                atoms: fin_domain::Quantity::new("100").unwrap(),
+            },
+            scaled_receipt: None,
+            evidence_version: 1,
+            evidence: json!({"slot":if open {100} else {101}}),
+            observed_at: if open {
+                "2026-10-12T10:00:00Z"
+            } else {
+                "2026-10-12T10:01:00Z"
+            }
+            .into(),
+        };
+        let protection = fin_domain::PendingRequestProtection {
+            position_anchor: anchor,
+            position_lock_resource: fin_domain::ResourceId("position:verified-position-pda".into()),
+            maximum_reduction: fin_domain::Quantity::new("100").unwrap(),
+            trigger_direction: direction,
+            trigger_price: fin_domain::Amount {
+                asset: fin_domain::AssetId {
+                    network: "solana:mainnet-beta".into(),
+                    reference: "jupiter:margin-usd".into(),
+                    decimals: 6,
+                },
+                atoms: fin_domain::Quantity::new(
+                    if direction == fin_domain::PendingRequestTriggerDirection::Above {
+                        "120"
+                    } else {
+                        "80"
+                    },
+                )
+                .unwrap(),
+            },
+            reduce_only: true,
+        };
+        let request_kind = "jupiter-perps-tpsl-tp";
+        let constraint = fin_domain::EffectConstraint::PendingRequestLifecycle {
+            wallet_resource: wallet.clone(),
+            request_resource: request_resource.clone(),
+            request_id: request.into(),
+            request_kind: request_kind.into(),
+            conditional_positions: vec![fin_domain::PendingRequestPositionBound {
+                resource: wallet.clone(),
+                position: "verified-position-pda".into(),
+                position_kind: fin_domain::PositionKind::DerivativeLong,
+                asset: protection.position_anchor.principal.asset.clone(),
+                minimum_delta: fin_domain::SignedQuantity::new("-100").unwrap(),
+                maximum_delta: fin_domain::SignedQuantity::new("0").unwrap(),
+            }],
+            conditional_credits: vec![],
+            conditional_pnl: vec![],
+            protection: Some(protection.clone()),
+        };
+        let submission = fin_domain::Submission {
+            kind: "synthetic_tx".into(),
+            reference: format!("signature-{id}"),
+            data: json!({"message":id}),
+        };
+        let effect = fin_domain::FinancialEffect::PendingRequestProgress {
+            wallet_resource: wallet.clone(),
+            request_resource: request_resource.clone(),
+            request_id: request.into(),
+            request_kind: request_kind.into(),
+            state: fin_domain::PendingRequestState::Open,
+            positions: vec![],
+            credits: vec![],
+            realized_pnl: vec![],
+            protection: Some(protection.clone()),
+        };
+        let mut record = json!({
+            "id":id,
+            "request_id":format!("request-{id}"),
+            "fingerprint":format!("fingerprint-{id}"),
+            "fingerprint_version":1,
+            "operation":"jupiter.perps.tpsl.create",
+            "input":{},
+            "status":if open {"pending"} else {"awaiting_approval"},
+            "created_at":"t0",
+            "updated_at":"t1",
+            "preview":{
+                "binding":{"request":request,"protection":protection},
+                "intent":{
+                    "expected":[constraint],
+                    "locks":[wallet,request_resource,"position:verified-position-pda"],
+                    "debits":[],"maximum_costs":[]
+                }
+            },
+            "approval":null,
+            "submission":if open {serde_json::to_value(&submission).unwrap()} else {Value::Null},
+            "effects":if open {serde_json::to_value(fin_domain::VerifiedEffects {
+                evidence_version:1,
+                submission:submission.clone(),
+                effects:vec![effect],
+                evidence:json!({"settlement_progress":{"version":1,"sequence":1,"snapshot_id":format!("open-{request}"),"event_digests":{"open":"digest"}}}),
+                observed_at:"2026-10-12T10:00:00Z".into(),
+                proof_digest:"synthetic-proof".into(),
+            }).unwrap()} else {Value::Null},
+            "last_reconciliation_evidence":null,
+            "error":null,
+            "run_id":null
+        });
+        if let Some(link) = protection_parent {
+            record["preview"]["binding"]["__fin_protection_parent"] = link;
+        }
+        if open {
+            let mut verified =
+                serde_json::from_value::<fin_domain::VerifiedEffects>(record["effects"].clone())
+                    .unwrap();
+            verified.proof_digest = fin_domain::verified_effect_digest(&verified).unwrap();
+            record["effects"] = serde_json::to_value(verified).unwrap();
+        }
+        let mut rows = vec![
+            ReservationRow {
+                resource: format!("lock:solana:mainnet-beta:request:{request}"),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:position:verified-position-pda".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        if !open {
+            rows.push(ReservationRow {
+                resource: "lock:solana:mainnet-beta:wallet:protection-test".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            });
+        }
+        (record, rows)
+    }
+
+    #[test]
+    fn protection_pair_requires_finalized_open_parent_and_leases_only_one_position_lock() {
+        let mut store = Store::in_memory().unwrap();
+        let (mut parent, mut parent_rows) = protected_request_record(
+            "protection-parent",
+            "request-one",
+            fin_domain::PendingRequestTriggerDirection::Above,
+            None,
+            true,
+        );
+        let open_effects = parent["effects"].clone();
+        let submission_value = parent["submission"].clone();
+        parent["status"] = json!("awaiting_approval");
+        parent["submission"] = Value::Null;
+        parent["effects"] = Value::Null;
+        parent_rows.push(ReservationRow {
+            resource: "lock:solana:mainnet-beta:wallet:protection-test".into(),
+            units: "0".into(),
+            fee_units: "0".into(),
+        });
+        ordinary_request(&mut store, "protection-parent");
+        store
+            .update_record("protection-parent", &parent, "t1-parent")
+            .unwrap();
+        let parent_snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation(
+                "protection-parent",
+                &parent_rows,
+                &parent,
+                &parent_snapshot,
+                "t2-reserved",
+            )
+            .unwrap();
+        let parent_submission =
+            serde_json::from_value::<fin_domain::Submission>(submission_value).unwrap();
+        store
+            .persist_submission(
+                "protection-parent",
+                &SubmissionRow {
+                    kind: parent_submission.kind.clone(),
+                    reference: parent_submission.reference.clone(),
+                    data: parent_submission.data.clone(),
+                },
+                "t3-submitted",
+            )
+            .unwrap();
+        parent = store.get_record("protection-parent").unwrap().unwrap();
+        parent["status"] = json!("pending");
+        parent["effects"] = open_effects.clone();
+        let proof = open_effects;
+        let progress = ProgressSettlement {
+            operation_id: "protection-parent".into(),
+            record: parent,
+            proof: proof.clone(),
+            effects: proof["effects"].clone(),
+            reservations: parent_rows
+                .into_iter()
+                .filter(|row| !row.resource.ends_with("wallet:protection-test"))
+                .collect(),
+            run_id: None,
+            run_record: None,
+            boundary_id: None,
+            expected_boundary: None,
+            boundary_record: None,
+            plan_id: None,
+            expected_plan: None,
+            plan_record: None,
+        };
+        store
+            .commit_progress_settlement(&progress, "t4-open")
+            .unwrap();
+        parent = store.get_record("protection-parent").unwrap().unwrap();
+
+        let link_for = |parent_record: &Value, shared: &str| {
+            json!({
+                "version":1,
+                "parent_operation_id":"protection-parent",
+                "parent_submission":parent_record["submission"],
+                "parent_request_id":"request-one",
+                "shared_locks":[shared]
+            })
+        };
+        let reject_candidate = |store: &mut Store, id: &str, request: &str, link: Value| {
+            let (mut candidate, rows) = protected_request_record(
+                id,
+                request,
+                fin_domain::PendingRequestTriggerDirection::Below,
+                Some(link),
+                false,
+            );
+            ordinary_request(store, id);
+            candidate["status"] = json!("awaiting_approval");
+            store
+                .update_record(id, &candidate, "t-rejected-candidate")
+                .unwrap();
+            let snapshot = store.list_records().unwrap();
+            assert!(matches!(
+                store.persist_operation_reservation_with_protection_parent(
+                    id,
+                    &rows,
+                    &candidate,
+                    &snapshot,
+                    "t-rejected-reservation",
+                    "protection-parent",
+                    &[],
+                ),
+                Err(StoreError::ReservationConflict)
+            ));
+            let mut failed = store.get_record(id).unwrap().unwrap();
+            failed["status"] = json!("failed");
+            store
+                .update_record(id, &failed, "t-rejected-candidate-failed")
+                .unwrap();
+        };
+
+        let pristine_parent = parent.clone();
+        parent["effects"]["proof_digest"] = json!("tampered-proof-digest");
+        store
+            .update_record("protection-parent", &parent, "t-tampered-parent")
+            .unwrap();
+        reject_candidate(
+            &mut store,
+            "protection-bad-proof",
+            "request-bad-proof",
+            link_for(&pristine_parent, "position:verified-position-pda"),
+        );
+        store
+            .update_record("protection-parent", &pristine_parent, "t-restored-parent")
+            .unwrap();
+        reject_candidate(
+            &mut store,
+            "protection-wrong-lock",
+            "request-wrong-lock",
+            link_for(&pristine_parent, "position:unrelated-position"),
+        );
+
+        let link = link_for(&parent, "position:verified-position-pda");
+        let (mut child, child_rows) = protected_request_record(
+            "protection-child",
+            "request-two",
+            fin_domain::PendingRequestTriggerDirection::Below,
+            Some(link.clone()),
+            false,
+        );
+        ordinary_request(&mut store, "protection-child");
+        child["status"] = json!("awaiting_approval");
+        store
+            .update_record("protection-child", &child, "t5-child")
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_protection_parent(
+                "protection-child",
+                &child_rows,
+                &child,
+                &snapshot,
+                "t6-child-reserved",
+                "protection-parent",
+                &[],
+            )
+            .unwrap();
+
+        let shared_position = ReservationRow {
+            resource: "lock:position:verified-position-pda".into(),
+            units: "0".into(),
+            fee_units: "0".into(),
+        };
+        {
+            let tx = store
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert!(
+                validate_progress_reservations(
+                    &tx,
+                    "protection-child",
+                    std::slice::from_ref(&shared_position),
+                )
+                .is_ok()
+            );
+            assert!(
+                validate_progress_reservations(
+                    &tx,
+                    "protection-parent",
+                    std::slice::from_ref(&shared_position),
+                )
+                .is_ok()
+            );
+            assert!(
+                !valid_protection_pair_tx(
+                    &tx,
+                    "protection-child",
+                    "protection-parent",
+                    "lock:solana:mainnet-beta:request:request-one",
+                )
+                .unwrap()
+            );
+            assert!(
+                !valid_protection_pair_tx(
+                    &tx,
+                    "protection-child",
+                    "protection-parent",
+                    "cash:solana:mainnet-beta:wallet:protection-test:native",
+                )
+                .unwrap()
+            );
+            assert!(matches!(
+                validate_progress_reservations(&tx, "unrelated-third", &[shared_position]),
+                Err(StoreError::ConcurrentReservation)
+            ));
+        }
+
+        // A second competing sibling cannot reuse the exact parent lease.
+        let (mut child_two, child_two_rows) = protected_request_record(
+            "protection-child-two",
+            "request-three",
+            fin_domain::PendingRequestTriggerDirection::Below,
+            Some(link),
+            false,
+        );
+        ordinary_request(&mut store, "protection-child-two");
+        child_two["status"] = json!("awaiting_approval");
+        store
+            .update_record("protection-child-two", &child_two, "t7-child-two")
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_protection_parent(
+                "protection-child-two",
+                &child_two_rows,
+                &child_two,
+                &snapshot,
+                "t8-conflict",
+                "protection-parent",
+                &[],
+            ),
+            Err(StoreError::ReservationConflict)
+        ));
+    }
+
+    #[test]
+    fn linked_update_of_second_protection_member_shares_only_exact_position_lock() {
+        let store = Store::in_memory().unwrap();
+        let (mut first, first_rows) = protected_request_record(
+            "protection-first",
+            "request-first",
+            fin_domain::PendingRequestTriggerDirection::Above,
+            None,
+            true,
+        );
+        let first_submission = first["submission"].clone();
+        let link = json!({
+            "version":1,
+            "parent_operation_id":"protection-first",
+            "parent_submission":first_submission,
+            "parent_request_id":"request-first",
+            "shared_locks":["position:verified-position-pda"]
+        });
+        let (second, second_rows) = protected_request_record(
+            "protection-second",
+            "request-second",
+            fin_domain::PendingRequestTriggerDirection::Below,
+            Some(link),
+            true,
+        );
+        let (mut update, _) = protected_request_record(
+            "update-second",
+            "request-second",
+            fin_domain::PendingRequestTriggerDirection::Below,
+            None,
+            false,
+        );
+        first["status"] = json!("pending");
+        update["operation"] = json!("jupiter.perps.tpsl.update");
+        update["preview"]["binding"]["__fin_amendment"] = json!({
+            "version":1,
+            "parent_operation_id":"protection-second",
+            "parent_submission":second["submission"],
+            "request_id":"request-second"
+        });
+        for record in [&first, &second, &update] {
+            let id = record["id"].as_str().unwrap();
+            store.conn.execute(
+                "INSERT INTO operations(id,request_id,fingerprint,operation,status,run_id,record_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,NULL,?6,'t0','t1')",
+                params![id, record["request_id"].as_str().unwrap(), record["fingerprint"].as_str().unwrap(), record["operation"].as_str().unwrap(), record["status"].as_str().unwrap(), record.to_string()],
+            ).unwrap();
+        }
+        for (id, rows) in [
+            ("protection-first", &first_rows),
+            ("protection-second", &second_rows),
+        ] {
+            for row in rows {
+                store.conn.execute(
+                    "INSERT INTO reservations(operation_id,resource,units,fee_units) VALUES(?1,?2,?3,?4)",
+                    params![id, row.resource, row.units, row.fee_units],
+                ).unwrap();
+            }
+        }
+        let tx = store.conn.unchecked_transaction().unwrap();
+        assert!(
+            valid_linked_protection_sibling_overlap_tx(
+                &tx,
+                &update,
+                "protection-second",
+                "protection-first",
+                "lock:position:verified-position-pda",
+            )
+            .unwrap()
+        );
+        assert!(
+            !valid_linked_protection_sibling_overlap_tx(
+                &tx,
+                &update,
+                "protection-second",
+                "protection-first",
+                "lock:solana:mainnet-beta:request:request-second",
+            )
+            .unwrap()
+        );
+    }
+
     fn ordinary_reservation(resource: &str) -> ReservationRow {
         ReservationRow {
             resource: resource.into(),
@@ -8411,6 +11151,351 @@ mod tests {
     }
 
     #[test]
+    fn fee_bearing_cancellation_only_overlaps_parent_lock_and_is_idempotent() {
+        let mut store = Store::in_memory().unwrap();
+        let native_resource_key = serde_json::to_string(&(
+            "wallet-a",
+            fin_domain::AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "SOL".into(),
+                decimals: 9,
+            },
+        ))
+        .unwrap();
+        let mut parent = ordinary_request(&mut store, "parent");
+        let input_asset = json!({"network":"solana:mainnet-beta","reference":"USDC","decimals":6});
+        parent["preview"] = json!({"intent":{
+            "locks":["wallet-a","escrow-a"],
+            "debits":[],
+            "maximum_costs":[],
+            "expected":[{"kind":"escrow_lifecycle","wallet_resource":"wallet-a","escrow_resource":"escrow-a","input_asset":input_asset,"output_asset":{"network":"solana:mainnet-beta","reference":"SOL","decimals":9},"maximum_wallet_debit":"100","minimum_output_per_input_numerator":"1","minimum_output_per_input_denominator":"1"}]
+        }});
+        store.update_record("parent", &parent, "t1").unwrap();
+        let snapshot = store.list_records().unwrap();
+        let parent_rows = [
+            ReservationRow {
+                resource: "lock:escrow-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: native_resource_key.clone(),
+                units: "10000".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        store
+            .persist_operation_reservation("parent", &parent_rows, &parent, &snapshot, "t2")
+            .unwrap();
+        let submission = SubmissionRow {
+            kind: "synthetic_tx".into(),
+            reference: "parent-signature".into(),
+            data: json!({"blockhash":"synthetic"}),
+        };
+        store
+            .persist_submission("parent", &submission, "t3")
+            .unwrap();
+        let mut pending_parent = store.get_record("parent").unwrap().unwrap();
+        pending_parent["status"] = json!("pending");
+        pending_parent["effects"] = json!({"effects":[{
+            "kind":"escrow_progress",
+            "wallet_resource":"wallet-a",
+            "escrow_resource":"escrow-a",
+            "input_asset":input_asset,
+            "output_asset":{"network":"solana:mainnet-beta","reference":"SOL","decimals":9},
+            "wallet_debit":"100",
+            "escrow_deposit":"100",
+            "input_transfer_fee":"0",
+            "input_filled":"0",
+            "output_filled":"0",
+            "input_refunded":"0",
+            "remaining_input":"100",
+            "state":"open"
+        }]});
+        store
+            .update_record("parent", &pending_parent, "t3-progress")
+            .unwrap();
+
+        let mut child = ordinary_request(&mut store, "cancel-child");
+        let cancellation = json!({"kind":"submission_cancellation","operation_id":"parent","submission":{"kind":submission.kind,"reference":submission.reference,"data":submission.data}});
+        child["preview"] = json!({"intent":{
+            "locks":["wallet-a","escrow-a"],
+            "debits":[],
+            "maximum_costs":[{"location":{"kind":"cash","resource":"wallet-a"},"amount":{"asset":{"network":"solana:mainnet-beta","reference":"SOL","decimals":9},"atoms":"5000"},"treatment":"additional_debit"}],
+            "expected":[cancellation]
+        }});
+        let child_rows = [
+            ReservationRow {
+                resource: "lock:wallet-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:escrow-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: native_resource_key.clone(),
+                units: "5000".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        let allowed_keys = cancellation_parent_reservation_keys(&child).unwrap();
+        assert!(
+            allowed_keys.contains(&native_resource_key),
+            "{allowed_keys:?} != {native_resource_key}"
+        );
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_cancellation_parent(
+                "cancel-child",
+                &child_rows,
+                &child,
+                &snapshot,
+                "t4",
+                "parent",
+            )
+            .unwrap();
+        let parent_rows_after = store.reservations("parent").unwrap();
+        assert_eq!(parent_rows_after.len(), parent_rows.len());
+        let child_rows_after = store.reservations("cancel-child").unwrap();
+        assert_eq!(child_rows_after.len(), child_rows.len());
+        assert!(
+            !parent_rows_after
+                .iter()
+                .any(|row| row.resource == "lock:wallet-a")
+        );
+        assert!(
+            parent_rows_after
+                .iter()
+                .any(|row| row.resource == "lock:escrow-a")
+        );
+        assert!(parent_rows_after.iter().any(|row| row.units == "10000"));
+        assert!(child_rows_after.iter().any(|row| row.units == "5000"));
+
+        let mut duplicate = ordinary_request(&mut store, "cancel-duplicate");
+        duplicate["preview"] = child["preview"].clone();
+        let mut duplicate_rows = child_rows.clone();
+        duplicate_rows[2].resource = "wallet-a:SOL:other".into();
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_cancellation_parent(
+                "cancel-duplicate",
+                &duplicate_rows,
+                &duplicate,
+                &snapshot,
+                "t5",
+                "parent"
+            ),
+            Err(StoreError::ReservationConflict)
+        ));
+        assert_eq!(store.reservation_count("parent").unwrap(), 2);
+        assert_eq!(store.reservation_count("cancel-child").unwrap(), 3);
+        assert_eq!(store.reservation_count("cancel-duplicate").unwrap(), 0);
+    }
+
+    #[test]
+    fn cancellation_parent_may_release_only_wallet_lock_after_verified_open_request() {
+        let mut store = Store::in_memory().unwrap();
+        let wallet = fin_domain::ResourceId("wallet-a".into());
+        let request = fin_domain::ResourceId("request-a".into());
+        let position_resource = wallet.clone();
+        let position = "position-a".to_owned();
+        let asset = fin_domain::AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "margin-usd".into(),
+            decimals: 6,
+        };
+        let bound = fin_domain::PendingRequestPositionBound {
+            resource: position_resource.clone(),
+            position: position.clone(),
+            position_kind: fin_domain::PositionKind::DerivativeLong,
+            asset: asset.clone(),
+            minimum_delta: fin_domain::SignedQuantity::new("0").unwrap(),
+            maximum_delta: fin_domain::SignedQuantity::new("0").unwrap(),
+        };
+        let constraint = fin_domain::EffectConstraint::PendingRequestLifecycle {
+            wallet_resource: wallet.clone(),
+            request_resource: request.clone(),
+            request_id: "request-a".into(),
+            request_kind: "tpsl".into(),
+            conditional_positions: vec![bound],
+            conditional_credits: Vec::new(),
+            conditional_pnl: Vec::new(),
+            protection: None,
+        };
+        let mut parent = ordinary_request(&mut store, "pending-request-parent");
+        parent["operation"] = json!("jupiter.perps.tpsl.create");
+        parent["preview"] = json!({
+            "binding":{"request":"request-a"},
+            "intent":{
+                "locks":["wallet-a","request-a","position-a"],
+                "debits":[],
+                "maximum_costs":[],
+                "expected":[serde_json::to_value(&constraint).unwrap()]
+            }
+        });
+        store
+            .update_record("pending-request-parent", &parent, "t1-prepared")
+            .unwrap();
+        let parent_rows = [
+            ReservationRow {
+                resource: "lock:request-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:position-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation(
+                "pending-request-parent",
+                &parent_rows,
+                &parent,
+                &snapshot,
+                "t2-reserved",
+            )
+            .unwrap();
+        let submission = fin_domain::Submission {
+            kind: "solana_transaction".into(),
+            reference: "parent-signature".into(),
+            data: json!({"message_sha256":"synthetic-message-hash"}),
+        };
+        store
+            .persist_submission(
+                "pending-request-parent",
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                "t3-submitted",
+            )
+            .unwrap();
+        let mut verified = fin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: submission.clone(),
+            effects: vec![fin_domain::FinancialEffect::PendingRequestProgress {
+                wallet_resource: wallet.clone(),
+                request_resource: request.clone(),
+                request_id: "request-a".into(),
+                request_kind: "tpsl".into(),
+                state: fin_domain::PendingRequestState::Open,
+                // Open proves the request state, not any future conditional
+                // position outcome. Those deltas are only emitted on fill.
+                positions: Vec::new(),
+                credits: Vec::new(),
+                realized_pnl: Vec::new(),
+                protection: None,
+            }],
+            evidence: json!({"synthetic":"request is open"}),
+            observed_at: "2026-01-01T00:00:01Z".into(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = fin_domain::verified_effect_digest(&verified).unwrap();
+        let mut pending = store.get_record("pending-request-parent").unwrap().unwrap();
+        pending["status"] = json!("pending");
+        pending["effects"] = serde_json::to_value(&verified).unwrap();
+        store
+            .update_record("pending-request-parent", &pending, "t4-open")
+            .unwrap();
+
+        let mut child = ordinary_request(&mut store, "pending-request-cancel");
+        child["operation"] = json!("jupiter.perps.tpsl.cancel");
+        child["preview"] = json!({
+            "intent":{
+                "locks":["wallet-a","request-a","position-a"],
+                "debits":[],
+                "maximum_costs":[{
+                    "location":{"kind":"cash","resource":"wallet-a"},
+                    "amount":{"asset":{"network":"solana:mainnet-beta","reference":"SOL","decimals":9},"atoms":"15"},
+                    "treatment":"additional_debit"
+                }],
+                "expected":[{
+                    "kind":"submission_cancellation",
+                    "operation_id":"pending-request-parent",
+                    "submission":serde_json::to_value(&submission).unwrap()
+                }]
+            }
+        });
+        let fee_resource = serde_json::to_string(&(
+            "wallet-a",
+            fin_domain::AssetId {
+                network: "solana:mainnet-beta".into(),
+                reference: "SOL".into(),
+                decimals: 9,
+            },
+        ))
+        .unwrap();
+        let child_rows = [
+            ReservationRow {
+                resource: "lock:wallet-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:request-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:position-a".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: fee_resource,
+                units: "0".into(),
+                fee_units: "15".into(),
+            },
+        ];
+        let mut tampered_parent = pending.clone();
+        tampered_parent["effects"]["proof_digest"] = json!("tampered-digest");
+        store
+            .update_record("pending-request-parent", &tampered_parent, "t5-tampered")
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_cancellation_parent(
+                "pending-request-cancel",
+                &child_rows,
+                &child,
+                &snapshot,
+                "t6-reject-tampered",
+                "pending-request-parent",
+            ),
+            Err(StoreError::ReservationConflict)
+        ));
+        store
+            .update_record("pending-request-parent", &pending, "t7-restored")
+            .unwrap();
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_cancellation_parent(
+                "pending-request-cancel",
+                &child_rows,
+                &child,
+                &snapshot,
+                "t8-cancel-reserved",
+                "pending-request-parent",
+            )
+            .unwrap();
+        assert_eq!(
+            store.reservation_count("pending-request-parent").unwrap(),
+            2
+        );
+        assert_eq!(
+            store.reservation_count("pending-request-cancel").unwrap(),
+            4
+        );
+    }
+
+    #[test]
     fn ordinary_reservation_rejects_stale_policy_snapshot_and_resource_conflicts() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("concurrent.sqlite");
@@ -8434,12 +11519,12 @@ mod tests {
                 &snapshot,
                 "t2"
             ),
-            Err(StoreError::ConcurrentReservation)
+            Err(StoreError::ConcurrentReservation | StoreError::ConcurrentReservationAt { .. })
         ));
         let fresh = second.list_records().unwrap();
         assert!(matches!(
             second.persist_operation_reservation("two", &reservations, &two, &fresh, "t2"),
-            Err(StoreError::ConcurrentReservation)
+            Err(StoreError::ConcurrentReservation | StoreError::ConcurrentReservationAt { .. })
         ));
         assert_eq!(second.reservation_count("two").unwrap(), 0);
         assert_eq!(second.get_record("two").unwrap(), Some(two));
@@ -8520,6 +11605,112 @@ mod tests {
         ));
         assert_eq!(store.reservation_count("ordinary").unwrap(), 0);
         assert_eq!(store.get_record("ordinary").unwrap(), Some(original));
+    }
+
+    #[test]
+    fn cash_capacity_allows_only_atomic_under_balance_overlap_and_keeps_locks_exclusive() {
+        let mut store = Store::in_memory().unwrap();
+        let first = ordinary_request(&mut store, "cash-first");
+        let second = ordinary_request(&mut store, "cash-second");
+        let capacity = [CashReservationCapacity {
+            resource: "wallet-a:USDC".into(),
+            maximum_total_units: "100".into(),
+        }];
+        let first_rows = [
+            ReservationRow {
+                resource: "wallet-a:USDC".into(),
+                units: "60".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:wallet-a:position".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_cash_capacities(
+                "cash-first",
+                &first_rows,
+                &first,
+                &snapshot,
+                "t1",
+                &capacity,
+            )
+            .unwrap();
+
+        let second_rows = [ReservationRow {
+            resource: "wallet-a:USDC".into(),
+            units: "40".into(),
+            fee_units: "0".into(),
+        }];
+        let snapshot = store.list_records().unwrap();
+        store
+            .persist_operation_reservation_with_cash_capacities(
+                "cash-second",
+                &second_rows,
+                &second,
+                &snapshot,
+                "t2",
+                &capacity,
+            )
+            .unwrap();
+
+        let mut third = ordinary_request(&mut store, "cash-third");
+        let third_rows = [ReservationRow {
+            resource: "wallet-a:USDC".into(),
+            units: "1".into(),
+            fee_units: "0".into(),
+        }];
+        let snapshot = store.list_records().unwrap();
+        assert!(matches!(
+            store.persist_operation_reservation_with_cash_capacities(
+                "cash-third",
+                &third_rows,
+                &third,
+                &snapshot,
+                "t3",
+                &capacity,
+            ),
+            Err(StoreError::ConcurrentReservationAt {
+                reason: "cash_capacity_exceeded"
+            })
+        ));
+        assert_eq!(store.reservation_count("cash-third").unwrap(), 0);
+
+        // Cash capacity never weakens separate position/order locks.
+        third["preview"] = json!({"binding":{}});
+        let conflicting = [
+            ReservationRow {
+                resource: "wallet-a:USDC".into(),
+                units: "1".into(),
+                fee_units: "0".into(),
+            },
+            ReservationRow {
+                resource: "lock:wallet-a:position".into(),
+                units: "0".into(),
+                fee_units: "0".into(),
+            },
+        ];
+        let snapshot = store.list_records().unwrap();
+        let lock_capacity = [CashReservationCapacity {
+            resource: "wallet-a:USDC".into(),
+            maximum_total_units: "200".into(),
+        }];
+        assert!(matches!(
+            store.persist_operation_reservation_with_cash_capacities(
+                "cash-third",
+                &conflicting,
+                &third,
+                &snapshot,
+                "t4",
+                &lock_capacity,
+            ),
+            Err(StoreError::ConcurrentReservationAt {
+                reason: "reservation_row_held"
+            })
+        ));
     }
 
     #[test]

@@ -29,6 +29,7 @@ BROKER_REL = Path("target/debug/examples/fin-dev-broker")
 CLI_REL = Path("target/debug/examples/fin-dev")
 START_TIMEOUT = 15.0
 VALID_MODES = {"synthetic", "live"}
+VALID_FIXTURES = {"solana"}
 
 
 class DevError(Exception):
@@ -294,18 +295,23 @@ def build_snapshot(directory: Path) -> tuple[str, Path, Path, str]:
         return build_id, runtime_cli, runtime_broker, identity_for(runtime_broker, runtime_cli)
 
 
-def start(name: str, machine: bool, mode: str = "synthetic") -> dict:
+def start(name: str, machine: bool, mode: str = "synthetic", fixture: str | None = None) -> dict:
     name = validate_name(name)
     if mode not in VALID_MODES:
         raise DevError("DEV_MODE_INVALID", "Choose synthetic or live development mode.", "Retry with `--mode synthetic` or `--mode live`.")
+    if fixture not in {None, *VALID_FIXTURES} or (fixture is not None and mode != "synthetic"):
+        raise DevError("DEV_FIXTURE_INVALID", "Development fixtures are available only in synthetic mode.", "Choose `--fixture solana` with `--mode synthetic`, or omit the fixture.")
     directory = env_dir(name)
     with EnvironmentLock(lock_path(name)):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(directory, 0o700)
         previous = ensure_stopped_or_clear_stale(directory)
         saved_mode = previous.get("mode", "synthetic") if previous else None
+        saved_fixture = previous.get("fixture") if previous else None
         if saved_mode and saved_mode != mode:
             raise DevError("DEV_MODE_MISMATCH", f"Environment {name} is saved in {saved_mode} mode.", "Use its saved mode when starting. Reset a stopped synthetic environment before switching modes; live environments keep their financial history.")
+        if previous and saved_fixture != fixture:
+            raise DevError("DEV_FIXTURE_MISMATCH", f"Environment {name} was created with a different fixture selection.", "Use the same fixture or reset the stopped synthetic environment before changing fixtures.")
         (directory / "logs").mkdir(mode=0o700, exist_ok=True)
         build_id, runtime_cli, runtime_broker, binary_id = build_snapshot(directory)
         runtime_socket = runtime_socket_path(name)
@@ -325,6 +331,7 @@ def start(name: str, machine: bool, mode: str = "synthetic") -> dict:
             "environment_identity": environment_identity,
             "environment_id": environment_id,
             "mode": mode,
+            "fixture": fixture,
             "cli_sha256": hashlib.sha256(runtime_cli.read_bytes()).hexdigest(),
             "broker_sha256": hashlib.sha256(runtime_broker.read_bytes()).hexdigest(),
             "socket": str(runtime_socket),
@@ -347,7 +354,10 @@ def start(name: str, machine: bool, mode: str = "synthetic") -> dict:
         # Runtime accepts these paths only in this development-only executable.
         command = [str(runtime_broker), "--socket", identity["socket"], "--database", identity["database"],
                    "--config", identity["config"], "--identity", environment_identity,
-                   "--build-id", build_id, "--environment-id", environment_id, "--mode", mode]
+                   "--build-id", build_id, "--environment-id", environment_id,
+                   "--environment-name", name, "--mode", mode]
+        if fixture:
+            command.extend(("--fixture", fixture))
         try:
             log_path = directory / "logs" / f"broker-{time.time_ns()}.log"
             owned = start_owned_process(command, log_path=log_path,
@@ -404,9 +414,14 @@ def stop_import_process(process: subprocess.Popen[bytes], timeout: float = 5.0) 
             pass
 
 
-def import_credentials(name: str, file_value: str, discover_identities: bool = False) -> dict:
+def import_credentials(name: str, file_value: str, discover_identities: bool = False,
+                       provider: str | None = None) -> dict:
     """Ask the development-only Rust broker to import a user-selected file."""
     name = validate_name(name)
+    if provider not in {None, "binance", "evm", "solana"}:
+        raise DevError("CREDENTIAL_PROVIDER_INVALID", "The selected credential provider is unsupported.", "Choose binance, evm or solana.")
+    if discover_identities and provider not in {None, "binance"}:
+        raise DevError("CREDENTIAL_PROVIDER_INVALID", "Identity discovery is available only for Binance imports.", "Retry without identity discovery or select the Binance provider.")
     selected_file = credentials_file(file_value)
     directory = env_dir(name)
     with EnvironmentLock(lock_path(name)):
@@ -459,8 +474,11 @@ def import_credentials(name: str, file_value: str, discover_identities: bool = F
             "--database", identity["database"], "--config", identity["config"],
             "--identity", environment_identity, "--build-id", build_id,
             "--environment-id", environment_id, "--mode", "live",
+            "--environment-name", name,
             "--import-credentials", str(selected_file),
         ]
+        if provider:
+            command.extend(("--provider", provider))
         if discover_identities:
             command.append("--discover-identities")
         log_path = directory / "logs" / f"credential-import-{time.time_ns()}.log"
@@ -646,8 +664,12 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("name")
         if action == "start":
             command.add_argument("--mode", choices=sorted(VALID_MODES), default="synthetic")
+            command.add_argument("--fixture", choices=sorted(VALID_FIXTURES),
+                                 help="Select a deterministic, in-memory synthetic adapter rehearsal fixture.")
         elif action == "import":
             command.add_argument("--credentials-file", required=True, metavar="PATH")
+            command.add_argument("--provider", choices=("binance", "evm", "solana"),
+                                 help="Import only credentials for this provider from a mixed .env file.")
             command.add_argument("--discover-identities", action="store_true",
                                  help="Use authenticated read-only Binance calls to discover and verify account identities.")
         if action == "cli":
@@ -663,9 +685,10 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(signum, cancel_signal)
     try:
         if options.action == "start":
-            result = start(options.name, options.json, options.mode)
+            result = start(options.name, options.json, options.mode, options.fixture)
         elif options.action == "import":
-            result = import_credentials(options.name, options.credentials_file, options.discover_identities)
+            result = import_credentials(options.name, options.credentials_file,
+                                        options.discover_identities, options.provider)
         elif options.action == "stop":
             result = stop(options.name)
         elif options.action == "reset":

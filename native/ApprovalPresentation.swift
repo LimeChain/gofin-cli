@@ -852,6 +852,8 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "coingecko": providerName = "CoinGecko"
     case "kraken": providerName = "Kraken"
     case "krakenfutures": providerName = "Kraken Futures"
+    case "solana": providerName = "Solana"
+    case "jupiter": providerName = "Jupiter"
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"

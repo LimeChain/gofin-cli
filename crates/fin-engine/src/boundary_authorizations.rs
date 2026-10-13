@@ -845,6 +845,7 @@ impl Engine {
             approval: None,
             submission: None,
             dispatch_evidence: None,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,

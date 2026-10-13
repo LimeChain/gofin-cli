@@ -139,7 +139,7 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
     def cleanup_envs(self):
         for repo in (self.repo_a, self.repo_b):
             fin_dev.REPO = repo
-            for name in ("alpha", "beta", "machine", "failure", "cancelled", "cancel-import", "live", "live-mode", "live-import"):
+            for name in ("alpha", "beta", "machine", "failure", "cancelled", "cancel-import", "live", "live-mode", "live-import", "solana-rehearsal", "live-fixture"):
                 try:
                     fin_dev.stop(name)
                 except fin_dev.DevError:
@@ -239,6 +239,19 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
         fin_dev.reset("alpha")
         self.assertFalse(alpha_dir.exists())
         self.assertTrue(fin_dev.env_dir("beta").exists())
+
+    def test_solana_fixture_is_synthetic_only_and_bound_to_environment(self):
+        started = fin_dev.start("solana-rehearsal", False, fixture="solana")
+        self.assertEqual(started["status"], "running")
+        metadata = fin_dev.read_environment(fin_dev.env_dir("solana-rehearsal"))
+        self.assertEqual(metadata["fixture"], "solana")
+        fin_dev.stop("solana-rehearsal")
+        with self.assertRaises(fin_dev.DevError) as mismatch:
+            fin_dev.start("solana-rehearsal", False)
+        self.assertEqual(mismatch.exception.code, "DEV_FIXTURE_MISMATCH")
+        with self.assertRaises(fin_dev.DevError) as live:
+            fin_dev.start("live-fixture", False, mode="live", fixture="solana")
+        self.assertEqual(live.exception.code, "DEV_FIXTURE_INVALID")
 
     def test_unavailable_mismatch_and_cross_worktree_routing_fail_closed(self):
         self.start_at(self.repo_a, "alpha")
@@ -418,6 +431,7 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 code = fin_dev.main(["--json", "import", "live-import",
                                      "--credentials-file", str(credentials),
+                                     "--provider", "binance",
                                      "--discover-identities"])
         self.assertEqual(code, 0)
         self.assertEqual(stderr.getvalue(), "")
@@ -425,6 +439,8 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
         self.assertEqual(len(imports), 2)
         self.assertNotIn("--discover-identities", imports[0])
         self.assertIn("--discover-identities", imports[1])
+        self.assertIn("--provider", imports[1])
+        self.assertEqual(imports[1][imports[1].index("--provider") + 1], "binance")
         self.assertNotIn("fixture-key", repr(imports))
 
     def test_live_import_cancellation_is_machine_safe_and_stops_owned_child(self):

@@ -184,14 +184,16 @@ pub(crate) fn adapters(
     credentials: Arc<dyn BrokerCredentialProvider>,
     prices: Arc<dyn fin_pricing::UsdPriceSource>,
     ethereum: std::collections::BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
+    solana: std::collections::BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
 ) -> Result<Vec<Arc<dyn Adapter>>> {
     let recipient: Option<Arc<dyn fin_kraken::funding::KrakenRecipientVerifier>> =
-        if ethereum.is_empty() {
+        if ethereum.is_empty() && solana.is_empty() {
             None
         } else {
-            Some(Arc::new(KrakenEvmRecipientVerifier::new(
+            Some(Arc::new(KrakenEvmRecipientVerifier::with_solana(
                 config,
                 ethereum.clone(),
+                solana.clone(),
             )?))
         };
     let mut adapters = vec![];
@@ -200,12 +202,13 @@ pub(crate) fn adapters(
         if fin_exchange::ExchangeProfile::connections(profile.as_ref())
             .iter()
             .any(|c| c.provider == "kraken")
-            && !ethereum.is_empty()
+            && (!ethereum.is_empty() || !solana.is_empty())
         {
             adapters.push(
-                Arc::new(crate::kraken_deposit::KrakenEvmDepositAdapter::new(
+                Arc::new(crate::kraken_deposit::KrakenEvmDepositAdapter::with_solana(
                     profile.clone(),
                     ethereum.clone(),
+                    solana.clone(),
                 )) as Arc<dyn Adapter>,
             );
         }
@@ -219,17 +222,25 @@ pub(crate) fn adapters(
 /// Reuses the canonical EVM observer. Kraken metadata supplies an exact route;
 /// configured custody controls whether a received credit enters Fin accounting.
 pub(crate) struct KrakenEvmRecipientVerifier {
-    observer: crate::EthereumPayoutVerifier,
+    observer: Option<crate::EthereumPayoutVerifier>,
     destinations: Vec<fin_binance::EthereumDestination>,
+    solana: std::collections::BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
 }
 impl KrakenEvmRecipientVerifier {
-    pub(crate) fn new(
+    pub(crate) fn with_solana(
         config: &BrokerConfigV2,
         ethereum: std::collections::BTreeMap<u64, Arc<fin_ethereum::EthereumAdapter>>,
+        solana: std::collections::BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
     ) -> Result<Self> {
+        let observer = if ethereum.is_empty() {
+            None
+        } else {
+            Some(crate::EthereumPayoutVerifier::new(ethereum)?)
+        };
         Ok(Self {
-            observer: crate::EthereumPayoutVerifier::new(ethereum)?,
+            observer,
             destinations: crate::configured_binance_destinations(config)?,
+            solana,
         })
     }
 }
@@ -292,7 +303,63 @@ impl fin_kraken::funding::KrakenRecipientVerifier for KrakenEvmRecipientVerifier
         destination_name: Option<&str>,
     ) -> Result<Option<fin_kraken::funding::KrakenDestination>> {
         use fin_binance::BinanceRecipientVerifier;
+        if reviewed_solana_network(network) {
+            let runtime = self.solana.values().next().map(|wallet| wallet.runtime());
+            let Some(runtime) = runtime else {
+                return Ok(None);
+            };
+            let asset =
+                fin_solana::funding::resolve_external_asset(&runtime, coin, contract).await?;
+            if asset.reference != "native"
+                && (coin != "USDC" || asset.reference != fin_solana::funding::MAINNET_USDC_MINT)
+            {
+                return Ok(None);
+            }
+            if let Some(mint) = contract.filter(|mint| !mint.is_empty())
+                && asset.reference != mint
+            {
+                return Ok(None);
+            }
+            let matches = self
+                .solana
+                .values()
+                .filter(|wallet| {
+                    wallet.address() == address
+                        && destination_name.is_none_or(|name| {
+                            wallet
+                                .connections()
+                                .iter()
+                                .any(|c| c.name == name || c.resource.0 == name)
+                        })
+                })
+                .collect::<Vec<_>>();
+            if matches.len() > 1 || (destination_name.is_some() && matches.is_empty()) {
+                return Ok(None);
+            }
+            let destination = matches.first().copied();
+            let address = fin_solana::parse_address(address)?;
+            return Ok(Some(fin_kraken::funding::KrakenDestination {
+                enrolled: destination.is_some(),
+                resource: destination
+                    .map(|wallet| {
+                        fin_domain::ResourceId(format!("solana:mainnet-beta:{}", wallet.address()))
+                    })
+                    .unwrap_or_else(|| {
+                        fin_domain::ResourceId(format!("external:solana:mainnet-beta:{address}"))
+                    }),
+                address,
+                chain_id: 0,
+                network: Some(fin_solana::NETWORK.into()),
+                cluster: Some(fin_solana::CLUSTER.into()),
+                mint: (asset.reference != "native").then(|| asset.reference.clone()),
+                asset,
+                confirmations: 1,
+            }));
+        }
         let Some(chain) = reviewed_chain(network) else {
+            return Ok(None);
+        };
+        let Some(observer) = &self.observer else {
             return Ok(None);
         };
         let matches = self
@@ -309,11 +376,7 @@ impl fin_kraken::funding::KrakenRecipientVerifier for KrakenEvmRecipientVerifier
         }
         let destination = matches.first().copied();
         let canonical = if coin == "XETH" { "ETH" } else { coin };
-        let Some(asset) = self
-            .observer
-            .resolve_asset(chain, canonical, contract)
-            .await?
-        else {
+        let Some(asset) = observer.resolve_asset(chain, canonical, contract).await? else {
             return Ok(None);
         };
         Ok(Some(fin_kraken::funding::KrakenDestination {
@@ -326,6 +389,9 @@ impl fin_kraken::funding::KrakenRecipientVerifier for KrakenEvmRecipientVerifier
             }),
             address: address.to_owned(),
             chain_id: chain,
+            network: Some(format!("ethereum:{chain}")),
+            cluster: None,
+            mint: None,
             asset,
             confirmations: destination.map(|d| d.confirmations).unwrap_or(1),
         }))
@@ -335,8 +401,56 @@ impl fin_kraken::funding::KrakenRecipientVerifier for KrakenEvmRecipientVerifier
         r: fin_kraken::funding::KrakenPayoutRequest,
     ) -> Result<fin_kraken::funding::KrakenPayoutResult> {
         use fin_binance::BinanceRecipientVerifier;
-        let p = self
-            .observer
+        if r.destination.asset.network == fin_solana::NETWORK {
+            if r.destination.network.as_deref() != Some(fin_solana::NETWORK)
+                || r.destination.cluster.as_deref() != Some(fin_solana::CLUSTER)
+                || r.destination.mint.as_deref()
+                    != (r.destination.asset.reference != "native")
+                        .then_some(r.destination.asset.reference.as_str())
+            {
+                return Err(FinError::validation(
+                    "The original Solana destination binding is incomplete or inconsistent.",
+                ));
+            }
+            let Some(runtime) = self.solana.values().next().map(|wallet| wallet.runtime()) else {
+                return Err(FinError::validation(
+                    "No Solana observer is configured for payout verification.",
+                ));
+            };
+            let minimum = solana_atoms(&r.minimum, r.destination.asset.decimals)?;
+            let maximum = solana_atoms(&r.maximum, r.destination.asset.decimals)?;
+            let request = fin_solana::funding::ExternalPayoutRequest {
+                signature: r.tx_hash,
+                asset: r.destination.asset.clone(),
+                recipient: r.destination.address.clone(),
+                recipient_owner: None,
+                source_owner: None,
+                amount: fin_solana::funding::AmountBounds {
+                    minimum_atoms: minimum,
+                    maximum_atoms: maximum,
+                },
+            };
+            return match runtime.verify_external_payout(&request).await? {
+                fin_solana::funding::ExternalPayoutStatus::Finalized { evidence } => {
+                    Ok(fin_kraken::funding::KrakenPayoutResult {
+                        status: fin_domain::Status::Completed,
+                        amount: Some(fin_domain::Quantity::from_u64(evidence.credited_atoms)),
+                        evidence: serde_json::to_value(evidence).unwrap_or(serde_json::Value::Null),
+                    })
+                }
+                fin_solana::funding::ExternalPayoutStatus::Pending { reason } => {
+                    Ok(fin_kraken::funding::KrakenPayoutResult {
+                        status: fin_domain::Status::Pending,
+                        amount: None,
+                        evidence: serde_json::json!({"state":"pending","reason":reason}),
+                    })
+                }
+            };
+        }
+        let observer = self.observer.as_ref().ok_or_else(|| {
+            FinError::validation("No EVM observer is configured for payout verification.")
+        })?;
+        let p = observer
             .verify(fin_binance::PayoutRequest {
                 tx_hash: r.tx_hash,
                 network: r.destination.asset.network.clone(),
@@ -357,9 +471,121 @@ impl fin_kraken::funding::KrakenRecipientVerifier for KrakenEvmRecipientVerifier
     }
 }
 
+pub(crate) fn reviewed_solana_network(network: &str) -> bool {
+    let normalized: String = network
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "sol" | "solana" | "solanamainnet" | "solanamainnetbeta"
+    )
+}
+
+fn solana_atoms(value: &str, decimals: u8) -> Result<u64> {
+    fin_domain::Quantity::from_decimal(value, decimals)?
+        .as_str()
+        .parse()
+        .map_err(|_| FinError::validation("Solana payout bound exceeds supported precision."))
+}
+
 #[cfg(test)]
 mod network_resolution_tests {
     use super::reviewed_chain;
+
+    #[test]
+    fn reviewed_solana_network_is_explicit_and_narrow() {
+        assert!(super::reviewed_solana_network("Solana"));
+        assert!(super::reviewed_solana_network("Solana Mainnet Beta"));
+        assert!(super::reviewed_solana_network("SOL"));
+        assert!(!super::reviewed_solana_network("BNB Smart Chain"));
+        assert!(!super::reviewed_solana_network("Solana Devnet"));
+    }
+
+    #[tokio::test]
+    async fn kraken_solana_funding_verifies_exact_finalized_usdc_payout_for_enrolled_recipient() {
+        use fin_kraken::funding::KrakenRecipientVerifier;
+        use std::collections::BTreeMap;
+
+        let fixture = crate::test_support::solana::SolanaFundingFixture::new(
+            "kraken-solana-recipient",
+            1_000_000_000,
+            0,
+        );
+        let recipient = fixture.signer_address();
+        let wallet = fixture.wallet();
+        let verifier = super::KrakenEvmRecipientVerifier::with_solana(
+            &crate::BrokerConfigV2 {
+                version: 2,
+                networks: vec![],
+                deployments: vec![],
+                connections: vec![],
+                policy: crate::BrokerPolicy::beta(),
+                approver_uid: 501,
+                extensions: BTreeMap::new(),
+            },
+            BTreeMap::new(),
+            BTreeMap::from([("kraken-solana-recipient".into(), wallet)]),
+        )
+        .unwrap();
+        let destination = verifier
+            .resolve(
+                "Solana",
+                "USDC",
+                Some(crate::test_support::solana::USDC_MINT),
+                &recipient,
+                Some("kraken-solana-recipient"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(destination.enrolled);
+        assert_eq!(
+            destination.asset.reference,
+            crate::test_support::solana::USDC_MINT
+        );
+        assert_eq!(destination.network.as_deref(), Some(fin_solana::NETWORK));
+        assert_eq!(destination.cluster.as_deref(), Some(fin_solana::CLUSTER));
+        assert_eq!(
+            destination.mint.as_deref(),
+            Some(crate::test_support::solana::USDC_MINT)
+        );
+        assert!(
+            verifier
+                .resolve(
+                    "Solana Devnet",
+                    "USDC",
+                    Some(crate::test_support::solana::USDC_MINT),
+                    &recipient,
+                    Some("kraken-solana-recipient")
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let signature = fixture
+            .inject_finalized_transfer(
+                crate::test_support::solana::USDC_MINT,
+                &recipient,
+                1_000_000,
+            )
+            .unwrap();
+        let result = verifier
+            .verify(fin_kraken::funding::KrakenPayoutRequest {
+                destination,
+                tx_hash: signature,
+                minimum: "1".into(),
+                maximum: "1".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, fin_domain::Status::Completed);
+        assert_eq!(
+            result.amount,
+            Some(fin_domain::Quantity::from_u64(1_000_000))
+        );
+    }
 
     #[tokio::test]
     async fn recipient_resource_and_name_resolve_the_same_enrolled_custody() {
@@ -393,7 +619,9 @@ mod network_resolution_tests {
             .unwrap(),
         );
         let mut verifier = super::KrakenEvmRecipientVerifier {
-            observer: crate::EthereumPayoutVerifier::new(BTreeMap::from([(1, adapter)])).unwrap(),
+            observer: Some(
+                crate::EthereumPayoutVerifier::new(BTreeMap::from([(1, adapter)])).unwrap(),
+            ),
             destinations: vec![fin_binance::EthereumDestination {
                 name: "wallet".into(),
                 resource: fin_domain::ResourceId(resource.clone()),
@@ -402,6 +630,7 @@ mod network_resolution_tests {
                 assets: BTreeMap::new(),
                 confirmations: 2,
             }],
+            solana: std::collections::BTreeMap::new(),
         };
         let named = verifier
             .resolve("Ether", "ETH", None, address, Some("wallet"))

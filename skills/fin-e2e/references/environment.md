@@ -38,11 +38,11 @@ make dev-env-cli DEV_ENV=<env> ARGS='operations --json'
 make dev-env-cli DEV_ENV=<env> ARGS='policy show --json'
 ```
 
-Confirm startup reports `mode: live`; record `buildId`. CLI invocation doesn't rebuild. Preserve any state-root override used for import. Use `dev-wallet` by default and `dev-wallet-secondary` or verified own-account exchange destinations when the transfer scenario needs a recipient; return capability is needed only if a return transfer is part of the selected scenario.
+Confirm startup reports `mode: live`; record `buildId`. CLI invocation doesn't rebuild. Preserve any state-root override used for import. Use `dev-wallet` for EVM or `dev-solana-wallet` for Solana. `dev-wallet-secondary` is an EVM recipient, not a Solana wallet. Use verified own-account exchange destinations when the transfer scenario needs them; return capability is needed when a return transfer is part of the selected scenario or required by the user.
 
 ## First import in this worktree
 
-Choose a new name such as `e2e-live` when no import applies. Development credentials are in the repository's gitignored `.env`. Use that file or its explicitly supplied absolute path; reuse an existing import when available. Check existence/ownership/permissions without printing contents: importer requires a regular caller-owned file, mode 0600, at most 32 KiB. Fix that disposable file's mode if needed. Do not search for arbitrary private keys or load installed production credentials. A combined export may include assignments for unrelated tools or connectors: import reads only supported Binance/EVM keys and silently ignores other valid assignments. Determine which supported fields the selected E2E scenario actually needs. The current importer accepts `FIN_DEV_BINANCE_API_KEY` with either `FIN_DEV_BINANCE_SECRET` or `FIN_DEV_BINANCE_PRIVATE_KEY_PEM`, `FIN_DEV_BINANCE_UID`, optional `FIN_DEV_BINANCE_SUB_*` fields, `FIN_DEV_EVM_PRIVATE_KEY` (also named `ETH_WALLET_PK`), and optional `FIN_DEV_EVM_SECONDARY_PRIVATE_KEY`; `ETH_WALLET_PK` imports as `dev-wallet` for Base and other supported EVM scenarios. See the [credential template](../../../.env.fin-dev.example) for aliases and account combinations. If credentials for another supported integration are present but incomplete and not needed, make a private caller-owned mode-0600 temporary dotenv file with only the exact scenario's required assignments; do not overwrite the source file, print values, or shell-source it. A route using a previously enrolled connection may need none of those fields in this import. After import, verify the selected connection and operation through `connections` and `capabilities`; missing credentials for an unrelated integration are not a blocker. Malformed assignment lines, duplicate supported keys and files with no supported Fin credentials still fail.
+Choose a new name such as `e2e-live` when no import applies. Development credentials are in the repository's gitignored `.env`. Use that file or its explicitly supplied absolute path; reuse an existing import when available. Check existence/ownership/permissions without printing contents: importer requires a regular caller-owned file, mode 0600, at most 32 KiB. Fix that disposable file's mode if needed. Do not search for arbitrary private keys or load installed production credentials. A combined export may include assignments for unrelated tools or connectors: import reads only supported credential keys and silently ignores other valid assignments. Determine which supported fields the selected E2E scenario actually needs. The importer accepts Binance, EVM, Solana and canonical Kraken/Kraken Futures credentials; see the [credential template](../../../.env.fin-dev.example) for exact names, aliases and account combinations. `ETH_WALLET_PK` aliases `FIN_DEV_EVM_PRIVATE_KEY` and imports as `dev-wallet`. `SOLANA_PRIVATE_KEY` aliases `FIN_DEV_SOLANA_PRIVATE_KEY` and imports as `dev-solana-wallet`. Provider filtering is available for `binance`, `evm` and `solana`; it preserves previously imported unrelated connections and policy. Prefer that filter for single-provider work. If an unrelated supported integration is incomplete and cannot be filtered for the selected mixed scenario, make a private caller-owned mode-0600 temporary dotenv file with only the required assignments; do not overwrite the source file, print values, or shell-source it. A route using a previously enrolled connection may need none of those fields in this import. After import, verify the selected connection and operation through `connections` and `capabilities`; missing credentials for an unrelated integration are not a blocker. Malformed selected assignments, duplicate selected aliases/canonical keys and files with no selected Fin credentials still fail.
 
 ```sh
 make dev-env-import DEV_ENV=e2e-live DEV_CREDENTIALS_FILE="$PWD/.env" DEV_FLAGS=--json
@@ -54,6 +54,53 @@ make dev-env-cli DEV_ENV=e2e-live ARGS='capabilities --json'
 Use the supplied absolute file path when outside this checkout. New worktrees have separate state: import the designated file once; do not copy another environment's journal/configuration or reuse its socket. If the source is gone and no applicable import exists here, request a disposable file locally, never secrets in chat. Continue synthetic verification while it is missing.
 
 Offline Binance import requires supplied UIDs/subaccount email. When needed, add `DEV_IMPORT_FLAGS=--discover-identities`; invocation includes these read-only authenticated checks. If Binance omits an exact UID/email association, request the nonsecret subaccount email rather than guessing. The [credential template](../../../.env.fin-dev.example) lists supported inputs.
+
+## Solana and Jupiter
+
+The supplied disposable Solana signer is `SOLANA_PRIVATE_KEY` in the designated
+dotenv file. Import accepts a conventional base58 64-byte keypair or a JSON
+array of 64 bytes, validates its derived public address and creates
+`dev-solana-wallet`. Reuse an existing import; otherwise import only Solana into
+the selected stopped environment:
+
+```sh
+make dev-env-import DEV_ENV=solana DEV_CREDENTIALS_FILE="$PWD/.env" DEV_IMPORT_FLAGS='--provider solana' DEV_FLAGS=--json
+make dev-env-start DEV_ENV=solana DEV_MODE=live DEV_FLAGS=--json
+make dev-env-cli DEV_ENV=solana ARGS='connections --json'
+make dev-env-cli DEV_ENV=solana ARGS='capabilities --json'
+```
+
+Use `DEV_ENV=solana` consistently for its lifecycle and CLI calls unless the
+task already selected another applicable live environment. Do not replace an
+existing synthetic environment or copy another environment's journal. Import
+does not establish funding, mainnet access or settlement. Obtain the public
+wallet address from connection discovery before using it for CEX whitelisting;
+never put a private key in chat, command arguments or a committed report.
+
+Solana wallet inputs use `network: "solana"` and `cluster: "mainnet-beta"`;
+accounting uses `solana:mainnet-beta`. Native SOL pays network fees and token
+account funding. Keep those costs separate from token amounts and refundable
+funding. Inspect both token programs, actual mint extensions and non-associated
+accounts; a successful SPL transfer does not establish Token-2022 coverage.
+Jupiter is keyless by default; never supply a shared API key or import a CEX
+credential as its service key.
+
+Discover the current `wallet.*`, `jupiter.*` and plan schemas. Require finalized,
+verified effects for terminal settlement. Confirmed inclusion is progress;
+Trigger/perp order creation and keeper requests can remain pending. After a
+timeout or restart, reconcile the saved operation, transaction and provider
+request identities; never refresh a blockhash or create another order to retry
+an uncertain write. Keep retained token/position account funding visible and
+close only eligible test-created accounts through supported operations.
+
+Use the [Solana/Jupiter guide](../../../docs/testing/solana-jupiter.md) and
+[coverage report](../../../docs/testing/solana-jupiter-report.md) for current
+capabilities and synthetic rehearsals. Honor the current task's explicit
+budget, slippage, leverage, restoration and live-scope limits; the existence of
+this wallet does not widen them. For a CEX round trip, independently verify
+withdrawal debit, finalized wallet receipt, return transaction and exchange
+deposit credit. Reuse of capital still consumes gross rolling budget on each
+leg.
 
 ## Align development policy with the scenario
 

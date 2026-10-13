@@ -24,6 +24,10 @@ pub struct CredentialReferences {
     pub binance_sub: Option<String>,
     pub evm_primary: Option<String>,
     pub evm_secondary: Option<String>,
+    #[serde(default)]
+    pub solana: Option<String>,
+    #[serde(default)]
+    pub jupiter: Option<String>,
 }
 
 /// Optional per-development-environment ceilings. These can only tighten the
@@ -109,6 +113,8 @@ pub struct EnvironmentConfig {
     #[serde(default)]
     pub evm_addresses: Vec<String>,
     #[serde(default)]
+    pub solana_address: Option<String>,
+    #[serde(default)]
     pub policy_limits: Option<PolicyLimits>,
 }
 
@@ -125,7 +131,8 @@ impl EnvironmentConfig {
             && self.credentials.binance_sub.is_none()
             && self.credentials.evm_primary.is_none()
             && self.credentials.evm_secondary.is_none()
-            && self.credentials.binance_sub.is_none()
+            && self.credentials.solana.is_none()
+            && self.credentials.jupiter.is_none()
     }
     pub fn empty(environment_id: &str) -> Self {
         Self {
@@ -135,7 +142,7 @@ impl EnvironmentConfig {
             kraken_default_wallet_account_id: None,
             krakenfutures_account_id: None,
             environment_id: environment_id.into(),
-            version: 1,
+            version: 2,
             mode: "synthetic".into(),
             credentials: CredentialReferences::default(),
             policy: None,
@@ -146,6 +153,7 @@ impl EnvironmentConfig {
             binance_sub_email: None,
             binance_sub_email_matched_by_venue_id: false,
             evm_addresses: Vec::new(),
+            solana_address: None,
             policy_limits: None,
         }
     }
@@ -155,16 +163,21 @@ impl EnvironmentConfig {
         }
         let raw =
             fs::read(path).map_err(|_| "development configuration could not be read".to_owned())?;
-        let config: Self = serde_json::from_slice(&raw)
+        let mut config: Self = serde_json::from_slice(&raw)
             .map_err(|_| "development configuration is invalid".to_owned())?;
         if config.environment_id != environment_id
-            || config.version != 1
+            || !matches!(config.version, 1 | 2)
             || !matches!(
                 config.format.as_str(),
                 "fin-dev-config" | "fin-dev-synthetic-config"
             )
         {
             return Err("development configuration identity mismatch".into());
+        }
+        // Version 2 is an additive profile migration. Serde defaults preserve
+        // all older credential references, policy, RPC scope and identities.
+        if config.version == 1 {
+            config.version = 2;
         }
         if let Some(limits) = &config.policy_limits {
             limits.validate()?;
@@ -218,6 +231,7 @@ pub async fn import(
     env_file: &Path,
     credential_dir: &Path,
     discover_identities: bool,
+    provider: Option<&str>,
 ) -> Result<(), String> {
     let metadata = fs::symlink_metadata(env_file)
         .map_err(|_| "credential file could not be read".to_owned())?;
@@ -246,7 +260,15 @@ pub async fn import(
     }
     let source =
         std::str::from_utf8(&source).map_err(|_| "credential file must be UTF-8".to_owned())?;
-    let values = dotenv::parse(source)?;
+    if let Some(provider) = provider
+        && !matches!(provider, "binance" | "evm" | "solana")
+    {
+        return Err("--provider must be binance, evm or solana".into());
+    }
+    if discover_identities && provider.is_some_and(|provider| provider != "binance") {
+        return Err("--discover-identities is available only for Binance imports".into());
+    }
+    let values = dotenv::parse_selected(source, provider)?;
     let mut config = EnvironmentConfig::read(config_path, environment_id)?;
     let old = config.clone();
     let mut additions: Vec<(String, SecretMaterial)> = Vec::new();
@@ -595,6 +617,25 @@ pub async fn import(
             return Err(format!("{address_name} requires its private key"));
         }
     }
+    if let Some(private_key) = values.get("FIN_DEV_SOLANA_PRIVATE_KEY") {
+        let signer = fin_solana::SolanaSigner::parse(private_key)
+            .map_err(|_| "FIN_DEV_SOLANA_PRIVATE_KEY is invalid".to_owned())?;
+        let derived = signer.address().to_owned();
+        if old
+            .solana_address
+            .as_ref()
+            .is_some_and(|address| address != &derived)
+        {
+            return Err("reimported Solana wallet differs from the saved environment; account swaps are refused".into());
+        }
+        additions.push((
+            "solana".into(),
+            SecretMaterial::SolanaPrivateKey {
+                private_key: private_key.to_string(),
+            },
+        ));
+        config.solana_address = Some(derived);
+    }
     if additions.is_empty() {
         return Err("credential file contains no complete supported connection".into());
     }
@@ -618,6 +659,7 @@ pub async fn import(
             "binance_sub" => config.credentials.binance_sub = Some(reference.as_str().into()),
             "evm_primary" => config.credentials.evm_primary = Some(reference.as_str().into()),
             "evm_secondary" => config.credentials.evm_secondary = Some(reference.as_str().into()),
+            "solana" => config.credentials.solana = Some(reference.as_str().into()),
             label if config.kraken_accounts.contains_key(label) => {
                 config
                     .kraken_accounts
@@ -662,6 +704,8 @@ pub async fn import(
             &config.credentials.evm_secondary,
             &old_references.evm_secondary,
         ),
+        (&config.credentials.solana, &old_references.solana),
+        (&config.credentials.jupiter, &old_references.jupiter),
     ] {
         if new_ref != old_ref
             && let Some(reference) = old_ref
@@ -929,6 +973,19 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
         });
     }
     if let (Some(reference), Some(address)) = (
+        config.credentials.solana.as_ref(),
+        config.solana_address.as_ref(),
+    ) {
+        connections.push(ConnectionConfig::Solana {
+            name: "dev-solana-wallet".into(),
+            resource: ResourceId(format!("solana:mainnet-beta:{address}")),
+            address: address.clone(),
+            credential_ref: Some(reference.clone()),
+            signing_enabled: true,
+            network: "solana:mainnet-beta".into(),
+        });
+    }
+    if let (Some(reference), Some(address)) = (
         config.credentials.evm_primary.as_ref(),
         config.evm_addresses.first(),
     ) && !address.is_empty()
@@ -1142,6 +1199,177 @@ mod tests {
     }
 
     #[test]
+    fn version_one_profile_migrates_additively_without_losing_saved_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut legacy = serde_json::to_value(EnvironmentConfig::empty("env")).unwrap();
+        legacy["version"] = serde_json::json!(1);
+        legacy.as_object_mut().unwrap().remove("solana_address");
+        legacy["credentials"]
+            .as_object_mut()
+            .unwrap()
+            .remove("solana");
+        legacy["credentials"]
+            .as_object_mut()
+            .unwrap()
+            .remove("jupiter");
+        legacy["credentials"]["evm_primary"] =
+            serde_json::json!("550e8400-e29b-41d4-a716-446655440000");
+        legacy["evm_addresses"] = serde_json::json!(["0x1111111111111111111111111111111111111111"]);
+        legacy["policy_limits"] = serde_json::to_value(limits("123", "456")).unwrap();
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let migrated = EnvironmentConfig::read(&path, "env").unwrap();
+        assert_eq!(migrated.version, 2);
+        assert_eq!(
+            migrated.credentials.evm_primary.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            migrated.evm_addresses,
+            ["0x1111111111111111111111111111111111111111"]
+        );
+        assert_eq!(migrated.policy_limits, Some(limits("123", "456")));
+        assert!(migrated.credentials.solana.is_none());
+        assert!(migrated.solana_address.is_none());
+    }
+
+    #[test]
+    fn interrupted_version_one_upgrade_restarts_without_rewriting_pending_journal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let journal_path = dir.path().join("operations.sqlite");
+        let pending_journal = b"synthetic-pending-submission:keep-original-identity";
+
+        let mut legacy = EnvironmentConfig::empty("env");
+        legacy.version = 1;
+        legacy.credentials = CredentialReferences {
+            kraken: Some("550e8400-e29b-41d4-a716-446655440007".into()),
+            krakenfutures: Some("550e8400-e29b-41d4-a716-446655440008".into()),
+            binance: Some("550e8400-e29b-41d4-a716-446655440001".into()),
+            binance_sub: Some("550e8400-e29b-41d4-a716-446655440002".into()),
+            evm_primary: Some("550e8400-e29b-41d4-a716-446655440003".into()),
+            evm_secondary: Some("550e8400-e29b-41d4-a716-446655440004".into()),
+            solana: Some("550e8400-e29b-41d4-a716-446655440005".into()),
+            jupiter: Some("550e8400-e29b-41d4-a716-446655440006".into()),
+        };
+        legacy.kraken_accounts.insert(
+            "kraken_1".into(),
+            KrakenDevelopmentAccount {
+                product: "kraken".into(),
+                name: "primary spot account".into(),
+                account_id: "spot-account".into(),
+                credential_ref: "550e8400-e29b-41d4-a716-446655440009".into(),
+                default_wallet_account_id: Some("wallet-default".into()),
+            },
+        );
+        legacy.policy = Some(custom_development_policy());
+        legacy
+            .rpc_urls
+            .insert(1, vec!["https://rpc.example.invalid".into()]);
+        legacy.reviewed_chain_ids = Some(vec![1]);
+        legacy.binance_uid = Some("100".into());
+        legacy.binance_sub_uid = Some("200".into());
+        legacy.binance_sub_email = Some("child@example.invalid".into());
+        legacy.binance_sub_email_matched_by_venue_id = true;
+        legacy.evm_addresses = vec!["0x1111111111111111111111111111111111111111".into()];
+        legacy.solana_address = Some("11111111111111111111111111111111".into());
+        legacy.policy_limits = Some(limits("123", "456"));
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::write(&journal_path, pending_journal).unwrap();
+
+        // Simulate termination after a partial next-version temp file was
+        // written but before the atomic rename. The legacy profile remains the
+        // restart source; the orphan is never interpreted as committed state.
+        let interrupted_temp = dir.path().join(".config.interrupted.tmp");
+        fs::write(&interrupted_temp, b"{\"version\":2,").unwrap();
+        let restarted = EnvironmentConfig::read(&path, "env").unwrap();
+        assert_eq!(restarted.version, 2);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()["version"],
+            1
+        );
+        assert_eq!(fs::read(&journal_path).unwrap(), pending_journal);
+
+        restarted.write_atomic(&path).unwrap();
+        assert!(interrupted_temp.exists());
+        let recovered = EnvironmentConfig::read(&path, "env").unwrap();
+        assert_eq!(recovered.version, 2);
+        assert_eq!(
+            recovered.credentials.binance.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440001")
+        );
+        assert_eq!(
+            recovered.credentials.binance_sub.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440002")
+        );
+        assert_eq!(
+            recovered.credentials.evm_primary.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440003")
+        );
+        assert_eq!(
+            recovered.credentials.evm_secondary.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440004")
+        );
+        assert_eq!(
+            recovered.credentials.solana.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440005")
+        );
+        assert_eq!(
+            recovered.credentials.kraken.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440007")
+        );
+        assert_eq!(
+            recovered.credentials.krakenfutures.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440008")
+        );
+        assert_eq!(
+            recovered
+                .kraken_accounts
+                .get("kraken_1")
+                .unwrap()
+                .credential_ref,
+            "550e8400-e29b-41d4-a716-446655440009"
+        );
+        assert_eq!(
+            recovered
+                .kraken_accounts
+                .get("kraken_1")
+                .unwrap()
+                .default_wallet_account_id
+                .as_deref(),
+            Some("wallet-default")
+        );
+        assert_eq!(
+            recovered.credentials.jupiter.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440006")
+        );
+        assert_eq!(recovered.policy, Some(custom_development_policy()));
+        assert_eq!(
+            recovered.rpc_urls.get(&1),
+            Some(&vec!["https://rpc.example.invalid".into()])
+        );
+        assert_eq!(recovered.reviewed_chain_ids, Some(vec![1]));
+        assert_eq!(recovered.binance_uid.as_deref(), Some("100"));
+        assert_eq!(recovered.binance_sub_uid.as_deref(), Some("200"));
+        assert_eq!(
+            recovered.binance_sub_email.as_deref(),
+            Some("child@example.invalid")
+        );
+        assert!(recovered.binance_sub_email_matched_by_venue_id);
+        assert_eq!(
+            recovered.evm_addresses,
+            ["0x1111111111111111111111111111111111111111"]
+        );
+        assert_eq!(
+            recovered.solana_address.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+        assert_eq!(recovered.policy_limits, Some(limits("123", "456")));
+        assert_eq!(fs::read(&journal_path).unwrap(), pending_journal);
+    }
+
+    #[test]
     fn owned_fork_transport_preserves_production_validated_profiles() {
         let mut config = EnvironmentConfig::empty("env");
         config.reviewed_chain_ids = Some(vec![1]);
@@ -1154,6 +1382,94 @@ mod tests {
             assert_eq!(runtime.networks[0], NetworkConfig::ethereum_mainnet());
             assert!(fin_evm::HttpRpc::new(runtime.networks[0].rpc_urls.clone(), 1).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn solana_only_import_preserves_evm_profile_and_refuses_wallet_rebinding() {
+        use ed25519_dalek::SigningKey;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn keypair(seed: u8) -> String {
+            let signing = SigningKey::from_bytes(&[seed; 32]);
+            let mut pair = [0u8; 64];
+            pair[..32].copy_from_slice(&[seed; 32]);
+            pair[32..].copy_from_slice(&signing.verifying_key().to_bytes());
+            format!(
+                "[{}]",
+                pair.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+            )
+        }
+
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let env_path = dir.path().join("selected.env");
+        let mut old = EnvironmentConfig::empty("env");
+        old.credentials.binance = Some("550e8400-e29b-41d4-a716-446655440001".into());
+        old.binance_uid = Some("123".into());
+        old.credentials.evm_primary = Some("550e8400-e29b-41d4-a716-446655440000".into());
+        old.evm_addresses
+            .push("0x1111111111111111111111111111111111111111".into());
+        old.policy = Some(custom_development_policy());
+        old.write_atomic(&config_path).unwrap();
+        fs::write(
+            &env_path,
+            format!(
+                "FIN_DEV_BINANCE_API_KEY=$(ignored)\nFIN_DEV_SOLANA_PRIVATE_KEY={}\n",
+                keypair(7)
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        import(
+            &config_path,
+            "env",
+            &env_path,
+            &credential_dir,
+            false,
+            Some("solana"),
+        )
+        .await
+        .unwrap();
+        let migrated = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(
+            migrated.credentials.evm_primary.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            migrated.credentials.binance.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440001")
+        );
+        assert_eq!(migrated.binance_uid.as_deref(), Some("123"));
+        assert!(migrated.credentials.solana.is_some());
+        assert_eq!(migrated.evm_addresses, old.evm_addresses);
+        assert_eq!(migrated.policy, old.policy);
+        let runtime = broker_config(&migrated).unwrap();
+        assert!(runtime.connections.iter().any(|connection| matches!(connection, ConnectionConfig::Evm { name, .. } if name == "dev-wallet")));
+        assert!(runtime.connections.iter().any(|connection| matches!(connection, ConnectionConfig::Solana { name, .. } if name == "dev-solana-wallet")));
+
+        fs::write(&env_path, format!("SOLANA_PRIVATE_KEY={}\n", keypair(8))).unwrap();
+        fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            import(
+                &config_path,
+                "env",
+                &env_path,
+                &credential_dir,
+                false,
+                Some("solana")
+            )
+            .await
+            .is_err()
+        );
+        let after = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(after.credentials.solana, migrated.credentials.solana);
+        assert_eq!(
+            after.credentials.evm_primary,
+            migrated.credentials.evm_primary
+        );
+        assert_eq!(after.credentials.binance, migrated.credentials.binance);
     }
 
     #[test]
@@ -1467,9 +1783,16 @@ mod tests {
         );
         fs::write(&dotenv_path, source).unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(fs::read(&journal_path).unwrap(), prior_journal);
 
         let saved = EnvironmentConfig::read(&config_path, "env").unwrap();
@@ -1529,7 +1852,7 @@ mod tests {
         initial.write_atomic(&config_path).unwrap();
         fs::write(&keys, indexed_fixture_file()).unwrap();
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &keys, &credential_dir, false)
+        import(&config_path, "env", &keys, &credential_dir, false, None)
             .await
             .unwrap();
         let first = EnvironmentConfig::read(&config_path, "env").unwrap();
@@ -1559,7 +1882,7 @@ mod tests {
             .credential_ref
             .clone();
         fs::write(&keys,"FIN_DEV_KRAKENFUTURES_2_API_KEY=synthetic-rotated-child-only\nFIN_DEV_KRAKENFUTURES_2_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKENFUTURES_2_ACCOUNT_ID=child-001\n").unwrap();
-        import(&config_path, "env", &keys, &credential_dir, false)
+        import(&config_path, "env", &keys, &credential_dir, false, None)
             .await
             .unwrap();
         let second = EnvironmentConfig::read(&config_path, "env").unwrap();
@@ -1594,7 +1917,7 @@ mod tests {
         let keys = dir.path().join("synthetic-only.env");
         fs::write(&keys, indexed_fixture_file()).unwrap();
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &keys, &credential_dir, false)
+        import(&config_path, "env", &keys, &credential_dir, false, None)
             .await
             .unwrap();
         let original = fs::read(&config_path).unwrap();
@@ -1608,7 +1931,7 @@ mod tests {
             source.replace("NAME=child-fixture", "NAME=master-fixture"),
         ] {
             fs::write(&keys, changed).unwrap();
-            let error = import(&config_path, "env", &keys, &credential_dir, false)
+            let error = import(&config_path, "env", &keys, &credential_dir, false, None)
                 .await
                 .unwrap_err();
             assert!(!error.contains("synthetic-child-only"));
@@ -1625,7 +1948,7 @@ mod tests {
         fs::write(&keys, "FIN_DEV_KRAKENFUTURES_8_NAME=partial-fixture\n").unwrap();
         fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(
-            import(&config_path, "env", &keys, &credential_dir, false)
+            import(&config_path, "env", &keys, &credential_dir, false, None)
                 .await
                 .is_err()
         );
@@ -1635,7 +1958,7 @@ mod tests {
             + "FIN_DEV_KRAKEN_API_KEY=synthetic-legacy-only\nFIN_DEV_KRAKEN_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKEN_ACCOUNT_ID=spot-001\n";
         fs::write(&keys, source).unwrap();
         assert!(
-            import(&config_path, "env", &keys, &credential_dir, false)
+            import(&config_path, "env", &keys, &credential_dir, false, None)
                 .await
                 .is_err()
         );
@@ -1651,9 +1974,16 @@ mod tests {
         let source = "FIN_DEV_KRAKEN_API_KEY=synthetic-spot-key\nFIN_DEV_KRAKEN_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKEN_ACCOUNT_ID=synthetic-spot-account\nFIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT\nFIN_DEV_KRAKENFUTURES_API_KEY=synthetic-derivatives-key\nFIN_DEV_KRAKENFUTURES_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKENFUTURES_ACCOUNT_ID=synthetic-derivatives-account\n";
         fs::write(&dotenv_path, source).unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let config = EnvironmentConfig::read(&config_path, "env").unwrap();
         assert!(config.credentials.kraken.is_some());
         assert_eq!(
@@ -1683,9 +2013,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            import(&config_path, "env", &dotenv_path, &credential_dir, false)
-                .await
-                .is_err()
+            import(
+                &config_path,
+                "env",
+                &dotenv_path,
+                &credential_dir,
+                false,
+                None
+            )
+            .await
+            .is_err()
         );
         assert_eq!(before, fs::read(&config_path).unwrap());
         for invalid in [
@@ -1694,9 +2031,16 @@ mod tests {
         ] {
             fs::write(&dotenv_path, invalid).unwrap();
             assert!(
-                import(&config_path, "env", &dotenv_path, &credential_dir, false)
-                    .await
-                    .is_err()
+                import(
+                    &config_path,
+                    "env",
+                    &dotenv_path,
+                    &credential_dir,
+                    false,
+                    None
+                )
+                .await
+                .is_err()
             );
             assert_eq!(before, fs::read(&config_path).unwrap());
         }
@@ -1706,9 +2050,16 @@ mod tests {
             source.replace("FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT\n", ""),
         )
         .unwrap();
-        import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let config = EnvironmentConfig::read(&config_path, "env").unwrap();
         assert_eq!(
             config.kraken_default_wallet_account_id.as_deref(),
@@ -1733,9 +2084,16 @@ mod tests {
         let dotenv_path = dir.path().join("keys.env");
         fs::write(&dotenv_path, "FIN_DEV_EVM_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001\n").unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let saved = fs::read_to_string(&config_path).unwrap();
         assert!(
             !saved.contains("0000000000000000000000000000000000000000000000000000000000000001")
@@ -1767,6 +2125,7 @@ mod tests {
                 &dotenv_path,
                 &dir.path().join("credentials"),
                 false,
+                None,
             )
             .await
             .is_err()
@@ -1792,6 +2151,7 @@ mod tests {
                 &dotenv_path,
                 &dir.path().join("credentials"),
                 false,
+                None,
             )
             .await
             .unwrap_err()
@@ -1812,9 +2172,16 @@ mod tests {
         let key = "0000000000000000000000000000000000000000000000000000000000000001";
         fs::write(&dotenv_path, format!("FIN_DEV_EVM_PRIVATE_KEY={key}\n")).unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
-        import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
         let imported = EnvironmentConfig::read(&config_path, "env").unwrap();
         assert_eq!(imported.policy_limits, profile.policy_limits);
         assert!(imported.credentials.evm_primary.is_some());
@@ -1827,9 +2194,16 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
-        let error = import(&config_path, "env", &dotenv_path, &credential_dir, false)
-            .await
-            .unwrap_err();
+        let error = import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(!error.contains(key));
         assert_eq!(fs::read(&config_path).unwrap(), old_config);
         assert_eq!(

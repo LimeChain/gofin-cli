@@ -354,6 +354,7 @@ async fn legacy_scope_without_rebate_credit_authority_keeps_receipt_unknown() {
         status: Status::Pending,
         created_at: now(),
         updated_at: now(),
+        position_baseline: None,
         preview: Some(old),
         approval: None,
         submission: Some(original),

@@ -85,7 +85,7 @@ meaningful milestone updates and the final recap, without repeating them on ever
 unchanged status check.
 
 
-EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. Liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
+EVM enrollment uses `fin connections add --provider evm --name wallet --credential-type private_key` in the human's Terminal. One connection is reusable across reviewed chains; no enrollment network is required. The optional network flag chooses only a read-check. `ethereum` remains a legacy provider alias; broadening an existing chain-scoped connection requires protected human-approved update. Financial requests select `"network":"evm"` and `chain_id` (`1`, `8453` Base, `42161` Arbitrum One, `4663` Robinhood Chain). Wallet holdings and same-chain native/ERC-20 transfers are available on the reviewed wallet networks. Bridge support includes dynamically verified exact-asset Relay routes, the existing Ethereum native-ETH canonical route to the same EOA on Arbitrum/Robinhood, and bidirectional Ethereum/Base canonical ETH or verified StandardBridge ERC-20 pairs. Ethereum, Base and Arbitrum expose reviewed Aave V3 markets; discover exact markets and reserve compatibility before planning. Uniswap v3/v4 swaps follow reviewed per-network deployments and exact pool liquidity, including Base. EVM AMM liquidity has no current Fin implementation. Token discovery is always partial, with candidates checked on RPC; inspect discovery warnings or provide explicit contracts. Snapshot coverage is native plus configured token scope, not the entire wallet. Unknown trusted USD prices block writes. Base, Arbitrum and Robinhood wallet writes and bridge payouts complete after a successful transaction is included in one canonical sequencer-produced block, without waiting for RPC finality. Other networks keep their configured receipt policy. Sequencer inclusion does not prove parent-chain finality. RPC customization is not yet a command.
 
 Reusable enrolled EVM wallets automatically expose a Hyperliquid owner account
 through the protected broker after updating Fin. Use `fin connections list --json`
@@ -104,6 +104,48 @@ Kraken Spot/Margin (`kraken`) and Derivatives (`krakenfutures`) have separate pr
 Kraken administrative authority changes use `fin configure OPERATION --input JSON` in the human's Terminal with separate fresh configuration approval. Its `--json` response hands off to the human; a financial plan cannot authorize these changes. Export reads use `--output PATH` for a private create-new local artifact; never ask Fin to overwrite an existing file. Dead-man switches configure only the approved timer; never renew them automatically.
 
 Wallet-funded Kraken deposits require correlated usable venue credit. A wallet transaction receipt or isolated balance increase does not complete them. Withdrawals default to independent destination proof. Unsupported observers require the human's explicit `verificationRequirement: "venue_only"` choice bound into the exact approval and plan; report that destination delivery remains unverified. Earn mutations are serialized by account/strategy until reconciled. Standing fills, amendments and partial native batches retain immutable identities and unresolved reservations; do not replay a child or create a new request ID after response loss. Linked order authority revisions require fresh exact approval outside plans. Conditional conversion sequences spend their parent's verified proceeds; their later leg still consumes gross turnover.
+
+## Solana and Jupiter
+
+Binance and Kraken funding can reuse an enrolled Solana mainnet-beta wallet.
+Discover the exact enabled SOL/USDC route, destination and minimums first.
+`binance.deposit` selects Binance `network: "SOL"`, an exact USDC `token` mint,
+and `maxFeeSol`; `kraken.deposit` selects `network: "solana"`,
+`cluster: "mainnet-beta"`, the discovered `methodId`, and an exact USDC `mint`.
+Native SOL omits the mint. Use `maxAccountFundingSol` to bound refundable account
+creation separately from fees. Do not supply EVM chain/fee fields on these routes.
+Withdrawals reuse the venue's existing operations and saved destination rules.
+Require finalized recipient effects; deposits also require correlated usable
+exchange credit. An uncertain source or delayed credit keeps its original ID.
+
+Inspect installed discovery before using `jupiter.*`; support depends on the
+installed build. Solana wallet requests select `"network":"solana"` and
+`"cluster":"mainnet-beta"`. Accounting uses `solana:mainnet-beta` and exact,
+case-sensitive mint addresses. Standard SPL Token and Token-2022 are separate
+programs; inspect reported extension capabilities rather than assuming every
+mint supports every operation.
+
+The human enrolls a signer with
+`fin connections add --provider solana --name sol-main --credential-type private_key`.
+A read-only connection uses `--credential-type read_only --address ADDRESS`.
+Never request the key in chat or arguments. Jupiter uses keyless access by
+default; optional user-owned service credentials use the separate `jupiter`
+provider and grant no wallet authority.
+
+Read schemas for each swap, limit-order, JLP and perpetual operation before
+planning. Keep the selected API route explicit when it is part of the intent.
+Explain network fees, token/protocol fees and refundable account funding
+separately. Limit-order placement establishes escrow, not a completed swap;
+keeper-request acceptance does not prove a perpetual position change. Native
+JLP mint/redemption and buying/selling JLP through a swap have distinct effects.
+Use finalized application evidence for settlement. Preserve the original
+operation identity when uncertain; never refresh a submitted transaction's
+blockhash or generate another order as an automatic retry.
+
+Cancelling a TP/SL request leaves its trading position open. Inspect remaining
+requests and positions after each keeper outcome; a filled protection request
+does not establish that its sibling was cancelled. Report signed position PnL,
+actual wallet proceeds and refunded account funding separately.
 
 ## Bridge transfers
 

@@ -226,6 +226,9 @@ impl KrakenRecipientVerifier for Venue {
             resource: ResourceId(DESTINATION.into()),
             address: WALLET.into(),
             chain_id: 8453,
+            network: None,
+            cluster: None,
+            mint: None,
             asset: AssetId {
                 network: "ethereum:8453".into(),
                 reference: "native".into(),

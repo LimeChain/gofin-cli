@@ -1,4 +1,4 @@
-//! Protected composite for EVM asset deposits into a Binance account. It
+//! Protected composite for EVM and Solana asset deposits into a Binance account. It
 //! exposes no arbitrary endpoint or recipient; the destination comes from a
 //! fresh, account-authenticated Binance metadata/address read.
 
@@ -7,9 +7,8 @@ use fin_binance::BinanceAdapter;
 use fin_domain::{
     Adapter, Amount, AssetId, Check, CheckStatus, ConnectionMetadata, Definition, EffectConstraint,
     ExecutionActor, FinError, FinancialEffect, FinancialIntent, FinancialState, OperationKind,
-    OperationRecord, PreparedOperation, Quantity, Reconciliation, ResourceAmount, ResourceId,
-    ReturnRouteContext, ReturnRouteProof, StateSnapshot, Status, Submission, binding_hash, now,
-    verified_effect_digest,
+    OperationRecord, PreparedOperation, Quantity, Reconciliation, ResourceId, ReturnRouteContext,
+    ReturnRouteProof, StateSnapshot, Status, Submission, binding_hash, now, verified_effect_digest,
 };
 use fin_ethereum::{BrokerVerifiedNativeDepositTarget, EthereumAdapter};
 use schemars::{JsonSchema, schema_for};
@@ -31,7 +30,12 @@ struct DepositInput {
     account: String,
     wallet: String,
     amount: String,
+    #[serde(default)]
     max_fee_eth: String,
+    #[serde(default)]
+    max_fee_sol: Option<String>,
+    #[serde(default)]
+    max_account_funding_sol: Option<String>,
     #[serde(default)]
     coin: Option<String>,
     #[serde(default)]
@@ -49,6 +53,8 @@ struct DepositBinding {
     inner_input: Value,
     inner_preview: PreparedOperation,
     source_free_before: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_protocol: Option<String>,
     #[serde(default)]
     coin: String,
     #[serde(default)]
@@ -66,6 +72,7 @@ struct DepositBinding {
 pub struct BinanceEthereumDepositAdapter {
     binance: Arc<BinanceAdapter>,
     ethereum: std::collections::BTreeMap<u64, Arc<EthereumAdapter>>,
+    solana: std::collections::BTreeMap<String, Arc<fin_solana::SolanaWalletAdapter>>,
 }
 
 impl BinanceEthereumDepositAdapter {
@@ -74,6 +81,7 @@ impl BinanceEthereumDepositAdapter {
         Self {
             binance,
             ethereum: std::collections::BTreeMap::from([(chain_id, ethereum)]),
+            solana: std::collections::BTreeMap::new(),
         }
     }
 
@@ -87,7 +95,17 @@ impl BinanceEthereumDepositAdapter {
                 .into_iter()
                 .map(|adapter| (adapter.config.chain_id, adapter))
                 .collect(),
+            solana: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Add protected Solana wallets to the existing composite operation.
+    pub fn with_solana_wallets(
+        mut self,
+        wallets: impl IntoIterator<Item = (String, Arc<fin_solana::SolanaWalletAdapter>)>,
+    ) -> Self {
+        self.solana = wallets.into_iter().collect();
+        self
     }
 
     fn input(raw: &Value) -> Result<DepositInput, FinError> {
@@ -150,9 +168,46 @@ impl BinanceEthereumDepositAdapter {
         Ok((ethereum, wallet))
     }
 
+    fn solana_wallet(&self, name: &str) -> Result<Arc<fin_solana::SolanaWalletAdapter>, FinError> {
+        self.solana.get(name).cloned().ok_or_else(|| {
+            error(
+                "SOLANA_WALLET_UNKNOWN",
+                "validation",
+                "Selected Solana wallet is not enrolled on mainnet-beta.",
+                "Select a configured protected Solana wallet.",
+            )
+        })
+    }
+
     fn input_route(input: &DepositInput) -> Result<(String, String, u64), FinError> {
         let coin = input.coin.clone().unwrap_or_else(|| "ETH".into());
         let network = input.network.clone().unwrap_or_else(|| "ETH".into());
+        if fin_binance::binance_solana_network(&network) {
+            if !matches!(coin.as_str(), "SOL" | "USDC")
+                || input.chain_id.is_some()
+                || input.max_fee_sol.as_deref().is_none_or(str::is_empty)
+                || !input.max_fee_eth.is_empty()
+            {
+                return Err(error(
+                    "DEPOSIT_ROUTE_UNSUPPORTED",
+                    "validation",
+                    "The selected Binance coin/network is not a supported Solana route.",
+                    "Choose SOL or USDC on Binance's SOL network with no EVM chain ID.",
+                ));
+            }
+            return Ok((coin, network, 0));
+        }
+        if input.max_fee_eth.is_empty()
+            || input.max_fee_sol.is_some()
+            || input.max_account_funding_sol.is_some()
+        {
+            return Err(error(
+                "DEPOSIT_ROUTE_UNSUPPORTED",
+                "validation",
+                "EVM routes require maxFeeEth and do not accept Solana fee fields.",
+                "Use maxFeeEth for EVM, or network SOL with maxFeeSol for Solana.",
+            ));
+        }
         let inferred = fin_binance::binance_evm_chain_id(&network).unwrap_or(0);
         let chain_id = input.chain_id.unwrap_or(inferred);
         if coin.is_empty()
@@ -189,6 +244,11 @@ impl BinanceEthereumDepositAdapter {
         chain_id: u64,
         token_request: Option<&str>,
     ) -> Result<(BrokerVerifiedNativeDepositTarget, AssetId), FinError> {
+        if fin_binance::binance_solana_network(network_name) {
+            return self
+                .target_solana(account_name, coin, network_name, token_request)
+                .await;
+        }
         let account = self.account(account_name)?;
         let networks = self
             .binance
@@ -493,6 +553,213 @@ impl BinanceEthereumDepositAdapter {
         ))
     }
 
+    async fn target_solana(
+        &self,
+        account_name: &str,
+        coin: &str,
+        network_name: &str,
+        token_request: Option<&str>,
+    ) -> Result<(BrokerVerifiedNativeDepositTarget, AssetId), FinError> {
+        let account = self.account(account_name)?;
+        let networks = self
+            .binance
+            .read(
+                "binance.networks",
+                &json!({"account":account_name,"coin":coin}),
+            )
+            .await?;
+        let matches = networks["assets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["coin"] == coin)
+            .collect::<Vec<_>>();
+        let asset_row = (matches.len() == 1).then(|| matches[0]).ok_or_else(|| {
+            error(
+                "DEPOSIT_NETWORK_UNAVAILABLE",
+                "preview",
+                "Binance did not return one unambiguous asset record.",
+                "Refresh the exact SOL funding route.",
+            )
+        })?;
+        let routes = asset_row["networks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|row| row["network"] == network_name)
+            .collect::<Vec<_>>();
+        let route = (routes.len() == 1).then(|| routes[0]).ok_or_else(|| {
+            error(
+                "DEPOSIT_NETWORK_UNAVAILABLE",
+                "preview",
+                "Binance did not return one unambiguous SOL network record.",
+                "Select the exact current Binance SOL network.",
+            )
+        })?;
+        if asset_row["depositAllEnable"] != true
+            || route["depositEnable"] != true
+            || route["coin"] != coin
+        {
+            return Err(error(
+                "DEPOSIT_DISABLED",
+                "preview",
+                "Binance does not currently accept deposits for this exact coin and network.",
+                "Wait until Binance enables this route.",
+            ));
+        }
+        let minimum = route["depositDust"].as_str().ok_or_else(|| {
+            error(
+                "DEPOSIT_MINIMUM_UNKNOWN",
+                "preview",
+                "Binance has not provided an exact minimum creditable amount.",
+                "Do not send until an exact minimum is available.",
+            )
+        })?;
+        let minimum_deposit = Quantity::from_decimal(minimum, 36).map_err(|_| internal_error())?;
+        let address_data = self
+            .binance
+            .read(
+                "binance.deposit-address",
+                &json!({"account":account_name,"coin":coin,"network":network_name}),
+            )
+            .await?;
+        let address = address_data["address"].as_str().ok_or_else(|| {
+            error(
+                "DEPOSIT_ADDRESS_INVALID",
+                "preview",
+                "Binance did not return an exact Solana deposit address.",
+                "Refresh the protected deposit address.",
+            )
+        })?;
+        fin_solana::parse_address(address).map_err(|_| {
+            error(
+                "DEPOSIT_ADDRESS_INVALID",
+                "preview",
+                "Binance returned an invalid Solana deposit address.",
+                "Do not send funds to this route.",
+            )
+        })?;
+        if address_data["coin"] != coin
+            || address_data["network"] != network_name
+            || address_data["memo"]
+                .as_str()
+                .is_none_or(|memo| !memo.is_empty())
+        {
+            return Err(error(
+                "DEPOSIT_ADDRESS_UNSUPPORTED",
+                "preview",
+                "The Binance Solana address is mismatched or requires an unsupported memo.",
+                "Use a plain Solana address without a memo.",
+            ));
+        }
+        for denomination in [&route["denomination"], &address_data["denomination"]] {
+            if !denomination.is_null()
+                && denomination.as_u64() != Some(1)
+                && denomination.as_str() != Some("unknown")
+            {
+                return Err(error(
+                    "DEPOSIT_DENOMINATION_UNSUPPORTED",
+                    "preview",
+                    "Binance reports a non-unit deposit denomination.",
+                    "Do not send until the route is explicitly one-to-one.",
+                ));
+            }
+        }
+        let route_mint = route["contractAddress"]
+            .as_str()
+            .filter(|value| !value.is_empty() && *value != "unknown");
+        let address_mint = address_data["contractAddress"]
+            .as_str()
+            .filter(|value| !value.is_empty() && *value != "unknown");
+        let request_mint = token_request.filter(|value| !value.is_empty() && *value != "native");
+        if route_mint.is_some() && address_mint.is_some() && route_mint != address_mint {
+            return Err(error(
+                "ASSET_IDENTITY_MISMATCH",
+                "preview",
+                "Binance deposit address mint differs from its network route.",
+                "Refresh the exact Solana deposit route before sending.",
+            ));
+        }
+        let metadata_mint = route_mint.or(address_mint);
+        if metadata_mint.is_some() && request_mint.is_some_and(|mint| Some(mint) != metadata_mint) {
+            return Err(error(
+                "ASSET_IDENTITY_MISMATCH",
+                "preview",
+                "Requested Solana mint differs from Binance route metadata.",
+                "Use the exact mint advertised by Binance.",
+            ));
+        }
+        if let Some(address_minimum) = address_data["minimumDeposit"].as_str()
+            && address_minimum != "unknown"
+        {
+            let address_minimum =
+                Quantity::from_decimal(address_minimum, 36).map_err(|_| internal_error())?;
+            if address_minimum != minimum_deposit {
+                return Err(error(
+                    "DEPOSIT_MINIMUM_MISMATCH",
+                    "preview",
+                    "Binance network and deposit-address minimums disagree.",
+                    "Refresh the exact deposit route before sending.",
+                ));
+            }
+        }
+        let source_asset = fin_solana::funding::resolve_external_asset(
+            &self
+                .solana
+                .values()
+                .next()
+                .ok_or_else(|| {
+                    error(
+                        "SOLANA_WALLET_UNKNOWN",
+                        "preview",
+                        "No protected Solana wallet observer is configured.",
+                        "Select a configured Solana wallet.",
+                    )
+                })?
+                .runtime(),
+            coin,
+            metadata_mint.or(request_mint),
+        )
+        .await?;
+        if (coin == "SOL" && source_asset.reference != "native")
+            || (coin == "USDC" && source_asset.reference == "native")
+        {
+            return Err(error(
+                "ASSET_IDENTITY_MISMATCH",
+                "preview",
+                "Binance route identity does not match the selected Solana asset.",
+                "Use native SOL or the exact Solana USDC mint.",
+            ));
+        }
+        let evidence = json!({"accountResource":account.resource,"coin":coin,"network":network_name,"address":address,"mint":source_asset.reference,"denomination":1,"minimumDeposit":minimum_deposit,"depositEnabled":true,"memo":"","minimumSource":"Binance capital config depositDust"});
+        let evidence_digest = binding_hash(&evidence).map_err(|_| internal_error())?;
+        let observed_at = now();
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&observed_at)
+            .map_err(|_| internal_error())?
+            .with_timezone(&chrono::Utc)
+            .checked_add_signed(chrono::Duration::seconds(90))
+            .ok_or_else(internal_error)?
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        Ok((
+            BrokerVerifiedNativeDepositTarget {
+                chain_id: 0,
+                account_resource: account.resource,
+                address: address.into(),
+                asset: AssetId {
+                    network: "binance".into(),
+                    reference: coin.into(),
+                    decimals: 36,
+                },
+                minimum_deposit,
+                network: network_name.into(),
+                observed_at,
+                expires_at,
+                evidence_digest,
+            },
+            source_asset,
+        ))
+    }
+
     fn inner_input(
         input: &DepositInput,
         target: &BrokerVerifiedNativeDepositTarget,
@@ -508,6 +775,38 @@ impl BinanceEthereumDepositAdapter {
             "amount":input.amount,
             "recipient":target.address
         })
+    }
+
+    fn solana_inner_input(
+        input: &DepositInput,
+        target: &BrokerVerifiedNativeDepositTarget,
+        asset: &AssetId,
+        wallet: &fin_solana::SolanaWalletAdapter,
+    ) -> Result<Value, FinError> {
+        let max_fee_sol = input
+            .max_fee_sol
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                error(
+                    "FEE_BOUND_REQUIRED",
+                    "preview",
+                    "Solana deposits require an explicit maximum network fee in SOL.",
+                    "Set maxFeeSol to the fee bound you approve.",
+                )
+            })?;
+        let mut inner = json!({"wallet":input.wallet,"network":"solana","cluster":"mainnet-beta","recipient":target.address,"amount":input.amount,"max_fee_sol":max_fee_sol,"max_account_funding_sol":input.max_account_funding_sol,"requestId":input.request_id});
+        if asset.reference != "native" {
+            inner["mint"] = Value::String(asset.reference.clone());
+            let token_account = fin_solana::associated_token_address(
+                wallet.address(),
+                &asset.reference,
+                fin_solana::token::TOKEN_PROGRAM_ID,
+            )
+            .map_err(|_| internal_error())?;
+            inner["source_token_account"] = Value::String(token_account);
+        }
+        Ok(inner)
     }
 
     async fn source_free(&self, account: &str, coin: &str) -> Result<String, FinError> {
@@ -569,15 +868,15 @@ impl BinanceEthereumDepositAdapter {
                 error(
                     "INNER_PREVIEW_INVALID",
                     "preview",
-                    "Ethereum transfer preview omitted its source resource.",
-                    "Refresh the Ethereum wallet preview.",
+                    "Wallet transfer preview omitted its source resource.",
+                    "Refresh the selected wallet transfer preview.",
                 )
             })?;
         let debit_atoms = Quantity::from_decimal(amount, source_asset.decimals).map_err(|_| {
             error(
                 "INVALID_AMOUNT",
                 "preview",
-                "Amount exceeds the selected EVM asset's exact on-chain precision.",
+                "Amount exceeds the selected asset's exact on-chain precision.",
                 "Use an exact amount supported by the selected asset.",
             )
         })?;
@@ -589,46 +888,62 @@ impl BinanceEthereumDepositAdapter {
                 "Use an exact amount supported by Binance's venue precision.",
             )
         })?;
-        let mut locks = vec![source.clone(), target.account_resource.clone()];
+        let mut locks = inner.intent.locks.clone();
+        locks.push(source.clone());
+        locks.push(target.account_resource.clone());
         locks.sort();
         locks.dedup();
+        let mut expected = inner.intent.expected.clone();
+        let principal = expected.iter_mut().find(|effect| matches!(effect,
+            EffectConstraint::Transfer { from, debit_asset, .. } if from == &source && debit_asset == source_asset
+        )).ok_or_else(|| error("INNER_PREVIEW_INVALID", "preview", "Wallet preview omitted its principal transfer constraint.", "Refresh the wallet transfer preview."))?;
+        *principal = EffectConstraint::Transfer {
+            from: source.clone(),
+            to: target.account_resource.clone(),
+            debit_asset: source_asset.clone(),
+            credit_asset: target.asset.clone(),
+            maximum_debit: debit_atoms,
+            minimum_credit: credit_atoms,
+        };
         Ok(FinancialIntent {
-            debits: vec![ResourceAmount {
-                resource: source.clone(),
-                amount: Amount {
-                    asset: source_asset.clone(),
-                    atoms: debit_atoms.clone(),
-                },
-            }],
+            debits: inner.intent.debits.clone(),
             maximum_costs: inner.intent.maximum_costs.clone(),
-            expected: vec![EffectConstraint::Transfer {
-                from: source,
-                to: target.account_resource.clone(),
-                debit_asset: source_asset.clone(),
-                credit_asset: target.asset.clone(),
-                maximum_debit: debit_atoms,
-                minimum_credit: credit_atoms,
-            }],
+            expected,
             locks,
         })
     }
 
     pub fn operation_definition() -> Definition {
+        let mut input_schema =
+            serde_json::to_value(schema_for!(DepositInput)).unwrap_or(Value::Null);
+        if let Some(required) = input_schema
+            .get_mut("required")
+            .and_then(Value::as_array_mut)
+        {
+            required.retain(|field| !matches!(field.as_str(), Some("maxFeeEth" | "maxFeeSol")));
+        }
+        input_schema["oneOf"] = json!([
+            {"required":["maxFeeEth"],"not":{"anyOf":[{"required":["network"]},{"required":["chainId"]},{"required":["maxFeeSol"]}] }},
+            {"required":["network","maxFeeEth"],"properties":{"network":{"not":{"const":"SOL"}}},"not":{"required":["maxFeeSol"]}},
+            {"required":["network","coin","maxFeeSol"],"properties":{"network":{"const":"SOL"},"coin":{"enum":["SOL","USDC"]}},"not":{"anyOf":[{"required":["maxFeeEth"]},{"required":["chainId"]}]}}
+        ]);
         Definition {
             name: "binance.deposit".into(),
-            description: "Deposit native ETH or an exact ERC20 token from a protected EVM wallet into a Binance main account or subaccount using its own credentials. Live Binance metadata selects the asset/network route; completion requires canonical chain evidence and matching usable Binance credit.".into(),
+            description: "Deposit native SOL or ETH, or exact Solana SPL USDC / EVM ERC20 assets, from a protected wallet into a Binance main account or subaccount using its own credentials. Live Binance metadata selects the asset/network route; completion requires finalized transaction evidence and matching usable Binance credit.".into(),
             kind: OperationKind::Write,
             execution_actor: ExecutionActor::AgentInvocable,
-            input_schema: serde_json::to_value(schema_for!(DepositInput)).unwrap_or(Value::Null),
+            input_schema,
             output_schema: json!({"type":"object"}),
             error_schema: schema_for!(FinError).into(),
             examples: vec![
                 json!({"requestId":"deposit-native-001","account":"binance-sub","wallet":"wallet","coin":"ETH","network":"ARBITRUM","chainId":42161,"token":"native","amount":"0.001","maxFeeEth":"0.0001"}),
                 json!({"requestId":"deposit-token-001","account":"binance-sub","wallet":"wallet","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":"0xaf88d065e77c8cc2239327c5edb3a432268e5831","amount":"1","maxFeeEth":"0.0001"}),
+                json!({"requestId":"deposit-sol-001","account":"binance-sub","wallet":"solana-wallet","coin":"SOL","network":"SOL","amount":"0.01","maxFeeSol":"0.00001"}),
+                json!({"requestId":"deposit-sol-usdc-001","account":"binance-sub","wallet":"solana-wallet","coin":"USDC","network":"SOL","token":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"1","maxFeeSol":"0.00001"}),
             ],
-            coverage: "Synthetic broker-composite transport and canonical fake-EVM proof; live funding capabilities and acceptance remain separately reported.".into(),
+            coverage: "Synthetic broker-composite transport and finalized fake-chain proof for configured EVM and Solana wallets; live funding capabilities and acceptance remain separately reported.".into(),
             completion: "Original transaction identity is canonical and finalized, and exactly one usable matching Binance credit plus the corresponding free-balance increase is observed.".into(),
-            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.","approval":"Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","coin":"Binance asset identity; never resolved from an EVM ticker","network":"explicit Binance network code matched to current metadata and a configured Fin EVM chain","token":"native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata","amount":"exact finite amount; amount=all is unsupported","completion":"chain submission alone is insufficient; matching deposit history with status 1 or 6, clear travel-rule status and exact free-balance delta are required; status 6 may retain a Binance withdrawal hold","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.","broker_generated_attempt_input_fields":["/requestId"]}),
+            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance EVM network mapping. Solana routes use coin SOL or USDC with network SOL and no chainId.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains and Solana mainnet-beta wallets. Solana token transfers use an explicit mint or the pinned mainnet USDC mint; other assets, memo/tag routes and non-unit denominations are unavailable.","approval":"Approval binds source wallet, destination account, chain/network, exact asset, deposit address, amount, fee envelope and displayed USD ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","token":"native SOL/ETH or exact SPL USDC/ERC20 identity; mint/contract and decimals are checked against current metadata and chain state","amount":"exact finite amount; amount=all is unsupported","completion":"Transaction submission alone is insufficient; the exact finalized transaction must match one Binance deposit-history credit and the exact free-balance delta. Status 6 may show a withdrawal hold and settles only when the credit is reflected in free balance.","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH for EVM routes.","maxFeeSol":"Maximum total transaction fee in SOL for Solana routes; any recipient account funding is separately bounded.","broker_generated_attempt_input_fields":["/requestId"]}),
         }
     }
 
@@ -641,6 +956,11 @@ impl BinanceEthereumDepositAdapter {
         let input = Self::input(raw)?;
         let account = self.account(&input.account)?;
         let (coin, network, chain_id) = Self::input_route(&input)?;
+        if chain_id == 0 {
+            return self
+                .prepare_solana_deposit(operation, raw, &input, &coin, &network, approved_inner)
+                .await;
+        }
         let (ethereum, wallet) = self.wallet(&input.wallet, chain_id)?;
         if !wallet.signing_enabled || input.request_id.is_empty() || input.request_id.len() > 128 {
             return Err(error(
@@ -727,6 +1047,7 @@ impl BinanceEthereumDepositAdapter {
             inner_input,
             inner_preview: inner_preview.clone(),
             source_free_before,
+            source_protocol: None,
             coin: coin.clone(),
             source_asset: Some(source_asset.clone()),
             usd_ceiling: None,
@@ -747,6 +1068,127 @@ impl BinanceEthereumDepositAdapter {
         };
         // Compose the wallet's approved USD ceilings without changing its exact
         // principal or gas envelope. Legacy inner previews retain exact pricing.
+        if approved_inner.is_none()
+            || inner_preview
+                .binding
+                .get(fin_domain::value_bounds::KEY)
+                .is_some()
+        {
+            fin_domain::value_bounds::bind(&mut prepared);
+        }
+        Ok(prepared)
+    }
+
+    async fn prepare_solana_deposit(
+        &self,
+        operation: &str,
+        raw: &Value,
+        input: &DepositInput,
+        coin: &str,
+        network: &str,
+        approved_inner: Option<&PreparedOperation>,
+    ) -> Result<PreparedOperation, FinError> {
+        if input.request_id.is_empty() || input.request_id.len() > 128 {
+            return Err(error(
+                "DEPOSIT_CONFIGURATION_INVALID",
+                "preview",
+                "Deposit requires a bounded stable request ID.",
+                "Use a new request ID for this transfer.",
+            ));
+        }
+        let wallet = self.solana_wallet(&input.wallet)?;
+        if wallet.signer().is_none() {
+            return Err(error(
+                "PROTECTED_SIGNER_REQUIRED",
+                "preview",
+                "Selected Solana wallet is not signing-enabled.",
+                "Choose a protected signing wallet.",
+            ));
+        }
+        let (target, source_asset) = self
+            .target(
+                &input.account,
+                &input.wallet,
+                coin,
+                network,
+                0,
+                input.token.as_deref(),
+            )
+            .await?;
+        let amount_atoms =
+            Quantity::from_decimal(&input.amount, source_asset.decimals).map_err(|_| {
+                error(
+                    "INVALID_AMOUNT",
+                    "preview",
+                    "Deposit amount must be exact within the selected Solana asset precision.",
+                    "Use a finite exact SOL or USDC amount.",
+                )
+            })?;
+        if amount_atoms.is_zero() {
+            return Err(error(
+                "INVALID_AMOUNT",
+                "preview",
+                "Deposit amount must be positive.",
+                "Use a positive finite amount.",
+            ));
+        }
+        let venue_atoms =
+            Quantity::from_decimal(&input.amount, 36).map_err(|_| internal_error())?;
+        if venue_atoms < target.minimum_deposit {
+            return Err(error(
+                "DEPOSIT_MINIMUM",
+                "preview",
+                "Deposit amount is below Binance's observed creditable minimum.",
+                "Increase the amount or choose another route.",
+            ));
+        }
+        let source_free_before = self.source_free(&input.account, coin).await?;
+        let inner_input = Self::solana_inner_input(input, &target, &source_asset, &wallet)?;
+        let inner_preview = match approved_inner {
+            Some(original) => wallet.revalidate(original).await?,
+            None => wallet.prepare("wallet.transfer", &inner_input).await?,
+        };
+        if inner_preview
+            .intent
+            .debits
+            .first()
+            .is_none_or(|debit| debit.amount.asset != source_asset)
+        {
+            return Err(error(
+                "ASSET_IDENTITY_MISMATCH",
+                "preview",
+                "Solana transfer preview did not preserve the exact selected mint.",
+                "Refresh the Binance route and exact mint metadata.",
+            ));
+        }
+        let intent =
+            Self::cross_custody_intent(&inner_preview, &target, &input.amount, &source_asset)?;
+        let summary = format!(
+            "Send {} {} from Solana wallet {} to Binance {} ({}) on SOL; maximum network fee {} SOL.",
+            input.amount,
+            coin,
+            input.wallet,
+            input.account,
+            target.address,
+            input.max_fee_sol.as_deref().unwrap_or("")
+        );
+        let binding = DepositBinding {
+            target,
+            inner_input,
+            inner_preview: inner_preview.clone(),
+            source_free_before,
+            source_protocol: Some("solana".into()),
+            coin: coin.into(),
+            source_asset: Some(source_asset.clone()),
+            usd_ceiling: None,
+        };
+        let mut prepared = PreparedOperation {
+            operation: operation.into(), input: raw.clone(), binding: serde_json::to_value(binding).map_err(|_| internal_error())?,
+            summary,
+            checks: vec![Check { name:"venue_deposit_enabled".into(), status:CheckStatus::Passed, detail:format!("Binance confirms {coin} deposits are enabled on SOL and supplies an exact credit minimum.") }, Check { name:"asset_identity".into(), status:CheckStatus::Passed, detail:format!("Exact Solana asset {} with {} decimals is fixed by finalized mint metadata.", source_asset.reference, source_asset.decimals) }, Check { name:"solana_transfer_preview".into(), status:CheckStatus::Passed, detail:"Ordinary wallet.transfer froze the exact owner, recipient, amount, mint and fee limits.".into() }],
+            warnings: vec!["A finalized Solana transaction does not complete this operation until Binance records the exact usable deposit credit and matching free-balance increase.".into()],
+            observed_at:inner_preview.observed_at.clone(), expires_at:inner_preview.expires_at.clone(), valuation:inner_preview.valuation.clone(), intent, operation_version:2, action_deadline:None,
+        };
         if approved_inner.is_none()
             || inner_preview
                 .binding
@@ -783,10 +1225,17 @@ impl Adapter for BinanceEthereumDepositAdapter {
 
     fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
         // Bind the receiving Binance accounts, configured deposit routes and
-        // per-chain EVM signer details without leaking internal destination
-        // rows into `fin connections list`.
+        // every constituent wallet identity without leaking internal
+        // destination rows into `fin connections list`.
         let mut identities = self.binance.authorization_identities();
         for adapter in self.ethereum.values() {
+            for identity in adapter.authorization_identities() {
+                if !identities.contains(&identity) {
+                    identities.push(identity);
+                }
+            }
+        }
+        for adapter in self.solana.values() {
             for identity in adapter.authorization_identities() {
                 if !identities.contains(&identity) {
                     identities.push(identity);
@@ -825,8 +1274,8 @@ impl Adapter for BinanceEthereumDepositAdapter {
             return Err(error(
                 "UNSUPPORTED_OPERATION",
                 "preview",
-                "Composite supports only metadata-verified Binance deposits over Fin EVM networks.",
-                "Select binance.deposit with a supported coin and network.",
+                "Composite supports metadata-verified Binance deposits over configured EVM and Solana networks.",
+                "Select native SOL/ETH or exact USDC on a supported network.",
             ));
         }
         self.prepare_deposit(operation, input, None).await
@@ -851,12 +1300,54 @@ impl Adapter for BinanceEthereumDepositAdapter {
             return Err(error(
                 "UNSUPPORTED_OPERATION",
                 "preflight",
-                "Composite supports only metadata-verified Binance deposits over Fin EVM networks.",
-                "Select binance.deposit with a supported coin and network.",
+                "Composite supports metadata-verified Binance deposits over configured EVM and Solana networks.",
+                "Select native SOL/ETH or exact USDC on a supported network.",
             ));
         }
         let input = Self::input(raw)?;
         let (coin, network, chain_id) = Self::input_route(&input)?;
+        if chain_id == 0 {
+            let wallet = self.solana_wallet(&input.wallet)?;
+            let (target, source_asset) = self
+                .target(
+                    &input.account,
+                    &input.wallet,
+                    &coin,
+                    &network,
+                    0,
+                    input.token.as_deref(),
+                )
+                .await?;
+            let inner_input = Self::solana_inner_input(&input, &target, &source_asset, &wallet)?;
+            let mut route_context = context.clone();
+            if !route_context
+                .projected
+                .cash
+                .iter()
+                .any(|cash| cash.resource == target.account_resource && cash.asset == target.asset)
+            {
+                let free = self.source_free(&input.account, &coin).await?;
+                let exact = Quantity::from_decimal(&free, 36).map_err(|_| internal_error())?;
+                route_context
+                    .projected
+                    .cash
+                    .push(fin_domain::ProjectedCash {
+                        resource: target.account_resource.clone(),
+                        asset: target.asset.clone(),
+                        amount: fin_domain::QuantityInterval {
+                            minimum: exact.clone(),
+                            maximum: exact,
+                        },
+                    });
+            }
+            let mut proof = wallet
+                .preflight_return_route("wallet.transfer", &inner_input, &route_context)
+                .await?;
+            proof.operation = operation.into();
+            proof.input_hash = binding_hash(raw)?;
+            proof.evidence["composite"] = json!({"operation":operation,"account":input.account,"wallet":input.wallet,"targetEvidenceDigest":target.evidence_digest,"completion":"finalized Solana transaction plus exact matching usable Binance credit required"});
+            return Ok(proof);
+        }
         let (ethereum, wallet) = self.wallet(&input.wallet, chain_id)?;
         let (target, source_asset) = self
             .target(
@@ -949,12 +1440,18 @@ impl Adapter for BinanceEthereumDepositAdapter {
             .await?;
         let current: DepositBinding =
             serde_json::from_value(fresh.binding.clone()).map_err(|_| internal_error())?;
-        if original.target.chain_id != current.target.chain_id
-            || original.target.account_resource != current.target.account_resource
-            || !original
+        let target_address_changed = if original.source_protocol.as_deref() == Some("solana") {
+            original.target.address != current.target.address
+        } else {
+            !original
                 .target
                 .address
                 .eq_ignore_ascii_case(&current.target.address)
+        };
+        if original.source_protocol != current.source_protocol
+            || original.target.chain_id != current.target.chain_id
+            || original.target.account_resource != current.target.account_resource
+            || target_address_changed
             || original.target.asset != current.target.asset
             || original.target.minimum_deposit != current.target.minimum_deposit
             || original.target.network != current.target.network
@@ -968,7 +1465,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
             return Err(error(
                 "PREVIEW_CHANGED",
                 "submission",
-                "Binance target, asset identity, source balance, or EVM transfer binding changed.",
+                "Binance target, asset identity, source balance, or wallet transfer binding changed.",
                 "Obtain a fresh preview and approval.",
             ));
         }
@@ -988,6 +1485,70 @@ impl Adapter for BinanceEthereumDepositAdapter {
         let fresh = self.revalidate(prepared).await?;
         let binding: DepositBinding =
             serde_json::from_value(fresh.binding.clone()).map_err(|_| internal_error())?;
+        if binding.source_protocol.as_deref() == Some("solana") {
+            let input = Self::input(&fresh.input)?;
+            let wallet = self.solana_wallet(&input.wallet)?;
+            let validated = fin_domain::RevalidatedOperation::after_revalidation(
+                fresh,
+                Arc::new(fin_domain::clock::SystemClock),
+            )?;
+            return wallet
+                .submit_nested_revalidated(&validated, &binding.inner_preview, journal)
+                .await;
+        }
+        let ethereum = self.ethereum.get(&binding.target.chain_id).ok_or_else(|| {
+            error(
+                "EVM_NETWORK_UNAVAILABLE",
+                "submission",
+                "The approved EVM network is no longer configured.",
+                "Restore that protected network configuration and obtain a fresh preview.",
+            )
+        })?;
+        ethereum.submit(&binding.inner_preview, journal).await
+    }
+
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn fin_domain::SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        validated.assert_fresh()?;
+        // The engine has already performed the final adapter revalidation and
+        // bound this complete candidate to policy and the durable journal.
+        // Repeating Binance and Solana RPC reads here would add latency after
+        // approval without strengthening the child-message binding.
+        let candidate = validated.prepared();
+        let binding: DepositBinding =
+            serde_json::from_value(candidate.binding.clone()).map_err(|_| internal_error())?;
+        if binding.source_protocol.as_deref() == Some("solana") {
+            let input = Self::input(&candidate.input)?;
+            let wallet = self.solana_wallet(&input.wallet)?;
+            let child_amount = binding.inner_input.get("amount").and_then(Value::as_str);
+            let child_recipient = binding.inner_input.get("recipient").and_then(Value::as_str);
+            let child_wallet = binding.inner_input.get("wallet").and_then(Value::as_str);
+            if child_amount != Some(input.amount.as_str())
+                || child_recipient != Some(binding.target.address.as_str())
+                || child_wallet != Some(input.wallet.as_str())
+                || binding.source_asset.as_ref().is_none_or(|asset| {
+                    asset.network != "solana:mainnet-beta"
+                        || (input.coin.as_deref() == Some("SOL") && asset.reference != "native")
+                        || (input.coin.as_deref() == Some("USDC")
+                            && asset.reference != fin_solana::funding::MAINNET_USDC_MINT)
+                })
+            {
+                return Err(error(
+                    "PREVIEW_CHANGED",
+                    "submission",
+                    "The nested Solana transfer no longer matches the approved Binance deposit.",
+                    "Obtain a fresh preview and approval.",
+                ));
+            }
+            // The outer candidate remains the journal identity; the nested
+            // transfer is only its exact frozen transaction payload.
+            return wallet
+                .submit_nested_revalidated(validated, &binding.inner_preview, journal)
+                .await;
+        }
         let ethereum = self.ethereum.get(&binding.target.chain_id).ok_or_else(|| {
             error(
                 "EVM_NETWORK_UNAVAILABLE",
@@ -1034,12 +1595,21 @@ impl Adapter for BinanceEthereumDepositAdapter {
             preview: Some(binding.inner_preview.clone()),
             ..record.clone()
         };
-        let Some(ethereum) = self.ethereum.get(&binding.target.chain_id) else {
-            return Ok(unknown(
-                json!({"reason":"The original EVM network is no longer configured; the durable submission was not replayed.","chainId":binding.target.chain_id}),
-            ));
+        let chain = if binding.source_protocol.as_deref() == Some("solana") {
+            let input = Self::input(&record.input)?;
+            let wallet = match self.solana_wallet(&input.wallet) {
+                Ok(wallet) => wallet,
+                Err(err) => return Ok(unknown(json!({"reason":err.code,"source":"solana"}))),
+            };
+            wallet.reconcile(&inner_record).await?
+        } else {
+            let Some(ethereum) = self.ethereum.get(&binding.target.chain_id) else {
+                return Ok(unknown(
+                    json!({"reason":"The original EVM network is no longer configured; the durable submission was not replayed.","chainId":binding.target.chain_id}),
+                ));
+            };
+            ethereum.reconcile(&inner_record).await?
         };
-        let chain = ethereum.reconcile(&inner_record).await?;
         if chain.status != Status::Completed {
             return Ok(Reconciliation {
                 status: chain.status,
@@ -1049,15 +1619,26 @@ impl Adapter for BinanceEthereumDepositAdapter {
         }
         let Some(mut verified) = chain.verified else {
             return Ok(unknown(
-                json!({"reason":"Canonical Ethereum completion did not include verified financial effects."}),
+                json!({"reason":"Canonical source-chain completion did not include verified financial effects."}),
             ));
         };
         if verified.submission != submission {
             return Ok(unknown(
-                json!({"reason":"Ethereum proof submission differs from the original persisted identity."}),
+                json!({"reason":"Source-chain proof submission differs from the original persisted identity."}),
             ));
         }
-        let tx_hash = submission.reference.clone();
+        let is_solana = binding.source_protocol.as_deref() == Some("solana");
+        let tx_hash = if is_solana {
+            submission
+                .data
+                .get("wallet_signature")
+                .and_then(Value::as_str)
+                .filter(|signature| !signature.is_empty())
+                .unwrap_or(&submission.reference)
+                .to_owned()
+        } else {
+            submission.reference.clone()
+        };
         let input = Self::input(&record.input)?;
         let coin = if binding.coin.is_empty() {
             input.coin.as_deref().unwrap_or("ETH")
@@ -1078,7 +1659,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
             .binance
             .read(
                 "binance.deposit-history",
-                &json!({"account":input.account,"coin":coin,"txHash":tx_hash}),
+                &json!({"account":input.account,"coin":coin,"network":binding.target.network,"txHash":tx_hash}),
             )
             .await
         {
@@ -1101,14 +1682,24 @@ impl Adapter for BinanceEthereumDepositAdapter {
             ));
         }
         let row = &records[0];
+        let address_matches = row["address"].as_str().is_some_and(|address| {
+            if is_solana {
+                address == binding.target.address
+            } else {
+                address.eq_ignore_ascii_case(&binding.target.address)
+            }
+        });
+        let tx_matches = row["txId"].as_str().is_some_and(|hash| {
+            if is_solana {
+                hash == tx_hash
+            } else {
+                hash.eq_ignore_ascii_case(&tx_hash)
+            }
+        });
         if row["coin"] != coin
             || row["network"] != binding.target.network
-            || !row["address"]
-                .as_str()
-                .is_some_and(|address| address.eq_ignore_ascii_case(&binding.target.address))
-            || !row["txId"]
-                .as_str()
-                .is_some_and(|hash| hash.eq_ignore_ascii_case(&tx_hash))
+            || !address_matches
+            || !tx_matches
             || !(row["addressTag"].is_null()
                 || row["addressTag"].as_str().is_some_and(str::is_empty))
         {
@@ -1116,12 +1707,13 @@ impl Adapter for BinanceEthereumDepositAdapter {
                 json!({"chain":chain.evidence,"venueRow":row,"reason":"Deposit row is not one exact usable credit for the original transaction and target."}),
             ));
         }
-        // Status 6 confirms deposit credit but can retain a Binance withdrawal
-        // hold. Settlement still requires the exact canonical transfer and the
-        // matching free-balance increase below; status alone is not proof.
-        if row["credited"] != true || !matches!(row["status"].as_u64(), Some(1 | 6)) {
+        // Status 6 denotes a credited deposit that may carry a withdrawal
+        // hold. As on the EVM path, it settles only with the exact free-balance
+        // delta proved below; a locked credit alone remains pending.
+        let usable_status = matches!(row["status"].as_u64(), Some(1 | 6));
+        if row["credited"] != true || !usable_status {
             return Ok(unknown(
-                json!({"chain":chain.evidence,"venueRow":row,"reason":"Deposit row does not confirm credit with clear travel-rule status for the original transaction and target."}),
+                json!({"chain":chain.evidence,"venueRow":row,"reason":"Deposit row does not confirm usable credit with clear travel-rule status for the original transaction and target."}),
             ));
         }
         let credit = row["amount"].as_str().ok_or_else(internal_error)?;
@@ -1164,11 +1756,15 @@ impl Adapter for BinanceEthereumDepositAdapter {
             .first()
             .map(|debit| debit.resource.clone())
             .ok_or_else(internal_error)?;
-        let expected_destination = ResourceId(format!(
-            "ethereum:{}:{}",
-            binding.target.chain_id,
-            binding.target.address.to_ascii_lowercase()
-        ));
+        let expected_destination = if is_solana {
+            ResourceId(format!("solana:mainnet-beta:{}", binding.target.address))
+        } else {
+            ResourceId(format!(
+                "ethereum:{}:{}",
+                binding.target.chain_id,
+                binding.target.address.to_ascii_lowercase()
+            ))
+        };
         let expected_asset = binding.source_asset.clone().unwrap_or_else(|| AssetId {
             network: "ethereum:1".into(),
             reference: "native".into(),
@@ -1181,7 +1777,10 @@ impl Adapter for BinanceEthereumDepositAdapter {
                     to,
                     debit,
                     credit: chain_credit,
-                } if !transfer_seen => {
+                } if !transfer_seen
+                    && to == expected_destination
+                    && debit.asset == expected_asset =>
+                {
                     let expected_credit =
                         Quantity::from_decimal(&debit.atoms.to_decimal(debit.asset.decimals), 36)
                             .map_err(|_| internal_error())?;
@@ -1194,7 +1793,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
                         || expected_credit != credited_atoms
                     {
                         return Ok(unknown(
-                            json!({"chain":chain.evidence,"venueRow":row,"reason":"Venue credited quantity does not exactly match the original EVM asset transfer principal."}),
+                            json!({"chain":chain.evidence,"venueRow":row,"reason":"Venue credited quantity does not exactly match the original wallet asset transfer principal."}),
                         ));
                     }
                     transfer_seen = true;
@@ -1209,9 +1808,10 @@ impl Adapter for BinanceEthereumDepositAdapter {
                     });
                 }
                 FinancialEffect::Cost { .. } => effects.push(effect),
-                _ => {
+                FinancialEffect::Transfer { .. } => effects.push(effect),
+                other => {
                     return Ok(unknown(
-                        json!({"chain":chain.evidence,"reason":"Unexpected extra chain effect is not safe to translate into venue custody."}),
+                        json!({"chain":chain.evidence,"reason":"Unexpected extra chain effect is not safe to translate into venue custody.","effect":other}),
                     ));
                 }
             }
@@ -1222,7 +1822,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
             ));
         }
         verified.effects = effects;
-        verified.evidence = json!({"method":"evm-canonical-and-binance-usable-deposit-v2","withdrawal_locked":row["withdrawalLocked"] == true,"chain":chain.evidence,"venueHistory":history,"venueBalance":{"before":binding.source_free_before,"after":after,"delta":credit},"targetEvidenceDigest":binding.target.evidence_digest,"coin":coin,"network":binding.target.network,"asset":expected_asset,"originalSubmission":submission});
+        verified.evidence = json!({"method":if is_solana {"solana-finalized-and-binance-usable-deposit-v1"} else {"evm-canonical-and-binance-usable-deposit-v2"},"withdrawal_locked":row["withdrawalLocked"] == true,"chain":chain.evidence,"venueHistory":history,"venueBalance":{"before":binding.source_free_before,"after":after,"delta":credit},"targetEvidenceDigest":binding.target.evidence_digest,"coin":coin,"network":binding.target.network,"asset":expected_asset,"originalSubmission":submission});
         verified.observed_at = now();
         verified.proof_digest = verified_effect_digest(&verified)?;
         Ok(Reconciliation {
@@ -1265,5 +1865,179 @@ mod route_tests {
             BinanceEthereumDepositAdapter::input_route(&legacy).unwrap(),
             ("ETH".into(), "ETH".into(), 1)
         );
+    }
+
+    #[test]
+    fn solana_deposit_routes_require_sol_fee_and_reject_evm_identity() {
+        let input: DepositInput = serde_json::from_value(json!({
+            "requestId":"solana-deposit", "account":"account", "wallet":"wallet",
+            "coin":"SOL", "network":"SOL", "amount":"0.01", "maxFeeSol":"0.00001"
+        }))
+        .unwrap();
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&input).unwrap(),
+            ("SOL".into(), "SOL".into(), 0)
+        );
+
+        let mut missing_fee = input.clone();
+        missing_fee.max_fee_sol = None;
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&missing_fee)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+        let mut wrong_chain = input.clone();
+        wrong_chain.chain_id = Some(1);
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&wrong_chain)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+        let mut zero_chain = input.clone();
+        zero_chain.chain_id = Some(0);
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&zero_chain)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+        let mut conflicting_fee = input.clone();
+        conflicting_fee.max_fee_eth = "0.001".into();
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&conflicting_fee)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+
+        let evm_without_fee: DepositInput = serde_json::from_value(json!({
+            "requestId":"evm-deposit", "account":"account", "wallet":"wallet",
+            "amount":"1"
+        }))
+        .unwrap();
+        assert_eq!(
+            BinanceEthereumDepositAdapter::input_route(&evm_without_fee)
+                .unwrap_err()
+                .code,
+            "DEPOSIT_ROUTE_UNSUPPORTED"
+        );
+    }
+
+    #[test]
+    fn composite_intent_retains_solana_associated_account_funding() {
+        let source = ResourceId("solana:mainnet-beta:source".into());
+        let target_resource = ResourceId("binance:uid:4:SPOT".into());
+        let usdc = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "mint".into(),
+            decimals: 6,
+        };
+        let sol = AssetId {
+            network: "solana:mainnet-beta".into(),
+            reference: "native".into(),
+            decimals: 9,
+        };
+        let amount = Quantity::from_u64(1_000_000);
+        let rent = Quantity::from_u64(3_000_000);
+        let fee = Quantity::from_u64(10_000);
+        let inner = PreparedOperation {
+            operation: "wallet.transfer".into(),
+            input: Value::Null,
+            binding: Value::Null,
+            summary: String::new(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: now(),
+            expires_at: now(),
+            valuation: None,
+            intent: FinancialIntent {
+                debits: vec![
+                    fin_domain::ResourceAmount {
+                        resource: source.clone(),
+                        amount: Amount {
+                            asset: usdc.clone(),
+                            atoms: amount.clone(),
+                        },
+                    },
+                    fin_domain::ResourceAmount {
+                        resource: source.clone(),
+                        amount: Amount {
+                            asset: sol.clone(),
+                            atoms: rent.clone(),
+                        },
+                    },
+                ],
+                maximum_costs: vec![fin_domain::CostBound {
+                    location: fin_domain::AccountingLocation::Cash {
+                        resource: source.clone(),
+                    },
+                    amount: Amount {
+                        asset: sol.clone(),
+                        atoms: fee.clone(),
+                    },
+                    treatment: fin_domain::CostTreatment::AdditionalDebit,
+                }],
+                expected: vec![
+                    EffectConstraint::Transfer {
+                        from: source.clone(),
+                        to: ResourceId("solana:mainnet-beta:binance-owner".into()),
+                        debit_asset: usdc.clone(),
+                        credit_asset: usdc.clone(),
+                        maximum_debit: amount.clone(),
+                        minimum_credit: amount.clone(),
+                    },
+                    EffectConstraint::Transfer {
+                        from: source.clone(),
+                        to: ResourceId("solana:mainnet-beta:account:binance-owner".into()),
+                        debit_asset: sol.clone(),
+                        credit_asset: sol.clone(),
+                        maximum_debit: rent.clone(),
+                        minimum_credit: rent.clone(),
+                    },
+                ],
+                locks: vec![source.clone()],
+            },
+            operation_version: 2,
+            action_deadline: None,
+        };
+        let target = BrokerVerifiedNativeDepositTarget {
+            chain_id: 0,
+            account_resource: target_resource.clone(),
+            address: "binance-owner".into(),
+            asset: AssetId {
+                network: "binance".into(),
+                reference: "USDC".into(),
+                decimals: 36,
+            },
+            minimum_deposit: Quantity::from_u64(0),
+            network: "SOL".into(),
+            observed_at: now(),
+            expires_at: now(),
+            evidence_digest: "digest".into(),
+        };
+        let combined =
+            BinanceEthereumDepositAdapter::cross_custody_intent(&inner, &target, "1", &usdc)
+                .unwrap();
+        assert_eq!(combined.debits.len(), 2);
+        assert_eq!(combined.expected.len(), 2);
+        assert_eq!(combined.maximum_costs, inner.intent.maximum_costs);
+        assert_eq!(
+            combined.expected[0],
+            EffectConstraint::Transfer {
+                from: source,
+                to: target_resource,
+                debit_asset: usdc.clone(),
+                credit_asset: AssetId {
+                    network: "binance".into(),
+                    reference: "USDC".into(),
+                    decimals: 36
+                },
+                maximum_debit: amount.clone(),
+                minimum_credit: Quantity::from_decimal("1", 36).unwrap(),
+            }
+        );
+        assert_eq!(combined.expected[1], inner.intent.expected[1]);
     }
 }

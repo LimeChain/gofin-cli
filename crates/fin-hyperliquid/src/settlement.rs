@@ -1264,6 +1264,7 @@ mod pre_dispatch_recovery_tests {
             approval: None,
             submission: None,
             dispatch_evidence,
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: Some(error),
@@ -1711,6 +1712,7 @@ mod nonce_invalidation_recovery_tests {
             approval: None,
             submission: Some(submission),
             dispatch_evidence: Some(json!({"unknown_response":true})),
+            position_baseline: None,
             effects: None,
             last_reconciliation_evidence: None,
             error: None,
@@ -1821,6 +1823,7 @@ mod nonce_invalidation_recovery_tests {
             }),
             approval: None,
             submission: Some(child_submission.clone()),
+            position_baseline: None,
             dispatch_evidence: Some(json!({
                 "source":"Hyperliquid /exchange",
                 "submission_reference":child_submission.reference,

@@ -1074,7 +1074,22 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
     {
         return None;
     }
+    let effects = value["effects"]["effects"].as_array();
+    let open_escrow = effects.is_some_and(|rows| {
+        rows.iter().any(|effect| {
+            matches!(
+                effect["kind"].as_str(),
+                Some("escrow_progress" | "escrow_position_progress")
+            ) && effect["state"] == "open"
+        })
+    });
+    let open_request = effects.is_some_and(|rows| {
+        rows.iter()
+            .any(|effect| effect["kind"] == "pending_request_progress" && effect["state"] == "open")
+    });
     let headline = match status {
+        "pending" if open_escrow => "Order open",
+        "pending" if open_request => "Request open",
         "completed" => "✓ Completed and verified",
         "pending" => "Pending verification",
         "failed" => "✗ Failed",
@@ -1083,7 +1098,6 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
         _ => return None,
     };
     let mut output = format!("{headline}: {}.\n", safe_text(operation));
-    let effects = value["effects"]["effects"].as_array();
     if let Some(effects) = effects {
         for effect in effects {
             let kind = effect["kind"].as_str().unwrap_or_default();
@@ -1094,6 +1108,31 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
             };
             if let Some(amount) = received.and_then(display_amount) {
                 line(&mut output, 0, &format!("Received {}.", safe_text(&amount)));
+            }
+            if matches!(kind, "escrow_progress" | "escrow_position_progress") {
+                for (field, label) in [
+                    ("remaining_input", "In escrow"),
+                    ("input_refunded", "Refunded"),
+                ] {
+                    if let Some(amount) = display_effect_quantity(effect, "input_asset", field) {
+                        line(&mut output, 0, &format!("{label}: {}.", safe_text(&amount)));
+                    }
+                }
+                if kind == "escrow_progress"
+                    && let Some(amount) =
+                        display_effect_quantity(effect, "output_asset", "output_filled")
+                {
+                    line(&mut output, 0, &format!("Received {}.", safe_text(&amount)));
+                }
+            }
+            if kind == "account_funding_progress"
+                && let Some(amount) = display_effect_quantity(effect, "asset", "remaining")
+            {
+                line(
+                    &mut output,
+                    0,
+                    &format!("Account funding retained: {}.", safe_text(&amount)),
+                );
             }
             if kind == "cost"
                 && let Some(amount) = display_amount(&effect["amount"])
@@ -1134,7 +1173,13 @@ fn render_operation_result(value: &Value, status_command: Option<&str>) -> Optio
         line(
             &mut output,
             0,
-            "Outcome is not yet verified. Do not resubmit.",
+            if open_escrow {
+                "Placement is verified; the order has not fully settled. Do not resubmit."
+            } else if open_request {
+                "Request placement is verified; keeper execution is still pending. Do not resubmit."
+            } else {
+                "Outcome is not yet verified. Do not resubmit."
+            },
         );
     } else if status != "completed" {
         if effects.is_some_and(|effects| !effects.is_empty()) {
@@ -1616,6 +1661,22 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
     None
 }
 
+/// Quantities here come only from verified effects, never preview estimates.
+fn display_effect_quantity(
+    effect: &Value,
+    asset_field: &str,
+    quantity_field: &str,
+) -> Option<String> {
+    let atoms = effect[quantity_field].as_str()?;
+    if atoms.is_empty()
+        || !atoms.bytes().all(|byte| byte.is_ascii_digit())
+        || atoms.bytes().all(|byte| byte == b'0')
+    {
+        return None;
+    }
+    display_amount(&json!({"asset":effect[asset_field], "atoms":atoms}))
+}
+
 fn display_amount(amount: &Value) -> Option<String> {
     let atoms = amount["atoms"].as_str()?;
     let decimals = amount["asset"]["decimals"].as_u64()? as usize;
@@ -1637,6 +1698,20 @@ fn display_amount(amount: &Value) -> Option<String> {
         .as_str()
         .unwrap_or("unknown network");
     let asset = match (network, reference) {
+        ("solana:mainnet-beta", "native") if decimals == 9 => "SOL",
+        ("solana:mainnet-beta", "So11111111111111111111111111111111111111112") if decimals == 9 => {
+            "WSOL"
+        }
+        ("solana:mainnet-beta", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
+            if decimals == 6 =>
+        {
+            "USDC"
+        }
+        ("solana:mainnet-beta", "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo")
+            if decimals == 6 =>
+        {
+            "PYUSD"
+        }
         ("ethereum:1" | "ethereum:42161" | "ethereum:8453" | "ethereum:4663", "native") => "ETH",
         ("ethereum:1", address)
             if address.eq_ignore_ascii_case("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48") =>
