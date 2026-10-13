@@ -21,6 +21,7 @@ use std::{
 
 pub use alloy;
 mod fees;
+mod rpc_race;
 mod rpc_selection;
 pub use fees::{OperatorFeeModel, RollupFeeBound};
 use rpc_selection::{ReadTrace, SelectionState};
@@ -1023,188 +1024,20 @@ impl HttpRpc {
                 "This RPC method is outside the reviewed runtime.",
             ));
         }
-        // One deadline covers identity checks, retries and endpoint fallback.
-        // Never cancel financial dispatch: its original identity must survive
-        // an uncertain transport result.
-        let read_deadline = tokio::time::Instant::now() + self.read_timeout;
-        let mut trace = ReadTrace::new(self, method);
-        let mut selected = None;
-        let mut active = None;
-        let request_anchor = Mutex::new(self.cached_anchor(method, &params));
-        let attempt = async {
-            let urls = if method == "eth_sendRawTransaction" {
-                &self.urls[..1]
-            } else {
-                &self.urls[..]
-            };
-            let mut missing = None;
-            let mut blocked = None;
-            let key = rpc_selection::capability(method, &params);
-            let mut failure = error(
-                "RPC_UNAVAILABLE",
-                "rpc",
-                "No configured RPC returned a usable response.",
-            );
-            let mut eligible = Vec::new();
-            let mut retry_after: Option<Duration> = None;
-            for (endpoint_index, url) in urls.iter().enumerate() {
-                if method != "eth_sendRawTransaction"
-                    && let Some(remaining) = self.read_cooldown_remaining(url)?
-                {
-                    retry_after =
-                        Some(retry_after.map_or(remaining, |previous| previous.min(remaining)));
-                    trace.attempt(endpoint_index, "rate_limited");
-                    continue;
-                }
-                if method != "eth_sendRawTransaction"
-                    && self.unsupported_remaining(endpoint_index, &key).is_some()
-                {
-                    trace.attempt(endpoint_index, "unsupported");
-                    blocked = Some(error(
-                        "RPC_UNSUPPORTED_CAPABILITY",
-                        "rpc",
-                        "Configured read endpoints do not support this capability yet; retry after capability recheck.",
-                    ));
-                    continue;
-                }
-                eligible.push((endpoint_index, url));
-            }
-            if eligible.is_empty()
-                && let Some(error) = blocked
-            {
-                return Err(error);
-            }
-            if eligible.is_empty()
-                && let Some(remaining) = retry_after
-            {
-                return Err(FinError::new(
-                    "RPC_RATE_LIMITED", "rpc",
-                    "All configured read RPC endpoints are temporarily cooling down after rate limits.",
-                    "Retry this read after the reported cooldown.",
-                ).with_details(json!({
-                    "chain_id": self.expected_chain_id,
-                    "retry_after_ms": remaining.as_nanos().div_ceil(1_000_000),
-                })));
-            }
-            for (index, (endpoint_index, url)) in eligible.iter().enumerate() {
-                active = Some(*endpoint_index);
-                trace.attempt(*endpoint_index, "unavailable");
-                let endpoint_attempt = async {
-                    if method == "eth_sendRawTransaction" {
-                        // Bound the pre-dispatch identity read, never the broadcast.
-                        tokio::time::timeout(self.read_timeout, self.ensure_endpoint(url))
-                            .await
-                            .map_err(|_| RpcAttemptFailure {
-                                error: self.read_timeout_error("eth_chainId"),
-                                retryable: false,
-                            })??;
-                    } else {
-                        self.ensure_endpoint(url).await?;
-                    }
-                    if method == "eth_sendRawTransaction" {
-                        self.at(url, method, params.clone(), 0, false).await
-                    } else {
-                        self.eligible_read(
-                            *endpoint_index,
-                            url,
-                            method,
-                            params.clone(),
-                            requirements,
-                            &request_anchor,
-                        )
-                        .await
-                    }
-                };
-                let remaining_endpoints = eligible.len() - index;
-                let result = if method == "eth_sendRawTransaction" || remaining_endpoints == 1 {
-                    // The last read endpoint can use the rest of the global budget.
-                    endpoint_attempt.await
-                } else {
-                    let remaining =
-                        read_deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let share = remaining / u32::try_from(remaining_endpoints).unwrap_or(u32::MAX);
-                    match tokio::time::timeout(share, endpoint_attempt).await {
-                        Ok(result) => result,
-                        Err(_) => Err(RpcAttemptFailure {
-                            retryable: true,
-                            error: error("RPC_ENDPOINT_TIMEOUT", "rpc", "RPC endpoint exceeded its allotted read time; trying another eligible endpoint.")
-                                .with_details(json!({
-                                    "chain_id": self.expected_chain_id,
-                                    "method": method,
-                                    "timeout_ms": share.as_nanos().div_ceil(1_000_000),
-                                })),
-                        }),
-                    }
-                };
-                active = None;
-                match result {
-                    Ok(value)
-                        if value.is_null()
-                            && matches!(
-                                method,
-                                "eth_getTransactionReceipt"
-                                    | "eth_getTransactionByHash"
-                                    | "eth_getBlockByNumber"
-                            ) =>
-                    {
-                        self.record_health(*endpoint_index, None);
-                        trace.attempt(*endpoint_index, "missing");
-                        missing = Some(value);
-                    }
-                    Ok(value) => {
-                        self.record_health(*endpoint_index, None);
-                        trace.attempt(*endpoint_index, "ok");
-                        selected = Some(*endpoint_index);
-                        return Ok(value);
-                    }
-                    Err(e) => {
-                        self.record_health(*endpoint_index, Some(&e.error));
-                        trace.attempt(*endpoint_index, rpc_selection::reason(&e.error));
-                        if method != "eth_sendRawTransaction"
-                            && e.error.code == "RPC_UNSUPPORTED_CAPABILITY"
-                        {
-                            self.mark_unsupported(*endpoint_index, &key);
-                        }
-                        if e.retryable
-                            || endpoint_access_failure(&e.error)
-                            || (method != "eth_sendRawTransaction"
-                                && e.error.code == "RPC_UNSUPPORTED_CAPABILITY")
-                        {
-                            failure = e.error;
-                        } else {
-                            return Err(e.error);
-                        }
-                    }
-                }
-            }
-            // Financial dispatch never advances to a second endpoint after an uncertain result.
-            // A missing receipt is absence of evidence, never proof of failure.
-            if let Some(value) = missing {
-                return Ok(value);
-            }
-            Err(failure)
-        };
         let result = if method == "eth_sendRawTransaction" {
-            attempt.await
-        } else {
-            match tokio::time::timeout_at(read_deadline, attempt).await {
-                Ok(result) => result,
-                Err(_) => {
-                    let error = self.read_timeout_error(method);
-                    if let Some(index) = active {
-                        self.record_health(index, Some(&error));
-                        trace.attempt(index, "timeout");
-                    }
-                    Err(error)
-                }
+            // No read race, retry or global read cancellation can replay a write.
+            let primary = &self.urls[0];
+            match tokio::time::timeout(self.read_timeout, self.ensure_endpoint(primary)).await {
+                Err(_) => Err(self.read_timeout_error("eth_chainId")),
+                Ok(Err(failure)) => Err(failure.error),
+                Ok(Ok(())) => self
+                    .at(primary, method, params, 0, false)
+                    .await
+                    .map_err(|failure| failure.error),
             }
+        } else {
+            self.raced_read(method, params, requirements).await
         };
-        let outcome = match &result {
-            Ok(value) if value.is_null() && selected.is_none() => "missing",
-            Ok(_) => "ok",
-            Err(_) => "error",
-        };
-        trace.finish(outcome, selected);
         result.map_err(|mut error| {
             // The snapshot contains reviewed method names, codes and rpc-N IDs only.
             let mut details = error
@@ -2954,6 +2787,14 @@ mod http_rpc_tests {
     }
 
     fn fixture_rpc(responses: Vec<FixtureResponse>) -> (HttpRpc, JoinHandle<Vec<String>>) {
+        fixture_rpc_with_gate(responses, None, None)
+    }
+
+    fn fixture_rpc_with_gate(
+        responses: Vec<FixtureResponse>,
+        before_first_response: Option<Arc<std::sync::atomic::AtomicBool>>,
+        after_last_response: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (HttpRpc, JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let worker = std::thread::spawn(move || {
@@ -2963,6 +2804,11 @@ mod http_rpc_tests {
                 let body = read_request(&mut stream);
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 methods.push(request["method"].as_str().unwrap().to_owned());
+                if methods.len() == 1
+                    && let Some(gate) = &before_first_response
+                {
+                    wait_for_fixture_gate(gate);
+                }
                 match response {
                     FixtureResponse::Json(result) => {
                         let payload = json!({
@@ -2988,24 +2834,52 @@ mod http_rpc_tests {
                     FixtureResponse::Http(status) => write_response(&mut stream, status, b""),
                 }
             }
+            if let Some(gate) = after_last_response {
+                gate.store(true, std::sync::atomic::Ordering::Release);
+            }
             methods
         });
         let rpc = HttpRpc::isolated_localhost(format!("http://{address}"), 1).unwrap();
         (rpc, worker)
     }
 
+    fn wait_for_fixture_gate(gate: &std::sync::atomic::AtomicBool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !gate.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "RPC fixture gate was not released"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        read_request_or_cancelled(stream).expect("fixture client did not send a full request")
+    }
+
+    fn read_request_or_cancelled(stream: &mut TcpStream) -> Option<Vec<u8>> {
         stream
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 2048];
         loop {
-            let count = stream.read(&mut chunk).unwrap();
-            assert_ne!(
-                count, 0,
-                "fixture client closed before sending a full request"
-            );
+            let count = match stream.read(&mut chunk) {
+                Ok(0) => return None,
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    return None;
+                }
+                Err(error) => panic!("fixture request failed: {error}"),
+            };
             bytes.extend_from_slice(&chunk[..count]);
             if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
                 let headers = String::from_utf8_lossy(&bytes[..header_end]);
@@ -3020,7 +2894,7 @@ mod http_rpc_tests {
                     .unwrap_or(0);
                 let body_start = header_end + 4;
                 if bytes.len() >= body_start + content_length {
-                    return bytes[body_start..body_start + content_length].to_vec();
+                    return Some(bytes[body_start..body_start + content_length].to_vec());
                 }
             }
         }
@@ -3028,14 +2902,21 @@ mod http_rpc_tests {
 
     fn write_response(stream: &mut TcpStream, status: u16, body: &[u8]) {
         let reason = if status == 200 { "OK" } else { "Unavailable" };
-        write!(
-            stream,
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .unwrap();
-        stream.write_all(body).unwrap();
-        stream.flush().unwrap();
+        let sent = (|| -> std::io::Result<()> {
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(body)?;
+            stream.flush()
+        })();
+        if let Err(error) = sent {
+            assert!(matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ));
+        }
     }
 
     #[tokio::test]
@@ -3308,6 +3189,8 @@ mod http_rpc_tests {
         let second = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let first_address = first.local_addr().unwrap();
         let second_address = second.local_addr().unwrap();
+        let first_script_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = first_script_complete.clone();
         let first_worker = std::thread::spawn(move || {
             let mut methods = Vec::new();
             let mut responses = vec![FixtureResponse::Json(json!(chain_id))];
@@ -3335,6 +3218,7 @@ mod http_rpc_tests {
                     FixtureResponse::Http(status) => write_response(&mut stream, status, b""),
                 }
             }
+            completed.store(true, std::sync::atomic::Ordering::Release);
             methods
         });
         let second_worker = std::thread::spawn(move || {
@@ -3347,10 +3231,18 @@ mod http_rpc_tests {
                         // macOS can inherit the listener's nonblocking mode;
                         // read_request expects a blocking fixture connection.
                         stream.set_nonblocking(false).unwrap();
-                        let request: Value =
-                            serde_json::from_slice(&read_request(&mut stream)).unwrap();
+                        let Some(body) = read_request_or_cancelled(&mut stream) else {
+                            continue;
+                        };
+                        let request: Value = serde_json::from_slice(&body).unwrap();
                         let method = request["method"].as_str().unwrap().to_owned();
                         methods.push(method.clone());
+                        if method == "eth_chainId" {
+                            // Observe A's scripted error before B can become
+                            // a winner, even when fixture threads run out of order.
+                            wait_for_fixture_gate(&first_script_complete);
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
                         let result = if method == "eth_chainId" {
                             json!("0x1")
                         } else if method == "eth_getBlockByNumber" {
@@ -3395,6 +3287,8 @@ mod http_rpc_tests {
         let first_address = first.local_addr().unwrap();
         let second_address = second.local_addr().unwrap();
         let first_params = params.clone();
+        let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed = retries_complete.clone();
         let first_worker = std::thread::spawn(move || {
             let mut methods = Vec::new();
             for index in 0..4 {
@@ -3411,6 +3305,7 @@ mod http_rpc_tests {
                 .to_string();
                 write_response(&mut stream, 200, payload.as_bytes());
             }
+            completed.store(true, std::sync::atomic::Ordering::Release);
             methods
         });
         let second_worker = std::thread::spawn(move || {
@@ -3424,6 +3319,7 @@ mod http_rpc_tests {
                     json!("0x1")
                 } else {
                     assert_eq!(request["params"], params);
+                    wait_for_fixture_gate(&retries_complete);
                     json!("0x6000")
                 };
                 let payload =
@@ -3480,18 +3376,27 @@ mod http_rpc_tests {
 
     #[tokio::test]
     async fn rate_limited_read_retries_then_fails_over_to_backup() {
-        // RPC A is on Ethereum, but rate-limits every balance attempt.
-        let (mut rpc, primary) = fixture_rpc(vec![
-            FixtureResponse::Json(json!("0x1")),
-            FixtureResponse::Http(429),
-            FixtureResponse::Http(429),
-            FixtureResponse::Http(429),
-        ]);
+        // Keep retry coverage deterministic: B waits until A finishes its script.
+        let retries_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut rpc, primary) = fixture_rpc_with_gate(
+            vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Http(429),
+                FixtureResponse::Http(429),
+                FixtureResponse::Http(429),
+            ],
+            None,
+            Some(retries_complete.clone()),
+        );
         // RPC B is also on Ethereum and returns the requested balance.
-        let (backup_rpc, backup) = fixture_rpc(vec![
-            FixtureResponse::Json(json!("0x1")),
-            FixtureResponse::Json(json!("0x2a")),
-        ]);
+        let (backup_rpc, backup) = fixture_rpc_with_gate(
+            vec![
+                FixtureResponse::Json(json!("0x1")),
+                FixtureResponse::Json(json!("0x2a")),
+            ],
+            Some(retries_complete),
+            None,
+        );
         rpc.urls.extend(backup_rpc.urls);
 
         let balance = rpc
@@ -3634,7 +3539,13 @@ mod http_rpc_tests {
             "RPC_REQUEST_FAILED"
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert!(
+            second
+                .join()
+                .unwrap()
+                .iter()
+                .all(|method| method == "eth_chainId")
+        );
 
         let (rpc, first, second) =
             two_endpoint_rpc_with_chain_responses(FixtureResponse::Json(json!("0x6000")), "0x2", 1);
@@ -3644,16 +3555,15 @@ mod http_rpc_tests {
                 json!(["0x0000000000000000000000000000000000000002", "0x10"])
             )
             .await
-            .unwrap_err()
-            .code,
-            "WRONG_CHAIN"
+            .unwrap(),
+            json!("0xbeef")
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId"]);
-        assert!(second.join().unwrap().is_empty());
+        assert_eq!(second.join().unwrap(), vec!["eth_chainId", "eth_getCode"]);
     }
 
     #[tokio::test]
-    async fn semantic_and_identity_errors_do_not_fail_over_to_another_endpoint() {
+    async fn semantic_reverts_fail_closed_but_invalid_response_identity_cannot_win() {
         let (rpc, first, second) =
             two_endpoint_rpc(FixtureResponse::RpcError(3, "execution reverted"));
         assert_eq!(
@@ -3664,7 +3574,13 @@ mod http_rpc_tests {
             "RPC_REQUEST_FAILED"
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert!(
+            second
+                .join()
+                .unwrap()
+                .iter()
+                .all(|method| method == "eth_chainId")
+        );
 
         let (rpc, first, second) = two_endpoint_rpc(FixtureResponse::Raw(json!({
             "jsonrpc":"2.0",
@@ -3674,12 +3590,14 @@ mod http_rpc_tests {
         assert_eq!(
             rpc.request("eth_call", json!([{}, "latest"]))
                 .await
-                .unwrap_err()
-                .code,
-            "RPC_DATA_INVALID"
+                .unwrap(),
+            json!("0xbeef")
         );
         assert_eq!(first.join().unwrap(), vec!["eth_chainId", "eth_call"]);
-        assert!(second.join().unwrap().is_empty());
+        assert_eq!(
+            second.join().unwrap(),
+            vec!["eth_chainId", "eth_call", "eth_getBlockByNumber"]
+        );
     }
 
     #[tokio::test]

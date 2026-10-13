@@ -206,9 +206,12 @@ impl Chain {
 
 // Both endpoints observe the same external chain. A accepts the complete POST
 // before dropping its response, then rate-limits reads. B serves only reads.
+// Reads race, so B's small fixture delay makes A's injected 429 or missing
+// receipt observable before B wins, rather than depending on thread scheduling.
 struct Endpoint {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    drain: std::sync::mpsc::Sender<std::sync::mpsc::Sender<()>>,
     stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -222,6 +225,7 @@ impl Endpoint {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let stopped = Arc::new(AtomicBool::new(false));
+        let (drain, drained) = std::sync::mpsc::channel::<std::sync::mpsc::Sender<()>>();
         let captured = requests.clone();
         let stop = stopped.clone();
         let worker = std::thread::spawn(move || {
@@ -229,6 +233,11 @@ impl Endpoint {
                 let mut stream = match listener.accept() {
                     Ok((stream, _)) => stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Acknowledge only after every queued connection and
+                        // delayed response callback has been handled.
+                        while let Ok(complete) = drained.try_recv() {
+                            let _ = complete.send(());
+                        }
                         std::thread::sleep(Duration::from_millis(1));
                         continue;
                     }
@@ -238,15 +247,23 @@ impl Endpoint {
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
-                let request = read_request(&mut stream);
+                let Some(request) = read_request(&mut stream) else {
+                    continue; // Fin may cancel a losing read before its POST is complete.
+                };
                 captured.lock().unwrap().push(request.clone());
                 if request["method"] == "eth_sendRawTransaction" {
                     assert!(primary, "RPC B must never receive a broadcast");
                     chain.accept(&request);
                     continue; // Fully accepted request, no HTTP response.
                 }
+                if !primary {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
                 if primary && !missing_receipts && chain.hash.lock().unwrap().is_some() {
-                    write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
                 } else {
                     let result = if primary
                         && missing_receipts
@@ -260,16 +277,35 @@ impl Endpoint {
                     };
                     let body =
                         json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
-                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                    // A losing read can be cancelled after the server receives
+                    // its request; a closed response socket is expected then.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
                 }
             }
         });
         Self {
             url,
             requests,
+            drain,
             stopped,
             worker: Some(worker),
         }
+    }
+
+    async fn drain(&self) {
+        let (complete, completed) = std::sync::mpsc::channel();
+        self.drain.send(complete).unwrap();
+        tokio::task::spawn_blocking(move || {
+            completed
+                .recv_timeout(Duration::from_secs(5))
+                .expect("synthetic RPC fixture did not drain")
+        })
+        .await
+        .unwrap();
     }
 }
 impl Drop for Endpoint {
@@ -283,12 +319,11 @@ impl Drop for Endpoint {
         }
     }
 }
-fn read_request(stream: &mut TcpStream) -> Value {
+fn read_request(stream: &mut TcpStream) -> Option<Value> {
     let mut bytes = Vec::new();
     let (header_end, length) = loop {
         let mut buffer = [0; 4096];
-        let read = stream.read(&mut buffer).unwrap();
-        assert!(read > 0, "synthetic RPC received an incomplete request");
+        let read = read_fixture_bytes(stream, &mut buffer)?;
         bytes.extend_from_slice(&buffer[..read]);
         if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
             let headers = std::str::from_utf8(&bytes[..end]).unwrap();
@@ -305,11 +340,30 @@ fn read_request(stream: &mut TcpStream) -> Value {
     };
     while bytes.len() < header_end + length {
         let mut buffer = [0; 4096];
-        let read = stream.read(&mut buffer).unwrap();
-        assert!(read > 0);
+        let read = read_fixture_bytes(stream, &mut buffer)?;
         bytes.extend_from_slice(&buffer[..read]);
     }
-    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
+    Some(serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap())
+}
+
+fn read_fixture_bytes(stream: &mut TcpStream, buffer: &mut [u8]) -> Option<usize> {
+    match stream.read(buffer) {
+        Ok(0) => None,
+        Ok(read) => Some(read),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            None
+        }
+        Err(error) => panic!("synthetic RPC request read failed: {error}"),
+    }
 }
 
 fn broker(path: &Path, urls: Vec<String>, chain: Arc<Chain>) -> Arc<BrokerRuntime> {
@@ -626,11 +680,18 @@ async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     assert_eq!(completed["status"], "completed", "{completed}");
     assert_eq!(completed["id"], id);
     assert_eq!(completed["submission"]["reference"], hash);
+    // Cancellation can leave a fully sent losing POST queued in the fixture.
+    // Drain callbacks before sampling, so a prior read cannot look like a new
+    // doctor probe; drain again afterwards to catch any actual probe.
+    primary.drain().await;
+    backup.drain().await;
     let before_doctor = (
         primary.requests.lock().unwrap().len(),
         backup.requests.lock().unwrap().len(),
     );
     let doctor = restarted.call(BrokerRequest::Doctor).await;
+    primary.drain().await;
+    backup.drain().await;
     assert_eq!(
         before_doctor,
         (

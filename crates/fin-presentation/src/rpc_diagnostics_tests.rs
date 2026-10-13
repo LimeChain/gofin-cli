@@ -71,6 +71,20 @@ fn doctor_distinguishes_cancelled_and_failed_reads_from_no_observations() {
 }
 
 #[test]
+fn doctor_explains_cancelled_loser_and_preserves_the_reason_in_machine_output() {
+    let mut value = doctor();
+    value["rpc_health"][0]["last_read"]["attempts"][0]["reason"] = json!("cancelled");
+    let human = render_human("doctor", &value, false);
+    assert!(human.contains("rpc-1: read was cancelled."));
+    assert!(human.contains("rpc-2 answered eth_call"));
+    let mut output = Vec::new();
+    ui(true, false, false)
+        .write_result_to(&value, "doctor", &mut output)
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), value);
+}
+
+#[test]
 fn all_missing_receipts_are_reported_without_claiming_a_successful_provider() {
     let mut value = doctor();
     value["rpc_health"][0]["last_read"] = json!({"method":"eth_getTransactionReceipt","outcome":"missing","selected_endpoint":null,"attempts":[{"endpoint_id":"rpc-1","reason":"missing"},{"endpoint_id":"rpc-2","reason":"missing"}]});

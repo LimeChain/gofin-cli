@@ -158,8 +158,10 @@ impl<'a> ReadTrace<'a> {
     }
     pub(super) fn attempt(&mut self, index: usize, reason: &str) {
         let id = format!("rpc-{}", index + 1);
-        if let Some(last) = self.attempts.last_mut()
-            && last["endpoint_id"] == id
+        if let Some(last) = self
+            .attempts
+            .iter_mut()
+            .find(|last| last["endpoint_id"] == id)
         {
             last["reason"] = json!(reason);
         } else {
@@ -171,11 +173,14 @@ impl<'a> ReadTrace<'a> {
         if self.method != "eth_sendRawTransaction"
             && let Ok(mut state) = self.rpc.selection.lock()
         {
+            self.attempts.sort_by_key(|attempt| {
+                attempt["endpoint_id"]
+                    .as_str()
+                    .and_then(|id| id.strip_prefix("rpc-"))
+                    .and_then(|id| id.parse::<usize>().ok())
+            });
             let observation = json!({"method":self.method,"outcome":outcome,"selected_endpoint":selected.map(|i|format!("rpc-{}",i+1)),"attempts":self.attempts});
-            if outcome == "ok"
-                && selected.is_some()
-                && self.attempts.iter().any(|a| a["reason"] != "ok")
-            {
+            if outcome == "ok" && selected.is_some_and(|index| index != 0) {
                 state.last_failover = Some(observation.clone());
             }
             state.last_read = Some(observation);
@@ -420,7 +425,6 @@ impl HttpRpc {
                 if rpc_u64(&header["number"]).ok() != Some(height) {
                     return Err(incompatible());
                 }
-                self.observe_header(index, &header, false)?;
                 let block_hash =
                     hash(header["hash"].as_str().unwrap_or_default()).map_err(|error| {
                         RpcAttemptFailure {
@@ -428,10 +432,16 @@ impl HttpRpc {
                             retryable: false,
                         }
                     })?;
-                anchor = Some((block_hash, height));
-                *request_anchor.lock().map_err(|_| {
+                let mut shared = request_anchor.lock().map_err(|_| {
                     failure("RPC_UNAVAILABLE", "Pinned request identity is unavailable.")
-                })? = anchor;
+                })?;
+                let observed = (block_hash, height);
+                if shared.is_some_and(|expected| expected != observed) {
+                    return Err(incompatible());
+                }
+                // Reject a racing fork before it can alter the shared cache.
+                self.observe_header(index, &header, false)?;
+                anchor = Some(*shared.get_or_insert(observed));
             }
         }
         let mut effective = params.clone();
@@ -481,6 +491,40 @@ impl HttpRpc {
             }
         }
         let value = result?;
+        // A malformed fast result cannot win over another provider. Typed ABI
+        // interpretation and financial proof remain owned by the adapter.
+        let shape = match method {
+            "eth_chainId" | "eth_blockNumber" | "eth_getTransactionCount" => {
+                rpc_u64(&value).map(|_| ())
+            }
+            "eth_getBalance" | "eth_estimateGas" | "eth_maxPriorityFeePerGas" => {
+                rpc_u256(&value).map(|_| ())
+            }
+            "eth_getCode" | "eth_call" | "eth_getStorageAt" => rpc_bytes(&value).map(|_| ()),
+            "eth_getTransactionReceipt" | "eth_getTransactionByHash" if !value.is_null() => {
+                let field = if method == "eth_getTransactionReceipt" {
+                    "transactionHash"
+                } else {
+                    "hash"
+                };
+                let requested = params[0].as_str().and_then(|text| hash(text).ok());
+                let reported = value[field].as_str().and_then(|text| hash(text).ok());
+                if value.is_object() && requested.is_some() && requested == reported {
+                    Ok(())
+                } else {
+                    Err(error(
+                        "RPC_DATA_INVALID",
+                        "rpc",
+                        "RPC transaction evidence does not identify the requested original hash; no evidence from this endpoint was accepted.",
+                    ))
+                }
+            }
+            _ => Ok(()),
+        };
+        shape.map_err(|error| RpcAttemptFailure {
+            error,
+            retryable: false,
+        })?;
         if method == "eth_getBlockByNumber" && !value.is_null() {
             if let Some(requested) = params
                 .get(0)

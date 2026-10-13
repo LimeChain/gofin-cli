@@ -77,21 +77,27 @@ their order remain authoritative. Missing-network coverage for reusable wallets
 uses the same defaults, as do read-only bridge observers without an injected
 transport. Custom RPC settings are not yet exposed through the public CLI.
 
-Reads try eligible endpoints in configured order within one 10-second deadline,
-including identity, capability and evidence checks. Retries stay within each
-endpoint's share of the remaining time. With two eligible endpoints, a
-slow primary gets roughly five seconds before the backup uses the remaining
-budget; an earlier failure leaves more time for the backup. The deadline applies
-to each RPC read, not the whole user command. Once the full budget expires, Fin
-returns `RPC_READ_TIMEOUT` without starting another provider attempt or resetting
+Reads start the first two eligible endpoints simultaneously, with at most two
+active attempts. The first usable response that passes transport validation wins
+and cancels the remaining read. If an endpoint fails or returns missing evidence,
+its slot goes to the next configured provider. Identity, response shape, freshness,
+capability and evidence checks remain inside the unchanged 10-second deadline.
+With only two eligible providers, each may use all the remaining time. With more
+than two, the remaining deadline is divided into parallel waves so later providers
+get a chance when the initial pair stalls. Retries stay within each attempt's time
+share. The deadline applies to each RPC read, not the whole user command. Once the
+full budget expires, Fin returns `RPC_READ_TIMEOUT` without starting another
+provider attempt or resetting
 the clock. A submitted transaction remains unresolved until its original
 identity can be reconciled; timeout does not establish transaction failure.
 Each endpoint has up to two retries (100/250 ms); a positive `Retry-After`
 advances immediately. Rate limits
 cool down reads for 30 seconds by default; valid seconds or HTTP dates override
-this up to 24 hours. The primary becomes eligible again after expiry. Wrong
-chain identity and contract reverts fail closed. Broadcasts have no read
-failover or retry and retain the primary even during its read cooldown.
+this up to 24 hours. The primary becomes eligible again after expiry. Wrong-chain
+or malformed responses reject their endpoint, allowing another valid response to
+win. A semantic contract revert observed before a winner still fails the read
+closed. Broadcasts have no read failover or retry and retain the primary even
+during its read cooldown.
 
 Latest observations must have a block timestamp no older than 60 seconds and
 no more than 30 seconds ahead of the local clock. Same-endpoint freshness is
@@ -113,17 +119,20 @@ both before and after the state read. Disagreement rejects its state rather
 than silently adopting another fork. The pool keeps at most 64 block anchors;
 typed state reads resolve missing anchors again. Recognized missing/pruned state errors on explicit historical
 reads advance to the next endpoint, including Nitro errors containing the
-unavailable state root. Contract reverts and identity mismatches still fail
-closed. Broadcasts use only the primary; after response loss, recovery
-queries the original hash through eligible read endpoints without resending.
+unavailable state root. Each request retains its canonical anchor across racing
+header lookups and cache eviction; another provider cannot substitute its fork.
+Contract reverts observed before a winner still fail closed, and wrong-chain
+responses cannot win. Broadcasts use only the primary; after response loss,
+recovery queries the original hash through eligible read endpoints without resending.
 Public access does not imply unlimited capacity or guaranteed archive support;
 missing required historical/finality evidence stays unresolved.
 
 `fin doctor` reports observed endpoint health and the latest read selection;
 `fin doctor --verbose` shows details and `fin doctor --json` retains structured
-`rpc_health`. Endpoint IDs (`rpc-1`, `rpc-2`, ...) follow configured order.
-The latest successful fallback is retained separately as `last_failover`, so
-a later healthy primary read does not hide a receipt recovered via a backup.
+`rpc_health`. Endpoint IDs (`rpc-1`, `rpc-2`, ...) and attempt records follow
+configured order, including losers marked `cancelled`. The latest actual
+non-primary winner is retained separately as `last_failover`, even if the primary
+was merely cancelled; a later healthy primary win does not erase it.
 Pinned hashes are owned by each request and survive eviction from the shared
 anchor cache while another endpoint is being tried.
 Diagnostics use actual shared wallet/bridge transports and do not perform
@@ -132,6 +141,13 @@ codes, methods, outcomes and numeric timing are published; URLs, headers,
 calldata and provider error messages are excluded. Dropping a read cancels its
 remaining attempts and records a cancelled observation. This is independent
 of financial submission cancellation, whose original identity stays durable.
+
+Synthetic transport tests cover simultaneous reads, invalid-response rejection,
+missing evidence, bounded concurrency and loser cancellation. Broker/SQLite
+restart fixtures exercise the same transport through the Ethereum adapter and
+optional isolated CLI, preserving the original ID, hash, reservations and proof
+with one signature and one broadcast. Public probes remain opt-in read-only
+checks; they do not establish live-write or native-approval evidence.
 
 ## Connection and input contract
 

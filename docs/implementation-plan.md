@@ -115,11 +115,18 @@ budget. Validation, approval, timeout and recovery rules remain unchanged.
 
 Bound external evidence collection, including RPC retries/fallback, while leaving
 financial dispatch and durable reconciliation under their original identities.
-EVM reads keep one 10-second deadline across all endpoints. Before an endpoint
-attempt, divide the remaining budget among the remaining eligible endpoints;
-that share covers chain verification, the requested read and its retries. A slow
-endpoint yields to the next provider, and the last provider may use all remaining
-time. Preserve exact request parameters and verify each provider's chain identity.
+EVM reads keep one 10-second deadline across all endpoints. Start the first two
+eligible endpoints concurrently, with at most two attempts active. A failed or
+missing response releases its slot for the next configured provider. The first
+usable response to pass transport identity, shape, freshness and evidence checks
+wins; cancel the remaining attempts. Reject malformed or wrong-chain responses
+individually, while a semantic contract revert observed before a winner still
+fails the read closed. With more than two eligible endpoints, divide remaining
+time into parallel waves so a stalled pair leaves an opportunity for later
+providers; with only two, both may use the full remaining deadline. Each attempt
+includes chain verification, the requested read and its bounded retries. Preserve
+exact parameters and each request's immutable canonical anchor even when header
+lookups race or the shared anchor cache evicts it.
 Financial broadcasts keep their original endpoint and are not cancelled by these
 read deadlines; their pre-dispatch identity check remains bounded separately.
 The EVM HTTP transport records a monotonic, in-memory read cooldown after HTTP

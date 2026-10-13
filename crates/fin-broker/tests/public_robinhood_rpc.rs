@@ -177,15 +177,19 @@ impl Gateway {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap();
-            loop {
+            'connections: loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
-                reader.read_line(&mut line).await.unwrap();
+                if !matches!(reader.read_line(&mut line).await, Ok(read) if read > 0) {
+                    continue;
+                }
                 let mut length = None;
                 loop {
                     line.clear();
-                    reader.read_line(&mut line).await.unwrap();
+                    if !matches!(reader.read_line(&mut line).await, Ok(read) if read > 0) {
+                        continue 'connections;
+                    }
                     if line == "\r\n" {
                         break;
                     }
@@ -198,7 +202,9 @@ impl Gateway {
                 let length = length.unwrap();
                 assert!(length < 4096);
                 let mut bytes = vec![0; length];
-                reader.read_exact(&mut bytes).await.unwrap();
+                if reader.read_exact(&mut bytes).await.is_err() {
+                    continue; // Fin can cancel a losing read during its POST.
+                }
                 let request: Value = serde_json::from_slice(&bytes).unwrap();
                 assert!(matches!(
                     request["method"].as_str(),
@@ -206,14 +212,20 @@ impl Gateway {
                 ));
                 captured.fetch_add(1, Ordering::SeqCst);
                 let (status, body, retry) = if forward {
+                    // Both gateways now race. Let the local primary's injected
+                    // 429 be observed before starting the live backup's read.
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     let response = client.post(BACKUP).json(&request).send().await.unwrap();
                     let status = response.status().as_u16();
                     (status, response.bytes().await.unwrap().to_vec(), "")
                 } else {
                     (429, vec![], "Retry-After: 120\r\n")
                 };
-                reader.get_mut().write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.unwrap();
-                reader.get_mut().write_all(&body).await.unwrap();
+                if reader.get_mut().write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes()).await.is_err() {
+                    continue;
+                }
+                // Cancellation closes the losing gateway's response socket.
+                let _ = reader.get_mut().write_all(&body).await;
             }
         });
         Self {

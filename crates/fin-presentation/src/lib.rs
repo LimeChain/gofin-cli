@@ -1091,6 +1091,7 @@ fn render_rpc_attempts(output: &mut String, attempts: &Value) {
             "lagging" => "RPC was behind",
             "unsupported" => "requested read was unsupported",
             "timeout" => "read timed out",
+            "cancelled" => "read was cancelled",
             "rate_limited" => "rate limited",
             "historical_unavailable" => "historical state was unavailable",
             "access_denied" => "public access was denied",

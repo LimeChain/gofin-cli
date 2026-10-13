@@ -2,6 +2,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod eligibility;
+mod racing;
 mod submission_recovery;
 
 type ReplyHook = Box<dyn FnOnce(&Value) -> Value + Send>;
@@ -84,6 +85,11 @@ struct Server {
 
 impl Server {
     fn new(replies: Vec<Reply>) -> Self {
+        let mut replies = replies.into_iter();
+        Self::handling(move |_| replies.next().expect("unexpected RPC fixture request"))
+    }
+
+    fn handling(mut response: impl FnMut(&Value) -> Reply + Send + 'static) -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -92,15 +98,18 @@ impl Server {
         let captured = requests.clone();
         let stop = stopped.clone();
         let worker = std::thread::spawn(move || {
-            let mut replies = replies.into_iter();
             while !stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false).unwrap();
-                        let request: Value =
-                            serde_json::from_slice(&read_request(&mut stream)).unwrap();
+                        // Racing can cancel a losing request during connection
+                        // setup, before its complete HTTP body reaches us.
+                        let Some(bytes) = read_fixture_request(&mut stream, &stop) else {
+                            continue;
+                        };
+                        let request: Value = serde_json::from_slice(&bytes).unwrap();
                         captured.lock().unwrap().push(request.clone());
-                        let mut reply = replies.next().expect("unexpected RPC fixture request");
+                        let mut reply = response(&request);
                         if let Some(on_request) = reply.on_request.take() {
                             reply.result = on_request(&request);
                         }
@@ -138,7 +147,7 @@ impl Server {
                             stream.flush()
                         })();
                         if let Err(error) = sent {
-                            // A timed-out client may close before the delayed reply.
+                            // A losing or timed-out client may close before its reply.
                             assert!(matches!(
                                 error.kind(),
                                 std::io::ErrorKind::BrokenPipe
@@ -168,6 +177,49 @@ impl Server {
     fn rpc(&self) -> HttpRpc {
         HttpRpc::isolated_localhost(self.url.clone(), 1).unwrap()
     }
+}
+
+fn read_fixture_request(stream: &mut TcpStream, stop: &AtomicBool) -> Option<Vec<u8>> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 2048];
+    while !stop.load(Ordering::Relaxed) {
+        match stream.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return None,
+            Err(error) => panic!("RPC fixture request failed: {error}"),
+        }
+        if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&bytes[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            if bytes.len() >= body_start + content_length {
+                return Some(bytes[body_start..body_start + content_length].to_vec());
+            }
+        }
+    }
+    None
 }
 
 impl Drop for Server {
@@ -200,7 +252,12 @@ async fn two_pruned_endpoints_reach_archive_with_same_canonical_block() {
     let backup = Server::new(unavailable(
         "historical state 61a3d7d087734a9401c2fdfdb914fb3085bce806bb4c7f432be010eefea0e042 is not available",
     ));
-    let archive = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
+    let archive = Server::new(vec![
+        Reply::result("0x1"),
+        // Both pruned endpoints must finish their bounded retries before
+        // archive evidence wins and cancels any remaining read.
+        Reply::result("0x2a").delayed(Duration::from_millis(100)),
+    ]);
     let rpc = HttpRpc::isolated_localhost_pool(
         vec![primary.url.clone(), backup.url.clone(), archive.url.clone()],
         1,
@@ -231,7 +288,10 @@ async fn slow_primary_read_fails_over_within_total_deadline() {
         Reply::result("0x1"),
         Reply::result("0xaa").delayed(Duration::from_secs(2)),
     ]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2a").delayed(Duration::from_millis(30)),
+    ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
     rpc.read_timeout = Duration::from_millis(600);
@@ -254,9 +314,12 @@ async fn slow_primary_read_fails_over_within_total_deadline() {
 }
 
 #[tokio::test]
-async fn slow_primary_identity_check_fails_over_to_verified_backup() {
+async fn slow_primary_identity_check_loses_to_verified_backup() {
     let primary = Server::new(vec![Reply::result("0x1").delayed(Duration::from_secs(2))]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2a").delayed(Duration::from_millis(30)),
+    ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
     rpc.read_timeout = Duration::from_millis(600);
@@ -315,7 +378,7 @@ async fn slow_all_providers_stop_at_total_deadline() {
 }
 
 #[tokio::test]
-async fn slow_backup_can_use_budget_unused_by_fast_primary_failure() {
+async fn slow_backup_can_use_remaining_deadline_after_fast_primary_failure() {
     let primary = Server::new(vec![Reply::result("0x1"), Reply::rate_limit(Some("120"))]);
     let backup = Server::new(vec![
         Reply::result("0x1"),
@@ -350,7 +413,10 @@ async fn slow_primary_does_not_allow_wrong_chain_backup() {
         .request("eth_getBalance", balance_params())
         .await
         .unwrap_err();
-    assert_eq!(error.code, "WRONG_CHAIN");
+    assert_eq!(error.code, "RPC_READ_TIMEOUT");
+    assert!(error.details.as_deref().unwrap()["rpc_health"]["last_read"]["attempts"]
+        .as_array().unwrap().iter().any(|attempt| attempt["endpoint_id"] == "rpc-2"
+            && attempt["reason"] == "incompatible"));
     assert_eq!(primary.requests().len(), 2);
     assert_eq!(
         backup.requests().len(),
@@ -524,12 +590,14 @@ async fn retry_after_fails_over_skips_primary_and_allows_return_after_expiry() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
         Reply::rate_limit(Some("120")),
-        Reply::result("0xaa"),
+        Reply::result("0xaa").delayed(Duration::from_millis(50)),
     ]);
     let backup = Server::new(vec![
         Reply::result("0x1"),
-        Reply::result("0x2a"),
+        // Let A's 429 arrive before B wins, so the cooldown is observable.
+        Reply::result("0x2a").delayed(Duration::from_millis(50)),
         Reply::result("0x2b"),
+        Reply::result("0x2c").delayed(Duration::from_secs(1)),
     ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
@@ -561,7 +629,7 @@ async fn retry_after_fails_over_skips_primary_and_allows_return_after_expiry() {
         json!("0xaa")
     );
     assert_eq!(primary.requests().len(), 3);
-    assert_eq!(backup.requests().len(), 3);
+    assert_eq!(backup.requests().len(), 4);
 }
 
 #[tokio::test]
@@ -674,7 +742,10 @@ async fn retry_after_does_not_redirect_or_retry_a_broadcast() {
         Reply::rate_limit(Some("120")),
         Reply::rate_limit(Some("120")),
     ]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2a").delayed(Duration::from_millis(50)),
+    ]);
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
     rpc.request("eth_getBalance", balance_params())

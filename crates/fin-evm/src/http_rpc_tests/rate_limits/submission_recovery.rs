@@ -66,10 +66,21 @@ fn original_transaction(signer: &LocalEnvelopeSigner) -> FrozenTransaction {
     }
 }
 
-fn accepted_hash(accepted: &Mutex<Option<String>>, request: &Value) -> String {
-    let original = accepted.lock().unwrap().clone().unwrap();
-    assert_eq!(request["params"], json!([original]));
-    original
+fn revalidation_reply(request: &Value) -> Reply {
+    match request["method"].as_str().unwrap() {
+        "eth_chainId" => Reply::result("0x1"),
+        "eth_getBlockByNumber" => Reply::computed(|_| {
+            json!({"baseFeePerGas":"0x1", "number":"0xb",
+                "hash":format!("0x{}", "22".repeat(32)),
+                "timestamp":format!("0x{:x}", SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
+        }),
+        "eth_getTransactionCount" => Reply::result("0x3"),
+        "eth_call" => Reply::result("0x"),
+        "eth_estimateGas" => Reply::result("0x5208"),
+        "eth_getBalance" => Reply::result("0xffffffffffffffff"),
+        method => panic!("unexpected revalidation read: {method}"),
+    }
 }
 
 async fn recover_lost_broadcast(corrupt_receipt: bool) {
@@ -91,66 +102,94 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
     let saved = journal.clone();
     let received = accepted.clone();
     let trace = events.clone();
-    let primary = Server::new(vec![
-        Reply::result("0x1"), // HttpRpc endpoint identity.
-        Reply::result("0x1"), // EvmRuntime revalidation.
-        Reply::computed(|_| {
-            json!({"baseFeePerGas":"0x1", "number":"0xb",
-            "hash":format!("0x{}", "22".repeat(32)),
-            "timestamp":format!("0x{:x}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
-        }),
-        Reply::result("0x3"),
-        Reply::result("0x"),
-        Reply::result("0x5208"),
-        Reply::result("0xffffffffffffffff"),
-        Reply::lost_response(move |request| {
-            assert_eq!(request["method"], "eth_sendRawTransaction");
-            let raw = rpc_bytes(&request["params"][0]).unwrap();
-            let original_hash = format!("{:#x}", verify_signed_envelope(&tx, &raw).unwrap());
-            // The original identity must already be on disk when A accepts it.
-            assert_eq!(saved.load().reference, original_hash);
-            *received.lock().unwrap() = Some(original_hash);
-            trace.lock().unwrap().push("accept");
-            Value::Null
-        }),
-        // Subsequent reads fail over to B; broadcasts must never do so.
-        Reply::rate_limit(Some("120")),
-    ]);
+    let primary = Server::handling(move |request| {
+        if request["method"] == "eth_sendRawTransaction" {
+            let tx = tx.clone();
+            let saved = saved.clone();
+            let received = received.clone();
+            let trace = trace.clone();
+            return Reply::lost_response(move |request| {
+                let raw = rpc_bytes(&request["params"][0]).unwrap();
+                let original_hash = format!("{:#x}", verify_signed_envelope(&tx, &raw).unwrap());
+                // The original identity must already be on disk when A accepts it.
+                assert_eq!(saved.load().reference, original_hash);
+                *received.lock().unwrap() = Some(original_hash);
+                trace.lock().unwrap().push("accept");
+                Value::Null
+            });
+        }
+        if received.lock().unwrap().is_some() {
+            // A is rate-limited after accepting the original broadcast. This
+            // is observed before B returns recovery evidence, then respected.
+            return Reply::rate_limit(Some("120"));
+        }
+        revalidation_reply(request)
+    });
 
-    let receipt_hash = accepted.clone();
-    let receipt_block = block_hash.clone();
-    let reported_hash = accepted.clone();
-    let reported_block = block_hash.clone();
+    let received = accepted.clone();
     let tx = transaction.clone();
-    let backup = Server::new(vec![
-        Reply::result("0x1"), // Independently validate B's chain.
-        Reply::result("0x1"),
-        Reply::computed(|_| Value::Null), // B has not indexed the receipt yet.
-        Reply::result("0x1"),
-        Reply::computed(move |request| {
-            let original = accepted_hash(&receipt_hash, request);
-            json!({
-                "transactionHash": if corrupt_receipt { format!("0x{}", "ff".repeat(32)) } else { original },
-                "blockHash":receipt_block,"blockNumber":"0xa","status":"0x1",
-                "gasUsed":"0x5208","effectiveGasPrice":"0x989680","logs":[]
-            })
-        }),
-        Reply::computed(move |request| {
-            let original = accepted_hash(&reported_hash, request);
-            json!({
-                "hash":original,"blockHash":reported_block,"blockNumber":"0xa",
-                "from":tx.sender,"to":tx.to,"chainId":"0x1","type":"0x2",
-                "nonce":"0x3","gas":"0x7530","value":"0x7","input":"0x",
-                "maxFeePerGas":"0x5f5e100","maxPriorityFeePerGas":"0x989680","accessList":[]
-            })
-        }),
-        Reply::computed(move |_| json!({"hash":block_hash,"number":"0xa"})),
-        Reply::result("0xb"),
-        Reply::computed(|_| {
-            json!({"number":"0xb", "hash":format!("0x{}", "22".repeat(32)),
-            "timestamp":format!("0x{:x}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs())})
-        }),
-    ]);
+    let mut receipt_reads = 0;
+    let backup = Server::handling(move |request| {
+        assert_ne!(
+            request["method"], "eth_sendRawTransaction",
+            "read racing must never send a financial broadcast to B"
+        );
+        let Some(original) = received.lock().unwrap().clone() else {
+            // Both endpoints can receive read-only revalidation. Return the
+            // same evidence, slower than A, without assuming request order.
+            return revalidation_reply(request).delayed(Duration::from_millis(30));
+        };
+        match request["method"].as_str().unwrap() {
+            "eth_chainId" => Reply::result("0x1"),
+            "eth_getTransactionReceipt" => {
+                assert_eq!(request["params"], json!([original]));
+                receipt_reads += 1;
+                if receipt_reads == 1 {
+                    // Absence of evidence is pending, never proof of failure.
+                    Reply::computed(|_| Value::Null)
+                } else {
+                    let reported_hash = if corrupt_receipt {
+                        format!("0x{}", "ff".repeat(32))
+                    } else {
+                        original
+                    };
+                    let block_hash = block_hash.clone();
+                    Reply::computed(move |_| {
+                        json!({
+                            "transactionHash":reported_hash,"blockHash":block_hash,
+                            "blockNumber":"0xa","status":"0x1","gasUsed":"0x5208",
+                            "effectiveGasPrice":"0x989680","logs":[]
+                        })
+                    })
+                }
+            }
+            "eth_getTransactionByHash" => {
+                assert_eq!(request["params"], json!([original]));
+                let tx = tx.clone();
+                let block_hash = block_hash.clone();
+                Reply::computed(move |_| {
+                    json!({
+                        "hash":original,"blockHash":block_hash,"blockNumber":"0xa",
+                        "from":tx.sender,"to":tx.to,"chainId":"0x1","type":"0x2",
+                        "nonce":"0x3","gas":"0x7530","value":"0x7","input":"0x",
+                        "maxFeePerGas":"0x5f5e100","maxPriorityFeePerGas":"0x989680","accessList":[]
+                    })
+                })
+            }
+            "eth_getBlockByNumber" if request["params"][0] == "0xa" => {
+                let block_hash = block_hash.clone();
+                Reply::computed(move |_| json!({"hash":block_hash,"number":"0xa"}))
+            }
+            "eth_blockNumber" => Reply::result("0xb"),
+            "eth_getBlockByNumber" => revalidation_reply(request),
+            "eth_getTransactionCount" | "eth_call" | "eth_estimateGas" | "eth_getBalance" => {
+                // A cancelled loser may already be queued in the fixture when
+                // A's fast revalidation completes and the broadcast arrives.
+                revalidation_reply(request).delayed(Duration::from_millis(30))
+            }
+            method => panic!("unexpected recovery read: {method}"),
+        }
+    });
     let mut rpc = primary.rpc();
     rpc.urls.push(backup.url.clone());
     let rpc = Arc::new(rpc);
@@ -199,7 +238,18 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
 
     let result = recovery.receipt(&journal.load(), &transaction, 2).await;
     if corrupt_receipt {
-        assert_eq!(result.unwrap_err().code, "RECEIPT_TRANSACTION_MISMATCH");
+        // Reject the wrong hash during transport validation, before this
+        // receipt can win the race or reach the runtime's envelope checks.
+        let failure = result.unwrap_err();
+        assert_eq!(failure.code, "RPC_DATA_INVALID");
+        assert!(
+            failure.details.as_deref().unwrap()["rpc_health"]["last_read"]["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|attempt| attempt["endpoint_id"] == "rpc-2"
+                    && attempt["reason"] == "incompatible")
+        );
     } else {
         let receipt = result.unwrap().unwrap();
         assert_eq!(receipt.hash, hash(&original.reference).unwrap());
@@ -211,7 +261,6 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
     assert_eq!(std::fs::read(&journal.path).unwrap(), original_bytes);
     assert_eq!(*events.lock().unwrap(), vec!["sign", "persist", "accept"]);
     let requests = primary.requests();
-    assert_eq!(requests.len(), 9);
     assert_eq!(
         requests
             .iter()
@@ -220,7 +269,13 @@ async fn recover_lost_broadcast(corrupt_receipt: bool) {
         1
     );
     let requests = backup.requests();
-    assert_eq!(requests.len(), if corrupt_receipt { 6 } else { 9 });
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "eth_getTransactionReceipt")
+            .count(),
+        2
+    );
     assert!(
         !requests
             .iter()

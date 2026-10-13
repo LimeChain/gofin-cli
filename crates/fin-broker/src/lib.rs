@@ -2508,6 +2508,7 @@ fn public_rpc_diagnostics(value: &Value) -> Option<Value> {
     ];
     const REASONS: &[&str] = &[
         "ok",
+        "cancelled",
         "missing",
         "lagging",
         "unsupported",

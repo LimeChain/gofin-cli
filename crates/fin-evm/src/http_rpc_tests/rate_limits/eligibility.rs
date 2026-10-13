@@ -22,6 +22,74 @@ fn pair(primary: &Server, backup: &Server) -> HttpRpc {
     HttpRpc::isolated_localhost_pool(vec![primary.url.clone(), backup.url.clone()], 1).unwrap()
 }
 
+// Launch both endpoints, but hold B's identity response until A's result has
+// been checked. This makes rejection coverage deterministic: a fast valid B
+// cannot hide stale, missing, or incompatible evidence from A.
+fn observed_primary_pair(
+    primary_replies: Vec<Reply>,
+    mut backup_replies: Vec<Reply>,
+) -> (Server, Server, Arc<HttpRpc>) {
+    let holder: Arc<Mutex<Option<std::sync::Weak<HttpRpc>>>> = Arc::new(Mutex::new(None));
+    let callback = holder.clone();
+    let original = backup_replies[0].on_request.take();
+    let original_result = backup_replies[0].result.clone();
+    backup_replies[0].on_request = Some(Box::new(move |request| {
+        let rpc = callback
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while rpc.diagnostics()["endpoints"][0]["status"] == "unobserved" {
+            assert!(Instant::now() < until, "A's result was never validated");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        original.map_or(original_result, |reply| reply(request))
+    }));
+    let primary = Server::new(primary_replies);
+    let backup = Server::new(backup_replies);
+    let rpc = Arc::new(pair(&primary, &backup));
+    *holder.lock().unwrap() = Some(Arc::downgrade(&rpc));
+    (primary, backup, rpc)
+}
+
+// Both historical header attempts must actually start before A wins.
+// B's delayed response keeps the request ordering stable for the later state
+// read, whose canonical anchor must be identical on both endpoints.
+fn historical_pair(
+    anchor: Value,
+    primary_state: Vec<Reply>,
+    backup_state: Vec<Reply>,
+) -> (Server, Server, HttpRpc) {
+    let mut backup_replies = vec![
+        Reply::result("0x1"),
+        constant_reply(anchor.clone()).delayed(Duration::from_millis(100)),
+    ];
+    backup_replies.extend(backup_state);
+    let backup = Server::new(backup_replies);
+    let observed = backup.requests.clone();
+    let mut primary_replies = vec![
+        Reply::result("0x1"),
+        Reply::computed(move |_| {
+            let until = Instant::now() + Duration::from_secs(2);
+            while observed.lock().unwrap().len() < 2 {
+                assert!(
+                    Instant::now() < until,
+                    "B's historical header never started"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            anchor
+        }),
+    ];
+    primary_replies.extend(primary_state);
+    let primary = Server::new(primary_replies);
+    let rpc = pair(&primary, &backup);
+    (primary, backup, rpc)
+}
+
 fn constant_reply(value: Value) -> Reply {
     Reply::computed(move |_| value)
 }
@@ -34,13 +102,11 @@ fn unsupported(message: &str) -> Reply {
 
 #[tokio::test]
 async fn stale_successful_latest_header_uses_fresh_backup() {
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(header(100, "11", 120)),
-    ]);
+    let primary = vec![Reply::result("0x1"), constant_reply(header(100, "11", 120))];
     let fresh = header(101, "22", 0);
-    let backup = Server::new(vec![Reply::result("0x1"), constant_reply(fresh.clone())]);
-    let result = pair(&primary, &backup)
+    let backup = vec![Reply::result("0x1"), constant_reply(fresh.clone())];
+    let (primary, backup, rpc) = observed_primary_pair(primary, backup);
+    let result = rpc
         .request("eth_getBlockByNumber", json!(["latest", false]))
         .await
         .unwrap();
@@ -52,15 +118,15 @@ async fn stale_successful_latest_header_uses_fresh_backup() {
 
 #[tokio::test]
 async fn implausibly_future_latest_header_cannot_supply_freshness() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         constant_reply(header(100, "11", -120)),
-    ]);
+    ];
     let fresh = header(101, "22", 0);
-    let backup = Server::new(vec![Reply::result("0x1"), constant_reply(fresh.clone())]);
+    let backup = vec![Reply::result("0x1"), constant_reply(fresh.clone())];
+    let (_primary, _backup, rpc) = observed_primary_pair(primary, backup);
     assert_eq!(
-        pair(&primary, &backup)
-            .request("eth_getBlockByNumber", json!(["latest", false]))
+        rpc.request("eth_getBlockByNumber", json!(["latest", false]))
             .await
             .unwrap(),
         fresh
@@ -69,21 +135,19 @@ async fn implausibly_future_latest_header_cannot_supply_freshness() {
 
 #[tokio::test]
 async fn stale_successful_height_is_verified_on_its_own_endpoint() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         Reply::result("0x64"),
         constant_reply(header(100, "11", 120)),
-    ]);
-    let backup = Server::new(vec![
+    ];
+    let backup = vec![
         Reply::result("0x1"),
         Reply::result("0x65"),
         constant_reply(header(101, "22", 0)),
-    ]);
+    ];
+    let (primary, backup, rpc) = observed_primary_pair(primary, backup);
     assert_eq!(
-        pair(&primary, &backup)
-            .request("eth_blockNumber", json!([]))
-            .await
-            .unwrap(),
+        rpc.request("eth_blockNumber", json!([])).await.unwrap(),
         json!("0x65")
     );
     for server in [&primary, &backup] {
@@ -96,22 +160,20 @@ async fn stale_successful_height_is_verified_on_its_own_endpoint() {
 
 #[tokio::test]
 async fn latest_state_from_stale_primary_is_discarded() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         Reply::result("0xdead"),
         constant_reply(header(100, "11", 120)),
-    ]);
-    let backup = Server::new(vec![
+    ];
+    let backup = vec![
         Reply::result("0x1"),
         Reply::result("0x2a"),
         constant_reply(header(101, "22", 0)),
-    ]);
+    ];
+    let (primary, backup, rpc) = observed_primary_pair(primary, backup);
     let params = json!(["0x0000000000000000000000000000000000000002", "latest"]);
     assert_eq!(
-        pair(&primary, &backup)
-            .request("eth_getBalance", params.clone())
-            .await
-            .unwrap(),
+        rpc.request("eth_getBalance", params.clone()).await.unwrap(),
         json!("0x2a")
     );
     assert_eq!(primary.requests()[1]["params"], params);
@@ -147,14 +209,14 @@ async fn recent_head_is_reused_for_bounded_same_endpoint_freshness_checks() {
 #[tokio::test]
 async fn absent_receipt_on_primary_searches_original_hash_on_backup() {
     let transaction_hash = format!("0x{}", "ab".repeat(32));
-    let primary = Server::new(vec![Reply::result("0x1"), constant_reply(Value::Null)]);
+    let primary = vec![Reply::result("0x1"), constant_reply(Value::Null)];
     let mined = json!({"transactionHash":transaction_hash,"blockNumber":"0x64",
         "blockHash":format!("0x{}", "11".repeat(32)),"status":"0x1"});
-    let backup = Server::new(vec![Reply::result("0x1"), constant_reply(mined.clone())]);
+    let backup = vec![Reply::result("0x1"), constant_reply(mined.clone())];
+    let (primary, backup, rpc) = observed_primary_pair(primary, backup);
     let params = json!([transaction_hash]);
     assert_eq!(
-        pair(&primary, &backup)
-            .request("eth_getTransactionReceipt", params.clone())
+        rpc.request("eth_getTransactionReceipt", params.clone())
             .await
             .unwrap(),
         mined
@@ -205,33 +267,29 @@ async fn missing_transaction_or_block_searches_another_provider() {
             header(16, "11", 86_400),
         ),
     ] {
-        let primary = Server::new(vec![Reply::result("0x1"), constant_reply(Value::Null)]);
-        let backup = Server::new(vec![Reply::result("0x1"), constant_reply(found.clone())]);
-        assert_eq!(
-            pair(&primary, &backup)
-                .request(method, params.clone())
-                .await
-                .unwrap(),
-            found
-        );
+        let primary = vec![Reply::result("0x1"), constant_reply(Value::Null)];
+        let backup = vec![Reply::result("0x1"), constant_reply(found.clone())];
+        let (_primary, backup, rpc) = observed_primary_pair(primary, backup);
+        assert_eq!(rpc.request(method, params.clone()).await.unwrap(), found);
         assert_eq!(backup.requests()[1]["params"], params);
     }
 }
 
 #[tokio::test]
 async fn unsupported_finality_is_cached_per_method_without_disabling_other_reads() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         unsupported("PRIVATE_RPC_ERROR finalized method unavailable"),
         constant_reply(header(101, "22", 0)),
-    ]);
+    ];
     let finalized = header(100, "11", 1_800);
-    let backup = Server::new(vec![
+    let backup = vec![
         Reply::result("0x1"),
         constant_reply(finalized.clone()),
         constant_reply(finalized.clone()),
-    ]);
-    let rpc = pair(&primary, &backup);
+        constant_reply(header(101, "22", 0)).delayed(Duration::from_millis(100)),
+    ];
+    let (primary, _backup, rpc) = observed_primary_pair(primary, backup);
     for _ in 0..2 {
         assert_eq!(
             rpc.request_checked(
@@ -267,27 +325,24 @@ async fn unsupported_finality_is_cached_per_method_without_disabling_other_reads
 
 #[tokio::test]
 async fn finalized_header_below_original_receipt_uses_backup() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         constant_reply(header(99, "33", 1_800)),
-    ]);
+    ];
     let finalized = header(100, "11", 1_800);
-    let backup = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(finalized.clone()),
-    ]);
+    let backup = vec![Reply::result("0x1"), constant_reply(finalized.clone())];
+    let (_primary, backup, rpc) = observed_primary_pair(primary, backup);
     assert_eq!(
-        pair(&primary, &backup)
-            .request_checked(
-                "eth_getBlockByNumber",
-                json!(["finalized", false]),
-                RpcReadRequirements {
-                    minimum_block: Some(100),
-                    ..Default::default()
-                }
-            )
-            .await
-            .unwrap(),
+        rpc.request_checked(
+            "eth_getBlockByNumber",
+            json!(["finalized", false]),
+            RpcReadRequirements {
+                minimum_block: Some(100),
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap(),
         finalized
     );
     assert_eq!(backup.requests()[1]["params"], json!(["finalized", false]));
@@ -295,28 +350,28 @@ async fn finalized_header_below_original_receipt_uses_backup() {
 
 #[tokio::test]
 async fn minimum_confirmation_height_cannot_be_satisfied_by_older_primary() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         Reply::result("0x63"),
         constant_reply(header(99, "33", 0)),
-    ]);
-    let backup = Server::new(vec![
+    ];
+    let backup = vec![
         Reply::result("0x1"),
         Reply::result("0x65"),
         constant_reply(header(101, "22", 0)),
-    ]);
+    ];
+    let (_primary, _backup, rpc) = observed_primary_pair(primary, backup);
     assert_eq!(
-        pair(&primary, &backup)
-            .request_checked(
-                "eth_blockNumber",
-                json!([]),
-                RpcReadRequirements {
-                    minimum_block: Some(101),
-                    ..Default::default()
-                }
-            )
-            .await
-            .unwrap(),
+        rpc.request_checked(
+            "eth_blockNumber",
+            json!([]),
+            RpcReadRequirements {
+                minimum_block: Some(101),
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap(),
         json!("0x65")
     );
 }
@@ -324,13 +379,11 @@ async fn minimum_confirmation_height_cannot_be_satisfied_by_older_primary() {
 #[tokio::test]
 async fn observed_historical_header_pins_state_by_canonical_hash_on_fallback() {
     let anchor = header(16, "11", 86_400);
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(anchor.clone()),
-        Reply::rate_limit(Some("120")),
-    ]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
-    let rpc = pair(&primary, &backup);
+    let (primary, backup, rpc) = historical_pair(
+        anchor.clone(),
+        vec![Reply::rate_limit(Some("120"))],
+        vec![Reply::result("0x2a")],
+    );
     assert_eq!(
         rpc.request("eth_getBlockByNumber", json!(["0x10", false]))
             .await
@@ -360,20 +413,14 @@ async fn observed_historical_header_pins_state_by_canonical_hash_on_fallback() {
 #[tokio::test]
 async fn numeric_fallback_cannot_use_same_height_on_another_fork() {
     let anchor = header(16, "11", 86_400);
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(anchor.clone()),
-        Reply::rate_limit(Some("120")),
-    ]);
     let mut hash_unsupported = Reply::rpc_error("invalid argument: blockHash is not supported");
     hash_unsupported.error =
         Some(json!({"code":-32602,"message":"invalid argument: blockHash is not supported"}));
-    let backup = Server::new(vec![
-        Reply::result("0x1"),
-        hash_unsupported,
-        constant_reply(header(16, "22", 86_400)),
-    ]);
-    let rpc = pair(&primary, &backup);
+    let (_primary, backup, rpc) = historical_pair(
+        anchor,
+        vec![Reply::rate_limit(Some("120"))],
+        vec![hash_unsupported, constant_reply(header(16, "22", 86_400))],
+    );
     rpc.request("eth_getBlockByNumber", json!(["0x10", false]))
         .await
         .unwrap();
@@ -395,26 +442,23 @@ async fn numeric_fallback_cannot_use_same_height_on_another_fork() {
 async fn numeric_fallback_requires_matching_block_hash_before_and_after_state() {
     for changes_after_state in [false, true] {
         let anchor = header(16, "11", 86_400);
-        let primary = Server::new(vec![
-            Reply::result("0x1"),
-            constant_reply(anchor.clone()),
-            Reply::rate_limit(Some("120")),
-        ]);
         let mut hash_unsupported = Reply::rpc_error("invalid argument: blockHash is not supported");
         hash_unsupported.error =
             Some(json!({"code":-32602,"message":"invalid argument: blockHash is not supported"}));
-        let backup = Server::new(vec![
-            Reply::result("0x1"),
-            hash_unsupported,
-            constant_reply(anchor.clone()),
-            Reply::result("0x2a"),
-            constant_reply(header(
-                16,
-                if changes_after_state { "22" } else { "11" },
-                86_400,
-            )),
-        ]);
-        let rpc = pair(&primary, &backup);
+        let (_primary, backup, rpc) = historical_pair(
+            anchor.clone(),
+            vec![Reply::rate_limit(Some("120"))],
+            vec![
+                hash_unsupported,
+                constant_reply(anchor),
+                Reply::result("0x2a"),
+                constant_reply(header(
+                    16,
+                    if changes_after_state { "22" } else { "11" },
+                    86_400,
+                )),
+            ],
+        );
         rpc.request("eth_getBlockByNumber", json!(["0x10", false]))
             .await
             .unwrap();
@@ -425,40 +469,60 @@ async fn numeric_fallback_requires_matching_block_hash_before_and_after_state() 
             assert_eq!(result.unwrap(), json!("0x2a"));
         }
         let requests = backup.requests();
-        assert_eq!(requests.len(), 5);
-        assert_eq!(requests[2]["method"], "eth_getBlockByNumber");
-        assert_eq!(requests[2]["params"], json!(["0x10", false]));
-        assert_eq!(requests[3]["method"], "eth_getBalance");
-        assert_eq!(requests[3]["params"], balance_params());
-        assert_eq!(requests[4]["method"], "eth_getBlockByNumber");
-        assert_eq!(requests[4]["params"], json!(["0x10", false]));
+        assert_eq!(requests.len(), 6);
+        assert_eq!(requests[3]["method"], "eth_getBlockByNumber");
+        assert_eq!(requests[3]["params"], json!(["0x10", false]));
+        assert_eq!(requests[4]["method"], "eth_getBalance");
+        assert_eq!(requests[4]["params"], balance_params());
+        assert_eq!(requests[5]["method"], "eth_getBlockByNumber");
+        assert_eq!(requests[5]["params"], json!(["0x10", false]));
     }
 }
 
 #[tokio::test]
 async fn semantic_revert_does_not_search_for_a_more_favorable_answer() {
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        Reply::rpc_error("execution reverted: PRIVATE_UPSTREAM_TEXT"),
+    let backup = Server::new(vec![
+        Reply::result("0x1").delayed(Duration::from_millis(100)),
     ]);
-    let backup = Server::new(vec![]);
+    let observed = backup.requests.clone();
+    let mut revert = Reply::rpc_error("execution reverted: PRIVATE_UPSTREAM_TEXT");
+    revert.on_request = Some(Box::new(move |_| {
+        let until = Instant::now() + Duration::from_secs(2);
+        while observed.lock().unwrap().is_empty() {
+            assert!(Instant::now() < until, "B's read attempt never started");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Value::Null
+    }));
+    let primary = Server::new(vec![Reply::result("0x1"), revert]);
     assert!(pair(&primary, &backup).request("eth_call", json!([{"to":"0x0000000000000000000000000000000000000002","data":"0x12345678"}, "0x10"])).await.is_err());
-    assert!(backup.requests().is_empty());
+    assert_eq!(backup.requests().len(), 1);
+    assert_eq!(backup.requests()[0]["method"], "eth_chainId");
 }
 
 #[tokio::test]
-async fn cancelling_an_inflight_read_does_not_start_backup_requests() {
+async fn cancelling_an_inflight_read_cancels_both_active_attempts() {
     let primary = Server::new(vec![
         Reply::result("0x1"),
         Reply::result("0x2a").delayed(Duration::from_secs(2)),
     ]);
-    let backup = Server::new(vec![]);
-    let rpc = Arc::new(pair(&primary, &backup));
+    let backup = Server::new(vec![
+        Reply::result("0x1"),
+        Reply::result("0x2b").delayed(Duration::from_secs(2)),
+    ]);
+    let unused = Server::new(vec![]);
+    let rpc = Arc::new(
+        HttpRpc::isolated_localhost_pool(
+            vec![primary.url.clone(), backup.url.clone(), unused.url.clone()],
+            1,
+        )
+        .unwrap(),
+    );
     let running = rpc.clone();
     let task =
         tokio::spawn(async move { running.request("eth_getBalance", balance_params()).await });
     tokio::time::timeout(Duration::from_secs(1), async {
-        while primary.requests().len() < 2 {
+        while primary.requests().len() < 2 || backup.requests().len() < 2 {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
@@ -467,8 +531,17 @@ async fn cancelling_an_inflight_read_does_not_start_backup_requests() {
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert!(backup.requests().is_empty());
+    assert_eq!(primary.requests().len(), 2);
+    assert_eq!(backup.requests().len(), 2);
+    assert!(unused.requests().is_empty());
     assert_eq!(rpc.diagnostics()["last_read"]["outcome"], "cancelled");
+    assert_eq!(
+        rpc.diagnostics()["last_read"]["attempts"],
+        json!([
+            {"endpoint_id":"rpc-1","reason":"cancelled"},
+            {"endpoint_id":"rpc-2","reason":"cancelled"}
+        ])
+    );
 }
 
 #[tokio::test]
@@ -511,13 +584,11 @@ async fn advancing_head_between_number_and_header_reads_is_not_staleness() {
 #[tokio::test]
 async fn explicit_typed_state_pin_resolves_hash_before_first_state_read() {
     let anchor = header(16, "11", 86_400);
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(anchor.clone()),
-        Reply::rate_limit(Some("120")),
-    ]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
-    let rpc = pair(&primary, &backup);
+    let (primary, backup, rpc) = historical_pair(
+        anchor.clone(),
+        vec![Reply::rate_limit(Some("120"))],
+        vec![Reply::result("0x2a")],
+    );
     assert_eq!(
         rpc.request_checked(
             "eth_getBalance",
@@ -565,13 +636,9 @@ async fn cache_eviction_during_failover_cannot_replace_request_block_identity() 
         state.evict_anchors();
         Value::Null
     }));
-    let primary = Server::new(vec![
-        Reply::result("0x1"),
-        constant_reply(anchor.clone()),
-        limited,
-    ]);
-    let backup = Server::new(vec![Reply::result("0x1"), Reply::result("0x2a")]);
-    let rpc = Arc::new(pair(&primary, &backup));
+    let (_primary, backup, rpc) =
+        historical_pair(anchor.clone(), vec![limited], vec![Reply::result("0x2a")]);
+    let rpc = Arc::new(rpc);
     *holder.lock().unwrap() = Some(Arc::downgrade(&rpc));
     rpc.request("eth_getBlockByNumber", json!(["0x10", false]))
         .await
@@ -591,35 +658,35 @@ async fn cache_eviction_during_failover_cannot_replace_request_block_identity() 
     );
     assert_eq!(
         backup.requests().len(),
-        2,
-        "B must not resolve another hash at this height"
+        3,
+        "B must reuse the original observation rather than resolve another hash for state"
     );
     assert_eq!(
-        backup.requests()[1]["params"][1],
+        backup.requests()[2]["params"][1],
         json!({"blockHash":anchor["hash"],"requireCanonical":true})
     );
 }
 
 #[tokio::test]
 async fn pending_nonce_from_stale_provider_cannot_reach_execution_checks() {
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         Reply::result("0x2"),
         constant_reply(header(100, "11", 120)),
-    ]);
-    let backup = Server::new(vec![
+    ];
+    let backup = vec![
         Reply::result("0x1"),
         Reply::result("0x3"),
         constant_reply(header(101, "22", 0)),
-    ]);
+    ];
+    let (_primary, _backup, rpc) = observed_primary_pair(primary, backup);
     assert_eq!(
-        pair(&primary, &backup)
-            .request(
-                "eth_getTransactionCount",
-                json!(["0x0000000000000000000000000000000000000002", "pending"])
-            )
-            .await
-            .unwrap(),
+        rpc.request(
+            "eth_getTransactionCount",
+            json!(["0x0000000000000000000000000000000000000002", "pending"])
+        )
+        .await
+        .unwrap(),
         json!("0x3")
     );
 }
@@ -627,16 +694,17 @@ async fn pending_nonce_from_stale_provider_cannot_reach_execution_checks() {
 #[tokio::test]
 async fn healthy_primary_read_does_not_erase_last_successful_failover() {
     let hash = format!("0x{}", "ab".repeat(32));
-    let primary = Server::new(vec![
+    let primary = vec![
         Reply::result("0x1"),
         constant_reply(Value::Null),
         constant_reply(header(100, "11", 0)),
-    ]);
-    let backup = Server::new(vec![
+    ];
+    let backup = vec![
         Reply::result("0x1"),
         constant_reply(json!({"transactionHash":hash})),
-    ]);
-    let rpc = pair(&primary, &backup);
+        constant_reply(header(100, "11", 0)).delayed(Duration::from_millis(100)),
+    ];
+    let (_primary, _backup, rpc) = observed_primary_pair(primary, backup);
     rpc.request("eth_getTransactionReceipt", json!([hash]))
         .await
         .unwrap();

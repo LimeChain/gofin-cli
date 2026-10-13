@@ -100,16 +100,25 @@ network. The same pure derivation runs on startup and protected reload so a
 broker update can expose newly shipped reviewed coverage without reenrollment.
 
 The EVM transport owns bounded endpoint eligibility, freshness checks, read
-capability cooldowns and credential-free health observations. Typed state
-reads resolve one canonical hash and retain it for the request across endpoint
-changes; the bounded shared anchor cache is not the authority for an in-flight
-request. Adapters continue to interpret original-envelope, receipt, financial
-effects and finality evidence. Minimum-height constraints let lagging providers
-fall back without weakening those adapter-owned requirements. `doctor` reads
-allowlisted snapshots from the actual wallet/bridge clients without probing
-networks; recent successful fallback is retained independently of the latest
-read. Broadcasts remain primary-only and unresolved writes use the existing
-journal and reconciliation path.
+capability cooldowns and credential-free health observations. It races the first
+two eligible endpoints, with at most two active attempts, and replaces failed or
+missing attempts with the next configured provider. The first usable response
+that passes transport validation wins and cancels its competitors. Invalid shape
+or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
+before a winner fails the read closed. One 10-second deadline covers the race.
+With more than two eligible providers, remaining time is shared across parallel
+waves so a stalled pair cannot consume the entire budget; with only two, each
+may use the full remaining deadline. Typed state reads resolve one canonical hash
+and retain it across racing header lookups, provider changes and shared-cache
+eviction. The bounded cache is not the authority for an in-flight request.
+Adapters continue to interpret original-envelope, receipt, financial effects and
+finality evidence. Minimum-height constraints exclude lagging responses without
+weakening those adapter-owned requirements. `doctor` reads allowlisted snapshots
+from the actual wallet/bridge clients without probing networks. Attempt IDs follow
+configured order, including cancelled competitors. `last_failover` records an
+actual non-primary winner independently of the latest read; a later primary win
+does not erase it. Broadcasts remain primary-only and unresolved writes use the
+existing journal and reconciliation path.
 When the effective config changes, the existing reload path recomposes adapters
 against the same journal; pending submission identities remain in place and
 are never replayed as a consequence of coverage derivation.
@@ -502,8 +511,8 @@ revocation cannot recall an already admitted submission. Snapshot observers run
 concurrently with a 10-second evidence deadline and report partial coverage.
 Preparation/revalidation, reconciliation observations and external reads have
 120-second deadlines; RPC reads share a 10-second budget across identity, retries
-and fallback. Independent EVM reads overlap within each phase, with original
-request tags and final pending-nonce checks retained. The financial submission
+and concurrent endpoint selection. Independent EVM reads overlap within each
+phase, with original request tags and final pending-nonce checks retained. The financial submission
 future is never cancelled by an evidence timeout. Further per-resource execution
 concurrency must preserve nonce control, cumulative policy and deduplication.
 
