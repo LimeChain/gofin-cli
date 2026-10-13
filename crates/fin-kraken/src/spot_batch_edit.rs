@@ -993,10 +993,8 @@ mod lifecycle_tests {
     async fn original_cash_batch_remains_only_fill_owner_across_atomic_or_legacy_revision_and_restart()
      {
         for legacy in [false, true] {
-            let path = std::env::temp_dir().join(format!(
-                "fin-spot-batch-revision-{}.sqlite3",
-                uuid::Uuid::new_v4()
-            ));
+            let journal_directory = tempfile::tempdir().unwrap();
+            let path = journal_directory.path().join("journal.sqlite3");
             let fixture = Arc::new(Venue {
                 reads: super::tests::Venue {
                     calls: Mutex::new(vec![]),
@@ -1077,7 +1075,6 @@ mod lifecycle_tests {
             assert_eq!(e.execute(request).await.unwrap().id, original.id);
             assert_eq!(fixture.writes.lock().unwrap().len(), 2);
             drop(e);
-            std::fs::remove_file(path).unwrap();
         }
     }
 }

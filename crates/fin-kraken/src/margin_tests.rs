@@ -769,10 +769,8 @@ async fn margin_engine_books_fees_and_native_baseline_closure_without_cash_princ
 }
 #[tokio::test]
 async fn margin_engine_partial_restart_keeps_events_and_applies_cumulative_terminal_once() {
-    let path = std::env::temp_dir().join(format!(
-        "fin-margin-synthetic-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let (a, f) = multi(false, false, "1000", "0.04");
     let engine = margin_engine(fin_store::Store::open(&path).unwrap(), a);
     let mut i = input(false, false);
@@ -826,7 +824,6 @@ async fn margin_engine_partial_restart_keeps_events_and_applies_cumulative_termi
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -1022,10 +1019,8 @@ fn opposite_pnl_adapter(f: Arc<MultiFixture>) -> ExchangeAdapter<KrakenProfile> 
 }
 #[tokio::test]
 async fn margin_later_profit_cannot_erase_proved_gross_loss_after_restart() {
-    let path = std::env::temp_dir().join(format!(
-        "fin-margin-gross-pnl-{}.sqlite3",
-        uuid::Uuid::new_v4()
-    ));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let (_, fixture) = multi(false, true, "1000", "0.04");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
@@ -1082,7 +1077,6 @@ async fn margin_later_profit_cannot_erase_proved_gross_loss_after_restart() {
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 
 struct MixedMarginFixture {
@@ -1164,8 +1158,8 @@ async fn mixed_margin_batch_preserves_gross_opening_and_closure_with_one_native_
         venue: base.clone(),
         terminal: AtomicBool::new(false),
     });
-    let path =
-        std::env::temp_dir().join(format!("fin-margin-mixed-{}.sqlite3", uuid::Uuid::new_v4()));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
         mixed_margin_adapter(fixture.clone()),
@@ -1228,7 +1222,6 @@ async fn mixed_margin_batch_preserves_gross_opening_and_closure_with_one_native_
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 
 struct ConditionalMarginFixture {
@@ -1309,8 +1302,8 @@ async fn conditional_margin_close_proves_parent_loan_and_closed_position_after_r
         closed: AtomicBool::new(false),
         bad_parent: AtomicBool::new(false),
     });
-    let path =
-        std::env::temp_dir().join(format!("fin-margin-child-{}.sqlite3", uuid::Uuid::new_v4()));
+    let journal_directory = tempfile::tempdir().unwrap();
+    let path = journal_directory.path().join("journal.sqlite3");
     let engine = margin_engine(
         fin_store::Store::open(&path).unwrap(),
         conditional_margin_adapter(fixture.clone()),
@@ -1367,7 +1360,6 @@ async fn conditional_margin_close_proves_parent_loan_and_closed_position_after_r
         1
     );
     drop(engine);
-    std::fs::remove_file(path).unwrap();
 }
 #[tokio::test]
 async fn conditional_margin_requires_enforceable_native_loss_limit_before_dispatch() {
