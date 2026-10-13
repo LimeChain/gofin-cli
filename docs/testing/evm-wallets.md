@@ -56,11 +56,7 @@ fin preview wallet.transfer --input '{"wallet":"wallet","network":"evm","chain_i
 ERC-20 transfers use the exact token contract instead of `"native"`; the amount
 is a decimal token quantity and `max_fee_eth` is the native ETH fee cap. A preview
 moves no funds. Execution uses the same public input with a persistent logical
-`--id`; no run or restoration is required for ordinary operations. Every write
-requires fresh Touch ID and personal movement/rolling allocation limits. For an
-explicitly authorized live test, the LLM separately records the baseline, $100
-budget and funded return plan under the live-test contract. This document does
-not authorize a live write.
+`--id`; no run or restoration is required for ordinary operations. Production writes require exact Touch ID approval or an active applicable authorization, plus personal movement/rolling allocation checks. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for live development verification with automatic development approval, finite budgets and optional restoration. This document alone does not authorize a live write.
 
 ## Optional authenticated pricing
 
@@ -95,7 +91,7 @@ and authenticated freshness independently from anonymous public probes.
 - Shared pricing keeps CoinGecko native ETH and verified platform/contract ERC-20
   lookups. Symbols alone never establish on-chain identity. Binance now uses
   exact active direct USDC/USDT spot pairs times batched stablecoin USD rates;
-  see [pricing contracts](../implementation-plan.md#pricing-contracts).
+  see [pricing evidence](../rust-architecture.md#pricing-evidence-and-approved-usd-ceilings).
   No cross-exchange fallback or stablecoin parity is assumed. Unsupported Binance
   pairs produce explicit unknown $0 estimates, with a protected opt-in for
   ordinary writes. This exception does not apply to on-chain prices or scoped
@@ -105,7 +101,7 @@ and authenticated freshness independently from anonymous public probes.
   from retrieval time. Source age is bounded to 120 seconds (public updates are
   roughly every 60 seconds). A shared/coalesced 30-second cache checks freshness;
   malformed, zero, future/stale data, rate limits or outage block writes instead
-  of returning stale data. The $100 caps and 90-second preview TTL are unchanged.
+  of returning stale data. Personal policy and the 90-second preview TTL still apply.
 - Anonymous public pricing is best effort. Optional Demo/Pro keys can be enrolled
   through protected human-terminal setup below; no environment key is loaded.
   Authenticated ping and a fresh ETH/USD quote verify current access, not pricing
@@ -183,20 +179,13 @@ Arbitrum USDC, Robinhood USDG and Binance USDG; rate limits can make it fail.
    cancellation. Check actual credential isolation and configuration Touch ID. For a concrete
    write, review chain, asset, amount, recipient and fee cap. Exercise decline/
    expiry before submission, then a separately authorized accepted operation.
-4. Before any separately authorized live round trip, capture both source and
-   recipient scope, select less than $100 including the full return gas reserve,
-   and prepare the exact reverse movement. The receiving wallet must be enrolled
-   and funded to return funds. Track both native and reviewed ERC-20 cases.
+4. Before a separately authorized live write, capture source and recipient scope, exact amounts, fee bounds and expected final state. Track both native and reviewed ERC-20 cases. For a requested round trip, include the receiving wallet and return gas; otherwise restoration is optional. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for agent-led live development verification.
 5. For L2 writes, observe canonical sequencer inclusion and reconcile the same
    operation after interrupted output. Duplicate/restart attempts must not
    create another transfer. Verify original transaction, chain, recipient,
    asset and protocol effects. Binance's Robinhood mapping remains unavailable/
    unverified; this checklist does not establish a live withdrawal route.
    Authorize every cleanup write separately.
-6. Restore starting custody and asset holdings net proved costs, reconcile fees
-   and dust, and record independent final snapshots establishing restoration.
-   Unresolved inclusion or incomplete cleanup cannot pass.
+6. Verify final custody, holdings, effects and costs against the requested scenario. Record whether optional restoration was performed, partial or skipped and disclose retained exposure and unresolved attempts. Required scenario effects and settlement must be verified.
 
-Follow the [live-test contract](README.md#live-test-contract). Record automated,
-public read-only, human approval/isolation and fully restored live results
-separately; existing Ethereum or historical TypeScript evidence does not transfer.
+Follow [$fin-e2e](../../skills/fin-e2e/SKILL.md) for live development verification. Record automated, public read-only, human approval/isolation and verified live-write results separately; results from another network do not establish coverage here.

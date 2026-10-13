@@ -6,8 +6,10 @@ use fin_presentation::Ui;
 use fin_protocol::BrokerRequest;
 #[cfg(any(target_os = "macos", test))]
 use fin_protocol::{BrokerResponse, MAX_FRAME_BYTES, MAX_RESPONSE_FRAME_BYTES};
+mod artifacts;
 mod companion_skill;
 mod daemon;
+pub(crate) mod json_stream;
 mod onboarding;
 mod shell_integration;
 use serde_json::{Value, json};
@@ -28,18 +30,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const BROKER_TIMEOUT: Duration = Duration::from_secs(8);
 const FINANCIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 const OBSERVER_TIMEOUT: Duration = Duration::from_secs(180);
+const VERSION: &str = match option_env!("FIN_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "fin",
     color = clap::ColorChoice::Never,
-    version,
+    version = VERSION,
     about = "Discover and safely operate Fin's protected financial broker"
 )]
 struct Cli {
-    /// Machine contract: JSON only, no terminal prompts, progress or color.
+    /// Machine contract: one JSON result, no terminal prompts or color.
     #[arg(long, global = true)]
     json: bool,
+    /// Emit NDJSON progress and one final result/error; requires --json.
+    #[arg(long, global = true, requires = "json")]
+    stream: bool,
     /// Show additional human-readable diagnostics; ignored with --json.
     #[arg(long, global = true)]
     verbose: bool,
@@ -87,7 +96,7 @@ enum Command {
         name: Option<String>,
     },
     /// Read balances, positions or other financial data.
-    Read(OperationArgs),
+    Read(ReadArgs),
     /// Review a financial operation without moving funds.
     Preview(OperationArgs),
     /// Execute under exact approval or an existing bounded authorization; --dry-run previews.
@@ -153,6 +162,12 @@ enum SkillCommand {
 #[derive(Args, Debug)]
 #[command(group(clap::ArgGroup::new("provider_choice").args(["provider_positional", "provider"]).multiple(false)))]
 struct ConnectionCommandArgs {
+    /// Public Kraken account identifier; credentials remain private.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    account_id: Option<String>,
+    /// Exact Kraken Spot default Funding wallet ID; ownership is checked during protected enrollment.
+    #[arg(long, requires_all = ["provider_choice", "name"])]
+    default_wallet_account_id: Option<String>,
     /// Provider to enroll; omit to choose it interactively.
     #[arg(value_enum, value_name = "PROVIDER")]
     provider_positional: Option<fin_discovery::Provider>,
@@ -211,6 +226,8 @@ impl ConnectionCommandArgs {
             execution_address: self.execution_address,
             credential_type: self.credential_type,
             api_plan: self.api_plan,
+            account_id: self.account_id,
+            default_wallet_account_id: self.default_wallet_account_id,
         })
     }
 }
@@ -223,15 +240,23 @@ struct OperationArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReadArgs {
+    #[command(flatten)]
+    operation: OperationArgs,
+    /// Save a bounded export privately; existing paths are never overwritten.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+#[derive(Args, Debug)]
 struct ConfigureArgs {
-    /// Exact human-interactive configuration operation from `fin capabilities`.
+    /// Exact human-interactive configuration operation from capabilities.
     operation: String,
     #[arg(long)]
     input: String,
-    /// Stable identity for this configuration action; retries must reuse it.
-    #[arg(long, required_unless_present = "dry_run")]
+    /// Stable request identity for recovery; generated and returned when omitted.
+    #[arg(long)]
     id: Option<String>,
-    /// Prepare a safe read-only configuration preview without authorization or dispatch.
+    /// Read-only configuration preview; no approval or dispatch.
     #[arg(long)]
     dry_run: bool,
 }
@@ -298,9 +323,9 @@ struct PlanInputArgs {
     /// Complete versioned named plan JSON.
     #[arg(long)]
     input: String,
-    /// Consent lifetime to include in the read-only review.
-    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
-    valid_for: u64,
+    /// Plan lifetime; omission calculates sequential allowances plus headroom.
+    #[arg(long, value_parser = parse_duration_seconds)]
+    valid_for: Option<u64>,
     /// Review a proposed replacement revision and its carried-forward usage.
     #[arg(long)]
     replaces: Option<String>,
@@ -314,9 +339,9 @@ struct PlanAuthorizeArgs {
     /// Stable request identity used to recover approval response loss.
     #[arg(long)]
     id: String,
-    /// Consent duration from successful approval (for example 10m; default 10m).
-    #[arg(long, default_value = "10m", value_parser = parse_duration_seconds)]
-    valid_for: u64,
+    /// Plan lifetime from successful approval (for example 45m); omission budgets the sequence.
+    #[arg(long, value_parser = parse_duration_seconds)]
+    valid_for: Option<u64>,
     /// Replace this active immutable plan revision.
     #[arg(long)]
     replaces: Option<String>,
@@ -370,6 +395,9 @@ enum ConnectionsCommand {
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
+    fn status_recovery_command(&self, _id: &str) -> Option<String> {
+        None
+    }
     fn development_mode(&self) -> bool {
         false
     }
@@ -410,7 +438,15 @@ impl UnixTransport {
         if peer_uid(&stream)? != self.expected_uid {
             return Err(protocol_error());
         }
-        let mut request_bytes = serde_json::to_vec(&request).map_err(|_| protocol_error())?;
+        let mut request_bytes = if fin_domain::execution_progress::enabled() {
+            serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
+                request: request.clone(),
+                progress: true,
+            })
+        } else {
+            serde_json::to_vec(&request)
+        }
+        .map_err(|_| protocol_error())?;
         request_bytes.push(b'\n');
         if request_bytes.len() > MAX_FRAME_BYTES {
             return Err(protocol_error());
@@ -438,24 +474,32 @@ impl UnixTransport {
 
 #[cfg(any(target_os = "macos", test))]
 pub async fn read_response<R: AsyncRead + Unpin>(reader: R) -> Result<Value, FinError> {
-    let reader = BufReader::new(reader);
-    let mut bytes = Vec::with_capacity(1024);
-    let read = reader
-        .take((MAX_RESPONSE_FRAME_BYTES + 1) as u64)
-        .read_until(b'\n', &mut bytes)
-        .await
-        .map_err(|_| broker_unavailable())?;
-    if read == 0 || bytes.len() > MAX_RESPONSE_FRAME_BYTES || bytes.last() != Some(&b'\n') {
-        return Err(protocol_error());
+    let mut reader = BufReader::new(reader);
+    for _ in 0..64 {
+        let mut bytes = Vec::with_capacity(1024);
+        let read = (&mut reader)
+            .take((MAX_RESPONSE_FRAME_BYTES + 1) as u64)
+            .read_until(b'\n', &mut bytes)
+            .await
+            .map_err(|_| broker_unavailable())?;
+        if read == 0 || bytes.len() > MAX_RESPONSE_FRAME_BYTES || bytes.last() != Some(&b'\n') {
+            return Err(protocol_error());
+        }
+        if let Ok(frame) = serde_json::from_slice::<fin_protocol::progress::ProgressFrame>(&bytes) {
+            fin_domain::execution_progress::emit(frame.progress);
+            continue;
+        }
+        let response: BrokerResponse =
+            serde_json::from_slice(&bytes).map_err(|_| protocol_error())?;
+        if !response.validate() {
+            return Err(protocol_error());
+        }
+        if let Some(error) = response.error {
+            return Err(error);
+        }
+        return response.result.ok_or_else(protocol_error);
     }
-    let response: BrokerResponse = serde_json::from_slice(&bytes).map_err(|_| protocol_error())?;
-    if !response.validate() {
-        return Err(protocol_error());
-    }
-    if let Some(error) = response.error {
-        return Err(error);
-    }
-    response.result.ok_or_else(protocol_error)
+    Err(protocol_error())
 }
 
 #[async_trait]
@@ -752,6 +796,7 @@ fn broker_unavailable() -> FinError {
 }
 pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
     match request {
+        BrokerRequest::Status { id } if id.starts_with("configuration:") => OBSERVER_TIMEOUT,
         BrokerRequest::Read { operation, .. }
             if matches!(operation.as_str(), "bridge.quotes" | "bridge.status") =>
         {
@@ -764,7 +809,8 @@ pub fn broker_response_timeout(request: &BrokerRequest) -> Duration {
         | BrokerRequest::AuthorizePlan { .. }
         | BrokerRequest::ExecutePlanStep { .. }
         | BrokerRequest::ReplacePlanCandidate { .. } => FINANCIAL_WRITE_TIMEOUT,
-        BrokerRequest::RunBegin { .. }
+        BrokerRequest::ReadArtifact { .. }
+        | BrokerRequest::RunBegin { .. }
         | BrokerRequest::RunReplan { .. }
         | BrokerRequest::Snapshot
         | BrokerRequest::Status { .. }
@@ -935,6 +981,9 @@ fn discovery_help(name: &str) -> Value {
 pub trait Client: Send + Sync {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError>;
     async fn execute(&self, request: OperationRequest) -> Result<Value, FinError>;
+    fn status_recovery_command(&self, _id: &str) -> Option<String> {
+        None
+    }
     fn development_mode(&self) -> bool {
         false
     }
@@ -998,6 +1047,9 @@ pub trait Client: Send + Sync {
 impl<T: Transport> Client for T {
     async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
         Transport::call(self, request).await
+    }
+    fn status_recovery_command(&self, id: &str) -> Option<String> {
+        Transport::status_recovery_command(self, id)
     }
     fn development_mode(&self) -> bool {
         Transport::development_mode(self)
@@ -1151,12 +1203,17 @@ async fn dispatch_with_review_hash(
             },
         },
         Command::Read(args) => {
-            client
-                .call(BrokerRequest::Read {
-                    operation: args.operation,
-                    input: parse_input(&args.input)?,
-                })
-                .await
+            let input = parse_input(&args.operation.input)?;
+            if let Some(output) = args.output {
+                artifacts::download(client, args.operation.operation, input, &output).await
+            } else {
+                client
+                    .call(BrokerRequest::Read {
+                        operation: args.operation.operation,
+                        input,
+                    })
+                    .await
+            }
         }
         Command::Preview(args) => {
             client
@@ -1255,7 +1312,7 @@ async fn dispatch_with_review_hash(
             } else {
                 launch_human_privileged(
                     PrivilegedAction::Configure(OperationRequest {
-                        request_id: args.id.ok_or_else(generic_input_error)?,
+                        request_id: args.id.unwrap_or_else(artifacts::new_request_id),
                         operation: args.operation,
                         input,
                         run_id: None,
@@ -1361,7 +1418,7 @@ async fn review_human_execution(cli: &Cli, client: &dyn Client, ui: &Ui) -> Resu
     let Command::Execute(args) = &cli.command else {
         return Ok(());
     };
-    if cli.json || args.dry_run || args.authorization.is_some() {
+    if cli.json || args.dry_run || args.authorization.is_some() || args.plan.is_some() {
         return Ok(());
     }
     // Reject missing execution identity before any service work. Preview is
@@ -1425,7 +1482,7 @@ fn boundary_authorization_request(
 fn financial_plan_request(
     input: &str,
     request_id: &str,
-    valid_for_seconds: u64,
+    valid_for_seconds: Option<u64>,
     replaces_revision_id: Option<String>,
     expected_review_hash: Option<String>,
 ) -> Result<fin_domain::financial_plans::FinancialPlanAuthorizationRequest, FinError> {
@@ -1526,7 +1583,9 @@ async fn review_plan_authorization(
     if preview["review_hash"].as_str().is_none_or(str::is_empty)
         || preview["plan"] != serde_json::to_value(&expected_plan).unwrap_or(Value::Null)
         || !valid_permissions
-        || preview["valid_for_seconds"].as_u64() != Some(args.valid_for)
+        || preview["valid_for_seconds"].as_u64().is_none_or(|seconds| {
+            seconds == 0 || args.valid_for.is_some_and(|expected| expected != seconds)
+        })
     {
         return Err(FinError::new(
             "PREVIEW_INVALID",
@@ -1579,7 +1638,7 @@ fn plan_review_for_display(preview: &Value, request_id: &str) -> Value {
 fn completion_definition() -> clap::Command {
     let definition = Cli::command();
     clap::Command::new("fin")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(VERSION)
         .args(definition.get_arguments().cloned())
         .subcommands(
             definition
@@ -1633,6 +1692,7 @@ fn launch_human_privileged_with_terminal(
             PrivilegedAction::Add(args) | PrivilegedAction::Update(args) => drop(args),
             PrivilegedAction::Remove(args) => drop(args),
             PrivilegedAction::PolicySet(args) => drop(args),
+            PrivilegedAction::Configure(request) => drop(request),
         }
         Err(FinError::new(
             "PROTECTED_PROVIDER_UNAVAILABLE",
@@ -1766,11 +1826,11 @@ fn administrator_authentication_reason(action: &PrivilegedAction) -> &'static st
         PrivilegedAction::Update(_) => {
             "Fin needs administrator access to securely update this connection."
         }
+        PrivilegedAction::Configure(_) => {
+            "Fin needs administrator access for the protected configuration attempt. Touch ID separately approves the exact venue settings."
+        }
         PrivilegedAction::PolicySet(_) => {
             "Fin needs administrator access to change protected financial policy. Touch ID separately approves the exact limits and unpriced exchange setting."
-        }
-        PrivilegedAction::Configure(_) => {
-            "Fin needs administrator access to review and configure this Hyperliquid account. Touch ID separately approves the exact venue setting."
         }
         PrivilegedAction::Remove(_) => "Fin needs administrator access to remove this connection.",
     }
@@ -1910,6 +1970,7 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
             argument.to_str(),
             Some(
                 "--input"
+                    | "--output"
                     | "--bounds"
                     | "--valid-for"
                     | "--replaces"
@@ -1928,6 +1989,9 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
                     | "--network"
                     | "--address"
                     | "--credential-type"
+                    | "--account-id"
+                    | "--default-wallet-account-id"
+                    | "--api-plan"
             )
         );
     }
@@ -1935,6 +1999,15 @@ fn requested_flag(args: &[std::ffi::OsString], flag: &str) -> bool {
 }
 
 fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
+    emit_with_status_command(result, ui, command, None)
+}
+
+fn emit_with_status_command(
+    result: Result<Value, FinError>,
+    ui: &Ui,
+    command: &str,
+    status_command: Option<&str>,
+) -> i32 {
     match result {
         Ok(value) => {
             let output = if command == "completions" && !ui.is_machine() {
@@ -1983,7 +2056,7 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
             } else if command == "daemon" && !ui.is_machine() {
                 ui.success(fin_presentation::render_human(command, &value, false).trim_end())
             } else {
-                ui.write_result(&value, command)
+                ui.write_result_with_status_command(&value, command, status_command)
             };
             i32::from(output.is_err())
         }
@@ -1997,6 +2070,8 @@ fn emit(result: Result<Value, FinError>, ui: &Ui, command: &str) -> i32 {
 pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Client) -> i32 {
     let machine = requested_json(&arguments);
     let verbose = requested_flag(&arguments, "--verbose");
+    let stream =
+        (machine && requested_flag(&arguments, "--stream")).then(json_stream::JsonStream::stdout);
     let cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error)
@@ -2007,11 +2082,15 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         {
             if machine {
                 let value = if error.kind() == ErrorKind::DisplayVersion {
-                    json!({"name":"fin", "version":env!("CARGO_PKG_VERSION")})
+                    json!({"name":"fin", "version":VERSION})
                 } else {
                     json!({"help":error.to_string()})
                 };
-                return emit(Ok(value), &Ui::new(true, false), "help");
+                return if let Some(stream) = stream {
+                    stream.finish(Ok(value))
+                } else {
+                    emit(Ok(value), &Ui::new(true, false), "help")
+                };
             }
             let _ = error.print();
             return 0;
@@ -2023,11 +2102,33 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 "The command or arguments are invalid.",
                 "Run fin --help to inspect supported commands.",
             );
-            return emit(Err(error), &Ui::new(machine, verbose), "cli");
+            return if let Some(stream) = stream {
+                stream.finish(Err(error))
+            } else {
+                emit(Err(error), &Ui::new(machine, verbose), "cli")
+            };
         }
     };
+    let stream = stream.map(|stream| stream.with_context(stream_context(&cli.command)));
     let ui = Ui::new(cli.json, cli.verbose);
     let name = command_name(&cli.command);
+    if cli.json
+        && matches!(
+            &cli.command,
+            Command::Configure(ConfigureArgs { dry_run: false, .. })
+        )
+    {
+        return emit(
+            Err(FinError::new(
+                "HUMAN_TERMINAL_REQUIRED",
+                "configuration",
+                "This administrative change requires fresh configuration approval in your own interactive Terminal.",
+                "Run the configure command without --json to review the exact account, product and settings and request Touch ID. A financial plan cannot authorize this change.",
+            )),
+            &ui,
+            name,
+        );
+    }
     if client.development_mode() && !development_command_allowed(&cli.command) {
         let error = FinError::new(
             "DEVELOPMENT_COMMAND_UNAVAILABLE",
@@ -2035,7 +2136,11 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             "Protected setup and connection management are unavailable in development environments.",
             "Use read-only discovery or a supported development operation in this environment.",
         );
-        return emit(Err(error), &ui, name);
+        return if let Some(stream) = stream {
+            stream.finish(Err(error))
+        } else {
+            emit(Err(error), &ui, name)
+        };
     }
     // Privileged commands replace this process; never leave a spinner alive across exec.
     let offline = matches!(
@@ -2049,7 +2154,7 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
             | Command::Skill { .. }
     );
     let human_execution = !cli.json
-        && (matches!(&cli.command, Command::Execute(args) if !args.dry_run && args.authorization.is_none())
+        && (matches!(&cli.command, Command::Execute(args) if !args.dry_run && args.authorization.is_none() && args.plan.is_none())
             || matches!(
                 &cli.command,
                 Command::Authorizations {
@@ -2062,8 +2167,25 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                     command: PlansCommand::Authorize(_)
                 }
             ));
-    let progress = if !offline && !human_only(&cli.command) && !human_execution {
+    let stage_progress = (!cli.json || cli.stream)
+        && matches!(
+            &cli.command,
+            Command::Execute(_)
+                | Command::Status { .. }
+                | Command::Preview(_)
+                | Command::Authorizations {
+                    command: AuthorizationsCommand::Authorize(_)
+                        | AuthorizationsCommand::Status { .. }
+                }
+                | Command::Plans {
+                    command: PlansCommand::Authorize(_)
+                        | PlansCommand::Preview(_)
+                        | PlansCommand::Status { .. }
+                }
+        );
+    let progress = if !offline && !human_only(&cli.command) && !human_execution && !stage_progress {
         Some(ui.progress(match &cli.command {
+            Command::Read(args) if args.output.is_some() => "Downloading export...",
             Command::Daemon {
                 command: DaemonCommand::Start,
             } => "Starting Fin daemon...",
@@ -2074,6 +2196,7 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
                 command: DaemonCommand::Status,
             } => "Checking daemon status...",
             Command::Execute(args) if args.dry_run => "Preparing preview...",
+            Command::Execute(args) if args.plan.is_some() => "Executing approved plan step...",
             Command::Execute(args) if args.authorization.is_some() => {
                 "Executing authorized attempt..."
             }
@@ -2102,7 +2225,16 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
     let result = match review_human_execution(&cli, client, &ui).await {
         Ok(()) => match review_boundary_authorization(&cli, client, &ui).await {
             Ok(()) => match review_plan_authorization(&cli, client, &ui).await {
-                Ok(review_hash) => dispatch_with_review_hash(cli, client, review_hash).await,
+                Ok(review_hash) => {
+                    execution_feedback(
+                        &ui,
+                        stage_progress,
+                        client.development_mode(),
+                        stream.as_ref(),
+                        dispatch_with_review_hash(cli, client, review_hash),
+                    )
+                    .await
+                }
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -2110,7 +2242,104 @@ pub async fn run_with_client(arguments: Vec<std::ffi::OsString>, client: &dyn Cl
         Err(error) => Err(error),
     };
     drop(progress);
-    emit(result, &ui, name)
+    let status_command = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value["id"].as_str())
+        .and_then(|id| client.status_recovery_command(id));
+    if let Some(stream) = stream {
+        stream.finish(result)
+    } else {
+        emit_with_status_command(result, &ui, name, status_command.as_deref())
+    }
+}
+
+fn stream_context(command: &Command) -> Value {
+    let mut context = json!({"command":command_name(command)});
+    match command {
+        Command::Execute(args) => {
+            context["operation"] = json!(args.operation);
+            if let Some(id) = &args.id {
+                context["request_id"] = json!(id);
+            }
+            if let Some(id) = &args.plan {
+                context["plan_id"] = json!(id);
+            }
+            if let Some(id) = &args.step {
+                context["step_id"] = json!(id);
+            }
+        }
+        Command::Read(args) => {
+            context["operation"] = json!(args.operation.operation);
+        }
+        Command::Preview(args) => {
+            context["operation"] = json!(args.operation);
+        }
+        Command::Status { id } => context["operation_id"] = json!(id),
+        Command::Plans {
+            command: PlansCommand::Authorize(args),
+        } => {
+            context["request_id"] = json!(args.id);
+        }
+        Command::Plans {
+            command: PlansCommand::Status { id } | PlansCommand::Cancel { id },
+        } => {
+            context["plan_id"] = json!(id);
+        }
+        Command::Authorizations {
+            command: AuthorizationsCommand::Authorize(args),
+        } => {
+            context["operation"] = json!(args.operation);
+            context["request_id"] = json!(args.id);
+        }
+        Command::Authorizations {
+            command: AuthorizationsCommand::Status { id } | AuthorizationsCommand::Cancel { id },
+        } => {
+            context["authorization_id"] = json!(id);
+        }
+        _ => {}
+    }
+    context
+}
+
+async fn execution_feedback<F: std::future::Future>(
+    ui: &Ui,
+    enabled: bool,
+    development: bool,
+    stream: Option<&json_stream::JsonStream>,
+    work: F,
+) -> F::Output {
+    if !enabled {
+        return work.await;
+    }
+    let (sender, mut receiver) = fin_domain::execution_progress::channel();
+    let feedback = async {
+        let mut active = if let Some(stream) = stream {
+            stream.connecting();
+            None
+        } else {
+            Some(ui.progress("Connecting to Fin..."))
+        };
+        let mut previous = None;
+        while let Some(stage) = receiver.recv().await {
+            if previous == Some(stage) {
+                continue;
+            }
+            previous = Some(stage);
+            drop(active.take());
+            if let Some(stream) = stream {
+                stream.progress(stage);
+            } else {
+                active = ui.execution_stage(stage, development);
+            }
+        }
+        drop(active);
+    };
+    let (result, ()) = tokio::join!(
+        fin_domain::execution_progress::observe(sender, work),
+        feedback
+    );
+    result
 }
 
 fn development_command_allowed(command: &Command) -> bool {
@@ -2154,6 +2383,22 @@ mod tests {
 
     fn sample_plan_json() -> &'static str {
         r#"{"version":1,"name":"Synthetic transfer","steps":[{"step_id":"transfer","operation":"wallet.transfer","input":{"request_id":"synthetic-input","wallet":"main-wallet","network":"evm","chain_id":1,"token":"native","amount":"0.01","recipient":"0x0000000000000000000000000000000000000001"},"permitted_variations":{"mode":"exact","maximum_debits":[],"maximum_costs":[],"possible_credits":[]},"completion":{"operation_succeeded":true},"funding_dependencies":[]}],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}}"#
+    }
+
+    #[tokio::test]
+    async fn progress_frames_are_observations_and_final_json_remains_exact() {
+        use fin_domain::execution_progress::{self, Stage};
+        let bytes = b"{\"progress\":\"preparing\"}\n{\"progress\":\"verifying\"}\n{\"ok\":true,\"result\":{\"status\":\"pending\"},\"error\":null}\n";
+        let (tx, mut rx) = execution_progress::channel();
+        let value = execution_progress::observe(tx, read_response(&bytes[..]))
+            .await
+            .unwrap();
+        assert_eq!(value, json!({"status":"pending"}));
+        assert_eq!(rx.recv().await, Some(Stage::Preparing));
+        assert_eq!(rx.recv().await, Some(Stage::Verifying));
+        assert_eq!(rx.recv().await, None);
+        let invalid = b"{\"progress\":\"submitted_successfully\"}\n";
+        assert!(read_response(&invalid[..]).await.is_err());
     }
 
     #[tokio::test]
@@ -2245,7 +2490,7 @@ mod tests {
             .unwrap();
         assert!(
             matches!(client.0.lock().unwrap().last(), Some(BrokerRequest::AuthorizePlan { request })
-            if request.request_id == "request-1" && request.valid_for_seconds == 600
+            if request.request_id == "request-1" && request.valid_for_seconds == Some(600)
                 && request.expected_review_hash.as_deref()
                     == Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
         );
@@ -2328,7 +2573,7 @@ mod tests {
                     "review_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "plan":preview.plan,
                     "permissions":steps,
-                    "valid_for_seconds":preview.valid_for_seconds,
+                    "valid_for_seconds":preview.valid_for_seconds.unwrap_or(600),
                 });
                 self.0.lock().unwrap().push(request);
                 Ok(result)
@@ -2370,6 +2615,73 @@ mod tests {
         );
         assert_eq!(display["review_hash"], preview["review_hash"]);
         assert!(preview.get("authorization_request_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn human_and_machine_plan_execution_skip_standalone_preview() {
+        struct PlanClient(std::sync::Mutex<Vec<BrokerRequest>>);
+        #[async_trait]
+        impl Client for PlanClient {
+            async fn call(&self, request: BrokerRequest) -> Result<Value, FinError> {
+                assert!(
+                    matches!(
+                        request,
+                        BrokerRequest::ExecutePlanStep { .. }
+                            | BrokerRequest::PreviewPlanStep { .. }
+                    ),
+                    "plan steps must not request standalone previews or approvals"
+                );
+                self.0.lock().unwrap().push(request);
+                Ok(json!({"status":"completed", "summary":"Synthetic plan step result"}))
+            }
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("plan execution must retain its existing authority")
+            }
+        }
+        for machine in [false, true] {
+            for preview in [false, true] {
+                let client = PlanClient(Default::default());
+                // A relative deadline is deliberately absent from the input:
+                // only the broker's plan-aware preparation may resolve it.
+                let mut args = vec![
+                    "fin",
+                    "execute",
+                    "uniswap.swap",
+                    "--input",
+                    "{}",
+                    "--id",
+                    "synthetic-attempt",
+                    "--plan",
+                    "synthetic-plan",
+                    "--step",
+                    "swap",
+                ];
+                if machine {
+                    args.push("--json");
+                }
+                if preview {
+                    args.push("--dry-run");
+                }
+                assert_eq!(
+                    run_with_client(args.into_iter().map(Into::into).collect(), &client).await,
+                    0
+                );
+                let calls = client.0.lock().unwrap();
+                assert_eq!(calls.len(), 1);
+                if preview {
+                    assert!(
+                        matches!(&calls[0], BrokerRequest::PreviewPlanStep { plan_id, step_id, input, .. }
+                        if plan_id == "synthetic-plan" && step_id == "swap" && input.get("deadline").is_none())
+                    );
+                } else {
+                    assert!(
+                        matches!(&calls[0], BrokerRequest::ExecutePlanStep { plan_id, step_id, request }
+                        if plan_id == "synthetic-plan" && step_id == "swap" && request.request_id == "synthetic-attempt"
+                        && request.input.get("deadline").is_none())
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -2995,6 +3307,58 @@ mod tests {
         assert!(!error.next_action.contains("daemon status"));
     }
 
+    #[tokio::test]
+    async fn configure_machine_handoff_and_export_help_are_offline() {
+        struct NoBroker;
+        #[async_trait]
+        impl Client for NoBroker {
+            async fn execute(&self, _: OperationRequest) -> Result<Value, FinError> {
+                panic!("configuration JSON must never execute");
+            }
+            async fn call(&self, _: BrokerRequest) -> Result<Value, FinError> {
+                panic!("configuration JSON must not contact broker");
+            }
+        }
+        let parsed=Cli::try_parse_from(["fin","configure","kraken.create-subaccount","--input","{\"account\":\"synthetic\",\"username\":\"synthetic\",\"email\":\"synthetic@example.invalid\"}","--id","synthetic-config","--json"]).unwrap();
+        assert!(human_only(&parsed.command));
+        assert_eq!(
+            dispatch(parsed, &NoBroker).await.unwrap_err().code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        let action = PrivilegedAction::Configure(OperationRequest {
+            operation: "kraken.create-subaccount".into(),
+            input: json!({}),
+            request_id: "synthetic-config".into(),
+            run_id: None,
+        });
+        assert_eq!(
+            launch_human_privileged_with_terminal(action, false, false, false)
+                .unwrap_err()
+                .code,
+            "HUMAN_TERMINAL_REQUIRED"
+        );
+        let read = Cli::try_parse_from([
+            "fin",
+            "read",
+            "kraken.retrieve-export",
+            "--input",
+            "{\"account\":\"synthetic\",\"id\":\"synthetic-report\"}",
+            "--output",
+            "synthetic.zip",
+            "--json",
+        ])
+        .unwrap();
+        assert!(!human_only(&read.command));
+        assert!(
+            Cli::command()
+                .find_subcommand("read")
+                .unwrap()
+                .get_arguments()
+                .any(|argument| argument.get_long() == Some("output"))
+        );
+        assert!(find_definition("configure").is_some());
+    }
+
     #[test]
     fn enrollment_dtos_reject_secret_fields_and_unknown_flags() {
         let args: fin_discovery::AddConnectionArgs = serde_json::from_value(json!({
@@ -3053,6 +3417,7 @@ mod tests {
             fin_broker::operation_definitions().len()
         );
         for name in [
+            "aave.markets",
             "wallet.permit2.allowance",
             "wallet.permit2.approve",
             "ramses.quote",
@@ -3145,6 +3510,61 @@ mod tests {
             launch_human_privileged_with_terminal(PrivilegedAction::Setup, false, false, false)
                 .unwrap_err();
         assert_eq!(error.code, "HUMAN_TERMINAL_REQUIRED");
+    }
+
+    #[test]
+    fn default_wallet_machine_and_redirected_enrollment_handoff_before_privilege() {
+        for tty in [true, false] {
+            let args:fin_discovery::AddConnectionArgs=serde_json::from_value(json!({"provider":"kraken","name":"spot","account_id":"synthetic","default_wallet_account_id":"WDEFAULT"})).unwrap();
+            assert_eq!(
+                launch_human_privileged_with_terminal(
+                    PrivilegedAction::Add(args),
+                    tty,
+                    true,
+                    false
+                )
+                .unwrap_err()
+                .code,
+                "HUMAN_TERMINAL_REQUIRED"
+            );
+        }
+        let parsed = Cli::try_parse_from([
+            "fin",
+            "connections",
+            "add",
+            "kraken",
+            "--name",
+            "spot",
+            "--account-id",
+            "synthetic",
+            "--default-wallet-account-id",
+            "WDEFAULT",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Connections {
+            command: Some(ConnectionsCommand::Add(args)),
+        } = parsed.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(
+            args.connection()
+                .unwrap()
+                .default_wallet_account_id
+                .as_deref(),
+            Some("WDEFAULT")
+        );
+        assert!(!requested_json(
+            &[
+                "fin",
+                "connections",
+                "add",
+                "--default-wallet-account-id",
+                "--json"
+            ]
+            .map(Into::into)
+        ));
     }
 
     #[test]
@@ -3418,9 +3838,20 @@ mod tests {
             serde_json::from_value(json!({"name":"synthetic-main"})).unwrap();
         for action in [
             PrivilegedAction::Setup,
+            PrivilegedAction::PolicySet(fin_discovery::PolicySetArgs {
+                max_movement_usd: "100".into(),
+                max_run_allocation_usd: "100".into(),
+                allow_unpriced_exchange_assets: None,
+            }),
             PrivilegedAction::Add(args),
             PrivilegedAction::Update(update),
             PrivilegedAction::Remove(remove),
+            PrivilegedAction::Configure(OperationRequest {
+                operation: "synthetic.configuration".into(),
+                input: json!({"account":"synthetic-main"}),
+                request_id: "synthetic-configuration-1".into(),
+                run_id: None,
+            }),
         ] {
             let error =
                 launch_human_privileged_with_terminal(action, true, false, false).unwrap_err();
@@ -3760,6 +4191,7 @@ mod tests {
                     locks: vec![],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 

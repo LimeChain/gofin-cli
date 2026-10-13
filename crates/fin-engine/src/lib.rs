@@ -39,26 +39,89 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+mod amendments;
+mod baseline_anchors;
 mod boundary_authorizations;
 #[cfg(test)]
 mod boundary_dispatch_tests;
 mod cash_reservation_sources;
+mod compound_mutations;
+mod conversion_sequences;
 #[cfg(test)]
 mod cost_attention_tests;
+#[cfg(test)]
+mod direct_credit_cost_tests;
 mod financial_plans;
+#[cfg(test)]
+mod gross_anchor_tests;
+#[cfg(test)]
+mod gross_settlement_cost_tests;
+mod grouped_amendments;
+mod mutation_batch_validation;
+mod mutation_batches;
 mod ordinary_policy;
+mod partial_proofs;
+mod unresolved_consumption;
 use ordinary_policy::reject_unpriced_run;
 mod projected_provenance;
 mod projected_shares;
 use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
+
+/// In-process evidence age, never restored from a persisted preview. Both clocks
+/// are checked so clock rollback cannot extend a candidate's reuse window.
+struct PreparationStamp {
+    started: tokio::time::Instant,
+    observed_at: DateTime<Utc>,
+}
+impl PreparationStamp {
+    fn start(observed_at: DateTime<Utc>) -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            observed_at,
+        }
+    }
+    fn permits(
+        &self,
+        window: std::time::Duration,
+        now: DateTime<Utc>,
+        prepared: &PreparedOperation,
+    ) -> bool {
+        let age = now.signed_duration_since(self.observed_at);
+        self.started.elapsed() < window
+            && age.to_std().is_ok_and(|age| age < window)
+            && observed_within_reuse_window(&prepared.observed_at, now, window)
+            && prepared.valuation.as_ref().is_none_or(|valuation| {
+                observed_within_reuse_window(&valuation.observed_at, now, window)
+                    && valuation
+                        .prices
+                        .iter()
+                        .all(|price| observed_within_reuse_window(&price.observed_at, now, window))
+            })
+    }
+}
+
+fn observed_within_reuse_window(
+    observed_at: &str,
+    now: DateTime<Utc>,
+    window: std::time::Duration,
+) -> bool {
+    let Ok(observed_at) = DateTime::parse_from_rfc3339(observed_at) else {
+        return false;
+    };
+    let Ok(window) = chrono::Duration::from_std(window) else {
+        return false;
+    };
+    let age = now.signed_duration_since(observed_at.with_timezone(&Utc));
+    age >= chrono::Duration::zero() && age < window
+}
 
 const DEFAULT_LIMIT_MICROS: u64 = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
 fn legacy_movement_limit() -> String {
     fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
 }
 const MAX_OBSERVATION_AGE_SECONDS: i64 = 120;
-const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const EXTERNAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 // Bound evidence collection only. Financial dispatch and reconciliation keep
 // their durable identity even after the caller stops waiting.
@@ -267,6 +330,7 @@ pub struct Engine {
     cost_origin_price_provider: Option<Arc<dyn TrustedAssetPriceProvider>>,
     write_queue: AsyncMutex<()>,
     instance_id: uuid::Uuid,
+    clock: Arc<dyn fin_domain::clock::Clock>,
 }
 
 /// An observer capture bound to the engine that created it. The broker may
@@ -365,7 +429,15 @@ impl Engine {
             cost_origin_price_provider: None,
             write_queue: AsyncMutex::new(()),
             instance_id: uuid::Uuid::new_v4(),
+            clock: Arc::new(fin_domain::clock::SystemClock),
         })
+    }
+
+    /// Internal test composition only; production broker uses the system clock.
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Attach the trusted provider before the engine is shared with request
@@ -465,7 +537,7 @@ impl Engine {
         let required_origins = self.cost_origin_assets(&prepared, None)?;
         self.complete_cost_origin_prices(&mut prepared, &required_origins)
             .await?;
-        validate_prepared(&prepared, operation, Utc::now())?;
+        validate_prepared(&prepared, operation, self.clock.now())?;
         Ok(prepared)
     }
 
@@ -485,17 +557,25 @@ impl Engine {
             ));
         }
         let context = self.preparation_context(run_id)?;
-        let mut preview = bounded_evidence(
-            operation,
-            "preflight",
-            PREFLIGHT_TIMEOUT,
-            adapter.prepare_with_context(operation, input, &context),
-        )
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
+        let linked = self.amendment_preparation_context(input)?;
+        let compound = self.compound_preparation_context(input)?;
+        let mut preview = bounded_evidence(operation, "preflight", PREFLIGHT_TIMEOUT, async {
+            if let Some(compound) = &compound {
+                adapter
+                    .prepare_with_compound_context(operation, input, &context, compound)
+                    .await
+            } else {
+                adapter
+                    .prepare_with_linked_context(operation, input, &context, &linked)
+                    .await
+            }
+        })
         .await?;
         let required_origins = self.cost_origin_assets(&preview, run_id)?;
         self.complete_cost_origin_prices(&mut preview, &required_origins)
             .await?;
-        validate_prepared(&preview, operation, Utc::now())?;
+        validate_prepared(&preview, operation, self.clock.now())?;
         Ok(preview)
     }
 
@@ -592,6 +672,16 @@ impl Engine {
                 )
             })?;
             for asset in required_assets {
+                if let Some(existing) = valuation.prices.iter().find(|price| price.asset == *asset)
+                    && validate_price_rows(
+                        std::slice::from_ref(existing),
+                        &BTreeSet::from([asset.clone()]),
+                        self.clock.now(),
+                    )
+                    .is_ok()
+                {
+                    continue;
+                }
                 let price = bounded_evidence(
                     &prepared.operation,
                     "pricing",
@@ -617,7 +707,7 @@ impl Engine {
                 validate_price_rows(
                     std::slice::from_ref(&price),
                     &BTreeSet::from([asset.clone()]),
-                    Utc::now(),
+                    self.clock.now(),
                 )
                 .map_err(|error| {
                     if error.code == "COST_VALUATION_STALE" {
@@ -642,7 +732,7 @@ impl Engine {
         }
         let mut all_required = required_assets.clone();
         all_required.extend(prepared_cost_assets(&prepared.intent));
-        validate_cost_prices(prepared, &all_required, Utc::now())?;
+        validate_cost_prices(prepared, &all_required, self.clock.now())?;
         Ok(())
     }
 
@@ -1048,6 +1138,13 @@ impl Engine {
 
     /// Return only broker-held, previously verified position anchors.
     pub fn preparation_context(&self, run_id: Option<&str>) -> Result<PreparationContext> {
+        self.preparation_context_except(run_id, None)
+    }
+    fn preparation_context_except(
+        &self,
+        run_id: Option<&str>,
+        excluded: Option<&str>,
+    ) -> Result<PreparationContext> {
         if let Some(run_id) = run_id {
             let run = self.load_run(run_id)?;
             return Ok(PreparationContext {
@@ -1056,7 +1153,13 @@ impl Engine {
         }
         let mut latest = BTreeMap::<String, PositionAnchor>::new();
         for record in self.operations()? {
-            if record.status != Status::Completed {
+            if excluded == Some(record.id.as_str()) {
+                continue;
+            }
+            if !matches!(
+                record.status,
+                Status::Completed | Status::Pending | Status::Submitted | Status::Unknown
+            ) {
                 continue;
             }
             let Some(verified) = &record.effects else {
@@ -1106,8 +1209,14 @@ impl Engine {
         if requirements.is_empty() {
             return Ok(None);
         }
+        // Some adapters can prepare the exact native anchor as part of the
+        // immutable candidate. Merge and validate those bound rows before
+        // asking registered observers for anything; this avoids a redundant
+        // broad account query and keeps the original venue observation as the
+        // approved baseline.
+        let prepared_context = baseline_anchors::merge(prepared, prior)?;
         let mut historical = BTreeMap::<String, PositionAnchor>::new();
-        for anchor in &prior.positions {
+        for anchor in &prepared_context.positions {
             let key = position_anchor_key(anchor)?;
             if historical.insert(key, anchor.clone()).is_some() {
                 return Err(ambiguous_anchor());
@@ -1317,7 +1426,21 @@ impl Engine {
         record: &OperationRecord,
         approved_predecessors: &[PositionAnchor],
     ) -> Result<PreparationContext> {
-        let mut context = self.preparation_context(record.run_id.as_deref())?;
+        // Exclude this operation's cumulative partial proof from the prior
+        // anchor set, then reapply its immutable captured baseline and exact
+        // verified predecessors. A terminal cumulative proof must not add an
+        // already-applied partial position delta twice.
+        let context =
+            self.preparation_context_except(record.run_id.as_deref(), Some(&record.id))?;
+        self.merge_record_position_baseline(record, approved_predecessors, context)
+    }
+
+    fn merge_record_position_baseline(
+        &self,
+        record: &OperationRecord,
+        approved_predecessors: &[PositionAnchor],
+        mut context: PreparationContext,
+    ) -> Result<PreparationContext> {
         let Some(baseline) = &record.position_baseline else {
             return Ok(context);
         };
@@ -1460,7 +1583,7 @@ impl Engine {
                 Ok(original)
             };
         }
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
         let initial = OperationRecord {
             id: id.clone(),
@@ -1574,7 +1697,7 @@ impl Engine {
                         status_for_error(&error)
                     };
                     record.error = Some(error);
-                    record.updated_at = now();
+                    record.updated_at = self.clock.now().to_rfc3339();
                     if record.status.terminal() {
                         let run = self.release_unsubmitted_reservation(&record)?;
                         self.commit_terminal(
@@ -1833,7 +1956,7 @@ impl Engine {
         record: &mut OperationRecord,
         boundary: Option<BoundaryAuthorizationRecord>,
         plan: Option<FinancialPlanAuthorizationRecord>,
-        preprepared: Option<PreparedOperation>,
+        preprepared: Option<(PreparedOperation, PreparationStamp)>,
         route: ExecutionRoute,
     ) -> Result<OperationRecord> {
         let definition = adapter
@@ -1855,16 +1978,40 @@ impl Engine {
                 == Some(1)
         });
         let context = self.preparation_context(request.run_id.as_deref())?;
+        let (preprepared, preparation_stamp) = match preprepared {
+            Some((prepared, stamp)) => (Some(prepared), stamp),
+            None => (None, PreparationStamp::start(self.clock.now())),
+        };
+        let linked = self.amendment_preparation_context(&request.input)?;
+        let compound = self.compound_preparation_context(&request.input)?;
         let mut prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
-                    bounded_evidence(
-                        &request.operation,
-                        "preflight",
-                        PREFLIGHT_TIMEOUT,
-                        adapter.prepare_with_context(&request.operation, &request.input, &context),
-                    )
+                    fin_domain::execution_progress::emit(
+                        fin_domain::execution_progress::Stage::Preparing,
+                    );
+                    bounded_evidence(&request.operation, "preflight", PREFLIGHT_TIMEOUT, async {
+                        if let Some(compound) = &compound {
+                            adapter
+                                .prepare_with_compound_context(
+                                    &request.operation,
+                                    &request.input,
+                                    &context,
+                                    compound,
+                                )
+                                .await
+                        } else {
+                            adapter
+                                .prepare_with_linked_context(
+                                    &request.operation,
+                                    &request.input,
+                                    &context,
+                                    &linked,
+                                )
+                                .await
+                        }
+                    })
                     .await?
                 }
                 ExecutionRoute::Configuration(_) => {
@@ -1947,7 +2094,7 @@ impl Engine {
             self.cost_origin_assets(&prepared, request.run_id.as_deref())?;
         self.complete_cost_origin_prices(&mut prepared, &required_cost_origins)
             .await?;
-        validate_prepared(&prepared, &request.operation, Utc::now())?;
+        validate_prepared(&prepared, &request.operation, self.clock.now())?;
         record.position_baseline = self
             .capture_position_baseline(&record.id, &prepared, &context)
             .await?;
@@ -1970,7 +2117,14 @@ impl Engine {
             plan.is_none() && boundary.is_none(),
         )?;
         record.preview = Some(prepared.clone());
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
+        let amendment = self.validate_submission_amendment_for_attempt(
+            &prepared,
+            request.run_id.as_deref(),
+            boundary.is_some() || plan.is_some(),
+            Some(&record.id),
+        )?;
+
         let mut run_state = if cancellation {
             None
         } else if let Some(run_id) = &request.run_id {
@@ -1990,7 +2144,7 @@ impl Engine {
                     &to_value(record)?,
                     &run.id,
                     &to_value(run)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else if cancellation && prepared.intent.maximum_costs.is_empty() {
@@ -2020,7 +2174,7 @@ impl Engine {
         let approved_binding_hash = binding_hash(&approved_binding)?;
         let (audit, challenge) = if let Some(boundary) = &boundary {
             if boundary.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&boundary.authorization.expires_at)? <= Utc::now()
+                || parse_time(&boundary.authorization.expires_at)? <= self.clock.now()
             {
                 return Err(boundary_error(
                     "Boundary authorization expired or was revoked before dispatch.",
@@ -2032,14 +2186,19 @@ impl Engine {
             ensure_audit_binding(&plan.approval, &plan.revision.approval_binding_hash)?;
             validate_future_expiry(
                 &plan.revision.expires_at,
-                Utc::now(),
+                self.clock.now(),
                 "PLAN_AUTHORIZATION_EXPIRED",
             )?;
             (plan.approval.clone(), None)
         } else {
             let challenge_expiry = std::cmp::min(
                 parse_time(&prepared.expires_at)?,
-                parse_time(&now())? + chrono::Duration::seconds(90),
+                parse_time(
+                    &self
+                        .clock
+                        .now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )? + chrono::Duration::seconds(90),
             );
             let challenge = AuthorizationChallenge {
                 purpose: match &route {
@@ -2054,37 +2213,55 @@ impl Engine {
                 nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
                 expires_at: challenge_expiry.to_rfc3339(),
             };
+            fin_domain::execution_progress::emit(
+                fin_domain::execution_progress::Stage::AwaitingApproval,
+            );
             let audit = match &route {
                 ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
                 ExecutionRoute::Configuration(authorizer) => {
                     authorizer.authorize_configuration(&challenge).await?
                 }
             };
-            validate_approval(&audit, &challenge, Utc::now())?;
+            validate_approval(&audit, &challenge, self.clock.now())?;
             (audit, Some(challenge))
         };
         record.approval = Some(audit.clone());
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
 
         let adapter_candidate = strip_plan_metadata(&prepared);
-        let mut refreshed = bounded_evidence(
-            &request.operation,
-            "revalidation",
-            PREFLIGHT_TIMEOUT,
-            async {
-                match &route {
-                    ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
-                    ExecutionRoute::Configuration(_) => {
-                        adapter.revalidate_configuration(&adapter_candidate).await
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Revalidating);
+        let reuse_preparation = matches!(&route, ExecutionRoute::Financial)
+            && adapter
+                .preparation_reuse_window(&adapter_candidate)
+                .is_some_and(|window| {
+                    preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
+                })
+            && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
+        let mut refreshed = if reuse_preparation {
+            adapter_candidate.clone()
+        } else {
+            bounded_evidence(
+                &request.operation,
+                "revalidation",
+                PREFLIGHT_TIMEOUT,
+                async {
+                    match &route {
+                        ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
+                        ExecutionRoute::Configuration(_) => {
+                            adapter.revalidate_configuration(&adapter_candidate).await
+                        }
                     }
-                }
-            },
-        )
-        .await?;
-        self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
-            .await?;
-        validate_prepared(&refreshed, &request.operation, Utc::now())?;
+                },
+            )
+            .await?
+        };
+        financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
+        if !reuse_preparation {
+            self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
+                .await?;
+        }
+        validate_prepared(&refreshed, &request.operation, self.clock.now())?;
         if let Some(boundary) = &boundary {
             let marker = refreshed
                 .binding
@@ -2176,12 +2353,12 @@ impl Engine {
             )?;
         }
         if let Some(challenge) = &challenge {
-            ensure_approval_fresh(&audit, challenge, Utc::now())?;
+            ensure_approval_fresh(&audit, challenge, self.clock.now())?;
         }
         if let Some(boundary) = &boundary {
             let current = self.load_boundary_record(&boundary.authorization.id)?;
             if current.authorization.status != BoundaryAuthorizationStatus::Active
-                || parse_time(&current.authorization.expires_at)? <= Utc::now()
+                || parse_time(&current.authorization.expires_at)? <= self.clock.now()
                 || current.active_attempt.as_deref() != Some(record.id.as_str())
             {
                 return Err(boundary_error(
@@ -2229,7 +2406,7 @@ impl Engine {
                 });
             if current.revision.revision_id != plan.revision.revision_id
                 || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || parse_time(&current.revision.expires_at)? <= self.clock.now()
                 || (current.active_attempt_id.as_deref() != Some(record.id.as_str())
                     && !recovery_parent_active)
                 || plan_attempt_hash.as_deref()
@@ -2264,6 +2441,18 @@ impl Engine {
             matches!(&route, ExecutionRoute::Financial),
             plan.is_none() && boundary.is_none(),
         )?;
+        if amendment.is_some()
+            && self.validate_submission_amendment_for_attempt(
+                &refreshed,
+                request.run_id.as_deref(),
+                boundary.is_some() || plan.is_some(),
+                Some(&record.id),
+            )? != amendment
+        {
+            return Err(FinError::validation(
+                "The original amendment owner changed before dispatch.",
+            ));
+        }
 
         if let (Some(run_id), Some(run)) = (&request.run_id, run_state.as_mut()) {
             self.recheck_run_reservation(run_id, &record.id, &refreshed)?;
@@ -2279,7 +2468,7 @@ impl Engine {
                     &to_value(record)?,
                     run_id,
                     &to_value(run)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         }
@@ -2316,20 +2505,26 @@ impl Engine {
             financial_plan_snapshot: plan.clone(),
             adapter: Some(adapter.clone()),
             options: self.options.clone(),
+            clock: self.clock.clone(),
             consumed: AtomicBool::new(false),
             store: self.store.clone(),
             record: Mutex::new(record.clone()),
         });
         let adapter_submission_candidate = strip_plan_metadata(&refreshed);
+        let validated = fin_domain::RevalidatedOperation::after_revalidation(
+            adapter_submission_candidate,
+            self.clock.clone(),
+        )?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Submitting);
         let submission = match &route {
             ExecutionRoute::Financial => {
                 adapter
-                    .submit(&adapter_submission_candidate, journal.clone())
+                    .submit_revalidated(&validated, journal.clone())
                     .await
             }
             ExecutionRoute::Configuration(_) => {
                 adapter
-                    .submit_configuration(&adapter_submission_candidate, journal.clone())
+                    .submit_configuration_revalidated(&validated, journal.clone())
                     .await
             }
         };
@@ -2359,7 +2554,7 @@ impl Engine {
         }
         *record = persisted;
         record.status = Status::Pending;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         self.update_record(record)?;
         self.reconcile_serial(record.id.clone()).await
     }
@@ -2372,7 +2567,9 @@ impl Engine {
                 Status::Submitted | Status::Pending | Status::Unknown
             )
         {
-            let _guard = self.write_queue.lock().await;
+            let Ok(_guard) = self.write_queue.try_lock() else {
+                return Ok(record);
+            };
             self.reconcile_serial(id.to_owned()).await
         } else {
             Ok(record)
@@ -2406,6 +2603,10 @@ impl Engine {
             .into_iter()
             .find(|definition| definition.name == record.operation)
             .ok_or_else(|| internal("registry definition disappeared during reconciliation"))?;
+        if self.has_pending_amendment(&record.id)? {
+            return Ok(record);
+        }
+        let amendment_context = self.amendment_context(&record.id)?;
         let mut adapter_record = record.clone();
         if let Some(prepared) = &record.preview {
             adapter_record.preview = Some(strip_plan_metadata(prepared));
@@ -2446,13 +2647,22 @@ impl Engine {
                 ));
             }
             let permission = financial_plans::permission_for_step(&revision, &step_id)?;
-            if !permission.generated_input_fields.is_empty() {
-                let execution_input = financial_plans::plan_attempt_input(
+            if !permission.generated_input_fields.is_empty()
+                || step.action_deadline_seconds.is_some()
+            {
+                let mut execution_input = financial_plans::plan_attempt_input(
                     &revision,
                     &step_id,
                     &record.input,
                     &record.id,
                 )?;
+                if let Some(deadline) = record
+                    .preview
+                    .as_ref()
+                    .and_then(|p| p.action_deadline.as_ref())
+                {
+                    deadline.apply(&mut execution_input)?;
+                }
                 let prepared = record.preview.as_ref().ok_or_else(|| {
                     plan_error(
                         "PLAN_CANDIDATE_MISSING",
@@ -2468,25 +2678,79 @@ impl Engine {
                 adapter_record.input = execution_input;
             }
         }
-        let reconciliation = match if definition.kind == OperationKind::Configuration
-            && definition.execution_actor == ExecutionActor::HumanInteractive
-        {
-            adapter.reconcile_configuration(&adapter_record).await
-        } else {
-            adapter.reconcile(&adapter_record).await
-        } {
-            Ok(reconciliation) => reconciliation,
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Verifying);
+        let compound = self.compound_preparation_context(&record.input)?;
+        let outcome = bounded_evidence(
+            &record.operation,
+            "reconciliation",
+            EXTERNAL_READ_TIMEOUT,
+            async {
+                let reconciliation = if definition.kind == OperationKind::Configuration
+                    && definition.execution_actor == ExecutionActor::HumanInteractive
+                {
+                    adapter.reconcile_configuration(&adapter_record).await
+                } else if let Some(compound) = &compound {
+                    adapter
+                        .reconcile_with_compound_context(&adapter_record, compound)
+                        .await
+                } else {
+                    adapter
+                        .reconcile_with_context(&adapter_record, &amendment_context)
+                        .await
+                }?;
+                let baselines = if reconciliation.status == Status::Completed {
+                    adapter.verified_position_baselines(&adapter_record).await?
+                } else {
+                    vec![]
+                };
+                Ok((reconciliation, baselines))
+            },
+        )
+        .await;
+        let (reconciliation, baselines) = match outcome {
+            Ok(evidence) => evidence,
             Err(error) => {
                 let mut retained = record;
+                // Keep the original submission error, but do not leave users
+                // staring at stale proof evidence when a later recovery check
+                // itself fails. Only public, non-secret error fields are
+                // recorded alongside the previous evidence.
+                let latest_error = json!({
+                    "code":error.code,
+                    "stage":error.stage,
+                    "message":error.message,
+                });
+                match retained.last_reconciliation_evidence.as_mut() {
+                    Some(Value::Object(evidence)) => {
+                        evidence.insert("latestReconciliationError".into(), latest_error);
+                    }
+                    Some(previous) => {
+                        retained.last_reconciliation_evidence = Some(json!({
+                            "reason":"Latest reconciliation attempt returned an error; previous evidence is retained.",
+                            "previous":previous,
+                            "latestReconciliationError":latest_error,
+                        }));
+                    }
+                    None => {
+                        retained.last_reconciliation_evidence = Some(json!({
+                            "reason":"Latest reconciliation attempt returned an error.",
+                            "latestReconciliationError":latest_error,
+                        }));
+                    }
+                }
                 if retained.error.is_none() || retained.submission.is_none() {
                     retained.error = Some(error);
                 }
-                retained.updated_at = now();
+                retained.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&retained)?;
                 return Ok(retained);
             }
         };
-        match self.apply_reconciliation(record.clone(), reconciliation.clone()) {
+        match self.apply_reconciliation_with_baselines(
+            record.clone(),
+            reconciliation.clone(),
+            baselines,
+        ) {
             Ok(record) => Ok(record),
             Err(error) if error.stage == "reconciliation" || error.stage == "budget" => {
                 let mut retained = record;
@@ -2519,7 +2783,7 @@ impl Engine {
                         retained.error = Some(error);
                     }
                 }
-                retained.updated_at = now();
+                retained.updated_at = self.clock.now().to_rfc3339();
                 self.update_record(&retained)?;
                 Ok(retained)
             }
@@ -2527,11 +2791,54 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     fn apply_reconciliation(
+        &self,
+        record: OperationRecord,
+        reconciliation: Reconciliation,
+    ) -> Result<OperationRecord> {
+        self.apply_reconciliation_with_baselines(record, reconciliation, vec![])
+    }
+    fn apply_reconciliation_with_baselines(
         &self,
         mut record: OperationRecord,
         reconciliation: Reconciliation,
+        baselines: Vec<PositionAnchor>,
     ) -> Result<OperationRecord> {
+        if let (Some(previous), Some(current)) = (&record.effects, &reconciliation.verified) {
+            let previous_progress =
+                fin_domain::SettlementProgress::from_evidence(&previous.evidence)?;
+            let current_progress =
+                fin_domain::SettlementProgress::from_evidence(&current.evidence)?;
+            if previous_progress.is_some() != current_progress.is_some()
+                && (previous_progress.is_some() || previous.evidence.get("proofEvents").is_some())
+            {
+                return Err(reconciliation_error(
+                    "An unresolved submission cannot change its cumulative proof identity protocol; preserve and reconcile its original receipt events.",
+                ));
+            }
+        }
+        let context = self.amendment_context(&record.id)?;
+        let accounting_intent = amendments::accounting_intent(&context)?;
+        let effective_intent = accounting_intent.as_ref();
+        if reconciliation
+            .evidence
+            .get(fin_domain::unresolved_consumption::KEY)
+            .is_some()
+            && let Some(retained) = self.commit_unresolved_cost_consumption(
+                &record,
+                &reconciliation,
+                effective_intent.unwrap_or(
+                    &record
+                        .preview
+                        .as_ref()
+                        .ok_or_else(|| internal("original preview missing"))?
+                        .intent,
+                ),
+            )?
+        {
+            return Ok(retained);
+        }
         match reconciliation.status.clone() {
             Status::Pending | Status::Submitted | Status::Unknown => {
                 if let Some(verified) = reconciliation.verified.clone()
@@ -2539,15 +2846,41 @@ impl Engine {
                 {
                     return self.apply_progress_reconciliation(record, reconciliation, verified);
                 }
-                if !cost_attention_pending(&record) {
-                    record.status = reconciliation.status;
-                    record.last_reconciliation_evidence = Some(reconciliation.evidence);
+                if cost_attention_pending(&record) {
+                    return Ok(record);
                 }
+                let expected = to_value(&record)?;
+                if let Some(verified) = &reconciliation.verified {
+                    if effective_intent.is_some() {
+                        partial_proofs::validate_pending_with_scope(
+                            &record,
+                            verified,
+                            effective_intent,
+                        )?;
+                    } else {
+                        partial_proofs::validate_pending(&record, verified)?;
+                    }
+                    record.effects = Some(verified.clone());
+                }
+                record.status = reconciliation.status;
+                record.last_reconciliation_evidence = Some(reconciliation.evidence);
                 if record.submission.is_none() {
                     record.error = None;
                 }
-                record.updated_at = now();
-                self.update_record(&record)?;
+                record.updated_at = self.clock.now().to_rfc3339();
+                if let Some(verified) = &reconciliation.verified {
+                    if self.commit_mutation_batch_progress(&record, &expected)? {
+                        return Ok(record);
+                    }
+                    self.store.lock().map_err(|_| internal("store lock poisoned"))?
+                        .commit_progress(&record.id, &expected, &to_value(&record)?, &to_value(verified)?,
+                            &to_value(&verified.effects)?, &record.updated_at)
+                        .map_err(|_| FinError::new("PARTIAL_PROOF_CONFLICT", "reconciliation",
+                            "Partial evidence conflicts with an immutable receipt or operation record.",
+                            "Reconcile the original submission; retain its reservations."))?;
+                } else {
+                    self.update_record(&record)?;
+                }
                 Ok(record)
             }
             Status::Completed | Status::Failed => {
@@ -2557,15 +2890,14 @@ impl Engine {
                     "Terminal venue status has no verified typed effects.",
                     "Reconcile this original submission until its proof and effects are available.",
                 ))?;
-                // A terminal proof is immutable and already accounted once.
-                // Return the durable record directly for an exact replay so
-                // cumulative credits/costs cannot be re-applied against a
-                // post-settlement anchor context.
+                // Terminal evidence is immutable: an exact replay is already
+                // accounted and may arrive after its post-state anchor is current.
                 if record.status == reconciliation.status
                     && record.effects.as_ref() == Some(&verified)
                 {
                     return Ok(record);
                 }
+                self.validate_consumed_costs_before_terminal(&record, &verified)?;
                 let prior_progress = record
                     .effects
                     .as_ref()
@@ -2606,29 +2938,50 @@ impl Engine {
                         &verified.effects,
                     )?;
                 }
-                validate_effects_mode(
+                if prior_progress.is_none() {
+                    partial_proofs::validate_growth(record.effects.as_ref(), &verified)?;
+                }
+                validate_effects_with_scope(
                     &record,
                     &verified,
                     &reconciliation.status,
                     reconciliation.status == Status::Failed && prior_progress.is_some(),
+                    effective_intent,
                 )?;
-                let accounting_delta =
-                    cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
+                let accounting_delta = if prior_progress.is_some() {
+                    cumulative_boundary_delta(record.effects.as_ref(), &verified)?
+                } else {
+                    verified.clone()
+                };
                 if reconciliation.status == Status::Completed {
+                    // Validate exact predecessor proofs before using their post-state
+                    // anchors to explain this operation's original snapshot.
                     let operations = self.operations()?;
-                    // Validate an exact sibling proof before allowing its
-                    // post-anchor to explain why this operation's original
-                    // snapshot differs from the latest durable history.
                     let predecessors = position_predecessor_context(
                         &record,
                         &verified,
                         &operations,
                         PreparationContext::default(),
                     )?;
-                    let prior = self.record_preparation_context_with_predecessors(
+                    let mut prior = self.record_preparation_context_with_predecessors(
                         &record,
                         &predecessors.positions,
                     )?;
+                    let prepared = record
+                        .preview
+                        .as_ref()
+                        .ok_or_else(|| internal("terminal preview missing"))?;
+                    prior = baseline_anchors::merge(prepared, &prior)?;
+                    for baseline in baselines {
+                        let key = position_anchor_key(&baseline)?;
+                        if !prior
+                            .positions
+                            .iter()
+                            .any(|anchor| position_anchor_key(anchor).as_ref() == Ok(&key))
+                        {
+                            prior.positions.push(baseline);
+                        }
+                    }
                     let prior =
                         position_predecessor_context(&record, &verified, &operations, prior)?;
                     validate_anchor_transitions(&verified, &prior)?;
@@ -2637,7 +2990,7 @@ impl Engine {
                 record.last_reconciliation_evidence = Some(reconciliation.evidence);
                 record.effects = Some(verified.clone());
                 record.error = None;
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 let cancellation = record
                     .preview
                     .as_ref()
@@ -2663,7 +3016,7 @@ impl Engine {
             Status::Cancelled | Status::Rejected | Status::Expired => {
                 record.status = reconciliation.status;
                 record.last_reconciliation_evidence = Some(reconciliation.evidence.clone());
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 if record.submission.is_some() {
                     return Err(FinError::new(
                         "INVALID_RECONCILIATION_STATUS",
@@ -2731,15 +3084,14 @@ impl Engine {
             }
         }
         validate_effects_mode(&record, &verified, &reconciliation.status, true)?;
-        // Boundary budgets are charged by the newly proved cumulative delta.
-        // Preserve the previous snapshot until this is computed; replacing
-        // record.effects first makes `current - previous` appear to be zero.
+        // Boundary budgets are charged by newly proved cumulative deltas.
+        // Retain the prior proof snapshot until the delta has been computed.
         let accounting_delta = cumulative_boundary_delta(record.effects.as_ref(), &verified)?;
         record.status = reconciliation.status;
         record.last_reconciliation_evidence = Some(reconciliation.evidence);
         record.effects = Some(verified.clone());
         record.error = None;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
 
         let prepared = record
             .preview
@@ -3100,7 +3452,7 @@ impl Engine {
         transfer.applied_proofs.push(proof.proof_digest.clone());
         transfer.settlement_proofs.push(proof.clone());
         transfer.transit = None;
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         if let Some(scope) = transfer.plan_scope.as_ref() {
             let (expected_plan, updated_plan) = if proof.outcome
                 == fin_domain::BridgeSettlementOutcome::Destination
@@ -3415,7 +3767,11 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .create_run(&ledger.id, &to_value(&ledger)?, &now())
+            .create_run(
+                &ledger.id,
+                &to_value(&ledger)?,
+                &self.clock.now().to_rfc3339(),
+            )
             .map_err(map_store)?;
         Ok(run_result(&ledger))
     }
@@ -3663,7 +4019,7 @@ impl Engine {
                 &record.authorization.id,
                 &to_value(expected)?,
                 &to_value(record)?,
-                &now(),
+                &self.clock.now().to_rfc3339(),
             )
             .map_err(map_store)
     }
@@ -3671,7 +4027,7 @@ impl Engine {
     fn require_active_boundary(&self, id: &str) -> Result<BoundaryAuthorization> {
         let mut record = self.load_boundary_record(id)?;
         if record.authorization.status == BoundaryAuthorizationStatus::Active
-            && parse_time(&record.authorization.expires_at)? <= Utc::now()
+            && parse_time(&record.authorization.expires_at)? <= self.clock.now()
         {
             let before = record.clone();
             record.authorization.status = BoundaryAuthorizationStatus::Expired;
@@ -3720,6 +4076,12 @@ impl Engine {
             run_id: run.map(|r| r.id.clone()),
             run_record: run.map(to_value).transpose()?,
         };
+        if self.commit_mutation_batch_terminal(&record, &settlement)? {
+            return Ok(());
+        }
+        if self.commit_amendment(&record, &settlement)? {
+            return Ok(());
+        }
         let boundary_id = record
             .preview
             .as_ref()
@@ -4378,7 +4740,7 @@ impl Engine {
         self.store
             .lock()
             .map_err(|_| internal("store lock poisoned"))?
-            .save_run(&run.id, &to_value(run)?, &now())
+            .save_run(&run.id, &to_value(run)?, &self.clock.now().to_rfc3339())
             .map_err(map_store)
     }
 
@@ -4431,7 +4793,7 @@ impl Engine {
                 "Reconcile the original submission before another write.",
             ));
         }
-        validate_prepared(prepared, &record.operation, Utc::now())?;
+        validate_prepared(prepared, &record.operation, self.clock.now())?;
         reject_unpriced_run(prepared)?;
         let route_step_index =
             u32::try_from(run.settled_route_steps.len()).map_err(|_| route_proof_error())?;
@@ -4470,7 +4832,7 @@ impl Engine {
         validate_price_observation(
             &valuation.observed_at,
             &valuation.source,
-            Utc::now(),
+            self.clock.now(),
             "VALUATION_UNAVAILABLE",
         )?;
         let movement = parse_uint(valuation.movement_usd_micros.as_str())?;
@@ -4485,7 +4847,7 @@ impl Engine {
         }
         let borrowed = parse_uint(valuation.additional_allocation_usd_micros.as_str())?;
         let cost_assets = prepared_cost_assets(&prepared.intent);
-        validate_cost_prices(prepared, &cost_assets, Utc::now())?;
+        validate_cost_prices(prepared, &cost_assets, self.clock.now())?;
         if [
             fin_domain::policy::limit(&self.options.max_movement_and_cost_usd_micros)?,
             fin_domain::policy::limit(&run.max_movement_usd_micros)?,
@@ -4538,7 +4900,7 @@ impl Engine {
             ));
         }
         ensure_intent_scope(&run, &prepared.intent)?;
-        validate_cost_bound_contract(&prepared.intent, prepared.valuation.as_ref())?;
+        validate_cost_bound_contract(&prepared.intent)?;
         let amounts =
             cash_reservation_amounts(&prepared.intent.debits, &prepared.intent.maximum_costs)?;
         let amount_map = aggregate_resource_amounts(&amounts)?;
@@ -4775,6 +5137,7 @@ struct OperationSubmissionJournal {
     financial_plan_snapshot: Option<FinancialPlanAuthorizationRecord>,
     adapter: Option<Arc<dyn Adapter>>,
     options: EngineOptions,
+    clock: Arc<dyn fin_domain::clock::Clock>,
     consumed: AtomicBool,
     store: Arc<Mutex<Store>>,
     record: Mutex<OperationRecord>,
@@ -4811,6 +5174,19 @@ fn plan_recovery_parent_identity(
 
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
+        // Local freshness checks also cover time spent waiting for an adapter's
+        // transport queue or signer after the single final revalidation.
+        {
+            let record = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?;
+            let prepared = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("submission preview missing"))?;
+            validate_prepared(prepared, &record.operation, self.clock.now())?;
+        }
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
         if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
         {
@@ -4841,7 +5217,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     });
             if current.revision.revision_id != snapshot.revision.revision_id
                 || current.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&current.revision.expires_at)? <= Utc::now()
+                || parse_time(&current.revision.expires_at)? <= self.clock.now()
                 || (current.active_attempt_id.as_deref() != Some(self.operation_id.as_str())
                     && !recovery_parent_active)
             {
@@ -4916,6 +5292,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     &self.operation_id,
                     &self.options,
                     &store,
+                    self.clock.now(),
                 )?;
             }
             return Ok(());
@@ -4934,7 +5311,11 @@ impl SubmissionJournal for OperationSubmissionJournal {
             self.validate_boundary_candidate(&grant, &prepared)?;
             Ok(())
         } else {
-            validate_future_expiry(&self.approval.expires_at, Utc::now(), "APPROVAL_EXPIRED")
+            validate_future_expiry(
+                &self.approval.expires_at,
+                self.clock.now(),
+                "APPROVAL_EXPIRED",
+            )
         }
     }
 
@@ -4973,6 +5354,16 @@ impl SubmissionJournal for OperationSubmissionJournal {
                         "Reconcile the original attempt.",
                     )
                 })?;
+            let mut candidate = prepared.clone();
+            let original = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?
+                .preview
+                .clone()
+                .ok_or_else(|| internal("plan preview missing"))?;
+            financial_plans::carry_action_deadline(&original, &mut candidate)?;
+            let prepared = &candidate;
             let hash = binding_hash(
                 &fin_domain::financial_plans::financial_plan_attempt_binding(
                     prepared,
@@ -5004,6 +5395,13 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     .operation,
                 prepared,
                 &current.revision.expires_at,
+            )?;
+            financial_plans::validate_action_deadline(
+                adapter.as_ref(),
+                &current.revision,
+                &linkage.step_id,
+                &raw_input,
+                prepared,
             )?;
             let permission = permission_for_step(&current.revision, &linkage.step_id)?;
             if let Some(exact) = &permission.exact {
@@ -5079,7 +5477,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                     .lock()
                     .map_err(|_| internal("journal record lock poisoned"))?;
                 record.preview = Some(durable_candidate.clone());
-                record.updated_at = now();
+                record.updated_at = self.clock.now().to_rfc3339();
                 record.clone()
             };
             let mut store = self
@@ -5092,6 +5490,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 &self.operation_id,
                 &self.options,
                 &store,
+                self.clock.now(),
             )?;
             store
                 .update_financial_plan_candidate_preview(
@@ -5116,7 +5515,7 @@ impl SubmissionJournal for OperationSubmissionJournal {
                 .lock()
                 .map_err(|_| internal("journal record lock poisoned"))?;
             current.preview = Some(prepared.clone());
-            current.updated_at = now();
+            current.updated_at = self.clock.now().to_rfc3339();
             current.clone()
         };
         self.store
@@ -5188,7 +5587,7 @@ impl OperationSubmissionJournal {
             .ok_or_else(|| boundary_error("Boundary authorization no longer exists."))?;
         let record: BoundaryAuthorizationRecord = from_value(raw)?;
         if record.authorization.status != BoundaryAuthorizationStatus::Active
-            || parse_time(&record.authorization.expires_at)? <= Utc::now()
+            || parse_time(&record.authorization.expires_at)? <= self.clock.now()
             || record.active_attempt.as_deref() != Some(self.operation_id.as_str())
         {
             return Err(boundary_error(
@@ -5241,6 +5640,7 @@ impl OperationSubmissionJournal {
             &self.operation_id,
             &self.options,
             &store,
+            self.clock.now(),
         )
     }
 
@@ -5289,7 +5689,7 @@ impl OperationSubmissionJournal {
                     &to_value(snapshot)?,
                     &self.operation_id,
                     &submission_row,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else if let (Some(id), Some(snapshot)) =
@@ -5312,17 +5712,21 @@ impl OperationSubmissionJournal {
                     &self.operation_id,
                     &snapshot.revision.expires_at,
                     &submission_row,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         } else {
             store
-                .persist_submission(&self.operation_id, &submission_row, &now())
+                .persist_submission(
+                    &self.operation_id,
+                    &submission_row,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?;
         }
         record.submission = Some(submission.clone());
         record.status = Status::Submitted;
-        record.updated_at = now();
+        record.updated_at = self.clock.now().to_rfc3339();
         Ok(())
     }
 }
@@ -5887,12 +6291,20 @@ fn validate_effects(
 ) -> Result<()> {
     validate_effects_mode(record, verified, outcome, false)
 }
-
 fn validate_effects_mode(
     record: &OperationRecord,
     verified: &VerifiedEffects,
     outcome: &Status,
-    allow_incomplete: bool,
+    partial: bool,
+) -> Result<()> {
+    validate_effects_with_scope(record, verified, outcome, partial, None)
+}
+fn validate_effects_with_scope(
+    record: &OperationRecord,
+    verified: &VerifiedEffects,
+    outcome: &Status,
+    partial: bool,
+    effective_intent: Option<&FinancialIntent>,
 ) -> Result<()> {
     if verified.evidence_version == 0 || verified.evidence.is_null() {
         return Err(FinError::new(
@@ -5918,6 +6330,8 @@ fn validate_effects_mode(
             "Do not settle; restore a compatible operation record.",
         )
     })?;
+    let intent = effective_intent.unwrap_or(&prepared.intent);
+    let allow_incomplete = partial;
     let approval = record.approval.as_ref().ok_or_else(|| {
         FinError::new(
             "APPROVAL_AUDIT_MISSING",
@@ -5985,6 +6399,17 @@ fn validate_effects_mode(
         .transpose()?
         .flatten()
         .is_some();
+    let (projected_intent, projected_effects) = conversion_sequences::validated_projection(
+        intent,
+        &verified.effects,
+        partial || confirmed_failure,
+        outcome.terminal(),
+    )?;
+    let mut projected_verified = verified.clone();
+    projected_verified.effects = projected_effects;
+    let verified = &projected_verified;
+    let intent = &projected_intent;
+
     let transit_effects = verified
         .effects
         .iter()
@@ -6097,7 +6522,7 @@ fn validate_effects_mode(
                 && matching_debits.len() == 1
                 && matching_transfers == 1
                 && transfer_constraints == 1
-                && !prepared.intent.expected.is_empty()
+                && !intent.expected.is_empty()
         };
         if !bridge_valid {
             return Err(FinError::new(
@@ -6108,23 +6533,14 @@ fn validate_effects_mode(
             ));
         }
     }
-    let mut matched = vec![false; prepared.intent.expected.len()];
-    validate_escrow_position_pairs(
-        &prepared.intent.expected,
-        &verified.effects,
-        allow_incomplete,
-    )?;
-    validate_pending_request_pairs(
-        &prepared.intent.expected,
-        &verified.effects,
-        allow_incomplete,
-    )?;
-    let expectation_effects =
-        aggregate_settlement_effects(&verified.effects, &prepared.intent.expected)?;
+    let mut matched = vec![false; intent.expected.len()];
+    validate_escrow_position_pairs(&intent.expected, &verified.effects, allow_incomplete)?;
+    validate_pending_request_pairs(&intent.expected, &verified.effects, allow_incomplete)?;
+    let expectation_effects = aggregate_settlement_effects(&verified.effects, &intent.expected)?;
     for (effect_index, effect) in expectation_effects.iter().enumerate() {
         let progressive_partial_match = if confirmed_failure && prior_progress {
             let mut found = false;
-            for constraint in &prepared.intent.expected {
+            for constraint in &intent.expected {
                 if progress_constraint_matches(constraint, effect)? {
                     found = true;
                     break;
@@ -6136,13 +6552,20 @@ fn validate_effects_mode(
         };
         if confirmed_failure
             && !matches!(effect, FinancialEffect::Cost { .. })
-            && !partial_failed_transfer_matches(&prepared.intent.expected, effect)
             && !progressive_partial_match
+            && !partial_failed_transfer_matches(&intent.expected, effect)
+            && !compound_mutations::failed_matches(intent, effect)?
+            && !matches!(effect, FinancialEffect::GroupedSubmissionAmendments{proof} if grouped_amendments::groups(intent)?.iter().any(|g|grouped_amendments::matches(g,proof,false)))
+            && !conversion_sequences::failed_projection_matches(
+                effective_intent.unwrap_or(&prepared.intent),
+                effect,
+            )?
+            && !partial_proofs::failed_execution_matches(&intent.expected, effect)?
         {
             return Err(FinError::new(
                 "FAILED_EFFECT_MISMATCH",
                 "reconciliation",
-                "A confirmed failed operation may prove attributable costs only; it cannot claim its intended financial effect.",
+                "A failed operation may prove bounded actual partial execution and attributable costs; it cannot claim unproved completion.",
                 "Keep the reservation and reconcile the original submission.",
             ));
         }
@@ -6155,34 +6578,24 @@ fn validate_effects_mode(
             continue;
         }
         if matches!(effect, FinancialEffect::PositionChange { .. })
-            && (escrow_position_change_is_paired(
-                &prepared.intent.expected,
-                &verified.effects,
-                effect,
-            ) || escrow_conditional_change_is_paired(
-                &prepared.intent.expected,
-                &verified.effects,
-                effect,
-            ) || pending_request_position_change_is_paired(
-                &prepared.intent.expected,
-                &verified.effects,
-                effect,
-            ))
+            && (escrow_position_change_is_paired(&intent.expected, &verified.effects, effect)
+                || escrow_conditional_change_is_paired(&intent.expected, &verified.effects, effect)
+                || pending_request_position_change_is_paired(
+                    &intent.expected,
+                    &verified.effects,
+                    effect,
+                ))
         {
             continue;
         }
         if matches!(effect, FinancialEffect::UsableCredit { .. })
-            && pending_request_credit_is_paired(
-                &prepared.intent.expected,
-                &verified.effects,
-                effect,
-            )
+            && pending_request_credit_is_paired(&intent.expected, &verified.effects, effect)
         {
             continue;
         }
         if matches!(effect, FinancialEffect::OriginMovement { .. })
             && pending_request_origin_movement_is_paired(
-                &prepared.intent.expected,
+                &intent.expected,
                 &verified.effects,
                 effect,
             )
@@ -6190,9 +6603,9 @@ fn validate_effects_mode(
             continue;
         }
         if matches!(effect, FinancialEffect::PositionRealizedPnl { .. })
-            && position_realized_pnl_is_paired(&prepared.intent.expected, &verified.effects, effect)
+            && position_realized_pnl_is_paired(&intent.expected, &verified.effects, effect)
         {
-            for (index, constraint) in prepared.intent.expected.iter().enumerate() {
+            for (index, constraint) in intent.expected.iter().enumerate() {
                 if matches!(constraint, EffectConstraint::PositionRealizedPnl {
                     resource, position, position_kind, asset, ..
                 } if matches!(effect, FinancialEffect::PositionRealizedPnl {
@@ -6205,12 +6618,7 @@ fn validate_effects_mode(
             continue;
         }
         let mut found = false;
-        let constraint_order = prepared
-            .intent
-            .expected
-            .iter()
-            .enumerate()
-            .collect::<Vec<_>>();
+        let constraint_order = intent.expected.iter().enumerate().collect::<Vec<_>>();
         for (index, constraint) in constraint_order
             .iter()
             .copied()
@@ -6229,12 +6637,14 @@ fn validate_effects_mode(
                 )
             }))
         {
-            if if allow_incomplete {
-                progress_constraint_matches(constraint, effect)?
-                    || in_transit_source_debit_matches(constraint, effect, verified)
-            } else {
-                constraint_matches(constraint, effect)?
-            } {
+            if partial_proofs::constraint_matches_progress(constraint, effect, partial)?
+                || if allow_incomplete {
+                    progress_constraint_matches(constraint, effect)?
+                        || in_transit_source_debit_matches(constraint, effect, verified)
+                } else {
+                    constraint_matches(constraint, effect)?
+                }
+            {
                 if matched[index]
                     && !matches!(
                         constraint,
@@ -6250,25 +6660,26 @@ fn validate_effects_mode(
             }
         }
         if !found
-            && !partial_failed_transfer_matches(&prepared.intent.expected, effect)
+            && !partial_failed_transfer_matches(&intent.expected, effect)
+            && !(confirmed_failure
+                && partial_proofs::failed_execution_matches(&intent.expected, effect)?)
             && !cost_within_intent(
                 effect,
-                &prepared.intent,
+                intent,
                 &verified.effects,
                 prepared
                     .valuation
                     .as_ref()
                     .map(|valuation| valuation.prices.as_slice()),
             )?
-            && !included_cost_conversion_effect_paired(effect, &prepared.intent, &verified.effects)?
+            && !included_cost_conversion_effect_paired(effect, intent, &verified.effects)?
         {
             let serialized = serde_json::to_value(effect).unwrap_or(Value::Null);
             let effect_kind = serialized
                 .get("kind")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let approved = prepared
-                .intent
+            let approved = intent
                 .expected
                 .iter()
                 .filter_map(|constraint| serde_json::to_value(constraint).ok())
@@ -6278,19 +6689,13 @@ fn validate_effects_mode(
                 "reconciliation",
                 "A verified financial effect does not satisfy the approved expectation or cost reserve.",
                 "Preserve the operation as unresolved and review its typed proof.",
-            )
-            .with_details(json!({"effect_index":effect_index,"effect_kind":effect_kind,"approved_constraints":approved})));
+            ).with_details(json!({"effect_index":effect_index,"effect_kind":effect_kind,"approved_constraints":approved})));
         }
     }
-    validate_optional_account_funding(&prepared.intent, &verified.effects)?;
-    validate_account_funding_lifecycle(
-        record,
-        &prepared.intent,
-        &verified.effects,
-        &verified.observed_at,
-    )?;
-    validate_position_realized_pnl(&prepared.intent.expected, &verified.effects)?;
-    for (index, constraint) in prepared.intent.expected.iter().enumerate() {
+    validate_optional_account_funding(intent, &verified.effects)?;
+    validate_account_funding_lifecycle(record, intent, &verified.effects, &verified.observed_at)?;
+    validate_position_realized_pnl(&intent.expected, &verified.effects)?;
+    for (index, constraint) in intent.expected.iter().enumerate() {
         if matches!(
             constraint,
             EffectConstraint::OptionalAccountFunding { .. }
@@ -6299,10 +6704,7 @@ fn validate_effects_mode(
             matched[index] = true;
         }
     }
-    // A denomination bound reserves a possible fee; placement and verified
-    // no-fill cancellation can legitimately have no fee effect at all. Once a
-    // typed Cost is present, its paired denomination marker is mandatory.
-    for (index, constraint) in prepared.intent.expected.iter().enumerate() {
+    for (index, constraint) in intent.expected.iter().enumerate() {
         let EffectConstraint::CostDenomination {
             location,
             cost_asset,
@@ -6314,33 +6716,8 @@ fn validate_effects_mode(
         else {
             continue;
         };
-        let has_cost = verified.effects.iter().any(|effect| {
-            matches!(effect,
-                FinancialEffect::Cost {
-                    location: actual_location,
-                    amount,
-                    category: actual_category,
-                    treatment: actual_treatment,
-                } if actual_location == location
-                    && amount.asset == *cost_asset
-                    && actual_category == category
-                    && actual_treatment == treatment)
-        });
-        let has_marker = verified.effects.iter().any(|effect| {
-            matches!(effect,
-                FinancialEffect::CostDenomination {
-                    location: actual_location,
-                    cost_asset: actual_cost_asset,
-                    category: actual_category,
-                    treatment: actual_treatment,
-                    denomination,
-                    ..
-                } if actual_location == location
-                    && actual_cost_asset == cost_asset
-                    && actual_category == category
-                    && actual_treatment == treatment
-                    && denomination.asset == *denomination_asset)
-        });
+        let has_cost = verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::Cost { location: actual_location, amount, category: actual_category, treatment: actual_treatment } if actual_location == location && amount.asset == *cost_asset && actual_category == category && actual_treatment == treatment));
+        let has_marker = verified.effects.iter().any(|effect| matches!(effect, FinancialEffect::CostDenomination { location: actual_location, cost_asset: actual_cost_asset, category: actual_category, treatment: actual_treatment, denomination, .. } if actual_location == location && actual_cost_asset == cost_asset && actual_category == category && actual_treatment == treatment && denomination.asset == *denomination_asset));
         if !has_cost && !has_marker {
             matched[index] = true;
         }
@@ -6351,7 +6728,7 @@ fn validate_effects_mode(
             .enumerate()
             .filter(|(_, was_matched)| !**was_matched)
             .filter_map(|(index, _)| {
-                let constraint = prepared.intent.expected.get(index)?;
+                let constraint = intent.expected.get(index)?;
                 let value = serde_json::to_value(constraint).ok()?;
                 let kind = value
                     .get("kind")
@@ -6369,7 +6746,7 @@ fn validate_effects_mode(
         )
         .with_details(json!({"unmatched_constraints":unmatched_constraints})));
     }
-    validate_cost_denominations(&prepared.intent.expected, &verified.effects)?;
+    validate_cost_denominations(&intent.expected, &verified.effects)?;
     let mut losses = BTreeMap::<String, BigUint>::new();
     for effect in &verified.effects {
         if let FinancialEffect::Settlement {
@@ -6404,11 +6781,10 @@ fn validate_effects_mode(
         ));
     }
     let actual = actual_debits_and_costs(&verified.effects)?;
-    let maximums =
-        cash_reservation_amounts(&prepared.intent.debits, &prepared.intent.maximum_costs)?;
+    let maximums = cash_reservation_amounts(&intent.debits, &intent.maximum_costs)?;
     let maximums = aggregate_resource_amounts(&maximums)?;
     let actual_cost_map = aggregate_costs(&verified.effects)?;
-    let maximum_cost_map = aggregate_cost_bounds(&prepared.intent.maximum_costs)?;
+    let maximum_cost_map = aggregate_cost_bounds(&intent.maximum_costs)?;
     for (key, amount) in actual_cost_map {
         if amount > maximum_cost_map.get(&key).cloned().unwrap_or_default() {
             return Err(FinError::new(
@@ -8014,6 +8390,32 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
             FinancialEffect::AccountFundingProgress { .. },
         ) => account_funding_lifecycle_effect_matches(constraint, effect),
         (
+            EffectConstraint::CompoundSubmissionMutations { children: scope },
+            FinancialEffect::CompoundSubmissionMutations { children: proof },
+        ) => compound_mutations::matches(scope, proof, false),
+        (
+            EffectConstraint::GroupedSubmissionAmendments { group },
+            FinancialEffect::GroupedSubmissionAmendments { proof },
+        ) => grouped_amendments::matches(group, proof, false),
+        (
+            EffectConstraint::SubmissionAmendment {
+                operation_id,
+                submission,
+                ..
+            },
+            FinancialEffect::SubmissionAmendment {
+                operation_id: actual,
+                submission: actual_submission,
+                successor,
+            },
+        ) => {
+            operation_id == actual
+                && submission == actual_submission
+                && successor.as_ref().is_none_or(|next| {
+                    next.kind == submission.kind && !next.reference.is_empty() && next != submission
+                })
+        }
+        (
             EffectConstraint::SubmissionCancellation {
                 operation_id,
                 submission,
@@ -8042,6 +8444,14 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 position_kind,
                 minimum_delta,
                 maximum_delta,
+            }
+            | EffectConstraint::MarginPosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
             },
             FinancialEffect::PositionChange {
                 resource: r,
@@ -8052,8 +8462,11 @@ fn constraint_matches(constraint: &EffectConstraint, effect: &FinancialEffect) -
                 ..
             },
         ) => {
-            position_kind.is_derivative()
-                && r == resource
+            (if matches!(constraint, EffectConstraint::DerivativePosition { .. }) {
+                position_kind.is_derivative()
+            } else {
+                position_kind.is_margin()
+            }) && r == resource
                 && p == position
                 && a == asset
                 && &anchor.position_kind == position_kind
@@ -8870,7 +9283,7 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
             credit,
         } = effect
         {
-            if [from, to].iter().any(|location| matches!(location, AccountingLocation::Position { position_kind, .. } if position_kind.is_derivative()))
+            if [from, to].iter().any(|location| matches!(location, AccountingLocation::Position { position_kind, .. } if (position_kind.is_derivative() || position_kind.is_margin())))
                 || from == to || debit.atoms.is_zero() || credit.atoms.is_zero() {
                 return Err(FinError::new(
                     "INVALID_ORIGIN_MOVEMENT",
@@ -8919,10 +9332,9 @@ fn validate_origin_links(effects: &[FinancialEffect]) -> Result<()> {
                 anchor,
                 ..
             } => {
-                if anchor
-                    .as_ref()
-                    .is_some_and(|anchor| anchor.position_kind.is_derivative())
-                {
+                if anchor.as_ref().is_some_and(|anchor| {
+                    anchor.position_kind.is_derivative() || anchor.position_kind.is_margin()
+                }) {
                     continue;
                 }
                 let location = position_location(effects, resource, position, asset)?;
@@ -9127,6 +9539,11 @@ fn cost_within_intent(
                     {
                         credit.atoms.integer()
                     }
+                    FinancialEffect::UsableCredit { to, amount: credit }
+                        if to == resource && credit.asset == amount.asset =>
+                    {
+                        credit.atoms.integer()
+                    }
                     _ => BigUint::zero(),
                 }
             });
@@ -9166,9 +9583,45 @@ fn cost_within_intent(
                             resource: r,
                             asset,
                             delta,
-                            ..
-                        } if r == resource && asset == &amount.asset && delta.is_negative() => {
-                            Some(delta.magnitude().integer())
+                            category,
+                        } if r == resource && asset == &amount.asset => {
+                            // Gross losses remain costs even when later gains
+                            // make the cumulative settlement positive. They are
+                            // included in that signed net flow, bounded by its
+                            // independently approved loss envelope, not added
+                            // as another cash debit. Require the exact declared
+                            // settlement identity; an unrelated credit grants
+                            // no capacity for an included cost.
+                            let declared = intent
+                                .expected
+                                .iter()
+                                .filter_map(|scope| match scope {
+                                    EffectConstraint::Settlement {
+                                        resource: r,
+                                        asset: a,
+                                        category: c,
+                                        minimum_delta,
+                                        ..
+                                    } if r == resource && a == asset && c == category => {
+                                        Some(if minimum_delta.is_negative() {
+                                            minimum_delta.magnitude().integer()
+                                        } else {
+                                            BigUint::zero()
+                                        })
+                                    }
+                                    _ => None,
+                                })
+                                .max();
+                            declared.map(|capacity| {
+                                std::cmp::max(
+                                    capacity,
+                                    if delta.is_negative() {
+                                        delta.magnitude().integer()
+                                    } else {
+                                        BigUint::zero()
+                                    },
+                                )
+                            })
                         }
                         FinancialEffect::CashDebit {
                             resource: actual_resource,
@@ -9531,6 +9984,8 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
             )
             | (PositionKind::DerivativeLong, PositionKind::DerivativeLong)
             | (PositionKind::DerivativeShort, PositionKind::DerivativeShort)
+            | (PositionKind::MarginLong, PositionKind::MarginLong)
+            | (PositionKind::MarginShort, PositionKind::MarginShort)
             | (
                 PositionKind::VariableDebt,
                 PositionKind::VariableDebt | PositionKind::StableDebt
@@ -9542,7 +9997,7 @@ fn validate_effect_anchor(effect: &FinancialEffect, proof_observed_at: &str) -> 
         || anchor.position != *name
         || !kind_matches
         || anchor.principal.asset != *asset
-        || (anchor.position_kind.is_derivative()
+        || ((anchor.position_kind.is_derivative() || anchor.position_kind.is_margin())
             && (scaled_receipt.is_some() || anchor.scaled_receipt.is_some()))
         || anchor.evidence_version == 0
         || anchor.evidence.is_null()
@@ -9624,7 +10079,8 @@ fn validate_anchor_transitions(
                     || !(anchor.position_kind == PositionKind::Supply
                         || anchor.position_kind == PositionKind::LockedCollateral
                         || anchor.position_kind == PositionKind::RefundableAccountFunding
-                        || anchor.position_kind.is_derivative())
+                        || anchor.position_kind.is_derivative()
+                        || anchor.position_kind.is_margin())
                     || anchor.principal.asset != *asset
                 {
                     return Err(ambiguous_anchor());
@@ -9632,8 +10088,12 @@ fn validate_anchor_transitions(
                 let key = position_anchor_key(anchor)?;
                 let transition = transitions.entry(key).or_default();
                 transition.changes.push(delta.integer());
-                if transition.anchor.replace(anchor.clone()).is_some() {
-                    return Err(ambiguous_anchor());
+                if let Some(previous) = &transition.anchor {
+                    if previous != anchor {
+                        return Err(ambiguous_anchor());
+                    }
+                } else {
+                    transition.anchor = Some(anchor.clone());
                 }
             }
             FinancialEffect::DebtChange {
@@ -9662,8 +10122,12 @@ fn validate_anchor_transitions(
                 let key = position_anchor_key(anchor)?;
                 let transition = transitions.entry(key).or_default();
                 transition.changes.push(delta.integer());
-                if transition.anchor.replace(anchor.clone()).is_some() {
-                    return Err(ambiguous_anchor());
+                if let Some(previous) = &transition.anchor {
+                    if previous != anchor {
+                        return Err(ambiguous_anchor());
+                    }
+                } else {
+                    transition.anchor = Some(anchor.clone());
                 }
             }
             _ => {}
@@ -9671,7 +10135,7 @@ fn validate_anchor_transitions(
     }
 
     for (key, transition) in transitions {
-        if transition.accruals.len() > 1 || transition.changes.len() > 1 {
+        if transition.accruals.len() > 1 {
             return Err(ambiguous_anchor());
         }
         if !transition.accruals.is_empty() && transition.changes.is_empty() {
@@ -10585,7 +11049,7 @@ fn validate_route_proof(
         return Err(route_proof_error());
     }
     validate_observation(&proof.observed_at, now_instant, "RETURN_ROUTE_STALE")?;
-    validate_cost_bound_contract(&proof.intent, None)?;
+    validate_cost_bound_contract(&proof.intent)?;
     Ok(())
 }
 
@@ -10986,9 +11450,20 @@ fn validate_projected_cash_legs(state: &ProjectedState, proof: &ReturnRouteProof
                 position_kind,
                 minimum_delta,
                 maximum_delta,
+            }
+            | EffectConstraint::MarginPosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                minimum_delta,
+                maximum_delta,
             } => {
-                if !position_kind.is_derivative()
-                    || minimum_delta.integer() > maximum_delta.integer()
+                if !(if matches!(constraint, EffectConstraint::DerivativePosition { .. }) {
+                    position_kind.is_derivative()
+                } else {
+                    position_kind.is_margin()
+                }) || minimum_delta.integer() > maximum_delta.integer()
                 {
                     return Err(route_proof_error());
                 }
@@ -11301,7 +11776,13 @@ fn validate_position_leg(
         ) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, true) => Direction::Increase,
         (PositionKind::StableDebt | PositionKind::VariableDebt, false) => Direction::Decrease,
-        (PositionKind::DerivativeLong | PositionKind::DerivativeShort, _) => {
+        (
+            PositionKind::DerivativeLong
+            | PositionKind::DerivativeShort
+            | PositionKind::MarginLong
+            | PositionKind::MarginShort,
+            _,
+        ) => {
             return Err(route_proof_error());
         }
         (PositionKind::Escrow, _) => return Err(route_proof_error()),
@@ -12333,6 +12814,31 @@ fn constraint_within(actual: &EffectConstraint, approved: &EffectConstraint) -> 
                 && amax.integer() <= bmax.integer()
         }
         (
+            EffectConstraint::MarginPosition {
+                resource: ar,
+                position: ap,
+                asset: aa,
+                position_kind: ak,
+                minimum_delta: amin,
+                maximum_delta: amax,
+            },
+            EffectConstraint::MarginPosition {
+                resource: br,
+                position: bp,
+                asset: ba,
+                position_kind: bk,
+                minimum_delta: bmin,
+                maximum_delta: bmax,
+            },
+        ) => {
+            ar == br
+                && ap == bp
+                && aa == ba
+                && ak == bk
+                && amin.integer() >= bmin.integer()
+                && amax.integer() <= bmax.integer()
+        }
+        (
             EffectConstraint::Settlement {
                 resource: ar,
                 asset: aa,
@@ -12425,6 +12931,10 @@ fn constraint_within(actual: &EffectConstraint, approved: &EffectConstraint) -> 
                 minimum_credit: bmc,
             },
         ) => af == bf && at == bt && ada == bda && aca == bca && amd <= bmd && amc >= bmc,
+        (
+            EffectConstraint::ConversionSequence { scope: actual },
+            EffectConstraint::ConversionSequence { scope: approved },
+        ) => conversion_sequences::constraints_within(actual, approved),
         (
             EffectConstraint::Conversion {
                 resource: ar,
@@ -12552,6 +13062,9 @@ fn actual_cash_debits(
     effects: &[FinancialEffect],
     include_additional_costs: bool,
 ) -> Result<BTreeMap<String, BigUint>> {
+    let projected_effects = conversion_sequences::project_effects(effects)?;
+    let effects = projected_effects.as_slice();
+
     let mut amounts = BTreeMap::new();
     for effect in effects {
         match effect {
@@ -12663,6 +13176,9 @@ fn aggregate_cost_bounds(bounds: &[CostBound]) -> Result<BTreeMap<String, BigUin
 }
 
 fn aggregate_costs(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let projected_effects = conversion_sequences::project_effects(effects)?;
+    let effects = projected_effects.as_slice();
+
     let mut map = BTreeMap::new();
     for effect in effects {
         if let FinancialEffect::Cost {
@@ -13350,10 +13866,38 @@ fn cash_reservation_amounts(
     Ok(amounts)
 }
 
-fn validate_cost_bound_contract(
+fn amendment_credit_bound(
     intent: &FinancialIntent,
-    _valuation: Option<&fin_domain::Valuation>,
-) -> Result<()> {
+    resource: &fin_domain::ResourceId,
+    asset: &fin_domain::AssetId,
+) -> bool {
+    intent.expected.iter().any(|effect| match effect {
+        EffectConstraint::Credit {
+            to,
+            asset: credited,
+            ..
+        } => to == resource && credited == asset,
+        EffectConstraint::OriginMovement {
+            to: AccountingLocation::Cash { resource: target },
+            credit_asset,
+            ..
+        } => target == resource && credit_asset == asset,
+        EffectConstraint::Conversion {
+            resource: r,
+            output,
+            ..
+        } => r == resource && output == asset,
+        EffectConstraint::ConversionSequence { scope } => {
+            &scope.resource == resource && scope.legs.iter().any(|leg| &leg.output == asset)
+        }
+        EffectConstraint::Transfer {
+            to, credit_asset, ..
+        } => to == resource && credit_asset == asset,
+        _ => false,
+    })
+}
+
+fn validate_cost_bound_contract(intent: &FinancialIntent) -> Result<()> {
     let debit_map = aggregate_resource_amounts(&intent.debits)?;
     let mut costs = BTreeMap::<String, BigUint>::new();
     for bound in &intent.maximum_costs {
@@ -13466,6 +14010,13 @@ fn validate_cost_bound_contract(
             }
             (AccountingLocation::Cash { resource }, CostTreatment::DeductedFromCredit) => {
                 let has_credit = intent.expected.iter().any(|expected| match expected {
+                    EffectConstraint::Credit { to, asset, .. } =>
+                        to == resource && asset == &bound.amount.asset,
+                    EffectConstraint::OriginMovement {
+                        to: AccountingLocation::Cash { resource: target },
+                        credit_asset,
+                        ..
+                    } => target == resource && credit_asset == &bound.amount.asset,
                     EffectConstraint::Conversion {
                         resource: r,
                         output,
@@ -13474,6 +14025,14 @@ fn validate_cost_bound_contract(
                     EffectConstraint::Transfer {
                         to, credit_asset, ..
                     } => to == resource && credit_asset == &bound.amount.asset,
+                    EffectConstraint::ConversionSequence{scope} => &scope.resource==resource && scope.legs.iter().any(|leg|leg.output==bound.amount.asset),
+                    EffectConstraint::GroupedSubmissionAmendments { group } => amendment_credit_bound(&group.approved_envelope.intent, resource, &bound.amount.asset),
+                    EffectConstraint::SubmissionAmendment { revision, .. } =>
+                        amendment_credit_bound(&revision.intent, resource, &bound.amount.asset),
+                    EffectConstraint::CompoundSubmissionMutations { children } => children.iter().any(|child| {
+                        matches!(&child.mutation, fin_domain::compound_mutations::ChildMutation::Amend { revision }
+                            if amendment_credit_bound(&revision.intent, resource, &bound.amount.asset))
+                    }),
                     _ => false,
                 });
                 if !has_credit {
@@ -13897,6 +14456,9 @@ fn apply_credits(
     available: &[ResourceAmount],
     effects: &[FinancialEffect],
 ) -> Result<Vec<ResourceAmount>> {
+    let projected_effects = conversion_sequences::project_effects(effects)?;
+    let effects = projected_effects.as_slice();
+
     let baseline_resources = run
         .baseline
         .state
@@ -14008,6 +14570,9 @@ fn apply_effect_provenance(
     effects: &[FinancialEffect],
     valuation: &fin_domain::Valuation,
 ) -> Result<Vec<ResourceAmount>> {
+    let projected_effects = conversion_sequences::project_effects(effects)?;
+    let effects = projected_effects.as_slice();
+
     let mut movement_origins = BTreeMap::<String, Vec<ProvenanceLot>>::new();
     let mut credit_cost_origins = BTreeMap::<String, Vec<ProvenanceLot>>::new();
     for effect in effects {
@@ -14208,7 +14773,11 @@ fn apply_effect_provenance(
                         &debit.atoms.integer(),
                     )?,
                     AccountingLocation::Position {
-                        position_kind: PositionKind::DerivativeLong | PositionKind::DerivativeShort,
+                        position_kind:
+                            PositionKind::DerivativeLong
+                            | PositionKind::DerivativeShort
+                            | PositionKind::MarginLong
+                            | PositionKind::MarginShort,
                         ..
                     } => return Err(route_proof_error()),
                     AccountingLocation::Position {
@@ -14242,7 +14811,11 @@ fn apply_effect_provenance(
                         ..
                     } => vec![],
                     AccountingLocation::Position {
-                        position_kind: PositionKind::DerivativeLong | PositionKind::DerivativeShort,
+                        position_kind:
+                            PositionKind::DerivativeLong
+                            | PositionKind::DerivativeShort
+                            | PositionKind::MarginLong
+                            | PositionKind::MarginShort,
                         ..
                     } => return Err(route_proof_error()),
                     AccountingLocation::Position {
@@ -14851,6 +15424,44 @@ fn position_anchor_requirements(intent: &FinancialIntent) -> Vec<PositionAnchorR
                 debt_position: false,
                 requires_prior: *direction == Direction::Decrease,
             }),
+            EffectConstraint::OriginMovement {
+                from,
+                to,
+                debit_asset,
+                credit_asset,
+                ..
+            } => {
+                for (location, asset, requires_prior) in
+                    [(from, debit_asset, true), (to, credit_asset, false)]
+                {
+                    if let AccountingLocation::Position {
+                        resource,
+                        position,
+                        position_kind,
+                    } = location
+                    {
+                        let requirement = PositionAnchorRequirement {
+                            resource: resource.clone(),
+                            position: position.clone(),
+                            asset: asset.clone(),
+                            kind: Some(position_kind.clone()),
+                            debt_position: matches!(
+                                position_kind,
+                                PositionKind::VariableDebt | PositionKind::StableDebt
+                            ),
+                            // A position used as the source is being reduced
+                            // and must already exist. A destination can be a
+                            // first deposit/open from zero, so its prior row
+                            // is useful when available but not mandatory.
+                            requires_prior,
+                        };
+                        if !requirements.contains(&requirement) {
+                            requirements.push(requirement);
+                        }
+                    }
+                }
+                continue;
+            }
             EffectConstraint::Accrual {
                 resource,
                 position,
@@ -14863,6 +15474,22 @@ fn position_anchor_requirements(intent: &FinancialIntent) -> Vec<PositionAnchorR
                 asset: asset.clone(),
                 kind: Some(position_kind.clone()),
                 debt_position: false,
+                requires_prior: true,
+            }),
+            EffectConstraint::MarginPosition {
+                resource,
+                position,
+                asset,
+                position_kind,
+                ..
+            } => Some(PositionAnchorRequirement {
+                resource: resource.clone(),
+                position: position.clone(),
+                asset: asset.clone(),
+                kind: Some(position_kind.clone()),
+                debt_position: false,
+                // Native margin baselines are immutable inputs to full-loan
+                // and cumulative-close accounting, including batch members.
                 requires_prior: true,
             }),
             EffectConstraint::DerivativePosition {
@@ -15287,8 +15914,9 @@ fn actual_cost_usd(
     effects: &[FinancialEffect],
     valuation: &fin_domain::Valuation,
 ) -> Result<BigUint> {
+    let effects = conversion_sequences::project_effects(effects)?;
     let mut costs = BTreeMap::<fin_domain::AssetId, BigUint>::new();
-    for effect in effects {
+    for effect in &effects {
         if let FinancialEffect::Cost { amount, .. } = effect {
             *costs.entry(amount.asset.clone()).or_default() += amount.atoms.integer();
         }
@@ -15377,9 +16005,18 @@ fn validate_trading_bounds(intent: &FinancialIntent) -> Result<()> {
                 minimum_delta,
                 maximum_delta,
                 ..
+            }
+            | EffectConstraint::MarginPosition {
+                position_kind,
+                minimum_delta,
+                maximum_delta,
+                ..
             } => {
-                if !position_kind.is_derivative()
-                    || minimum_delta.integer() > maximum_delta.integer()
+                if !(if matches!(expected, EffectConstraint::DerivativePosition { .. }) {
+                    position_kind.is_derivative()
+                } else {
+                    position_kind.is_margin()
+                }) || minimum_delta.integer() > maximum_delta.integer()
                 {
                     return Err(FinError::validation("Invalid bounded derivative exposure."));
                 }
@@ -15441,7 +16078,9 @@ fn validate_prepared(
     operation: &str,
     instant: DateTime<Utc>,
 ) -> Result<()> {
-    fin_domain::value_bounds::validate(prepared)?;
+    baseline_anchors::validate(prepared)?;
+    conversion_sequences::validate_prepared(prepared)?;
+    fin_domain::value_bounds::validate_at(prepared, instant)?;
     validate_trading_bounds(&prepared.intent)?;
 
     if prepared.operation != operation {
@@ -15541,12 +16180,15 @@ fn validate_price_observation(
     if fin_domain::price_freshness::is_fresh(value, source, instant) {
         Ok(())
     } else {
-        Err(FinError::new(
+        let mut error = FinError::new(
             code,
             "valuation",
             "Price evidence has expired or contains invalid leg timestamps.",
             "Obtain fresh prices for the specific expired leg.",
-        ))
+        );
+        error.details =
+            fin_domain::price_freshness::failure_details(value, source, instant).map(Box::new);
+        Err(error)
     }
 }
 
@@ -15959,9 +16601,10 @@ fn account_boundary_effects(
     let Some(effects) = effects else {
         return Ok(());
     };
+    let projected_effects = conversion_sequences::project_effects(&effects.effects)?;
     let mut debit_consumption: Vec<ResourceAmount> = Vec::new();
     let mut cost_consumption: Vec<CostBound> = Vec::new();
-    for effect in &effects.effects {
+    for effect in &projected_effects {
         match effect {
             FinancialEffect::CashDebit { resource, amount } => {
                 add_resource_amount(&mut debit_consumption, resource, amount)?
@@ -16617,10 +17260,13 @@ mod configuration_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     mod account_funding_tests;
+    mod evidence_reuse;
+    mod final_validation;
     #[path = "included_cost_conversion_tests.rs"]
     mod included_cost_conversion_tests;
     #[path = "pending_request_credit_workflow_tests.rs"]
     mod pending_request_credit_workflow_tests;
+    mod plan_recovery;
     #[path = "position_predecessor_tests.rs"]
     mod position_predecessor_tests;
     mod position_realized_pnl_tests;
@@ -16746,6 +17392,7 @@ mod tests {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         };
         let audit = ApprovalAudit {
             mechanism: "synthetic-test-authorizer".into(),
@@ -16827,6 +17474,7 @@ mod tests {
             financial_plan_snapshot: None,
             adapter: None,
             options: EngineOptions::default(),
+            clock: Arc::new(fin_domain::clock::SystemClock),
             consumed: AtomicBool::new(true),
             store: Arc::new(Mutex::new(store)),
             record: Mutex::new(operation.clone()),
@@ -16848,6 +17496,214 @@ mod tests {
                 .unwrap()
                 .unwrap()["dispatch_evidence"],
             evidence
+        );
+    }
+
+    #[test]
+    fn partial_fills_commit_once_preserve_reservations_and_require_cumulative_terminal_proof() {
+        let location = resource("binance-account");
+        let input = asset("binance", "ETH", 18);
+        let output = asset("binance", "USDC", 6);
+        let operation = record(
+            vec![EffectConstraint::Conversion {
+                resource: location.clone(),
+                input: input.clone(),
+                maximum_input: quantity("1000000000000000000"),
+                output: output.clone(),
+                minimum_output: quantity("100"),
+            }],
+            vec![],
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SYNTHETIC-partial.sqlite");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_request(
+                &operation.id,
+                &operation.request_id,
+                &operation.fingerprint,
+                &operation.operation,
+                None,
+                "pending",
+                &to_value(&operation).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        store
+            .reserve(
+                &operation.id,
+                &[ReservationRow {
+                    resource: "synthetic-exact-asset".into(),
+                    units: "1000000000000000000".into(),
+                    fee_units: "0".into(),
+                }],
+            )
+            .unwrap();
+        let engine = Engine::new(
+            store,
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let cumulative = |record: &OperationRecord, spent: &str, received: &str, events: Value| {
+            let mut bundle = proof(
+                record,
+                vec![FinancialEffect::Conversion {
+                    resource: location.clone(),
+                    spent: Amount {
+                        asset: input.clone(),
+                        atoms: quantity(spent),
+                    },
+                    received: Amount {
+                        asset: output.clone(),
+                        atoms: quantity(received),
+                    },
+                }],
+            );
+            bundle.evidence = json!({"proofEvents":events});
+            bundle.proof_digest = verified_effect_digest(&bundle).unwrap();
+            bundle
+        };
+        let first_event = json!({"eventId":"synthetic:fill:1","amount":"20"});
+        let first = cumulative(&operation, "10", "20", json!([first_event]));
+        assert_eq!(
+            validate_effects(&operation, &first, &Status::Completed)
+                .unwrap_err()
+                .code,
+            "UNEXPECTED_FINANCIAL_EFFECT"
+        );
+        let pending = engine
+            .apply_reconciliation(
+                operation,
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"standing":true}),
+                    verified: Some(first.clone()),
+                },
+            )
+            .unwrap();
+        let repeated = engine
+            .apply_reconciliation(
+                pending.clone(),
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: json!({"standing":true}),
+                    verified: Some(first),
+                },
+            )
+            .unwrap();
+        assert_eq!(repeated.effects, pending.effects);
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservation_count(&pending.id)
+                .unwrap(),
+            1
+        );
+        let shrunk = cumulative(&pending, "9", "20", json!([first_event]));
+        assert_eq!(
+            engine
+                .apply_reconciliation(
+                    pending.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: json!({}),
+                        verified: Some(shrunk)
+                    }
+                )
+                .unwrap_err()
+                .code,
+            "INVALID_PARTIAL_PROOF"
+        );
+        let over = cumulative(&pending, "1000000000000000001", "200", json!([first_event]));
+        assert!(
+            engine
+                .apply_reconciliation(
+                    pending.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: json!({}),
+                        verified: Some(over)
+                    }
+                )
+                .is_err()
+        );
+        let changed = cumulative(
+            &pending,
+            "10",
+            "20",
+            json!([{"eventId":"synthetic:fill:1","amount":"99"}]),
+        );
+        assert_eq!(
+            engine
+                .apply_reconciliation(
+                    pending.clone(),
+                    Reconciliation {
+                        status: Status::Pending,
+                        evidence: json!({}),
+                        verified: Some(changed)
+                    }
+                )
+                .unwrap_err()
+                .code,
+            "PARTIAL_PROOF_CONFLICT"
+        );
+        drop(engine);
+        let engine = Engine::new(
+            Store::open(&path).unwrap(),
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let recovered: OperationRecord = from_value(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .get_record(&pending.id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered.effects, pending.effects);
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservation_count(&pending.id)
+                .unwrap(),
+            1
+        );
+        let complete = cumulative(
+            &recovered,
+            "50",
+            "100",
+            json!([first_event,{"eventId":"synthetic:fill:2","amount":"80"}]),
+        );
+        let done = engine
+            .apply_reconciliation(
+                recovered,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: json!({"closed":true}),
+                    verified: Some(complete),
+                },
+            )
+            .unwrap();
+        assert_eq!(done.status, Status::Completed);
+        assert_eq!(
+            engine
+                .store
+                .lock()
+                .unwrap()
+                .reservation_count(&done.id)
+                .unwrap(),
+            0
         );
     }
 
@@ -17204,6 +18060,7 @@ mod tests {
             &child.id,
             &options,
             &store,
+            Utc::now(),
         )
         .unwrap();
 
@@ -17218,6 +18075,7 @@ mod tests {
                 &child.id,
                 &options,
                 &store,
+                Utc::now(),
             )
             .unwrap_err()
             .code,
@@ -18233,6 +19091,7 @@ mod tests {
                     locks: vec![],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -18371,6 +19230,35 @@ mod tests {
         );
         assert_eq!(result.status, Status::Pending);
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn required_read_evidence_allows_ninety_seconds_and_bounds_stalls_at_one_twenty() {
+        for deadline in [PREFLIGHT_TIMEOUT, EXTERNAL_READ_TIMEOUT] {
+            assert_eq!(deadline, std::time::Duration::from_secs(120));
+            let result = bounded_evidence("synthetic.read", "preflight", deadline, async {
+                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+                Ok(7)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result, 7);
+            let started = tokio::time::Instant::now();
+            let error = bounded_evidence(
+                "synthetic.read",
+                "preflight",
+                deadline,
+                std::future::pending::<Result<()>>(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(tokio::time::Instant::now() - started, deadline);
+            assert_eq!(error.code, "EVIDENCE_TIMEOUT");
+            assert_eq!(
+                error.details.as_ref().unwrap()["timeout_seconds"],
+                json!(120)
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -19343,6 +20231,72 @@ mod tests {
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
     }
+    #[tokio::test]
+    async fn execution_stages_follow_real_approval_and_stop_on_cancellation() {
+        use fin_domain::execution_progress::{self, Stage};
+        struct CancelApproval;
+        #[async_trait]
+        impl Authorizer for CancelApproval {
+            async fn authorize(&self, _: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+                Err(FinError::new(
+                    "AUTHORIZATION_CANCELLED",
+                    "approval",
+                    "Cancelled",
+                    "Review before retrying.",
+                ))
+            }
+        }
+        for cancelled in [false, true] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let authorizer: Arc<dyn Authorizer> = if cancelled {
+                Arc::new(CancelApproval)
+            } else {
+                Arc::new(SyntheticAuthorizer)
+            };
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let (tx, mut rx) = execution_progress::channel();
+            let record = execution_progress::observe(
+                tx,
+                engine.execute(OperationRequest {
+                    request_id: "synthetic-progress".into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({"amount":"1"}),
+                    run_id: None,
+                }),
+            )
+            .await
+            .unwrap();
+            let mut stages = vec![];
+            while let Some(stage) = rx.recv().await {
+                stages.push(stage);
+            }
+            if cancelled {
+                assert_eq!(stages, vec![Stage::Preparing, Stage::AwaitingApproval]);
+                assert!(record.submission.is_none());
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    stages,
+                    vec![
+                        Stage::Preparing,
+                        Stage::AwaitingApproval,
+                        Stage::Revalidating,
+                        Stage::Submitting,
+                        Stage::Verifying
+                    ]
+                );
+                assert_eq!(record.status, Status::Pending);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
     fn synthetic_engine(path: &std::path::Path, adapter: Arc<dyn Adapter>) -> Engine {
         Engine::new(
             Store::open(path).unwrap(),
@@ -19834,11 +20788,7 @@ mod tests {
             }],
         );
         record.run_id = Some("synthetic-position-run".into());
-        validate_cost_bound_contract(
-            &record.preview.as_ref().unwrap().intent,
-            record.preview.as_ref().unwrap().valuation.as_ref(),
-        )
-        .unwrap();
+        validate_cost_bound_contract(&record.preview.as_ref().unwrap().intent).unwrap();
         let anchor = PositionAnchor {
             resource: position_resource.clone(),
             position: "aave:USDC:supply".into(),
@@ -20058,7 +21008,7 @@ mod tests {
             expected: vec![],
             locks: vec![],
         };
-        validate_cost_bound_contract(&intent, None).unwrap();
+        validate_cost_bound_contract(&intent).unwrap();
         let reserved = aggregate_resource_amounts(
             &cash_reservation_amounts(&intent.debits, &intent.maximum_costs).unwrap(),
         )
@@ -20245,6 +21195,19 @@ mod tests {
             .unwrap();
         assert_eq!(restored.origin, origin);
         assert_eq!(restored.atoms, "99500000");
+    }
+
+    #[test]
+    fn expired_price_error_reports_original_evidence_age() {
+        let at = Utc::now();
+        let observed = (at - chrono::Duration::seconds(121)).to_rfc3339();
+        let error =
+            validate_price_observation(&observed, "synthetic", at, "STALE_VALUATION").unwrap_err();
+        assert_eq!(error.code, "STALE_VALUATION");
+        let details = error.details.unwrap();
+        assert_eq!(details["observed_at"], observed);
+        assert_eq!(details["evidence"][0]["age_ms"], 121000);
+        assert_eq!(details["evidence"][0]["maximum_age_ms"], 120000);
     }
 
     #[tokio::test]
@@ -24368,6 +25331,7 @@ mod tests {
                     ],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -24831,6 +25795,7 @@ mod tests {
                     locks: vec![resource("synthetic-parent-cash")],
                 },
                 operation_version: 1,
+                action_deadline: None,
             }
         }
     }
@@ -24893,6 +25858,7 @@ mod tests {
                 }),
                 intent,
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -26652,7 +27618,6 @@ mod tests {
             "UNPRICED_ASSET"
         );
     }
-
     #[test]
     fn ordinary_transfer_source_progress_is_bounded_nonspendable_and_settles_only_delta() {
         let directory = tempfile::tempdir().unwrap();
@@ -26937,5 +27902,505 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, FinancialEffect::TransitPrincipal { .. }))
         );
+    }
+
+    fn synthetic_amendment(
+        original: &OperationRecord,
+        total_eth: &str,
+        movement: &str,
+        delta_eth: &str,
+    ) -> PreparedOperation {
+        let mut scope = fin_domain::amendments::AmendmentScope {
+            intent: original.preview.as_ref().unwrap().intent.clone(),
+            binding: json!({"synthetic_revised_amount":total_eth}),
+            valuation: original.preview.as_ref().unwrap().valuation.clone(),
+        };
+        scope.intent.debits[0].amount.atoms = quantity(total_eth);
+        if let EffectConstraint::Transfer { maximum_debit, .. } = &mut scope.intent.expected[0] {
+            *maximum_debit = quantity(total_eth);
+        }
+        scope.valuation.as_mut().unwrap().movement_usd_micros = quantity(movement);
+        let mut prepared = original.preview.clone().unwrap();
+        prepared.intent.debits[0].amount.atoms = quantity(delta_eth);
+        prepared.intent.maximum_costs.clear();
+        prepared.valuation.as_mut().unwrap().movement_usd_micros = quantity("1000000");
+        prepared.intent.expected = vec![EffectConstraint::SubmissionAmendment {
+            operation_id: original.id.clone(),
+            submission: original.submission.clone().unwrap(),
+            revision: Box::new(scope),
+        }];
+        prepared.binding = json!({"original":original.id,"revision":prepared.intent.expected});
+        prepared
+    }
+    #[tokio::test]
+    async fn amendment_scope_preserves_owner_exact_delta_and_full_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = synthetic_engine(
+            &directory.path().join("amendment.sqlite"),
+            Arc::new(SyntheticAdapter::new()),
+        );
+        let original = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-original-owner".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let prepared = synthetic_amendment(
+            &original,
+            "2000000000000000000",
+            "2000000",
+            "1000000000000000000",
+        );
+        assert_eq!(
+            engine
+                .validate_submission_amendment(&prepared, None, false)
+                .unwrap(),
+            Some(original.id.clone())
+        );
+        assert!(
+            engine
+                .validate_submission_amendment(&prepared, None, true)
+                .is_err()
+        );
+        assert!(
+            engine
+                .validate_submission_amendment(&prepared, Some("run"), false)
+                .is_err()
+        );
+        let mut bad = prepared.clone();
+        bad.intent.debits[0].amount.atoms = quantity("1");
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_err()
+        );
+        let mut bad = prepared.clone();
+        if let EffectConstraint::SubmissionAmendment { revision, .. } = &mut bad.intent.expected[0]
+        {
+            revision.intent.debits[0].amount.asset.reference = "OTHER".into();
+        }
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_err()
+        );
+        let mut bad = prepared.clone();
+        if let EffectConstraint::SubmissionAmendment { revision, .. } = &mut bad.intent.expected[0]
+        {
+            revision.valuation.as_mut().unwrap().movement_usd_micros = quantity("200000000");
+        }
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_err()
+        );
+        let mut bad = prepared.clone();
+        bad.valuation.as_mut().unwrap().movement_usd_micros = quantity("0");
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_err()
+        );
+        let mut bad = prepared.clone();
+        if let EffectConstraint::SubmissionAmendment { submission, .. } =
+            &mut bad.intent.expected[0]
+        {
+            submission.reference = "unrelated".into();
+        }
+        assert!(
+            engine
+                .validate_submission_amendment(&bad, None, false)
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn amendment_completion_atomically_expands_original_reservation_without_fill_duplication()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("amendments.sqlite");
+        let engine = synthetic_engine(&path, Arc::new(SyntheticAdapter::new()));
+        let original = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-fill-owner".into(),
+                operation: "synthetic.transfer".into(),
+                input: json!({}),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        let prepared = synthetic_amendment(
+            &original,
+            "2000000000000000000",
+            "2000000",
+            "1000000000000000000",
+        );
+        let mut mutation = original.clone();
+        mutation.id = "synthetic-mutation-owner".into();
+        mutation.request_id = "synthetic-mutation-request".into();
+        mutation.fingerprint = "synthetic-mutation-fingerprint".into();
+        mutation.preview = Some(prepared.clone());
+        mutation.status = Status::AwaitingApproval;
+        mutation.submission = None;
+        mutation.effects = None;
+        mutation.last_reconciliation_evidence = None;
+        mutation.approval.as_mut().unwrap().binding_hash =
+            binding_hash(&authorization_binding(&prepared)).unwrap();
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &mutation.id,
+                &mutation.request_id,
+                &mutation.fingerprint,
+                &mutation.operation,
+                None,
+                "awaiting_approval",
+                &to_value(&mutation).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        engine
+            .validate_submission_amendment_for_attempt(&prepared, None, false, Some(&mutation.id))
+            .unwrap();
+        engine
+            .reserve_ordinary_operation(&mut mutation, &prepared, None, None, None)
+            .await
+            .unwrap();
+        assert!(engine.has_pending_amendment(&original.id).unwrap());
+        assert!(
+            engine
+                .validate_submission_amendment(&prepared, None, false)
+                .is_err()
+        );
+        assert_eq!(engine.status(&original.id, true).await.unwrap(), original);
+        let submission = Submission {
+            kind: "synthetic_tx".into(),
+            reference: "synthetic-mutation-tx".into(),
+            data: json!({"synthetic":true}),
+        };
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .persist_submission(
+                &mutation.id,
+                &SubmissionRow {
+                    kind: submission.kind.clone(),
+                    reference: submission.reference.clone(),
+                    data: submission.data.clone(),
+                },
+                &now(),
+            )
+            .unwrap();
+        mutation.submission = Some(submission.clone());
+        mutation.status = Status::Submitted;
+        let mut verified = VerifiedEffects {
+            evidence_version: 1,
+            submission,
+            effects: vec![FinancialEffect::SubmissionAmendment {
+                operation_id: original.id.clone(),
+                submission: original.submission.clone().unwrap(),
+                successor: Some(Submission {
+                    kind: "synthetic_tx".into(),
+                    reference: "synthetic-successor-tx".into(),
+                    data: json!({"synthetic":true}),
+                }),
+            }],
+            evidence: json!({"synthetic":"exact mutation receipt"}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        verified.proof_digest = verified_effect_digest(&verified).unwrap();
+        let completed = engine
+            .apply_reconciliation(
+                mutation,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: verified.evidence.clone(),
+                    verified: Some(verified),
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.status, Status::Completed);
+        assert!(!engine.has_pending_amendment(&original.id).unwrap());
+        assert_eq!(engine.load_record(&original.id).unwrap(), original);
+        assert_eq!(engine.allocation_used_usd_micros().unwrap(), "2000000");
+        let mut expired_delta = completed.clone();
+        expired_delta.updated_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        engine.update_record(&expired_delta).unwrap();
+        assert_eq!(
+            engine.allocation_used_usd_micros().unwrap(),
+            "2000000",
+            "amendment delta remains reserved beyond24h while original expanded order is unresolved"
+        );
+        let context = engine.amendment_context(&original.id).unwrap();
+        assert_eq!(context.revisions.len(), 1);
+        assert_eq!(
+            context.effective_scope().unwrap().intent.debits[0]
+                .amount
+                .atoms,
+            quantity("2000000000000000000")
+        );
+        let store = engine.store.lock().unwrap();
+        assert_eq!(store.reservation_count(&completed.id).unwrap(), 0);
+        assert!(store.reservation_count(&original.id).unwrap() > 0);
+        drop(store);
+        let mut receipt = VerifiedEffects {
+            evidence_version: 1,
+            submission: original.submission.clone().unwrap(),
+            effects: vec![transfer_effect()],
+            evidence: json!({"synthetic":"successor cumulative fill"}),
+            observed_at: now(),
+            proof_digest: String::new(),
+        };
+        if let FinancialEffect::Transfer { debit, .. } = &mut receipt.effects[0] {
+            debit.atoms = quantity("1500000000000000000");
+        }
+        receipt.proof_digest = verified_effect_digest(&receipt).unwrap();
+        assert!(validate_effects(&original, &receipt, &Status::Completed).is_err());
+        assert!(
+            validate_effects_with_scope(
+                &original,
+                &receipt,
+                &Status::Completed,
+                false,
+                Some(&context.effective_scope().unwrap().intent)
+            )
+            .is_ok()
+        );
+        // Earlier approved fills remain covered when a later mutation narrows future venue size.
+        let mut narrowed = context.clone();
+        let mut revision = narrowed.revisions[0].clone();
+        revision.amendment_operation_id = "synthetic-narrowing".into();
+        revision.scope.intent.debits[0].amount.atoms = quantity("1500000000000000000");
+        if let EffectConstraint::Transfer { maximum_debit, .. } =
+            &mut revision.scope.intent.expected[0]
+        {
+            *maximum_debit = quantity("1500000000000000000");
+        }
+        narrowed.revisions.push(revision);
+        let envelope = amendments::accounting_intent(&narrowed).unwrap().unwrap();
+        assert_eq!(
+            envelope.debits[0].amount.atoms,
+            quantity("2000000000000000000")
+        );
+        assert!(
+            validate_effects_with_scope(
+                &original,
+                &receipt,
+                &Status::Completed,
+                false,
+                Some(&envelope)
+            )
+            .is_ok()
+        );
+        let second = synthetic_amendment(
+            &original,
+            "3000000000000000000",
+            "3000000",
+            "1000000000000000000",
+        );
+        assert!(
+            engine
+                .validate_submission_amendment(&second, None, false)
+                .is_ok()
+        );
+        let mut wrong = second.clone();
+        wrong.intent.debits[0].amount.atoms = quantity("2000000000000000000");
+        assert!(
+            engine
+                .validate_submission_amendment(&wrong, None, false)
+                .is_err()
+        );
+        drop(engine);
+        let reopened = synthetic_engine(&path, Arc::new(SyntheticAdapter::new()));
+        assert_eq!(reopened.load_record(&original.id).unwrap(), original);
+        assert_eq!(
+            reopened.amendment_context(&original.id).unwrap().revisions,
+            context.revisions
+        );
+    }
+
+    #[test]
+    fn margin_native_position_requires_own_kind_and_bound_baseline_for_external_close() {
+        let native = asset("synthetic-margin", "ETH", 18);
+        let venue = resource("synthetic-margin-account");
+        let bound = EffectConstraint::MarginPosition {
+            resource: venue.clone(),
+            position: "margin:ETH:LONG".into(),
+            asset: native.clone(),
+            position_kind: PositionKind::MarginLong,
+            minimum_delta: SignedQuantity::new("-5").unwrap(),
+            maximum_delta: SignedQuantity::new("0").unwrap(),
+        };
+        let mut baseline = position_anchor(
+            "synthetic-margin-account",
+            "margin:ETH:LONG",
+            PositionKind::MarginLong,
+            "5",
+        );
+        baseline.principal.asset = native.clone();
+        let mut closing = baseline.clone();
+        closing.principal.atoms = quantity("0");
+        let effect = FinancialEffect::PositionChange {
+            resource: venue.clone(),
+            position: baseline.position.clone(),
+            asset: native.clone(),
+            delta: SignedQuantity::new("-5").unwrap(),
+            scaled_receipt: None,
+            anchor: Some(closing),
+        };
+        let mut rec = record(vec![bound.clone()], vec![]);
+        let prepared = rec.preview.as_mut().unwrap();
+        prepared.observed_at = "2026-01-01T00:00:30Z".into();
+        prepared.binding[fin_domain::BASELINE_ANCHORS_KEY] = json!([baseline.clone()]);
+        trading_rebind(&mut rec);
+        baseline_anchors::validate(rec.preview.as_ref().unwrap()).unwrap();
+        let verified = proof(&rec, vec![effect.clone()]);
+        validate_effects(&rec, &verified, &Status::Completed).unwrap();
+        assert!(validate_anchor_transitions(&verified, &PreparationContext::default()).is_err());
+        let merged = baseline_anchors::merge(
+            rec.preview.as_ref().unwrap(),
+            &PreparationContext::default(),
+        )
+        .unwrap();
+        validate_anchor_transitions(&verified, &merged).unwrap();
+        assert!(PositionKind::MarginLong.is_margin());
+        assert!(!PositionKind::MarginLong.is_derivative());
+        let derivative = EffectConstraint::DerivativePosition {
+            resource: venue,
+            position: baseline.position.clone(),
+            asset: native,
+            position_kind: PositionKind::MarginLong,
+            minimum_delta: SignedQuantity::new("-5").unwrap(),
+            maximum_delta: SignedQuantity::new("0").unwrap(),
+        };
+        assert!(!constraint_matches(&derivative, &effect).unwrap());
+        assert!(
+            validate_trading_bounds(&FinancialIntent {
+                expected: vec![derivative],
+                ..Default::default()
+            })
+            .is_err()
+        );
+        let mut previous = baseline.clone();
+        previous.principal.atoms = quantity("2");
+        let prior = PreparationContext {
+            positions: vec![previous.clone()],
+        };
+        let merged = baseline_anchors::merge(rec.preview.as_ref().unwrap(), &prior).unwrap();
+        assert_eq!(merged.positions, vec![previous]);
+        assert!(validate_anchor_transitions(&verified, &merged).is_err());
+        let mut bad = rec.preview.clone().unwrap();
+        bad.binding[fin_domain::BASELINE_ANCHORS_KEY][0]["resource"] = "wrong-account".into();
+        assert!(baseline_anchors::validate(&bad).is_err());
+        let mut bad = rec.preview.clone().unwrap();
+        bad.input[fin_domain::BASELINE_ANCHORS_KEY] = json!([baseline]);
+        assert!(baseline_anchors::validate(&bad).is_err());
+    }
+    #[test]
+    fn partial_position_terminal_uses_cumulative_delta_without_adding_own_anchor_twice() {
+        let native = asset("synthetic", "BASE", 0);
+        let venue = resource("synthetic-position");
+        let expected = EffectConstraint::MarginPosition {
+            resource: venue.clone(),
+            position: "BASE:LONG".into(),
+            asset: native.clone(),
+            position_kind: PositionKind::MarginLong,
+            minimum_delta: SignedQuantity::new("0").unwrap(),
+            maximum_delta: SignedQuantity::new("2").unwrap(),
+        };
+        let original = record(vec![expected], vec![]);
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(SyntheticAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        engine
+            .store
+            .lock()
+            .unwrap()
+            .create_request(
+                &original.id,
+                &original.request_id,
+                &original.fingerprint,
+                &original.operation,
+                None,
+                "pending",
+                &to_value(&original).unwrap(),
+                &now(),
+            )
+            .unwrap();
+        let make = |atoms: &str| {
+            let mut anchor = position_anchor(
+                "synthetic-position",
+                "BASE:LONG",
+                PositionKind::MarginLong,
+                atoms,
+            );
+            anchor.principal.asset = native.clone();
+            FinancialEffect::PositionChange {
+                resource: venue.clone(),
+                position: "BASE:LONG".into(),
+                asset: native.clone(),
+                delta: SignedQuantity::new(atoms).unwrap(),
+                scaled_receipt: None,
+                anchor: Some(anchor),
+            }
+        };
+        let first = json!({"eventId":"synthetic-fill-1","quantity":"1"});
+        let second = json!({"eventId":"synthetic-fill-2","quantity":"1"});
+        let mut pending = proof(&original, vec![make("1")]);
+        pending.evidence = json!({"proofEvents":[first.clone()]});
+        pending.proof_digest = verified_effect_digest(&pending).unwrap();
+        let pending = engine
+            .apply_reconciliation(
+                original,
+                Reconciliation {
+                    status: Status::Pending,
+                    evidence: pending.evidence.clone(),
+                    verified: Some(pending),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            engine.preparation_context(None).unwrap().positions[0]
+                .principal
+                .atoms,
+            quantity("1")
+        );
+        let mut terminal = proof(&pending, vec![make("2")]);
+        terminal.evidence = json!({"proofEvents":[first,second]});
+        terminal.proof_digest = verified_effect_digest(&terminal).unwrap();
+        assert!(
+            validate_anchor_transitions(&terminal, &engine.preparation_context(None).unwrap())
+                .is_err()
+        );
+        let completed = engine
+            .apply_reconciliation(
+                pending,
+                Reconciliation {
+                    status: Status::Completed,
+                    evidence: terminal.evidence.clone(),
+                    verified: Some(terminal),
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.status, Status::Completed);
+        assert_eq!(
+            engine.preparation_context(None).unwrap().positions[0]
+                .principal
+                .atoms,
+            quantity("2")
+        );
+    }
+    mod boundary_progress_accounting_tests {
+        include!("boundary_progress_accounting_tests.rs");
     }
 }

@@ -317,6 +317,18 @@ not just serialization after an interactive command has finished.
   it. Warnings and recovery guidance belong in defined structured fields.
   Ordinary machine-mode runs should not emit unstructured chatter on stderr;
   stderr is reserved for failures that prevent emitting the documented result.
+- Opt-in `--json --stream` emits NDJSON progress and one terminal result/error
+  event. The existing `--json` single-value contract stays unchanged. Progress
+  carries public request/operation context and actual broker stages (plus local
+  `connecting`); it is best effort and never controls execution. Slow or closed
+  output cannot cancel/replay a financial action. A terminal result may still
+  report pending financial work; reconcile the original identity. Discover the
+  event schemas in `machine_contract.streaming`.
+- Verified open escrow and keeper requests remain pending financial work. Human
+  results distinguish order/request placement from settlement, show remaining
+  escrow and exact refunds, and identify retained account funding separately
+  from costs. Solana amounts use exact network/mint identities; readable labels
+  never replace the structured mint or alter decimal precision.
 - Use stable schemas, error codes, status meanings, exit codes, and resource or
   operation references. Include argument/validation failures, missing setup,
   authorization refusal, cancellation, timeout, and uncertain submission in
@@ -384,6 +396,17 @@ review. Exceptionally long summaries explicitly refer to the full terminal
 review rather than silently cutting off an amount or fee. Native dialog layout
 still needs human verification on the target Mac.
 
+Named plans may add one caller-authored `summary` sentence that complements
+their intent-led name. Terminal review and Touch ID show both in full, followed
+by the native step count and consent duration. Names retain their 80-character
+limit; when a summary is present, name and summary together are limited to 140
+Unicode characters. Empty, untrimmed, multiline, control/bidirectional text and
+overlong pairs fail validation before approval. The complete plan, including
+this display text, is bound to the review and approval; financial authority
+comes from its structured scopes. Omitted summaries preserve existing records
+and prompt behavior. The agent explains inputs, outcomes and material limits in
+the two complementary sentences; the broker does not infer financial prose.
+
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
 from the account database, runs file changes as that user, and supports Zsh, Bash,
@@ -427,7 +450,7 @@ A fresh-agent rehearsal must start from CLI discovery alone and produce correct 
 
 Human acceptance uses the real compiled release, runs terminal installation and credential enrollment, verifies actual secret isolation and native authentication, and lets a fresh agent check the resulting safe metadata. It then exercises individually approved production/mainnet operations under the live-test contract. Automated enrollment/approval doubles cannot establish this human path.
 
-Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes/restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [common cases C12–C19](testing/README.md#common-acceptance-cases) and the [report template](testing/report-template.md).
+Record results separately for automated discovery/enrollment tests, fresh-agent rehearsal, human installation/onboarding, credential-boundary checks, real biometric acceptance/cancellation, and financial live writes and optional restoration. Until the human session runs, mark its cases pending/not run with an exact checklist; do not claim complete production acceptance. See [human onboarding checklist](testing/onboarding.md) and the [report template](testing/report-template.md).
 
 ## Exchange connectivity and discovery
 
@@ -474,7 +497,7 @@ Machine mode returns `HUMAN_TERMINAL_REQUIRED` before sudo or terminal input,
 even with a TTY. Policy changes refuse nonterminal operations, preserving
 reservations and exact approved authority. Historical unrestored run records do
 not block policy changes or ordinary execution. Approved changes retain per-write
-Touch ID. Live-test $100 and restoration instructions remain in the testing guide.
+Touch ID. Live-development verification follows [$fin-e2e](../skills/fin-e2e/SKILL.md), including alignment of isolated development policy and authorizations; restoration is optional.
 See [limit and reload behavior](../README.md#financial-limits).
 
 ## Approval responsiveness

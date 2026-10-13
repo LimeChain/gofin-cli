@@ -1,4 +1,5 @@
 //! Ethereum wallet, Uniswap v3 and Aave v3 operations over a frozen Alloy envelope.
+pub mod aave;
 mod abi;
 #[cfg(test)]
 mod amm_conformance_tests;
@@ -74,6 +75,18 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
         Err(error(code, "validation", message))
     }
 }
+
+fn bind_prepared_valuation(prepared: &mut PreparedOperation) -> Result<()> {
+    if matches!(
+        prepared.operation.as_str(),
+        "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
+    ) {
+        fin_domain::value_bounds::bind_with_price_buffer(prepared)?;
+    } else {
+        fin_domain::value_bounds::bind(prepared);
+    }
+    Ok(())
+}
 /// Recheck adapter-owned valuation immediately before entering the signing
 /// runtime. The engine may have added origin prices for a bounded run, so
 /// compare exact asset identities rather than requiring identical price lists.
@@ -84,6 +97,7 @@ fn require(condition: bool, code: &str, message: &str) -> Result<()> {
 fn carry_attempt_valuation(
     approved: &PreparedOperation,
     fresh: &mut PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     if approved
         .binding
@@ -96,7 +110,7 @@ fn carry_attempt_valuation(
     {
         let mut guarded = approved.clone();
         fin_domain::value_bounds::bind(&mut guarded);
-        fin_domain::value_bounds::carry(&guarded, fresh)?;
+        fin_domain::value_bounds::carry_at(&guarded, fresh, at)?;
         fresh
             .binding
             .as_object_mut()
@@ -105,26 +119,27 @@ fn carry_attempt_valuation(
         fresh.summary = approved.summary.clone();
         Ok(())
     } else {
-        fin_domain::value_bounds::carry(approved, fresh)
+        fin_domain::value_bounds::carry_at(approved, fresh, at)
     }
 }
 
 fn require_attempt_valuation(
     approved: &PreparedOperation,
     fresh: &PreparedOperation,
+    at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     if approved
         .binding
         .get(fin_domain::value_bounds::KEY)
         .is_some()
     {
-        fin_domain::value_bounds::validate(fresh)
+        fin_domain::value_bounds::validate_at(fresh, at)
     } else if approved
         .binding
         .get(fin_domain::boundaries::BOUNDARY_METADATA_KEY)
         .is_some()
     {
-        carry_attempt_valuation(approved, &mut fresh.clone())
+        carry_attempt_valuation(approved, &mut fresh.clone(), at)
     } else {
         require_frozen_valuation(fresh.valuation.as_ref(), approved.valuation.as_ref())
     }
@@ -373,6 +388,8 @@ pub struct EthereumConfig {
     pub v3_deployments: BTreeMap<V3Dex, V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<AaveConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aave_markets: Vec<AaveConfig>,
 }
 impl Default for EthereumConfig {
     fn default() -> Self {
@@ -391,6 +408,8 @@ impl Default for EthereumConfig {
             }),
             ramses: None,
             v3_deployments: BTreeMap::new(),
+
+            aave_markets: vec![],
             aave: Some(AaveConfig {
                 pool: "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2".into(),
                 oracle: "0x54586be62e3c3580375ae3723c145253060ca0c2".into(),
@@ -457,6 +476,7 @@ impl EthereumConfig {
             ramses: None,
             v3_deployments: BTreeMap::new(),
             aave: None,
+            aave_markets: vec![],
         }
     }
 }
@@ -534,15 +554,24 @@ impl OracleObservationClock for SystemOracleClock {
         })
     }
 }
+#[derive(Clone)]
 pub struct EthereumAdapter {
     pub config: EthereumConfig,
     pub wallets: Vec<WalletConnection>,
     pub runtime: Arc<EvmRuntime>,
     oracle_clock: Arc<dyn OracleObservationClock>,
+    clock: Arc<dyn fin_domain::clock::Clock>,
     wallet_valuation: Option<Arc<dyn WalletValuation>>,
     token_discovery: Option<Arc<dyn TokenDiscovery>>,
 }
 impl EthereumAdapter {
+    /// Internal deterministic fixture composition. No production configuration switch.
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Internal dependency injection for a guarded isolated fork. Production
     /// broker composition always calls new(), whose clock is fixed system UTC.
     /// This affects oracle heartbeat observation only, never authorization expiry.
@@ -622,6 +651,20 @@ impl EthereumAdapter {
         if let Some(aave) = &mut config.aave {
             deployments.extend([&mut aave.pool, &mut aave.oracle]);
         }
+        require(
+            config.aave_markets.len() <= 16,
+            "AAVE_MARKET_SCOPE_INVALID",
+            "Aave market scope exceeds the reviewed read bound.",
+        )?;
+        let mut pools = BTreeSet::new();
+        for market in &mut config.aave_markets {
+            require(
+                pools.insert(lower_address(address(&market.pool)?)),
+                "AAVE_MARKET_DUPLICATE",
+                "Aave profiles duplicate one pool identity.",
+            )?;
+            deployments.extend([&mut market.pool, &mut market.oracle]);
+        }
         for value in deployments {
             let a = address(value)?;
             require(
@@ -671,6 +714,7 @@ impl EthereumAdapter {
             wallets,
             runtime,
             oracle_clock: Arc::new(SystemOracleClock),
+            clock: Arc::new(fin_domain::clock::SystemClock),
             wallet_valuation: None,
             token_discovery: None,
         })
@@ -704,7 +748,10 @@ impl EthereumAdapter {
                     || self.config.ramses.is_some()
                     || !self.config.v3_deployments.is_empty()
             }
-            name if name.starts_with("aave.") => self.config.aave.is_some(),
+            "aave.markets" => true,
+            name if name.starts_with("aave.") => {
+                self.config.aave.is_some() || !self.config.aave_markets.is_empty()
+            }
             name if name.starts_with("uniswap.") => self.config.uniswap.is_some(),
             name if name.starts_with("ramses.") => self.config.ramses.is_some(),
             name if uniswap::profile::additional_dex(name).is_some() => self
@@ -904,9 +951,18 @@ struct Binding {
     pub scaled_before: Option<Quantity>,
     pub repay_all: bool,
     pub all_amount: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aave_emode: Option<Quantity>,
     pub supply_anchor: Option<PositionAnchor>,
     pub debt_anchor: Option<PositionAnchor>,
     pub debt_rounding_maximum: Option<Quantity>,
+    /// Native pre-action anchors explicitly bound by this protected preview.
+    #[serde(
+        default,
+        rename = "_fin_verified_baseline_anchors",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub verified_baseline_anchors: Vec<PositionAnchor>,
     #[serde(
         default,
         rename = "_fin_usd_ceiling_v1",
@@ -967,13 +1023,19 @@ impl Adapter for EthereumAdapter {
         self.read_snapshot_scoped(scope).await
     }
     async fn read(&self, operation: &str, input: &Value) -> Result<Value> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.read(operation, input).await;
+        }
         self.read_operation(operation, input).await
     }
     async fn prepare(&self, operation: &str, input: &Value) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare(operation, input).await;
+        }
         let mut prepared = self
             .prepare_operation(operation, input, None, &PreparationContext::default())
             .await?;
-        fin_domain::value_bounds::bind(&mut prepared);
+        bind_prepared_valuation(&mut prepared)?;
         Ok(prepared)
     }
     async fn prepare_with_context(
@@ -982,10 +1044,13 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         context: &PreparationContext,
     ) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare_with_context(operation, input, context).await;
+        }
         let mut prepared = self
             .prepare_operation(operation, input, None, context)
             .await?;
-        fin_domain::value_bounds::bind(&mut prepared);
+        bind_prepared_valuation(&mut prepared)?;
         Ok(prepared)
     }
     async fn preflight_return_route(
@@ -1020,6 +1085,12 @@ impl Adapter for EthereumAdapter {
         input: &Value,
         bounds: &Value,
     ) -> Result<financial_plans::PlanPermission> {
+        if let Some(a) = self.selected_market(input)? {
+            return a.prepare_plan_permission(operation, input, bounds).await;
+        }
+        if operation.starts_with("aave.") {
+            return self.aave_plan_permission(operation, input, bounds).await;
+        }
         self.swap_plan_permission(operation, input, bounds).await
     }
     fn validate_boundary_candidate(
@@ -1027,6 +1098,15 @@ impl Adapter for EthereumAdapter {
         spec: &boundaries::BoundarySpec,
         prepared: &PreparedOperation,
     ) -> Result<()> {
+        if spec.fixed["operation"]
+            .as_str()
+            .is_some_and(|op| op.starts_with("aave."))
+        {
+            if let Some(a) = self.selected_market(&prepared.input)? {
+                return a.validate_aave_candidate(spec, prepared);
+            }
+            return self.validate_aave_candidate(spec, prepared);
+        }
         if matches!(
             spec.fixed.get("operation").and_then(Value::as_str),
             Some("uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap")
@@ -1040,7 +1120,34 @@ impl Adapter for EthereumAdapter {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        if let Ok(Some(adapter)) = self.selected_market(&prepared.input) {
+            return adapter.preparation_reuse_window(prepared);
+        }
+        // These preparations already simulate the exact envelope and reserve
+        // finite principal, receipt and fee bounds. Submit retains a fresh
+        // pending-nonce check and the journal's signing/dispatch authority checks.
+        matches!(
+            prepared.operation.as_str(),
+            "wallet.transfer"
+                | "wallet.wrap"
+                | "wallet.unwrap"
+                | "wallet.approve"
+                | "uniswap.swap"
+                | "ramses.swap"
+                | "sushi.swap"
+                | "pancakeswap.swap"
+        )
+        .then_some(std::time::Duration::from_secs(30))
+    }
+
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.revalidate(prepared).await;
+        }
         if prepared.operation == "wallet.permit2.approve" {
             return self.permit2_revalidate(prepared).await;
         }
@@ -1052,7 +1159,8 @@ impl Adapter for EthereumAdapter {
             )
         })?;
         require(
-            prepared.expires_at > now(),
+            chrono::DateTime::parse_from_rfc3339(&prepared.expires_at)
+                .is_ok_and(|expires| expires > self.clock.now()),
             "PREVIEW_EXPIRED",
             "Original preview has expired.",
         )?;
@@ -1070,7 +1178,7 @@ impl Adapter for EthereumAdapter {
                 &context,
             )
             .await?;
-        carry_attempt_valuation(prepared, &mut refreshed)?;
+        carry_attempt_valuation(prepared, &mut refreshed, self.clock.now())?;
         Ok(refreshed)
     }
     async fn submit(
@@ -1078,8 +1186,8 @@ impl Adapter for EthereumAdapter {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission> {
-        if prepared.operation == "wallet.permit2.approve" {
-            return self.permit2_submit(prepared, journal).await;
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.submit(prepared, journal).await;
         }
         let fresh = self.revalidate(prepared).await?;
         require(
@@ -1087,7 +1195,25 @@ impl Adapter for EthereumAdapter {
             "BINDING_CHANGED",
             "Current executable fields differ from approved envelope.",
         )?;
-        require_attempt_valuation(prepared, &fresh)?;
+        require_attempt_valuation(prepared, &fresh, self.clock.now())?;
+        let validated = RevalidatedOperation::after_revalidation(fresh, self.clock.clone())?;
+        self.submit_revalidated(&validated, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        let prepared = validated.prepared();
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.submit_revalidated(validated, journal).await;
+        }
+        validated.assert_fresh()?;
+        // The runtime checks the journal immediately around protected signing
+        // and dispatch. Composite deposits retain their outer candidate there.
+        if prepared.operation == "wallet.permit2.approve" {
+            return self.permit2_submit_revalidated(validated, journal).await;
+        }
         let binding: Binding = serde_json::from_value(prepared.binding.clone()).map_err(|_| {
             error(
                 "BINDING_INVALID",
@@ -1095,23 +1221,53 @@ impl Adapter for EthereumAdapter {
                 "Original binding is malformed.",
             )
         })?;
-        let transaction = if let Some(template) = &binding.permit_template {
-            self.runtime
-                .materialize_permit_template(template, journal.clone())
-                .await?
-                .transaction
-        } else {
-            binding.transaction.clone()
-        };
+        let metadata = json!({"operation":prepared.operation,"resource":binding.resource});
+        if let Some(template) = &binding.permit_template {
+            return self
+                .runtime
+                .submit_permit_template_revalidated(template, metadata, journal, validated)
+                .await;
+        }
         self.runtime
-            .submit(
-                &transaction,
-                json!({"operation":prepared.operation,"resource":binding.resource}),
-                journal,
-            )
+            .submit_revalidated(&binding.transaction, metadata, journal, validated)
             .await
     }
+    async fn verified_position_baselines(
+        &self,
+        record: &OperationRecord,
+    ) -> Result<Vec<PositionAnchor>> {
+        let Some(prepared) = &record.preview else {
+            return Ok(vec![]);
+        };
+        if let Some(a) = self.selected_market(&prepared.input)? {
+            return a.verified_position_baselines(record).await;
+        }
+        if !record.operation.starts_with("aave.") {
+            return Ok(vec![]);
+        }
+        let b: Binding = serde_json::from_value(prepared.binding.clone())
+            .map_err(|_| FinError::validation("Invalid original Aave binding."))?;
+        let token = self.token(&b.token.reference, None).await?;
+        let owner = address(&b.transaction.sender)?;
+        let mut baselines = Vec::new();
+        for (anchor, receipt) in [
+            (&b.supply_anchor, &b.a_token),
+            (&b.debt_anchor, &b.debt_token),
+        ] {
+            if let (Some(anchor), Some(receipt)) = (anchor, receipt) {
+                self.validate_anchor(anchor, &token, owner, address(receipt)?)
+                    .await?;
+                baselines.push(anchor.clone());
+            }
+        }
+        Ok(baselines)
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation> {
+        if let Some(preview) = &record.preview
+            && let Some(a) = self.selected_market(&preview.input)?
+        {
+            return a.reconcile(record).await;
+        }
         if record.operation == "wallet.permit2.approve" {
             return self.permit2_reconcile(record).await;
         }

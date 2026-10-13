@@ -1,6 +1,6 @@
 # Solana and Jupiter verification report
 
-Date: 2026-10-12. Scope: the uncommitted implementation in this worktree.
+Initial verification: 2026-10-12. Scope: the Solana/Jupiter implementation in this worktree.
 Implementation drafts and fixes used Luna agents, with orchestration, review
 and final verification in the parent task.
 
@@ -8,7 +8,48 @@ and final verification in the parent task.
 key was imported and no mainnet transaction was submitted in this implementation
 run. The tests below use synthetic credentials, funds and transport responses.
 
-## Final reproducible checks
+## Main integration and UX review — 2026-10-13
+
+Merged `origin/main` at `5d29dfb`, preserving both its Kraken integration and
+Solana/Jupiter's versioned recovery and accounting. The review aligned wallet
+and swap execution with main's preparation reuse and final validated handoff:
+candidate freshness, immutable messages, required signers, costs and remaining
+authority are still checked without repeating simulations. Keeper operations
+retain their mutable-state checks.
+
+Immediate wallet, swap and JLP steps use the shared computed plan duration;
+standing orders and keeper workflows require an explicit duration. The CLI
+rehearsals verify the computed 15-minute window for two-step immediate plans
+and explicit matching windows for standing plans. Candidate validity remains
+independent of parent consent, and uncertain submissions are never refreshed.
+
+Human output distinguishes verified open orders and keeper requests from
+completed trades, shows escrow refunds and retained account funding, and uses
+SOL/USDC/PYUSD labels only for exact network, mint and decimal matches. Machine
+execution rehearsals consume the shared progress stream and require one final
+result. Protected enrollment and installed Touch ID remain human-unrun.
+
+The cross-integration regression checks also caught and fixed a redundant
+position-observer query: shared capture now validates immutable native anchors
+already supplied by an adapter before querying missing scopes. Stale bound
+evidence still fails, and reductions still require an exact prior position.
+Kraken's 283 library tests and the engine's 308 library tests pass as part of
+the combined workspace run.
+
+| Command | Post-merge result |
+| --- | --- |
+| `cargo test --offline --locked --workspace` | Passed: 2,202 tests across 91 suites; 11 ignored |
+| `cargo test --offline --locked -p fin-broker --example fin-dev-broker` | Passed: 81 tests |
+| `cargo clippy --offline --locked --workspace --all-targets -- -D warnings` | Passed |
+| `cargo fmt --all -- --check` | Passed |
+| `make catalog` | Passed; merged discovery regenerated |
+| `make test-dev-env` | Passed, including all 11 Solana/Jupiter public CLI rehearsal modes |
+
+All results above use synthetic credentials and transport. Ignored tests are
+not passes. No live keys were imported and no mainnet writes were attempted
+during the merge review; the live and human check statuses below are unchanged.
+
+## Initial reproducible checks — 2026-10-12
 
 | Command | Result |
 | --- | --- |

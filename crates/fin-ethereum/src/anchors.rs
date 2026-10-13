@@ -194,9 +194,14 @@ impl EthereumAdapter {
                 .await?
         };
         require(
-            revision == U256::from(5),
+            revision
+                == if kind == PositionKind::Supply {
+                    self.supply_revision()
+                } else {
+                    self.debt_revision()
+                },
             "TOKEN_REVISION_UNSUPPORTED",
-            "Exact scaled backing anchors support reviewed token revision 5 only.",
+            "Exact scaled backing anchors require the selected reviewed token revision.",
         )?;
         let scaled = self
             .runtime
@@ -234,7 +239,7 @@ impl EthereumAdapter {
             "ANCHOR_INDEX_INVALID",
             "Scaled backing or normalized index exceeds reviewed bounds.",
         )?;
-        let claim = backing(scaled, index, &kind)?;
+        let claim = self.position_backing(scaled, index, &kind)?;
         let observed = self
             .runtime
             .call(receipt_token, &Erc20::balanceOfCall { owner }, Some(block))
@@ -273,7 +278,7 @@ impl EthereumAdapter {
             principal: amount(&token.asset(self), claim),
             scaled_receipt: Some(quantity(scaled)),
             evidence_version: 1,
-            evidence: json!({"method":"aave-v3-revision-5-exact-scaled-backing","chain_id":self.config.chain_id,"pool":self.aave()?.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":quantity(scaled),"deferred_unpaid_rounding":quantity(deferred_rounding),"deferred_unpaid_interest":quantity(deferred_interest)}),
+            evidence: json!({"method":self.backing_method(),"chain_id":self.config.chain_id,"pool":self.aave()?.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":header["hash"],"normalized_index":quantity(index),"scaled_balance":quantity(scaled),"deferred_unpaid_rounding":quantity(deferred_rounding),"deferred_unpaid_interest":quantity(deferred_interest)}),
             observed_at: now(),
         })
     }
@@ -284,6 +289,7 @@ impl EthereumAdapter {
         owner: Address,
         receipt_token: Address,
         kind: PositionKind,
+        new_attempt: bool,
     ) -> Result<PositionAnchor> {
         let resource = resource(self.config.chain_id, owner);
         let name = position(
@@ -306,6 +312,14 @@ impl EthereumAdapter {
             "Trusted preparation context duplicates one physical position.",
         )?;
         if let Some(prior) = found.first() {
+            if new_attempt
+                && prior.principal.atoms.is_zero()
+                && prior.scaled_receipt.as_ref().is_some_and(Quantity::is_zero)
+            {
+                return self
+                    .observe_closed_lineage(prior, token, owner, receipt_token)
+                    .await;
+            }
             self.validate_anchor(prior, token, owner, receipt_token)
                 .await?;
             Ok((*prior).clone())
@@ -321,7 +335,7 @@ impl EthereumAdapter {
                 .await
         }
     }
-    pub(crate) async fn validate_anchor(
+    fn validate_anchor_identity(
         &self,
         anchor: &PositionAnchor,
         token: &reads::Token,
@@ -333,7 +347,7 @@ impl EthereumAdapter {
             anchor.evidence_version == 1
                 && anchor.resource == resource(self.config.chain_id, owner)
                 && anchor.principal.asset == token.asset(self)
-                && (anchor.evidence["method"] == json!("aave-v3-revision-5-exact-scaled-backing")
+                && (anchor.evidence["method"] == json!(self.backing_method())
                     || anchor.evidence["method"] == json!("aave-zero-observed-backing"))
                 && anchor.evidence["chain_id"] == json!(self.config.chain_id)
                 && anchor.evidence["pool"] == json!(self.aave()?.pool)
@@ -351,6 +365,123 @@ impl EthereumAdapter {
             "ANCHOR_IDENTITY_INVALID",
             "Trusted anchor does not bind the same immutable position representation.",
         )?;
+        Ok(())
+    }
+    // A new generation of an already-closed position has no outstanding
+    // principal or accrual to reconstruct. Reobserve exact zero today rather
+    // than depending forever on archived storage. Original pending attempts
+    // still validate their frozen anchors through validate_anchor.
+    async fn observe_closed_lineage(
+        &self,
+        prior: &PositionAnchor,
+        token: &reads::Token,
+        owner: Address,
+        receipt_token: Address,
+    ) -> Result<PositionAnchor> {
+        self.validate_anchor_identity(prior, token, owner, receipt_token)?;
+        let block = prior.evidence["block"]
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                error(
+                    "ANCHOR_BLOCK_INVALID",
+                    "prepare",
+                    "Closed lineage block is missing.",
+                )
+            })?;
+        let index: Quantity = serde_json::from_value(prior.evidence["normalized_index"].clone())
+            .map_err(|_| {
+                error(
+                    "ANCHOR_INDEX_INVALID",
+                    "prepare",
+                    "Closed lineage index is invalid.",
+                )
+            })?;
+        let index = u256(&index)?;
+        require(
+            index >= pow10(27)? && index < (U256::from(1) << 128),
+            "ANCHOR_INDEX_INVALID",
+            "Closed lineage index exceeds reviewed bounds.",
+        )?;
+        let expected = json!({"method":prior.evidence["method"],"chain_id":self.config.chain_id,"pool":self.aave()?.pool,"underlying":token.reference,"receipt_token":lower_address(receipt_token),"block":block,"block_hash":prior.evidence["block_hash"],"normalized_index":quantity(index),"scaled_balance":Quantity::zero(),"deferred_unpaid_rounding":Quantity::zero(),"deferred_unpaid_interest":Quantity::zero()});
+        require(
+            prior.evidence == expected,
+            "ANCHOR_PROOF_MISMATCH",
+            "Closed lineage must have exact zero backing and expenses with valid evidence.",
+        )?;
+        let old_hash = prior.evidence["block_hash"].as_str().unwrap_or("");
+        fin_evm::hash(old_hash)?;
+        self.require_anchor_header(block, old_hash).await?;
+        let current = rpc_u64(
+            &self
+                .runtime
+                .rpc
+                .request("eth_blockNumber", json!([]))
+                .await?,
+        )?;
+        require(
+            current >= block,
+            "ANCHOR_BLOCK_INVALID",
+            "Closed lineage cannot lie after the current block.",
+        )?;
+        let before = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([block_tag(Some(current)), false]),
+            )
+            .await?;
+        let hash = before["hash"].as_str().unwrap_or("");
+        fin_evm::hash(hash)?;
+        require(
+            rpc_u64(&before["number"])? == current,
+            "ANCHOR_BLOCK_INVALID",
+            "Current closed-position observation block differs.",
+        )?;
+        let fresh = self
+            .zero_anchor(
+                token,
+                owner,
+                receipt_token,
+                prior.position_kind.clone(),
+                current,
+            )
+            .await.map_err(|failure| if failure.code == "ANCHOR_BACKING_MISMATCH" {
+                error("POSITION_PRINCIPAL_CHANGED", "prepare", "Current backing differs from the proved closed position; it cannot be discarded by reopening.")
+            } else {failure})?;
+        require(
+            fresh.evidence["block_hash"] == hash,
+            "ANCHOR_PROOF_MISMATCH",
+            "Current observation block changed while reading zero backing.",
+        )?;
+        self.require_anchor_header(block, old_hash).await?;
+        Ok(fresh)
+    }
+    async fn require_anchor_header(&self, block: u64, hash: &str) -> Result<()> {
+        let header = self
+            .runtime
+            .rpc
+            .request(
+                "eth_getBlockByNumber",
+                json!([block_tag(Some(block)), false]),
+            )
+            .await?;
+        require(
+            rpc_u64(&header["number"])? == block && header["hash"] == hash,
+            "ANCHOR_PROOF_MISMATCH",
+            "Closed lineage canonical block no longer matches.",
+        )
+    }
+    pub(crate) async fn validate_anchor(
+        &self,
+        anchor: &PositionAnchor,
+        token: &reads::Token,
+        owner: Address,
+        receipt_token: Address,
+    ) -> Result<()> {
+        self.validate_anchor_identity(anchor, token, owner, receipt_token)?;
+        let kind = &anchor.position_kind;
         let block = anchor.evidence["block"].as_u64().ok_or_else(|| {
             error(
                 "ANCHOR_BLOCK_INVALID",
@@ -447,7 +578,7 @@ impl EthereumAdapter {
             "Current normalized index regressed below proved anchor.",
         )?;
         sub(
-            backing(scaled, index, &anchor.position_kind)?,
+            self.position_backing(scaled, index, &anchor.position_kind)?,
             u256(&anchor.principal.atoms)?,
         )
     }

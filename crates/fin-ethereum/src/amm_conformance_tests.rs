@@ -5,6 +5,7 @@ use crate::{
     AaveConfig, EthereumAdapter, EthereumConfig, RouterKind, UniswapConfig, WalletConnection,
     WalletValuation,
 };
+use fin_domain::Adapter;
 use fin_domain::boundaries::BoundaryAuthorizationRequest;
 use fin_domain::{
     AccountingLocation, Amount, ApprovalAudit, AssetId, AuthorizationChallenge, Authorizer,
@@ -305,7 +306,9 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
 
     let mut long_deadline = accepted.clone();
     long_deadline["request_id"] = json!("SYNTHETIC-deadline-over-cap");
-    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 900);
+    // Leave ample distance from the ten-minute boundary: crossing a wall-clock
+    // second during preparation must not change which guard this test exercises.
+    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 1200);
     expect_boundary_rejection(
         &engine,
         &authorization.id,
@@ -361,7 +364,9 @@ async fn engine_plan_authorizes_adapter_reviewed_swap_variations() -> Result<()>
     let plan = FinancialPlanSpec {
         version: 1,
         name: "SYNTHETIC bounded AMM conformance".into(),
+        summary: None,
         steps: vec![FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "swap".into(),
             operation: "uniswap.swap".into(),
             input,
@@ -397,7 +402,7 @@ async fn engine_plan_authorizes_adapter_reviewed_swap_variations() -> Result<()>
         .authorize_financial_plan(FinancialPlanAuthorizationRequest {
             request_id: "SYNTHETIC-conformance-plan-authorization".into(),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         })
@@ -547,6 +552,50 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
 }
 
 struct RepublishingPrices(AtomicU64);
+
+#[tokio::test]
+async fn swap_usd_buffer_is_reserved_under_personal_limits_before_approval() -> Result<()> {
+    for (movement, allocation, expected) in [
+        ("3020000", "100000000", "MOVEMENT_LIMIT"),
+        ("100000000", "3020000", "ALLOCATION_LIMIT"),
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
+        let adapter = Arc::new(adapter(rpc.clone()));
+        let approvals = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter],
+            Arc::new(CountingApproval(approvals.clone())),
+            EngineOptions {
+                max_movement_and_cost_usd_micros: movement.into(),
+                max_run_allocation_usd_micros: allocation.into(),
+                ..EngineOptions::default()
+            },
+        )?;
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "SYNTHETIC-buffer-policy".into(),
+                operation: "uniswap.swap".into(),
+                input: candidate(),
+                run_id: None,
+            })
+            .await?;
+        assert_eq!(result.status, fin_domain::Status::Failed);
+        assert_eq!(result.error.unwrap().code, expected);
+        assert_eq!(approvals.load(Ordering::SeqCst), 0);
+        assert!(result.submission.is_none());
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction")
+        );
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl WalletValuation for RepublishingPrices {
     async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
@@ -665,6 +714,240 @@ async fn boundary_keeps_attempt_usd_ceiling_through_republication_and_rejects_ex
             .unwrap()
             .iter()
             .any(|method| method == "eth_sendRawTransaction")
+    );
+    Ok(())
+}
+
+struct ManualClock(std::sync::Mutex<chrono::DateTime<chrono::Utc>>);
+impl ManualClock {
+    fn advance(&self, seconds: i64) {
+        *self.0.lock().unwrap() += chrono::Duration::seconds(seconds);
+    }
+}
+impl fin_domain::clock::Clock for ManualClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        *self.0.lock().unwrap()
+    }
+}
+struct ClockApproval(Arc<ManualClock>);
+#[async_trait::async_trait]
+impl Authorizer for ClockApproval {
+    async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+        use fin_domain::clock::Clock;
+        Ok(ApprovalAudit {
+            mechanism: "synthetic-clock-only".into(),
+            binding_hash: challenge.binding_hash.clone(),
+            challenge_nonce: challenge.nonce.clone(),
+            approved_at: self.0.now().to_rfc3339(),
+            expires_at: challenge.expires_at.clone(),
+        })
+    }
+}
+
+fn relative_swap_request(
+    input: Value,
+) -> fin_domain::financial_plans::FinancialPlanAuthorizationRequest {
+    use fin_domain::financial_plans::*;
+    let resource = ResourceId(format!("ethereum:1:{:#x}", addr(1)));
+    FinancialPlanAuthorizationRequest {
+        request_id: "SYNTHETIC-relative-swap-authority".into(),
+        valid_for_seconds: Some(2700),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+        plan: FinancialPlanSpec {
+            version: 1,
+            name: "Synthetic future swap with long parent".into(),
+            summary: None,
+            steps: vec![FinancialPlanStepSpec {
+                step_id: "swap".into(),
+                operation: "uniswap.swap".into(),
+                input,
+                action_deadline_seconds: Some(600),
+                permitted_variations: bounds(),
+                completion: FinancialStepCompletion {
+                    principal_spend: None,
+                    minimum_net_receipt: None,
+                    operation_succeeded: true,
+                },
+                funding_dependencies: vec![],
+            }],
+            aggregate_bounds: FinancialPlanBounds {
+                maximum_debits: vec![ResourceAmount {
+                    resource: resource.clone(),
+                    amount: Amount {
+                        asset: AssetId {
+                            network: "ethereum:1".into(),
+                            reference: format!("{:#x}", addr(100)),
+                            decimals: 18,
+                        },
+                        atoms: Quantity::from_decimal("0.002", 18).unwrap(),
+                    },
+                }],
+                maximum_costs: vec![CostBound {
+                    location: AccountingLocation::Cash { resource },
+                    amount: Amount {
+                        asset: AssetId {
+                            network: "ethereum:1".into(),
+                            reference: "native".into(),
+                            decimals: 18,
+                        },
+                        atoms: Quantity::from_decimal("0.0002", 18).unwrap(),
+                    },
+                    treatment: CostTreatment::AdditionalDebit,
+                }],
+            },
+        },
+    }
+}
+
+#[tokio::test]
+async fn long_plan_resolves_short_swap_after_eleven_minutes_and_rejects_insufficient_time_before_rpc()
+-> Result<()> {
+    use fin_domain::clock::Clock;
+    let clock = Arc::new(ManualClock(std::sync::Mutex::new(
+        chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+    )));
+    let rpc = Arc::new(Fixture::new());
+    *rpc.allowance.lock().unwrap() = fin_evm::u256(&Quantity::from_decimal("0.01", 18)?)?;
+    let adapter = Arc::new(adapter(rpc.clone()).with_clock(clock.clone()));
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("timing.sqlite");
+    let engine = Engine::new(
+        Store::open(&database).unwrap(),
+        vec![adapter.clone()],
+        Arc::new(ClockApproval(clock.clone())),
+        EngineOptions::default(),
+    )?
+    .with_clock(clock.clone());
+    let mut input = candidate();
+    input.as_object_mut().unwrap().remove("deadline");
+    let request = relative_swap_request(input.clone());
+    let review = engine.preview_financial_plan(request.clone()).await?;
+    assert_eq!(review.valid_for_seconds, 2700);
+    assert_eq!(
+        review.permissions[0]
+            .permission
+            .as_ref()
+            .unwrap()
+            .authorization_seconds,
+        None
+    );
+    assert!(review.plan.steps[0].input.get("deadline").is_none());
+    let mut automatic = request.clone();
+    automatic.valid_for_seconds = None;
+    assert_eq!(
+        engine
+            .preview_financial_plan(automatic.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW"
+    );
+    automatic.plan.steps[0].action_deadline_seconds = Some(300);
+    assert_eq!(
+        engine
+            .preview_financial_plan(automatic)
+            .await?
+            .valid_for_seconds,
+        600
+    );
+    let mut short = request.clone();
+    short.valid_for_seconds = Some(300);
+    short.plan.steps[0].action_deadline_seconds = Some(120);
+    assert_eq!(
+        engine.preview_financial_plan(short).await?.timing_warnings[0].code,
+        "PLAN_DURATION_BELOW_BUDGET"
+    );
+    let authorized = engine.authorize_financial_plan(request).await?;
+    clock.advance(661);
+    let prepared = engine
+        .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
+        .await?;
+    assert_eq!(
+        prepared.input["deadline"],
+        clock.now().timestamp() as u64 + 600
+    );
+    assert_eq!(
+        prepared.action_deadline.as_ref().unwrap().resolved_at,
+        clock.now().to_rfc3339()
+    );
+    let original_hash = fin_domain::binding_hash(
+        &fin_domain::financial_plans::financial_plan_attempt_binding(
+            &prepared,
+            &authorized.plan_id,
+            &authorized.revision.revision_id,
+            "swap",
+        ),
+    )?;
+    let mut rewritten = prepared.clone();
+    rewritten.input["deadline"] = json!(clock.now().timestamp() as u64 + 601);
+    assert_ne!(
+        original_hash,
+        fin_domain::binding_hash(
+            &fin_domain::financial_plans::financial_plan_attempt_binding(
+                &rewritten,
+                &authorized.plan_id,
+                &authorized.revision.revision_id,
+                "swap"
+            )
+        )?
+    );
+    clock.advance(300);
+    assert_eq!(
+        adapter.revalidate(&prepared).await.unwrap_err().code,
+        "PREVIEW_EXPIRED"
+    );
+    clock.advance(2700 - 661 - 300 - 599);
+    let before = rpc.calls.lock().unwrap().len();
+    let error = engine
+        .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "PLAN_INSUFFICIENT_AUTHORIZATION_TIME");
+    assert_eq!(error.details.as_ref().unwrap()["remaining_seconds"], 599);
+    assert_eq!(
+        error.details.as_ref().unwrap()["plan_id"],
+        authorized.plan_id
+    );
+    assert_eq!(
+        rpc.calls.lock().unwrap().len(),
+        before,
+        "insufficient time must not prepare through RPC"
+    );
+    let status = engine.financial_plan_status(&authorized.plan_id).await?;
+    assert!(
+        !status
+            .authorization_timing
+            .as_ref()
+            .unwrap()
+            .can_prepare_next_action
+    );
+    assert!(status.usage.reservations.is_empty());
+    clock.advance(600);
+    let restarted = Engine::new(
+        Store::open(&database).unwrap(),
+        vec![adapter],
+        Arc::new(ClockApproval(clock.clone())),
+        EngineOptions::default(),
+    )?
+    .with_clock(clock);
+    assert_eq!(
+        restarted
+            .financial_plan_status(&authorized.plan_id)
+            .await?
+            .revision
+            .status,
+        fin_domain::financial_plans::FinancialPlanAuthorizationStatus::Expired
+    );
+    assert_eq!(
+        restarted
+            .preview_financial_plan_step(&authorized.plan_id, "swap", "uniswap.swap", &input)
+            .await
+            .unwrap_err()
+            .code,
+        "PLAN_AUTHORIZATION_INACTIVE"
     );
     Ok(())
 }

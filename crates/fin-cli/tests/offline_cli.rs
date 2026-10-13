@@ -38,6 +38,38 @@ fn run(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn version_uses_compiled_release_identity_in_human_json_and_stream_output() {
+    let expected = option_env!("FIN_RELEASE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
+    let human = run(&["--version"]);
+    assert!(human.status.success());
+    assert!(human.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap(),
+        format!("fin {expected}\n")
+    );
+    for args in [
+        vec!["--version", "--json"],
+        vec!["--version", "--json", "--stream"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fin"))
+            .args(&args)
+            // Runtime environment cannot change the compiled release identity.
+            .env("FIN_RELEASE_VERSION", "0.0.0-runtime-must-not-override")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let result = if args.contains(&"--stream") {
+            &value["result"]
+        } else {
+            &value
+        };
+        assert_eq!(result["version"], expected);
+    }
+}
+
+#[test]
 fn deposit_discovery_exposes_exact_evm_routes_without_service_or_prompts() {
     let output = run(&["schema", "binance.deposit", "--json", "--verbose"]);
     assert!(output.status.success());
@@ -176,12 +208,41 @@ fn offline_discovery_commands_work_without_service() {
                 .any(|op| op["name"] == name)
         );
     }
+    let operations = capabilities["operations"].as_array().unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(
+                |operation| operation["name"].as_str().is_some_and(|name| name
+                    .starts_with("kraken.")
+                    || name.starts_with("krakenfutures."))
+            )
+            .count(),
+        132
+    );
+    for product in ["kraken", "krakenfutures"] {
+        assert_eq!(capabilities["exchanges"]["fin"][product]["writes"], true);
+        assert_eq!(
+            capabilities["exchanges"]["fin"][product]["account_enrollment"],
+            true
+        );
+        assert_eq!(
+            capabilities["exchanges"]["fin"][product]["public_only"],
+            false
+        );
+        assert!(
+            capabilities["exchanges"]["library"]["compiled_exchanges"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(product))
+        );
+    }
     assert_eq!(capabilities["exchanges"]["library"]["version"], "4.5.85");
     assert_eq!(
         capabilities["exchanges"]["library"]["all_library_methods_exposed"],
         false
     );
-    for venue in ["kraken", "hyperliquid", "okx", "coinbase", "bybit"] {
+    for venue in ["okx", "coinbase", "bybit"] {
         assert_eq!(capabilities["exchanges"]["fin"][venue]["writes"], false);
         assert_eq!(
             capabilities["exchanges"]["fin"][venue]["account_enrollment"],
@@ -1304,4 +1365,68 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
             );
         }
     }
+}
+
+#[test]
+fn streaming_is_opt_in_and_wraps_success_errors_help_and_human_handoffs() {
+    let legacy = run(&["capabilities", "--json"]);
+    let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    let streamed = run(&["capabilities", "--json", "--stream", "--verbose"]);
+    assert!(streamed.status.success());
+    assert!(streamed.stderr.is_empty());
+    let event: Value = serde_json::from_slice(&streamed.stdout).unwrap();
+    assert_eq!(event["type"], "result");
+    assert_eq!(event["result"], legacy);
+    assert_eq!(event["context"]["command"], "capabilities");
+    for args in [
+        vec!["--json", "--stream", "--help"],
+        vec!["--json", "--stream", "--version"],
+    ] {
+        let output = run(&args);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let event: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(event["type"], "result");
+    }
+    for args in [
+        vec!["--json", "--stream", "nonsense"],
+        vec!["--json", "--stream", "setup"],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let event: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(event["type"], "error");
+        assert!(event["error"]["next_action"].is_string());
+        assert!(!output.stdout.contains(&0x1b));
+    }
+    assert!(!run(&["capabilities", "--stream"]).status.success());
+}
+
+#[test]
+fn administrative_json_returns_configuration_handoff_without_service_prompts_or_enrollment_chatter()
+{
+    let result = run(&[
+        "configure",
+        "krakenfutures.set-self-trade-strategy",
+        "--input",
+        r#"{"account":"synthetic-derivatives","strategy":"REJECT_TAKER"}"#,
+        "--id",
+        "synthetic-config-offline",
+        "--json",
+    ]);
+    assert!(!result.status.success());
+    assert!(result.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "HUMAN_TERMINAL_REQUIRED");
+    assert_eq!(value["error"]["stage"], "configuration");
+    let next = value["error"]["next_action"].as_str().unwrap();
+    assert!(next.contains("without --json"));
+    assert!(next.contains("Touch ID"));
+    assert!(next.contains("financial plan"));
+    assert!(
+        !String::from_utf8(result.stdout)
+            .unwrap()
+            .contains("password")
+    );
 }

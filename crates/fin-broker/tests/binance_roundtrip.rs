@@ -1328,6 +1328,8 @@ struct ArbitrumErc20ExecutionRpc {
     accepted: AtomicUsize,
     venue: Arc<SyntheticVenue>,
     journal: Arc<Mutex<Option<fin_domain::Submission>>>,
+    durable_store_path: Option<std::path::PathBuf>,
+    delay_credit: bool,
     wallet_address: String,
 }
 
@@ -1385,14 +1387,39 @@ impl EvmRpc for ArbitrumErc20ExecutionRpc {
                 }
             }
             "eth_sendRawTransaction" => {
-                let persisted = self.journal.lock().unwrap().clone().ok_or_else(|| {
-                    FinError::new(
-                        "JOURNAL_ORDER_INVALID",
-                        "test",
-                        "No durable submission was stored before broadcast.",
-                        "Persist before dispatch.",
-                    )
-                })?;
+                let persisted = self
+                    .journal
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .or_else(|| {
+                        let store = Store::open(self.durable_store_path.as_ref()?).ok()?;
+                        store.list_records().ok()?.into_iter().find_map(|record| {
+                            let operation_id = record["id"].as_str()?;
+                            let (plan_id, _, step_id, _) =
+                                store.financial_plan_attempt_owner(operation_id).ok()??;
+                            let plan = store.financial_plan(&plan_id).ok()??;
+                            // Plan retries retain the caller's logical ID in
+                            // their linkage; each candidate has an internal ID.
+                            let linked = plan["attempts"].as_array()?.iter().any(|attempt| {
+                                attempt["attempt_id"] == operation_id
+                                    && attempt["step_id"] == step_id
+                                    && attempt["logical_request_id"]
+                                        == "synthetic-plan-arbitrum-deposit"
+                            });
+                            linked
+                                .then(|| serde_json::from_value(record["submission"].clone()).ok())
+                                .flatten()
+                        })
+                    })
+                    .ok_or_else(|| {
+                        FinError::new(
+                            "JOURNAL_ORDER_INVALID",
+                            "test",
+                            "No durable submission was stored before broadcast.",
+                            "Persist before dispatch.",
+                        )
+                    })?;
                 if self.accepted.fetch_add(1, Ordering::SeqCst) != 0 {
                     return Err(FinError::new(
                         "DUPLICATE_BROADCAST",
@@ -1432,6 +1459,15 @@ impl EvmRpc for ArbitrumErc20ExecutionRpc {
                     &hash,
                     &amount_text,
                 );
+                if self.delay_credit {
+                    let mut state = self.venue.state.lock().unwrap();
+                    state.deposit_history.last_mut().unwrap()["status"] = json!(0);
+                    let current = micros(&state.usdc_balances[EMAIL_A]);
+                    state.usdc_balances.insert(
+                        EMAIL_A.into(),
+                        format_micros(current - micros(&amount_text)),
+                    );
+                }
                 *self.hash.lock().unwrap() = Some(hash.clone());
                 Ok(json!(hash))
             }
@@ -2824,12 +2860,54 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     );
     assert!(legacy_recovered.verified.is_some());
 
-    // Chain finality alone, locked venue credit, and a partial credit never
-    // produce completed composite financial effects.
+    // Binance status6 records credited funds with a withdrawal restriction.
+    // Exact chain identity and the independently observed balance still apply.
     venue.state.lock().unwrap().deposit_history[0]["status"] = json!(6);
     let locked = composite.reconcile(&record).await.unwrap();
-    assert_eq!(locked.status, fin_domain::Status::Unknown);
-    assert!(locked.verified.is_none());
+    assert_eq!(
+        locked.status,
+        fin_domain::Status::Completed,
+        "{:?}",
+        locked.evidence
+    );
+    assert!(locked.verified.is_some());
+    assert_eq!(locked.evidence["withdrawal_locked"], true);
+    assert!(locked.evidence["waiting_for"].is_null());
+    let original_balance = venue
+        .state
+        .lock()
+        .unwrap()
+        .balances
+        .insert("main".into(), "0.009".into())
+        .unwrap();
+    let missing_balance = composite.reconcile(&record).await.unwrap();
+    assert_eq!(missing_balance.status, fin_domain::Status::Unknown);
+    assert!(missing_balance.verified.is_none());
+    venue
+        .state
+        .lock()
+        .unwrap()
+        .balances
+        .insert("main".into(), original_balance);
+    for (field, wrong) in [
+        ("amount", json!("0.009")),
+        ("network", json!("ARBITRUM")),
+        (
+            "address",
+            json!("0x2222222222222222222222222222222222222222"),
+        ),
+        ("txId", json!(format!("0x{}", "ee".repeat(32)))),
+    ] {
+        let original = {
+            let mut state = venue.state.lock().unwrap();
+            std::mem::replace(&mut state.deposit_history[0][field], wrong)
+        };
+        let mismatched = composite.reconcile(&record).await.unwrap();
+        assert_eq!(mismatched.status, fin_domain::Status::Unknown);
+        assert!(mismatched.verified.is_none());
+        assert!(mismatched.evidence["waiting_for"].is_null(), "{field}");
+        venue.state.lock().unwrap().deposit_history[0][field] = original;
+    }
     venue.state.lock().unwrap().deposit_history[0]["status"] = json!(1);
     venue.state.lock().unwrap().deposit_history[0]["amount"] = json!("0.009");
     let partial = composite.reconcile(&record).await.unwrap();
@@ -2837,15 +2915,20 @@ async fn native_binance_deposit_settles_only_after_original_canonical_hash_and_u
     assert!(partial.verified.is_none());
 
     venue.state.lock().unwrap().deposit_history[0]["amount"] = json!("0.01");
-    venue.state.lock().unwrap().deposit_history[0]["travelRuleStatus"] = json!(2);
-    let unknown_travel_state = composite.reconcile(&record).await.unwrap();
-    assert_eq!(unknown_travel_state.status, fin_domain::Status::Unknown);
-    assert!(unknown_travel_state.verified.is_none());
-
-    venue.state.lock().unwrap().deposit_history[0]["travelRuleStatus"] = json!("1");
-    let malformed_travel_state = composite.reconcile(&record).await.unwrap();
-    assert_eq!(malformed_travel_state.status, fin_domain::Status::Unknown);
-    assert!(malformed_travel_state.verified.is_none());
+    for status in [1, 6] {
+        for travel_rule in [json!(1), json!(2), json!("1")] {
+            venue.state.lock().unwrap().deposit_history[0]["status"] = json!(status);
+            venue.state.lock().unwrap().deposit_history[0]["travelRuleStatus"] =
+                travel_rule.clone();
+            let restricted = composite.reconcile(&record).await.unwrap();
+            assert_eq!(
+                restricted.status,
+                fin_domain::Status::Unknown,
+                "status={status},travel_rule={travel_rule}"
+            );
+            assert!(restricted.verified.is_none());
+        }
+    }
 }
 
 #[tokio::test]
@@ -2991,6 +3074,8 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
         accepted: AtomicUsize::new(0),
         venue: venue.clone(),
         journal: journal.inner.clone(),
+        durable_store_path: None,
+        delay_credit: false,
         wallet_address: wallet_address.clone(),
     });
     let ethereum = Arc::new(
@@ -3088,6 +3173,455 @@ async fn arbitrum_usdc_deposit_executes_erc20_and_requires_exact_binance_credit(
     let mismatched_network = composite.reconcile(&record).await.unwrap();
     assert_eq!(mismatched_network.status, fin_domain::Status::Unknown);
     assert!(mismatched_network.verified.is_none());
+}
+
+#[test]
+fn named_arbitrum_deposit_recovers_orphan_approval_and_retains_authority_across_restart() {
+    // Match Tokio's production worker budget. A current-thread test hides the
+    // debug-build stack overflow in progress-observed HTTP revalidation.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(2 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::spawn(named_arbitrum_deposit_workflow())
+                .await
+                .unwrap();
+        });
+}
+
+/// Exercise reqwest/URL parsing on the financial worker using local RPC only.
+async fn http_deposit_rpc(
+    inner: Arc<ArbitrumErc20ExecutionRpc>,
+) -> (fin_evm::HttpRpc, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let inner = inner.clone();
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(&mut stream);
+                let mut length = None;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap() == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':')
+                        && key.eq_ignore_ascii_case("content-length")
+                    {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+                let length = length.expect("bounded RPC JSON body");
+                assert!(length < 64 * 1024);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                drop(reader);
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let result = inner
+                    .request(
+                        request["method"].as_str().unwrap(),
+                        request["params"].clone(),
+                    )
+                    .await
+                    .unwrap();
+                let body = json!({"jsonrpc":"2.0","id":request["id"],"result":result}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    (
+        fin_evm::HttpRpc::isolated_localhost(format!("http://localhost:{port}"), 42161).unwrap(),
+        server,
+    )
+}
+
+async fn streamed_deposit_request(
+    runtime: Arc<fin_broker::BrokerRuntime>,
+    request: BrokerRequest,
+) -> fin_protocol::BrokerResponse {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+    let serving = tokio::spawn(async move {
+        fin_broker::serve_connection(server, &runtime, unsafe { libc::getuid() })
+            .await
+            .unwrap();
+    });
+    let mut frame = serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
+        request,
+        progress: true,
+    })
+    .unwrap();
+    frame.push(b'\n');
+    client.write_all(&frame).await.unwrap();
+    let mut lines = tokio::io::BufReader::new(client).lines();
+    let mut stages = vec![];
+    let result = loop {
+        let line = lines
+            .next_line()
+            .await
+            .unwrap()
+            .expect("final broker response");
+        if let Ok(frame) = serde_json::from_str::<fin_protocol::progress::ProgressFrame>(&line) {
+            stages.push(frame.progress);
+        } else {
+            break serde_json::from_str::<fin_protocol::BrokerResponse>(&line).unwrap();
+        }
+    };
+    serving.await.unwrap();
+    use fin_domain::execution_progress::Stage;
+    assert_eq!(
+        stages,
+        vec![
+            Stage::Preparing,
+            Stage::Revalidating,
+            Stage::Submitting,
+            Stage::Verifying
+        ]
+    );
+    result
+}
+
+async fn named_arbitrum_deposit_workflow() {
+    use fin_domain::financial_plans::FinancialPlanAuthorizationRequest;
+    let venue = Arc::new(SyntheticVenue::new());
+    let binance = subaccount_only_adapter(venue.clone());
+    let token = "0xaf88d065e77c8cc2239327c5edb3a432268e5831";
+    let signer = fin_evm::LocalEnvelopeSigner::from_private_key(
+        "0x0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .unwrap();
+    let address = format!("{:#x}", signer.address());
+    let wallet = ResourceId(format!("ethereum:42161:{address}"));
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("named-arbitrum-deposit.sqlite");
+    let transaction = Arc::new(Mutex::new(None));
+    let rpc = Arc::new(ArbitrumErc20ExecutionRpc {
+        token: token.into(),
+        transaction: transaction.clone(),
+        hash: Mutex::new(None),
+        accepted: AtomicUsize::new(0),
+        venue: venue.clone(),
+        journal: Arc::new(Mutex::new(None)),
+        durable_store_path: Some(path.clone()),
+        delay_credit: true,
+        wallet_address: address.clone(),
+    });
+    let (http_rpc, http_server) = http_deposit_rpc(rpc.clone()).await;
+    let ethereum = Arc::new(
+        fin_ethereum::EthereumAdapter::new(
+            fin_ethereum::EthereumConfig::wallet_only(42161, 1, vec![token.into()]),
+            vec![fin_ethereum::WalletConnection {
+                name: "synthetic-wallet".into(),
+                address: address.clone(),
+                signing_enabled: true,
+            }],
+            Arc::new(fin_evm::EvmRuntime::new(
+                Arc::new(http_rpc),
+                42161,
+                Some(Arc::new(RecordingSigner {
+                    signer,
+                    transaction: transaction.clone(),
+                })),
+            )),
+        )
+        .unwrap()
+        .with_wallet_valuation(Arc::new(SyntheticWalletPrice)),
+    );
+    let composite = Arc::new(fin_broker::BinanceEthereumDepositAdapter::new(
+        binance.clone(),
+        ethereum.clone(),
+    ));
+    let input = json!({"requestId":"synthetic-plan-deposit-template","account":"child-a","wallet":"synthetic-wallet","amount":"1.25","maxFeeEth":"0.001","coin":"USDC","network":"ARBITRUM","chainId":42161,"token":token});
+    let prepared = composite.prepare("binance.deposit", &input).await.unwrap();
+    let source_asset = prepared.intent.debits[0].amount.asset.clone();
+    let target_asset = AssetId {
+        network: "binance".into(),
+        reference: "USDC".into(),
+        decimals: 36,
+    };
+    let mut config = runtime_config();
+    config.networks = fin_broker::NetworkConfig::reviewed_evm_networks();
+    for connection in &mut config.connections {
+        if let ConnectionConfig::Ethereum {
+            resource,
+            network,
+            address: configured_address,
+            assets,
+            ..
+        } = connection
+        {
+            *resource = wallet.clone();
+            *network = "ethereum:42161".into();
+            *configured_address = address.clone();
+            *assets = vec![
+                source_asset.clone(),
+                AssetId {
+                    network: "ethereum:42161".into(),
+                    reference: "native".into(),
+                    decimals: 18,
+                },
+            ];
+        }
+    }
+    struct DepositValuator;
+    #[async_trait]
+    impl AssetValuator for DepositValuator {
+        async fn usd_micros(&self, amount: &Amount) -> Result<(String, String, String)> {
+            let unit = num_bigint::BigUint::from(10u8).pow(amount.asset.decimals as u32);
+            Ok((
+                (amount.atoms.integer() * num_bigint::BigUint::from(1_000_000u64) / unit)
+                    .to_string(),
+                now(),
+                "synthetic-deposit-usd".into(),
+            ))
+        }
+    }
+    let approval = Arc::new(SyntheticApproval(AtomicUsize::new(0)));
+    let compose = || {
+        compose_runtime(
+            config.clone(),
+            RuntimeDependencies {
+                store: Store::open(&path).unwrap(),
+                adapters: vec![binance.clone(), composite.clone(), ethereum.clone()],
+                authorizer: approval.clone(),
+                valuator: Arc::new(DepositValuator),
+                bridge: None,
+            },
+        )
+        .unwrap()
+    };
+    let broker = compose();
+    let plan = serde_json::from_value(json!({
+        "version":1,"name":"Deposit USDC into synthetic Binance",
+        "steps":[{"step_id":"deposit","operation":"binance.deposit","input":input,
+            "permitted_variations":{"mode":"exact","maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs,
+                "possible_credits":[{"resource":resource(1002),"asset":target_asset}]},
+            "completion":{"operation_succeeded":true,"minimum_net_receipt":{"resource":resource(1002),"amount":{"asset":target_asset,"atoms":Quantity::from_decimal("1.25",36).unwrap()}}},
+            "funding_dependencies":[]}],
+        "aggregate_bounds":{"maximum_debits":prepared.intent.debits,"maximum_costs":prepared.intent.maximum_costs}
+    })).unwrap();
+    let mut authorization = FinancialPlanAuthorizationRequest {
+        request_id: "synthetic-deposit-plan-approval".into(),
+        plan,
+        valid_for_seconds: Some(2700),
+        replaces_revision_id: None,
+        expected_review_hash: None,
+    };
+    let review = broker
+        .handle(BrokerRequest::PreviewPlan {
+            request: authorization.clone(),
+        })
+        .await;
+    assert!(review.ok, "{:?}", review.error);
+    authorization.expected_review_hash = Some(
+        review.result.unwrap()["review_hash"]
+            .as_str()
+            .unwrap()
+            .into(),
+    );
+    let authorized = broker
+        .handle(BrokerRequest::AuthorizePlan {
+            request: authorization,
+        })
+        .await;
+    assert!(authorized.ok, "{:?}", authorized.error);
+    let authorized = authorized.result.unwrap();
+    let plan_id = authorized["plan_id"].as_str().unwrap().to_owned();
+    let expiry = authorized["revision"]["expires_at"].clone();
+    assert!(expiry.as_str().is_some_and(|value| !value.is_empty()));
+    let revision_id = authorized["revision"]["revision_id"].as_str().unwrap();
+    assert!(!revision_id.is_empty());
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+
+    // Reproduce the persisted legacy approval with no inspectable reservation.
+    // It never acquired authority or submission identity before interruption.
+    let orphan = fin_domain::OperationRecord {
+        id: "synthetic-orphan-approval".into(),
+        request_id: "synthetic-orphan-request".into(),
+        fingerprint: "synthetic-orphan-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "binance.deposit".into(),
+        input: input.clone(),
+        status: fin_domain::Status::AwaitingApproval,
+        created_at: now(),
+        updated_at: now(),
+        preview: None,
+        approval: None,
+        submission: None,
+        dispatch_evidence: None,
+        position_baseline: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    Store::open(&path)
+        .unwrap()
+        .create_request(
+            &orphan.id,
+            &orphan.request_id,
+            &orphan.fingerprint,
+            &orphan.operation,
+            None,
+            "awaiting_approval",
+            &json!(orphan),
+            &now(),
+        )
+        .unwrap();
+    // Construction is also used by non-serving protected helpers. It cannot
+    // decide that another runtime's awaiting attempt has been interrupted.
+    let non_serving_runtime = compose();
+    let untouched = Store::open(&path)
+        .unwrap()
+        .get_record(&orphan.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        untouched,
+        json!(orphan),
+        "composition must not cancel another runtime's attempt"
+    );
+    drop(non_serving_runtime);
+    drop(broker);
+    let broker = compose();
+    // The owned synthetic startup mirrors production recovery only after
+    // the previous runtime has stopped and before accepting any request.
+    let recovery = broker.engine.recover_interrupted().unwrap();
+    assert_eq!(
+        recovery.cancelled_before_submission,
+        vec![orphan.id.clone()]
+    );
+    let repaired = Store::open(&path)
+        .unwrap()
+        .get_record(&orphan.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(repaired["status"], "cancelled");
+    assert!(repaired["submission"].is_null());
+    let status = broker
+        .handle(BrokerRequest::PlanStatus {
+            plan_id: plan_id.clone(),
+        })
+        .await;
+    assert!(status.ok, "{:?}", status.error);
+    let status = status.result.unwrap();
+    assert_eq!(status["revision"]["expires_at"], expiry);
+    assert_eq!(status["revision"]["revision_id"], revision_id);
+    let execute = BrokerRequest::ExecutePlanStep {
+        plan_id: plan_id.clone(),
+        step_id: "deposit".into(),
+        request: OperationRequest {
+            request_id: "synthetic-plan-arbitrum-deposit".into(),
+            operation: "binance.deposit".into(),
+            input,
+            run_id: None,
+        },
+    };
+    let pending = streamed_deposit_request(broker.clone(), execute.clone()).await;
+    assert!(pending.ok, "{:?}", pending.error);
+    let pending = pending.result.unwrap();
+    assert_eq!(pending["status"], "unknown", "{pending}");
+    assert_eq!(
+        pending["last_reconciliation_evidence"]["chain"]["original_envelope_verified"],
+        true
+    );
+    assert_eq!(
+        pending["last_reconciliation_evidence"]["chain"]["finality"],
+        "sequencer-inclusion"
+    );
+    assert_eq!(
+        pending["last_reconciliation_evidence"]["venueRow"]["creditState"],
+        "pending"
+    );
+    assert!(pending["submission"].is_object());
+    assert_eq!(rpc.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        approval.0.load(Ordering::SeqCst),
+        1,
+        "the active plan must cover dispatch without another approval"
+    );
+    assert_eq!(
+        venue.state.lock().unwrap().usdc_balances[EMAIL_A],
+        "0.000000"
+    );
+    drop(broker);
+    venue.state.lock().unwrap().deposit_history[0]["status"] = json!(6);
+    let broker = compose();
+    broker.engine.recover_interrupted().unwrap();
+    let still_pending = broker.handle(execute.clone()).await;
+    assert!(still_pending.ok, "{:?}", still_pending.error);
+    let still_pending = still_pending.result.unwrap();
+    assert_eq!(still_pending["id"], pending["id"]);
+    assert_eq!(still_pending["submission"], pending["submission"]);
+    assert_eq!(still_pending["status"], "unknown");
+    assert!(still_pending["last_reconciliation_evidence"]["waiting_for"].is_null());
+    assert!(still_pending["effects"].is_null());
+    {
+        let mut state = venue.state.lock().unwrap();
+        assert_eq!(state.deposit_history[0]["status"], 6);
+        state
+            .usdc_balances
+            .insert(EMAIL_A.into(), "1.250000".into());
+    }
+    let completed = broker.handle(execute.clone()).await;
+    assert!(completed.ok, "{:?}", completed.error);
+    let completed = completed.result.unwrap();
+    assert_eq!(completed["status"], "completed", "{completed}");
+    assert_eq!(completed["effects"]["evidence"]["withdrawal_locked"], true);
+    assert_eq!(completed["id"], pending["id"]);
+    let record: fin_domain::OperationRecord = serde_json::from_value(completed.clone()).unwrap();
+    assert!(record.effects.unwrap().effects.iter().any(|effect| matches!(effect,
+        fin_domain::FinancialEffect::Transfer { debit,credit,to,.. }
+            if debit.asset == source_asset && debit.atoms.to_decimal(6) == "1.25"
+            && credit.asset == target_asset && credit.atoms.to_decimal(36) == "1.25" && to == &resource(1002))));
+    let duplicate = broker.handle(execute).await;
+    assert!(duplicate.ok, "{:?}", duplicate.error);
+    assert_eq!(duplicate.result.unwrap()["id"], completed["id"]);
+    assert_eq!(
+        rpc.accepted.load(Ordering::SeqCst),
+        1,
+        "restart and retries must never rebroadcast"
+    );
+    assert_eq!(approval.0.load(Ordering::SeqCst), 1);
+    let final_status = broker.handle(BrokerRequest::PlanStatus { plan_id }).await;
+    assert!(final_status.ok, "{:?}", final_status.error);
+    let final_status = final_status.result.unwrap();
+    assert_eq!(final_status["revision"]["expires_at"], expiry);
+    assert_eq!(final_status["revision"]["revision_id"], revision_id);
+    assert_eq!(
+        final_status["steps"][0]["state"], "completed",
+        "{final_status}"
+    );
+    assert!(final_status["blockers"].as_array().unwrap().is_empty());
+    assert!(
+        final_status["usage"]["reservations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        Store::open(&path)
+            .unwrap()
+            .reservation_count(completed["id"].as_str().unwrap())
+            .unwrap(),
+        0,
+        "credited status6 releases the operation's resource reservations"
+    );
+    http_server.abort();
 }
 
 #[tokio::test]

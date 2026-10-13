@@ -29,9 +29,15 @@ pub fn configuration_approval_expired(action: &str) -> FinError {
     FinError::new(
         "AUTHORIZATION_EXPIRED",
         "enrollment",
-        "Approval expired. No configuration was saved.",
+        if action == "configure" {
+            "Configuration approval expired before dispatch; no new venue request was sent."
+        } else {
+            "Approval expired. No configuration was saved."
+        },
         if action == "initialize" {
             "Run setup again to request a fresh approval."
+        } else if action == "configure" {
+            "Run the same fin configure command with its original --id to inspect whether dispatch occurred before requesting a new approval."
         } else if action == "policy_set" {
             "Run fin policy set again to request a fresh approval."
         } else {
@@ -65,7 +71,7 @@ fn configuration_challenge(challenge: &AuthorizationChallenge) -> Result<()> {
         && challenge.operation_id.starts_with("configuration:")
         && matches!(
             challenge.binding["action"].as_str(),
-            Some("initialize" | "add" | "update" | "remove" | "policy_set")
+            Some("initialize" | "add" | "update" | "remove" | "policy_set" | "configure")
         )
         && challenge.binding["financial_movement"] == false
         && challenge.binding["future_financial_authority"] == false;
@@ -2550,6 +2556,37 @@ mod tests {
             configuration_challenge(&challenge).unwrap_err().code,
             "INVALID_CHALLENGE"
         );
+    }
+
+    #[test]
+    fn administrative_configuration_is_exact_expiring_without_financial_authority() {
+        let mut challenge = configuration();
+        challenge.binding["action"] = "configure".into();
+        challenge.binding["operation"] = "krakenfutures.set-leverage-setting".into();
+        challenge.binding["parameters"] = serde_json::json!({"maxLeverage":"2"});
+        challenge.binding_hash = binding_hash(&challenge.binding).unwrap();
+        assert!(configuration_challenge(&challenge).is_ok());
+        let proof = ConfigurationReview {
+            uid: 501,
+            hash: challenge.binding_hash.clone(),
+            nonce: challenge.nonce.clone(),
+            operation: challenge.operation_id.clone(),
+            expiry: challenge.expires_at.clone(),
+        };
+        assert!(proof.validate_for(&challenge, 501).is_ok());
+        let mut changed = challenge.clone();
+        changed.binding["parameters"]["maxLeverage"] = "3".into();
+        changed.binding_hash = binding_hash(&changed.binding).unwrap();
+        assert!(proof.validate_for(&changed, 501).is_err());
+        changed = challenge.clone();
+        changed.binding["future_financial_authority"] = true.into();
+        changed.binding_hash = binding_hash(&changed.binding).unwrap();
+        assert!(configuration_challenge(&changed).is_err());
+        challenge.expires_at = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        let failure = configuration_challenge(&challenge).unwrap_err();
+        assert_eq!(failure.code, "AUTHORIZATION_EXPIRED");
+        assert!(failure.message.contains("no new venue request"));
+        assert!(failure.next_action.contains("original --id"));
     }
 
     #[test]

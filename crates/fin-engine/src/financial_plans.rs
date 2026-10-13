@@ -8,6 +8,15 @@ use fin_domain::financial_plans::{
     FinancialPlanUsage,
 };
 
+const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
+
+#[path = "non_cash_plan_sources.rs"]
+mod non_cash_plan_sources;
+use non_cash_plan_sources::{
+    exact_non_cash_receipt_scope, substantive_plan_source_effects,
+    validate_exact_non_cash_receipt_candidate,
+};
+
 impl Engine {
     /// Prepare balance-independent adapter permissions and return the canonical
     /// review hash. Preview is read-only and never creates an approval request.
@@ -16,10 +25,23 @@ impl Engine {
         request: FinancialPlanAuthorizationRequest,
     ) -> Result<FinancialPlanReview> {
         self.validate_plan_request(&request)?;
-        let permissions = self.prepare_plan_permissions(&request.plan).await?;
-        validate_plan_permissions(&request.plan, &permissions)?;
-        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let completed_steps = prior
+            .as_ref()
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?
+            .map(completed_plan_step_ids)
+            .unwrap_or_default();
+        let permissions = self
+            .prepare_plan_permissions(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        let feasibility_warnings = self
+            .validate_plan_feasibility(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        validate_plan_permissions(&request.plan, &permissions)?;
+        let (valid_for_seconds, timing_warnings) =
+            self.resolve_plan_duration(&request, prior.as_ref())?;
+        validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
         let carried_forward_usage = prior
             .as_ref()
             .map(|record| record.usage.clone())
@@ -29,18 +51,19 @@ impl Engine {
                 .store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
-            validate_revision_transition(
+            validate_revision_transition_with_completed(
                 prior.as_ref(),
                 &request.plan,
                 &permissions,
                 &carried_forward_usage,
                 &store,
+                &completed_steps,
             )?;
         }
         let review_hash = financial_plans::financial_plan_review_hash(
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_forward_usage,
         )?;
@@ -56,12 +79,14 @@ impl Engine {
             plan: request.plan,
             permissions,
             review_hash,
-            valid_for_seconds: request.valid_for_seconds,
+            valid_for_seconds,
             replaces_revision_id: request.replaces_revision_id,
             plan_id: prior.as_ref().map(|record| record.revision.plan_id.clone()),
             carried_forward_usage,
             remaining_debits,
             remaining_costs,
+            timing_warnings,
+            feasibility_warnings,
         })
     }
 
@@ -117,10 +142,22 @@ impl Engine {
             ));
         }
 
-        let permissions = self.prepare_plan_permissions(&request.plan).await?;
-        validate_plan_permissions(&request.plan, &permissions)?;
-        validate_plan_authorization_duration(request.valid_for_seconds, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let completed_steps = prior
+            .as_ref()
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?
+            .map(completed_plan_step_ids)
+            .unwrap_or_default();
+        let permissions = self
+            .prepare_plan_permissions(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        self.validate_plan_feasibility(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        validate_plan_permissions(&request.plan, &permissions)?;
+        let (valid_for_seconds, _timing_warnings) =
+            self.resolve_plan_duration(&request, prior.as_ref())?;
+        validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
         let carried_usage = prior
             .as_ref()
             .map(|record| record.usage.clone())
@@ -128,7 +165,7 @@ impl Engine {
         let review_hash = financial_plans::financial_plan_review_hash(
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_usage,
         )?;
@@ -160,12 +197,13 @@ impl Engine {
                 .store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
-            validate_revision_transition(
+            validate_revision_transition_with_completed(
                 prior.as_ref(),
                 &request.plan,
                 &permissions,
                 &carried_usage,
                 &store,
+                &completed_steps,
             )?;
         }
         let binding = financial_plans::financial_plan_approval_binding(
@@ -173,12 +211,12 @@ impl Engine {
             &revision_id,
             &request.plan,
             &permissions,
-            request.valid_for_seconds,
+            valid_for_seconds,
             request.replaces_revision_id.as_deref(),
             &carried_usage,
         );
         let approved_binding_hash = binding_hash(&binding)?;
-        plan_duration(request.valid_for_seconds)?;
+        plan_duration(valid_for_seconds)?;
         let challenge = AuthorizationChallenge {
             purpose: "financial_plan".into(),
             operation_id: plan_id.clone(),
@@ -188,10 +226,10 @@ impl Engine {
                 "Approve the plan “{}” with {} ordered steps for {} seconds.",
                 request.plan.name,
                 request.plan.steps.len(),
-                request.valid_for_seconds
+                valid_for_seconds
             ),
             nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            expires_at: (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339(),
+            expires_at: (self.clock.now() + chrono::Duration::seconds(90)).to_rfc3339(),
         };
         {
             let mut store = self
@@ -199,7 +237,12 @@ impl Engine {
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
             if !store
-                .begin_financial_plan_request(&request.request_id, &fingerprint, &plan_id, &now())
+                .begin_financial_plan_request(
+                    &request.request_id,
+                    &fingerprint,
+                    &plan_id,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?
             {
                 return Err(plan_error(
@@ -209,27 +252,38 @@ impl Engine {
                 ));
             }
         }
+        fin_domain::execution_progress::emit(
+            fin_domain::execution_progress::Stage::AwaitingApproval,
+        );
         let approval = match self.authorizer.authorize(&challenge).await {
             Ok(approval) => approval,
             Err(error) => {
                 self.store
                     .lock()
                     .map_err(|_| internal("store lock poisoned"))?
-                    .fail_financial_plan_request(&request.request_id, &fingerprint, &now())
+                    .fail_financial_plan_request(
+                        &request.request_id,
+                        &fingerprint,
+                        &self.clock.now().to_rfc3339(),
+                    )
                     .map_err(map_store)?;
                 return Err(error);
             }
         };
-        if let Err(error) = validate_approval(&approval, &challenge, Utc::now()) {
+        if let Err(error) = validate_approval(&approval, &challenge, self.clock.now()) {
             self.store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?
-                .fail_financial_plan_request(&request.request_id, &fingerprint, &now())
+                .fail_financial_plan_request(
+                    &request.request_id,
+                    &fingerprint,
+                    &self.clock.now().to_rfc3339(),
+                )
                 .map_err(map_store)?;
             return Err(error);
         }
         let approved_at = parse_time(&approval.approved_at)?;
-        let seconds = i64::try_from(request.valid_for_seconds).map_err(|_| {
+        let seconds = i64::try_from(valid_for_seconds).map_err(|_| {
             plan_error(
                 "PLAN_DURATION_INVALID",
                 "Plan duration is too large.",
@@ -261,7 +315,7 @@ impl Engine {
             approval_binding_hash: approved_binding_hash,
             approved_at: approval.approved_at.clone(),
             expires_at,
-            valid_for_seconds: request.valid_for_seconds,
+            valid_for_seconds,
             status: FinancialPlanAuthorizationStatus::Active,
             replaces_revision_id: request.replaces_revision_id.clone(),
         };
@@ -279,7 +333,7 @@ impl Engine {
         record.approval = approval;
         record.request_fingerprint = fingerprint.clone();
         record.usage = carried_usage;
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut store = self
             .store
             .lock()
@@ -301,7 +355,22 @@ impl Engine {
     }
 
     pub async fn financial_plan_status(&self, plan_id: &str) -> Result<FinancialPlanStatus> {
-        let _guard = self.write_queue.lock().await;
+        let Ok(_guard) = self.write_queue.try_lock() else {
+            // A running execution already owns reconciliation. Return durable
+            // state promptly; retry the snapshot if a settlement changes it.
+            for _ in 0..3 {
+                let record = self.load_financial_plan(plan_id)?;
+                let status = self.build_plan_status(&record, &record.revision)?;
+                if self.load_financial_plan(plan_id)? == record {
+                    return Ok(status);
+                }
+            }
+            return Err(plan_error(
+                "PLAN_STATUS_BUSY",
+                "Plan state changed while reading status.",
+                "Retry status; no new financial action is required.",
+            ));
+        };
         let mut record = self.load_financial_plan(plan_id)?;
         expire_plan_if_needed(self, &mut record)?;
         let mut unresolved_ids = Vec::new();
@@ -333,7 +402,7 @@ impl Engine {
                     plan_id,
                     &to_value(&expected)?,
                     &to_value(&record)?,
-                    &now(),
+                    &self.clock.now().to_rfc3339(),
                 )
                 .map_err(map_store)?;
         }
@@ -392,24 +461,36 @@ impl Engine {
                 summary: format!("Read-only plan step `{step_id}`."),
                 checks: vec![],
                 warnings: vec![],
-                observed_at: now(),
-                expires_at: now(),
+                observed_at: self.clock.now().to_rfc3339(),
+                expires_at: self.clock.now().to_rfc3339(),
                 valuation: None,
                 intent: fin_domain::FinancialIntent::default(),
                 operation_version: 1,
+                action_deadline: None,
             });
         }
         let preview_attempt_id = Uuid::new_v4().to_string();
-        let execution_input =
+        let action_deadline =
+            self.prepare_action_deadline(&*adapter, &record.revision, step_id, input)?;
+        let mut execution_input =
             self.plan_step_attempt_input(&record, step_id, input, &preview_attempt_id)?;
+        if let Some(deadline) = &action_deadline {
+            deadline.apply(&mut execution_input)?;
+        }
         let context = self.preparation_context(None)?;
-        let prepared = bounded_evidence(
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
+        let mut prepared = bounded_evidence(
             operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(operation, &execution_input, &context),
         )
-        .await?;
+        .await
+        .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
+        if prepared.action_deadline.is_some() {
+            return Err(internal("adapter supplied broker timing"));
+        }
+        prepared.action_deadline = action_deadline;
         self.validate_plan_candidate(
             &*adapter,
             &record.revision,
@@ -426,7 +507,8 @@ impl Engine {
                 .map_err(|_| internal("store lock poisoned"))?;
             validate_candidate_plan_caps(&record, step_id, &prepared, &store)?;
         }
-        validate_prepared(&prepared, operation, Utc::now())?;
+        validate_prepared(&prepared, operation, self.clock.now())
+            .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         Ok(prepared)
     }
 
@@ -439,8 +521,16 @@ impl Engine {
         request: OperationRequest,
     ) -> Result<OperationRecord> {
         let _guard = self.write_queue.lock().await;
-        self.execute_financial_plan_step_serial(plan_id, step_id, request, None)
-            .await
+        let logical_request_id = request.request_id.clone();
+        self.execute_financial_plan_step_serial(
+            plan_id,
+            step_id,
+            request,
+            None,
+            &logical_request_id,
+            0,
+        )
+        .await
     }
 
     pub async fn execute_financial_plan_step_replacing(
@@ -451,11 +541,14 @@ impl Engine {
         request: OperationRequest,
     ) -> Result<OperationRecord> {
         let _guard = self.write_queue.lock().await;
+        let logical_request_id = request.request_id.clone();
         self.execute_financial_plan_step_serial(
             plan_id,
             step_id,
             request,
             Some(previous_attempt_id),
+            &logical_request_id,
+            0,
         )
         .await
     }
@@ -466,6 +559,8 @@ impl Engine {
         step_id: &str,
         request: OperationRequest,
         replacement: Option<&str>,
+        logical_request_id: &str,
+        refresh_count: usize,
     ) -> Result<OperationRecord> {
         if request.request_id.trim().is_empty() {
             return Err(plan_error(
@@ -501,6 +596,30 @@ impl Engine {
             } else {
                 Ok(operation)
             };
+        }
+        if refresh_count == 0 {
+            let prior_plan = self.load_financial_plan(plan_id)?;
+            if let Some(linkage) = prior_plan.attempts.iter().rev().find(|attempt| {
+                attempt.logical_request_id.as_deref() == Some(logical_request_id)
+                    && attempt.step_id == step_id
+            }) {
+                if linkage.request_fingerprint != fingerprint {
+                    return Err(plan_error(
+                        "REQUEST_ID_CONFLICT",
+                        "This logical request ID already names different plan parameters.",
+                        "Inspect the original attempt and use a new ID only for a deliberate retry.",
+                    ));
+                }
+                let operation = self.load_record(&linkage.attempt_id)?;
+                return if matches!(
+                    operation.status,
+                    Status::Submitted | Status::Pending | Status::Unknown
+                ) {
+                    self.reconcile_serial(operation.id.clone()).await
+                } else {
+                    Ok(operation)
+                };
+            }
         }
         let mut plan = self.load_financial_plan(plan_id)?;
         // Keep the exact pre-preparation snapshot for the later store CAS. A
@@ -549,7 +668,7 @@ impl Engine {
                 ));
             }
             if plan.revision.status != FinancialPlanAuthorizationStatus::Active
-                || parse_time(&plan.revision.expires_at)? <= Utc::now()
+                || parse_time(&plan.revision.expires_at)? <= self.clock.now()
             {
                 return Err(plan_error(
                     "PLAN_AUTHORIZATION_INACTIVE",
@@ -585,21 +704,75 @@ impl Engine {
                 .await;
         }
         let id = Uuid::new_v4().to_string();
-        let execution_input = self.plan_step_attempt_input(&plan, step_id, &request.input, &id)?;
+        // The execution input is built below with the fresh preparation deadline
+        // and request id, while preserving any typed recovery-parent fields.
         let mut execution_request = request.clone();
+        execution_request.request_id = Uuid::new_v4().to_string();
+        let preparation_stamp = PreparationStamp::start(self.clock.now());
+        let action_deadline =
+            self.prepare_action_deadline(&*adapter, &plan.revision, step_id, &request.input)?;
+        let mut execution_input =
+            self.plan_step_attempt_input(&plan, step_id, &request.input, &id)?;
+        if let Some(deadline) = &action_deadline {
+            deadline.apply(&mut execution_input)?;
+        }
         execution_request.input = execution_input.clone();
         let context = self.preparation_context(None)?;
-        let mut prepared = bounded_evidence(
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
+        let preparation_result = bounded_evidence(
             &request.operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(&request.operation, &execution_input, &context),
         )
-        .await?;
+        .await;
+        let mut prepared = match preparation_result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self
+                    .retry_plan_preparation_error(
+                        error,
+                        plan_id,
+                        step_id,
+                        request,
+                        logical_request_id,
+                        refresh_count,
+                    )
+                    .await;
+            }
+        };
+        if prepared.action_deadline.is_some() {
+            return Err(internal("adapter supplied broker timing"));
+        }
+        prepared.action_deadline = action_deadline;
         let required_origins = self.cost_origin_assets(&prepared, None)?;
-        self.complete_cost_origin_prices(&mut prepared, &required_origins)
-            .await?;
-        validate_prepared(&prepared, &request.operation, Utc::now())?;
+        if let Err(error) = self
+            .complete_cost_origin_prices(&mut prepared, &required_origins)
+            .await
+        {
+            return self
+                .retry_plan_preparation_error(
+                    error,
+                    plan_id,
+                    step_id,
+                    request,
+                    logical_request_id,
+                    refresh_count,
+                )
+                .await;
+        }
+        if let Err(error) = validate_prepared(&prepared, &request.operation, self.clock.now()) {
+            return self
+                .retry_plan_preparation_error(
+                    error,
+                    plan_id,
+                    step_id,
+                    request,
+                    logical_request_id,
+                    refresh_count,
+                )
+                .await;
+        }
         self.validate_plan_candidate(
             &*adapter,
             &plan.revision,
@@ -625,10 +798,10 @@ impl Engine {
         validate_plan_aggregate_remaining(&plan, &prepared)?;
         validate_plan_funding(&plan, step_id, &prepared)?;
 
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut operation = OperationRecord {
             id: id.clone(),
-            request_id: request.request_id.clone(),
+            request_id: execution_request.request_id.clone(),
             fingerprint: fingerprint.clone(),
             fingerprint_version: 1,
             operation: request.operation.clone(),
@@ -660,6 +833,7 @@ impl Engine {
             attempt_id: id.clone(),
             request_fingerprint: fingerprint.clone(),
             execution_binding_hash,
+            logical_request_id: Some(logical_request_id.to_owned()),
             submission_id: None,
             result: None,
         });
@@ -723,7 +897,7 @@ impl Engine {
                     &previous.id,
                     &to_value(&previous)?,
                     &id,
-                    &request.request_id,
+                    &execution_request.request_id,
                     &fingerprint,
                     &request.operation,
                     &to_value(&operation)?,
@@ -744,7 +918,7 @@ impl Engine {
                         &to_value(&initial_plan)?,
                         &updated_plan,
                         &id,
-                        &request.request_id,
+                        &execution_request.request_id,
                         &fingerprint,
                         &request.operation,
                         &to_value(&operation)?,
@@ -765,7 +939,7 @@ impl Engine {
                         &to_value(&initial_plan)?,
                         &updated_plan,
                         &id,
-                        &request.request_id,
+                        &execution_request.request_id,
                         &fingerprint,
                         &request.operation,
                         &to_value(&operation)?,
@@ -785,21 +959,29 @@ impl Engine {
                 &mut operation,
                 None,
                 Some(plan.clone()),
-                Some(prepared),
+                Some((prepared, preparation_stamp)),
                 super::ExecutionRoute::Financial,
             )
             .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
+                let error = self.plan_candidate_recovery(error, plan_id, Some(&operation));
+                let error = if can_auto_refresh_plan_candidate(&error)
+                    && refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES
+                {
+                    with_plan_refresh_details(error, refresh_count)
+                } else {
+                    error
+                };
                 if !operation.status.terminal() {
                     operation.status = if operation.submission.is_some() {
                         Status::Unknown
                     } else {
                         status_for_error(&error)
                     };
-                    operation.error = Some(error);
-                    operation.updated_at = now();
+                    operation.error = Some(error.clone());
+                    operation.updated_at = self.clock.now().to_rfc3339();
                     if operation.status.terminal() {
                         self.commit_terminal(
                             operation.clone(),
@@ -812,9 +994,195 @@ impl Engine {
                         self.update_record(&operation)?;
                     }
                 }
+                let retry_candidate = can_auto_refresh_plan_candidate(&error)
+                    && operation.status.terminal()
+                    && operation.submission.is_none()
+                    && operation.dispatch_evidence.is_none()
+                    && operation.effects.is_none()
+                    && self
+                        .store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .submission(&operation.id)
+                        .map_err(map_store)?
+                        .is_none()
+                    && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
+                    && self.plan_authority_active(plan_id)?;
+                if retry_candidate {
+                    self.verify_persisted_unsubmitted_terminal(&operation)?;
+                    return Box::pin(self.execute_financial_plan_step_serial(
+                        plan_id,
+                        step_id,
+                        request_with_child_id(request),
+                        None,
+                        logical_request_id,
+                        refresh_count + 1,
+                    ))
+                    .await;
+                }
                 Ok(operation)
             }
         }
+    }
+
+    /// Explain candidate freshness/transport recovery using current authority.
+    /// This guidance never retries, renews or changes financial state.
+    fn plan_candidate_recovery(
+        &self,
+        mut error: FinError,
+        plan_id: &str,
+        attempt: Option<&OperationRecord>,
+    ) -> FinError {
+        if !matches!(
+            error.code.as_str(),
+            "PREVIEW_EXPIRED"
+                | "PREVIEW_CHANGED"
+                | "REQUEST_CHANGED"
+                | "PLAN_CANDIDATE_CHANGED"
+                | "BINDING_CHANGED"
+                | "NONCE_CHANGED"
+                | "STALE_VALUATION"
+                | "VALUE_BOUND_EXCEEDED"
+                | "SLIPPAGE_LIMIT"
+                | "EVIDENCE_TIMEOUT"
+                | "RPC_READ_TIMEOUT"
+                | "RPC_UNAVAILABLE"
+        ) {
+            return error;
+        }
+        let Ok(plan) = self.load_financial_plan(plan_id) else {
+            return error;
+        };
+        let at = self.clock.now();
+        let active = plan.revision.status == FinancialPlanAuthorizationStatus::Active
+            && parse_time(&plan.revision.expires_at).is_ok_and(|expiry| expiry > at);
+        let submitted = attempt.is_some_and(|attempt| {
+            attempt.submission.is_some() || attempt.dispatch_evidence.is_some()
+        });
+        let other_attempt = plan
+            .active_attempt_id
+            .as_deref()
+            .filter(|id| attempt.is_none_or(|attempt| attempt.id != *id));
+        let reconcile = submitted || other_attempt.is_some();
+        error.next_action = if reconcile {
+            "Inspect this plan's status and reconcile the original attempt. Do not create another financial submission or renew consent merely to verify its outcome."
+        } else if !active {
+            "Nothing was submitted. Review the remaining work and authorize a replacement using --replaces with the current revision ID before starting a new attempt."
+        } else if attempt.is_some() {
+            "Nothing was submitted. Prepare a fresh candidate under the same plan using a new attempt ID. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        } else {
+            "Nothing was submitted or recorded as an attempt. Retry preparation under the same plan; the request ID can be reused. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        }
+        .into();
+        let mut details = error
+            .details
+            .as_deref()
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        details.extend(
+            json!({
+                "plan_id": plan_id,
+                "revision_id": plan.revision.revision_id,
+                "observed_at": at.to_rfc3339(),
+                "attempt_id": other_attempt.or_else(|| attempt.map(|attempt| attempt.id.as_str())),
+                "reconciliation_required": reconcile,
+                "reauthorization_required": !reconcile && !active,
+                "new_attempt_required": !reconcile && attempt.is_some(),
+                "submission_recorded": submitted,
+            })
+            .as_object()
+            .expect("recovery details are an object")
+            .clone(),
+        );
+        error.details = Some(Box::new(Value::Object(details)));
+        error
+    }
+
+    fn plan_authority_active(&self, plan_id: &str) -> Result<bool> {
+        let plan = self.load_financial_plan(plan_id)?;
+        Ok(
+            plan.revision.status == FinancialPlanAuthorizationStatus::Active
+                && parse_time(&plan.revision.expires_at)? > self.clock.now(),
+        )
+    }
+
+    async fn retry_plan_preparation_error(
+        &self,
+        error: FinError,
+        plan_id: &str,
+        step_id: &str,
+        request: OperationRequest,
+        logical_request_id: &str,
+        refresh_count: usize,
+    ) -> Result<OperationRecord> {
+        let error = self.plan_candidate_recovery(error, plan_id, None);
+        if can_auto_refresh_plan_candidate(&error)
+            && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
+            && self.plan_authority_active(plan_id)?
+        {
+            return Box::pin(self.execute_financial_plan_step_serial(
+                plan_id,
+                step_id,
+                request_with_child_id(request),
+                None,
+                logical_request_id,
+                refresh_count + 1,
+            ))
+            .await;
+        }
+        Err(with_plan_refresh_details(error, refresh_count))
+    }
+
+    fn verify_persisted_unsubmitted_terminal(&self, operation: &OperationRecord) -> Result<()> {
+        if !operation.status.terminal()
+            || operation.submission.is_some()
+            || operation.dispatch_evidence.is_some()
+            || operation.effects.is_some()
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "The failed candidate has evidence that prevents automatic refresh.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        if store
+            .submission(&operation.id)
+            .map_err(map_store)?
+            .is_some()
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "A durable submission identity exists for this candidate.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        let persisted = store
+            .get_record(&operation.id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("terminal candidate record disappeared"))?;
+        if persisted != to_value(operation)?
+            || persisted
+                .get("submission")
+                .is_some_and(|value| !value.is_null())
+            || persisted
+                .get("dispatch_evidence")
+                .is_some_and(|value| !value.is_null())
+            || persisted
+                .get("effects")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "The durable candidate record does not prove a clean pre-submission failure.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        Ok(())
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -885,7 +1253,7 @@ impl Engine {
             "request": request_fingerprint(&request)?,
         }))?;
         let id = Uuid::new_v4().to_string();
-        let timestamp = now();
+        let timestamp = self.clock.now().to_rfc3339();
         let mut operation = OperationRecord {
             id: id.clone(),
             request_id: request.request_id.clone(),
@@ -922,6 +1290,7 @@ impl Engine {
                 "definition_hash":exact.definition_hash,
                 "connections_hash":exact.connections_hash,
             }))?,
+            logical_request_id: None,
             submission_id: None,
             result: None,
         });
@@ -1002,7 +1371,7 @@ impl Engine {
                 operation.error = Some(error);
             }
         }
-        operation.updated_at = now();
+        operation.updated_at = self.clock.now().to_rfc3339();
         loop {
             // Hold the process-local store mutex across the final CAS so a
             // concurrent revoke on this Engine cannot slip between reading
@@ -1072,30 +1441,246 @@ impl Engine {
 
     fn validate_plan_request(&self, request: &FinancialPlanAuthorizationRequest) -> Result<()> {
         request.validate()?;
-        if request.request_id.trim().is_empty() || request.valid_for_seconds == 0 {
+        if request.request_id.trim().is_empty() || request.valid_for_seconds == Some(0) {
             return Err(plan_error(
                 "PLAN_REQUEST_INVALID",
                 "A request ID and positive plan duration are required.",
                 "Supply a stable request ID and a positive representable duration.",
             ));
         }
-        let duration = plan_duration(request.valid_for_seconds)?;
-        Utc::now().checked_add_signed(duration).ok_or_else(|| {
-            plan_error(
-                "PLAN_DURATION_INVALID",
-                "Plan expiry cannot be represented from the current time.",
-                "Choose a shorter consent duration.",
-            )
-        })?;
+        if let Some(seconds) = request.valid_for_seconds {
+            let duration = plan_duration(seconds)?;
+            self.clock
+                .now()
+                .checked_add_signed(duration)
+                .ok_or_else(|| {
+                    plan_error(
+                        "PLAN_DURATION_INVALID",
+                        "Plan expiry cannot be represented from the current time.",
+                        "Choose a shorter consent duration.",
+                    )
+                })?;
+        }
         Ok(())
+    }
+
+    fn resolve_plan_duration(
+        &self,
+        request: &FinancialPlanAuthorizationRequest,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+    ) -> Result<(u64, Vec<FinError>)> {
+        let prior_status = prior
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?;
+        let mut allowances = Vec::new();
+        let mut unclassified = Vec::new();
+        for step in &request.plan.steps {
+            if prior_status.as_ref().is_some_and(|status| {
+                status.steps.iter().any(|progress| {
+                    progress.step_id == step.step_id
+                        && progress.state == FinancialPlanStepProgressState::Completed
+                })
+            }) {
+                continue;
+            }
+            let (adapter, _) = self.resolve(&step.operation)?;
+            match adapter.plan_step_allowance(&step.operation, &step.input)? {
+                Some(seconds) => allowances.push(seconds),
+                None => unclassified.push(step.step_id.clone()),
+            }
+        }
+        if !unclassified.is_empty() && request.valid_for_seconds.is_none() {
+            return Err(plan_error("PLAN_DURATION_REQUIRED", "This plan includes a resting, delayed, or unclassified stage whose lifetime must be selected explicitly.",
+                "Supply --valid-for with a horizon covering the entire remaining sequence, including dependency settlement.")
+                .with_details(json!({"step_ids":unclassified,"explicit_duration_required":true})));
+        }
+        let budget = fin_domain::plan_timing::sequential_budget(allowances)?;
+        let seconds = request.valid_for_seconds.unwrap_or(budget);
+        for step in &request.plan.steps {
+            let completed = prior_status.as_ref().is_some_and(|status| {
+                status.steps.iter().any(|progress| {
+                    progress.step_id == step.step_id
+                        && progress.state == FinancialPlanStepProgressState::Completed
+                })
+            });
+            if !completed
+                && step
+                    .action_deadline_seconds
+                    .is_some_and(|window| window >= seconds)
+            {
+                return Err(plan_error("PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW", "The plan lifetime leaves no orchestration time around a full approved action window.",
+                    "Select an explicit longer --valid-for or review a shorter relative action window before requesting native approval.")
+                    .with_details(json!({"step_id":step.step_id,"authorization_seconds":seconds,"required_action_window_seconds":step.action_deadline_seconds,"automatic_duration":request.valid_for_seconds.is_none()})));
+            }
+        }
+        plan_duration(seconds)?;
+        let warnings = if seconds < budget {
+            vec![plan_error("PLAN_DURATION_BELOW_BUDGET", "The explicit duration is shorter than the known sequential planning allowance.",
+                "Review the full workflow horizon; keep the explicit constraint or choose a longer duration before approval.")
+                .with_details(json!({"requested_seconds":seconds,"known_budget_seconds":budget,"unclassified_step_ids":unclassified}))]
+        } else {
+            Vec::new()
+        };
+        Ok((seconds, warnings))
+    }
+
+    fn prepare_action_deadline(
+        &self,
+        adapter: &dyn Adapter,
+        revision: &FinancialPlanRevision,
+        step_id: &str,
+        input: &Value,
+    ) -> Result<Option<fin_domain::plan_timing::ResolvedActionDeadline>> {
+        let step = revision
+            .spec
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .ok_or_else(|| internal("plan step missing"))?;
+        let definition = adapter
+            .definitions()
+            .into_iter()
+            .find(|d| d.name == step.operation)
+            .ok_or_else(|| internal("plan operation missing"))?;
+        fin_domain::plan_timing::plan_input_schema(
+            &definition,
+            input,
+            step.action_deadline_seconds,
+        )?;
+        let Some(policy) = fin_domain::plan_timing::relative_deadline_policy(
+            &definition,
+            step.action_deadline_seconds,
+        )?
+        else {
+            fin_domain::authority_expiry::validate_plan_input_deadlines(
+                &definition,
+                input,
+                &revision.expires_at,
+                self.clock.now(),
+            )?;
+            return Ok(None);
+        };
+        fin_domain::plan_timing::resolve_action_deadline(
+            &policy,
+            step.action_deadline_seconds.expect("relative policy"),
+            self.clock.now(),
+            &revision.expires_at,
+        )
+        .map(Some)
+        .map_err(|mut error| {
+            if let Some(details) = error
+                .details
+                .as_mut()
+                .and_then(|details| details.as_object_mut())
+            {
+                details.insert("plan_id".into(), json!(revision.plan_id));
+                details.insert("revision_id".into(), json!(revision.revision_id));
+                details.insert("step_id".into(), json!(step_id));
+            }
+            error
+        })
+    }
+
+    /// Admission is independent of future balances and precedes native approval.
+    /// A bounded batch overlaps independent venue reads without changing step order.
+    async fn validate_plan_feasibility(
+        &self,
+        spec: &financial_plans::FinancialPlanSpec,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+        completed_steps: &[String],
+    ) -> Result<Vec<String>> {
+        let mut pending = Vec::new();
+        for step in &spec.steps {
+            if completed_steps
+                .iter()
+                .any(|completed| completed == &step.step_id)
+                && prior.is_some_and(|p| p.revision.spec.steps.iter().any(|old| old == step))
+            {
+                continue;
+            }
+            let (adapter, kind) = self.resolve(&step.operation)?;
+            // Adapter permission preparation already validates its own scope.
+            if kind != OperationKind::Write || step.permitted_variations["mode"] != "exact" {
+                continue;
+            }
+            pending.push((
+                step.step_id.clone(),
+                step.operation.clone(),
+                step.input.clone(),
+                adapter,
+            ));
+        }
+        let mut warnings = Vec::new();
+        for chunk in pending.chunks(4) {
+            let mut tasks = tokio::task::JoinSet::new();
+            for (index, (step_id, operation, input, adapter)) in chunk.iter().cloned().enumerate() {
+                tasks.spawn(async move {
+                    let result = bounded_evidence(
+                        &operation,
+                        "plan_feasibility",
+                        PREFLIGHT_TIMEOUT,
+                        adapter.validate_plan_feasibility(&operation, &input),
+                    )
+                    .await
+                    .map_err(|mut error| {
+                        let mut details = error
+                            .details
+                            .as_deref()
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        details.insert("step_id".into(), json!(step_id));
+                        details.insert("operation".into(), json!(operation));
+                        details.insert("before_plan_approval".into(), json!(true));
+                        error.details = Some(Box::new(Value::Object(details)));
+                        error
+                    })?;
+                    Ok::<_, FinError>((
+                        index,
+                        result
+                            .into_iter()
+                            .map(|warning| format!("{step_id}: {warning}"))
+                            .collect::<Vec<_>>(),
+                    ))
+                });
+            }
+            let mut rows = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                rows.push(result.map_err(|_| internal("plan feasibility task failed"))??);
+            }
+            rows.sort_by_key(|(index, _)| *index);
+            warnings.extend(rows.into_iter().flat_map(|(_, warnings)| warnings));
+        }
+        Ok(warnings)
     }
 
     async fn prepare_plan_permissions(
         &self,
         spec: &financial_plans::FinancialPlanSpec,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+        completed_steps: &[String],
     ) -> Result<Vec<FinancialPlanStepPermission>> {
         let mut permissions = Vec::new();
         for step in &spec.steps {
+            // Completed steps are archival history. Reusing their approved
+            // permission keeps an adapter metadata update from invalidating a
+            // valid suffix-only revision.
+            if let Some(prior) = prior
+                && prior.revision.spec.steps.iter().any(|old| {
+                    old == step
+                        && completed_steps
+                            .iter()
+                            .any(|completed| completed == &step.step_id)
+                })
+                && let Some(permission) = prior
+                    .revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == step.step_id)
+            {
+                permissions.push(permission.clone());
+                continue;
+            }
             let (adapter, kind) = self.resolve(&step.operation)?;
             let definition = adapter
                 .definitions()
@@ -1117,11 +1702,16 @@ impl Engine {
                     "Choose an agent-readable read or agent-invocable financial write.",
                 ));
             }
-            validate_plan_json_schema(&definition.input_schema, &step.input)?;
+            let template_schema = fin_domain::plan_timing::plan_input_schema(
+                &definition,
+                &step.input,
+                step.action_deadline_seconds,
+            )?;
+            validate_plan_json_schema(&template_schema, &step.input)?;
             let generated_input_fields =
                 generated_attempt_input_fields(&definition, &step.input, is_read)?;
             validate_generated_attempt_input_schema(
-                &definition.input_schema,
+                &template_schema,
                 &step.input,
                 &generated_input_fields,
                 &generated_attempt_input_value(
@@ -1134,7 +1724,14 @@ impl Engine {
             let exact_requested =
                 step.permitted_variations.get("mode") == Some(&Value::String("exact".into()));
             if exact_requested {
-                validate_plan_json_schema(&definition.input_schema, &step.input)?;
+                if definition.semantics["plan_permission"]["requires_adapter_scope"] == true {
+                    return Err(plan_error(
+                        "PLAN_APPLICATION_SCOPE_REQUIRED",
+                        "This operation requires its application-reviewed plan bounds, including risk and cumulative authority.",
+                        "Use the operation's discovered plan_permission bounds instead of generic exact mode.",
+                    ));
+                }
+                validate_plan_json_schema(&template_schema, &step.input)?;
                 let scope: FinancialPlanExactScope = serde_json::from_value(
                     step.permitted_variations.clone(),
                 )
@@ -1198,6 +1795,20 @@ impl Engine {
                     ),
                 )
                 .await?;
+                if let Some(window) = step.action_deadline_seconds
+                    && permission
+                        .spec
+                        .parameters
+                        .get("max_deadline_seconds")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|limit| window > limit)
+                {
+                    return Err(plan_error(
+                        "PLAN_ACTION_DEADLINE_INVALID",
+                        "Relative action window exceeds the approved adapter deadline bound.",
+                        "Use an action window within max_deadline_seconds.",
+                    ));
+                }
                 if permission.spec.summary.trim().is_empty()
                     || permission.spec.fixed.is_null()
                     || permission.spec.parameters.is_null()
@@ -1251,6 +1862,7 @@ impl Engine {
             prepared,
             &revision.expires_at,
         )?;
+        validate_action_deadline(adapter, revision, step_id, raw_input, prepared)?;
         let permission = permission_for_step(revision, step_id)?;
         if let Some(exact) = &permission.exact {
             validate_exact_plan_candidate(
@@ -1372,13 +1984,15 @@ impl Engine {
         input: &Value,
     ) -> Result<()> {
         if record.revision.status != FinancialPlanAuthorizationStatus::Active
-            || parse_time(&record.revision.expires_at)? <= Utc::now()
+            || parse_time(&record.revision.expires_at)? <= self.clock.now()
         {
             return Err(plan_error(
                 "PLAN_AUTHORIZATION_INACTIVE",
                 "Plan authorization is expired or revoked.",
-                "Obtain fresh authorization before starting another step.",
-            ));
+                "Reconcile unresolved attempts, preview a replacement revision with --replaces REVISION_ID, and obtain fresh native approval before starting another step.",
+            ).with_details(json!({"plan_id":record.revision.plan_id,"revision_id":record.revision.revision_id,"expires_at":record.revision.expires_at,
+                "observed_at":self.clock.now().to_rfc3339(),"authorization_status":record.revision.status,
+                "reauthorization_required":true,"reconciliation_required":record.active_attempt_id.is_some()})));
         }
         let step = record
             .revision
@@ -1675,6 +2289,13 @@ impl Engine {
         record: &FinancialPlanAuthorizationRecord,
         revision: &FinancialPlanRevision,
     ) -> Result<FinancialPlanStatus> {
+        let consumed_obligations_by_scope = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| internal("store lock poisoned"))?;
+            cumulative_obligation_usage_by_scope(record, revision, &store)?
+        };
         let mut steps = Vec::new();
         let mut reserved_debits = record.usage.consumed_debits.clone();
         let mut reserved_costs = record.usage.consumed_costs.clone();
@@ -1808,6 +2429,13 @@ impl Engine {
                 });
             }
             let permission = permission_for_step(revision, &step.step_id)?;
+            let consumed_obligations = permission
+                .permission
+                .as_ref()
+                .and_then(|adapter| adapter.cumulative_scope.as_ref())
+                .and_then(|scope| consumed_obligations_by_scope.get(&scope.scope_id))
+                .cloned()
+                .unwrap_or_default();
             let exhausted = !completed
                 && !unresolved
                 && step_authority_cannot_complete(
@@ -1815,10 +2443,17 @@ impl Engine {
                     permission,
                     &consumed_debits,
                     &remaining_debits,
+                    &consumed_obligations,
+                    &step_effects,
                 )?;
             if exhausted {
-                blockers
-                    .push("Remaining step authority cannot satisfy its completion target.".into());
+                blockers.push(if exact_non_cash_receipt_scope(step, permission)
+                    && substantive_plan_source_effects(&step_effects)?
+                {
+                    "This exact noncash receipt step already used its finite source attempt; a remaining receipt requires fresh authority for a separate step or plan.".into()
+                } else {
+                    "Remaining step authority cannot satisfy its completion target.".into()
+                });
             }
             let state = if completed {
                 FinancialPlanStepProgressState::Completed
@@ -1844,7 +2479,7 @@ impl Engine {
             blockers.push("A plan attempt is unresolved.".into());
         }
         let authorization_active = revision.status == FinancialPlanAuthorizationStatus::Active
-            && parse_time(&revision.expires_at)? > Utc::now();
+            && parse_time(&revision.expires_at)? > self.clock.now();
         let pending_bridge_settlements = bridge_transfers
             .iter()
             .filter(|transfer| {
@@ -1902,7 +2537,26 @@ impl Engine {
         if !authorization_active && next.is_some() {
             blockers.push("Plan authorization is expired, revoked, or superseded.".into());
         }
+        let at = self.clock.now();
+        let remaining_seconds = parse_time(&revision.expires_at)?
+            .signed_duration_since(at)
+            .num_seconds()
+            .max(0) as u64;
+        let required_window = next
+            .as_ref()
+            .and_then(|id| revision.spec.steps.iter().find(|step| &step.step_id == id))
+            .and_then(|step| step.action_deadline_seconds);
+        let authorization_timing = Some(fin_domain::plan_timing::PlanAuthorizationTiming {
+            observed_at: at.to_rfc3339(),
+            expires_at: revision.expires_at.clone(),
+            remaining_seconds,
+            required_action_window_seconds: required_window,
+            can_prepare_next_action: authorization_active
+                && next.is_some()
+                && required_window.is_none_or(|window| window <= remaining_seconds),
+        });
         Ok(FinancialPlanStatus {
+            authorization_timing,
             plan_id: revision.plan_id.clone(),
             revision: revision.clone(),
             usage: record.usage.clone(),
@@ -1935,7 +2589,12 @@ pub(super) fn validate_exact_plan_candidate(
         .into_iter()
         .find(|definition| definition.name == operation)
         .ok_or_else(|| internal("registry definition disappeared"))?;
-    validate_plan_json_schema(&definition.input_schema, raw_input)?;
+    let seconds = prepared
+        .action_deadline
+        .as_ref()
+        .map(|deadline| deadline.window_seconds);
+    let schema = fin_domain::plan_timing::plan_input_schema(&definition, raw_input, seconds)?;
+    validate_plan_json_schema(&schema, raw_input)?;
     validate_exact_plan_identity(adapter, operation, exact)
 }
 
@@ -1983,6 +2642,46 @@ fn validate_exact_plan_identity(
         ));
     }
     Ok(())
+}
+
+fn can_auto_refresh_plan_candidate(error: &FinError) -> bool {
+    // A new candidate may reprice within the existing plan and policy bounds.
+    // The shared code also reports identity and malformed-bound failures; those
+    // must not be retried as ordinary USD price movement.
+    if error.code == "VALUE_BOUND_EXCEEDED" {
+        return error
+            .details
+            .as_deref()
+            .is_some_and(|details| details["reason"].as_str() == Some("usd_ceiling_exceeded"));
+    }
+    matches!(
+        error.code.as_str(),
+        "PREVIEW_EXPIRED"
+            | "STALE_VALUATION"
+            | "NONCE_CHANGED"
+            | "EVIDENCE_TIMEOUT"
+            | "RPC_READ_TIMEOUT"
+            | "RPC_UNAVAILABLE"
+    )
+}
+
+fn with_plan_refresh_details(mut error: FinError, refresh_count: usize) -> FinError {
+    let mut details = error
+        .details
+        .as_deref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    details.insert("refresh_count".into(), json!(refresh_count));
+    details.insert("refresh_limit".into(), json!(MAX_PLAN_CANDIDATE_REFRESHES));
+    details.insert("refresh_exhausted".into(), json!(true));
+    error.details = Some(Box::new(Value::Object(details)));
+    error
+}
+
+fn request_with_child_id(mut request: OperationRequest) -> OperationRequest {
+    request.request_id = Uuid::new_v4().to_string();
+    request
 }
 
 fn select_next_eligible_step(steps: &[FinancialPlanStepProgress]) -> Option<String> {
@@ -2340,6 +3039,80 @@ fn validate_plan_permissions(
     validate_aggregate_permission_bounds(spec, permissions)
 }
 
+pub(super) fn carry_action_deadline(
+    original: &PreparedOperation,
+    candidate: &mut PreparedOperation,
+) -> Result<()> {
+    if candidate.action_deadline.is_some() && candidate.action_deadline != original.action_deadline
+    {
+        return Err(plan_error(
+            "PLAN_CANDIDATE_CHANGED",
+            "The immutable action deadline resolution changed.",
+            "Reconcile the original attempt; do not rewrite it.",
+        ));
+    }
+    candidate
+        .action_deadline
+        .clone_from(&original.action_deadline);
+    Ok(())
+}
+
+pub(super) fn validate_action_deadline(
+    adapter: &dyn Adapter,
+    revision: &FinancialPlanRevision,
+    step_id: &str,
+    raw_input: &Value,
+    prepared: &PreparedOperation,
+) -> Result<()> {
+    let step = revision
+        .spec
+        .steps
+        .iter()
+        .find(|step| step.step_id == step_id)
+        .ok_or_else(|| internal("step missing"))?;
+    let definition = adapter
+        .definitions()
+        .into_iter()
+        .find(|d| d.name == step.operation)
+        .ok_or_else(|| internal("definition missing"))?;
+    let policy = fin_domain::plan_timing::relative_deadline_policy(
+        &definition,
+        step.action_deadline_seconds,
+    )?;
+    match (policy, &prepared.action_deadline) {
+        (None, None) => Ok(()),
+        (Some(policy), Some(resolved)) => {
+            fin_domain::plan_timing::plan_input_schema(
+                &definition,
+                raw_input,
+                step.action_deadline_seconds,
+            )?;
+            let at = parse_time(&resolved.resolved_at)?;
+            let expected = fin_domain::plan_timing::resolve_action_deadline(
+                &policy,
+                step.action_deadline_seconds.expect("relative deadline"),
+                at,
+                &revision.expires_at,
+            )?;
+            if resolved != &expected
+                || prepared.input.get(&policy.field) != Some(&json!(expected.deadline_unix_seconds))
+            {
+                return Err(plan_error(
+                    "PLAN_CANDIDATE_CHANGED",
+                    "The concrete deadline differs from its immutable resolution or approved window.",
+                    "Reconcile the original attempt; use candidate replacement only while unsubmitted.",
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(plan_error(
+            "PLAN_CANDIDATE_CHANGED",
+            "The candidate lacks or changes its approved deadline policy.",
+            "Preserve the original prepared candidate.",
+        )),
+    }
+}
+
 fn validate_plan_authorization_duration(
     requested_seconds: u64,
     permissions: &[FinancialPlanStepPermission],
@@ -2356,8 +3129,8 @@ fn validate_plan_authorization_duration(
             return Err(plan_error(
                 "PLAN_AUTHORIZATION_DURATION_EXCEEDED",
                 "The requested plan authorization lasts longer than an adapter-reviewed step allows.",
-                "Choose a plan duration within every step's approved authorization limit and review again.",
-            ));
+                "Review the workflow duration and the adapter's intentional authorization limit; revise the approved scope or workflow rather than truncating consent.",
+            ).with_details(json!({"step_id":permission.step_id,"requested_seconds":requested_seconds,"maximum_authorization_seconds":maximum})));
         }
     }
     Ok(())
@@ -2394,6 +3167,17 @@ fn validate_cumulative_plan_scopes(
                 "PLAN_CUMULATIVE_SCOPE_INVALID",
                 "An adapter cumulative scope must contain valid positive unique debit and cost caps.",
                 "Regenerate the plan review with exact parent limits.",
+            ));
+        }
+        let mut obligation_ids = std::collections::BTreeSet::new();
+        if scope.maximum_obligations.iter().any(|cap| {
+            cap.amount.atoms.is_zero()
+                || !obligation_ids.insert((cap.resource.clone(), cap.amount.asset.clone()))
+        }) {
+            return Err(plan_error(
+                "PLAN_CUMULATIVE_SCOPE_INVALID",
+                "Debt obligation caps must be positive and unique by resource and asset.",
+                "Regenerate the plan with exact borrowing limits.",
             ));
         }
         let mut cost_ids = Vec::new();
@@ -2498,7 +3282,19 @@ fn validate_exact_scope(scope: &FinancialPlanExactScope) -> Result<()> {
     }
     let mut costs = Vec::new();
     for cost in &scope.maximum_costs {
-        if cost.amount.atoms.is_zero()
+        let valid_text = |value: &str| !value.is_empty() && value.trim() == value;
+        let valid_location = match &cost.location {
+            AccountingLocation::Cash { resource } => valid_text(&resource.0),
+            AccountingLocation::Position {
+                resource, position, ..
+            } => valid_text(&resource.0) && valid_text(position),
+        };
+        let valid_treatment = matches!(cost.location, AccountingLocation::Cash { .. })
+            || matches!(cost.treatment, CostTreatment::IncludedInDebit);
+        if !valid_location
+            || !valid_treatment
+            || !valid_text(&cost.amount.asset.network)
+            || !valid_text(&cost.amount.asset.reference)
             || costs.iter().any(|identity| {
                 identity
                     == &(
@@ -2510,8 +3306,8 @@ fn validate_exact_scope(scope: &FinancialPlanExactScope) -> Result<()> {
         {
             return Err(plan_error(
                 "PLAN_EXACT_SCOPE_INVALID",
-                "Exact cost caps must be positive and unique by location, asset, and treatment.",
-                "Use one positive maximum cost for each exact fee identity.",
+                "Exact cost caps must have valid unique location, asset, and treatment identities; zero preserves exact zero fee authority.",
+                "Use one nonnegative maximum cost for each exact fee identity.",
             ));
         }
         costs.push((
@@ -2645,6 +3441,9 @@ pub(super) fn validate_generated_plan_candidate(
                 recovered.clone(),
             )?;
         }
+    }
+    if let Some(deadline) = &prepared.action_deadline {
+        deadline.apply(&mut ordinary_expected)?;
     }
     if &ordinary_expected != expected_input {
         return Err(recovery_parent_invalid(
@@ -2930,6 +3729,39 @@ fn validate_aggregate_permission_bounds(
     spec: &financial_plans::FinancialPlanSpec,
     permissions: &[FinancialPlanStepPermission],
 ) -> Result<()> {
+    // Completion targets are required gross spending, unlike optional step
+    // ceilings that may deliberately share a smaller aggregate allowance.
+    // Catch impossible plans with exact arithmetic before asking for approval.
+    let mut required = BTreeMap::<(ResourceId, fin_domain::AssetId), BigUint>::new();
+    for target in spec
+        .steps
+        .iter()
+        .filter_map(|step| step.completion.principal_spend.as_ref())
+    {
+        *required
+            .entry((target.resource.clone(), target.amount.asset.clone()))
+            .or_default() += target.amount.atoms.integer();
+    }
+    for ((resource, asset), amount) in required {
+        let cap = spec
+            .aggregate_bounds
+            .maximum_debits
+            .iter()
+            .find(|cap| cap.resource == resource && cap.amount.asset == asset);
+        if cap.is_none_or(|cap| amount > cap.amount.atoms.integer()) {
+            return Err(plan_error(
+                "PLAN_COMPLETION_OUTSIDE_AGGREGATE",
+                "Required principal-spend targets exceed the plan's cumulative debit cap.",
+                "Reduce the completion targets or review a sufficient aggregate cap before authorization.",
+            )
+            .with_details(json!({
+                "resource": resource,
+                "asset": asset,
+                "required_atoms": amount.to_string(),
+                "maximum_atoms": cap.map(|cap| &cap.amount.atoms),
+            })));
+        }
+    }
     for permission in permissions {
         for item in permission_debits(permission) {
             if !spec
@@ -2970,6 +3802,7 @@ pub(super) fn validate_candidate_plan_caps(
 ) -> Result<()> {
     let permission = permission_for_step(&record.revision, step_id)?;
     let scope = plan_boundary_spec(permission)?;
+    let mut prior_effects = Vec::new();
     let mut spent_debits = Vec::new();
     let mut spent_costs = Vec::new();
     for attempt in record
@@ -2986,6 +3819,7 @@ pub(super) fn validate_candidate_plan_caps(
         };
         let operation: OperationRecord = from_value(raw)?;
         if let Some(verified) = operation.effects {
+            prior_effects.extend(verified.effects.clone());
             let (debits, costs, _) =
                 summarize_plan_effects(&verified.effects, step_id, &record.usage)?;
             spent_debits = add_amounts(&spent_debits, &debits)?;
@@ -3007,6 +3841,7 @@ pub(super) fn validate_candidate_plan_caps(
                 "Use a step from the active revision.",
             )
         })?;
+    validate_exact_non_cash_receipt_candidate(step, permission, prepared, &prior_effects)?;
     if let Some(target) = &step.completion.principal_spend {
         let consumed = spent_debits
             .iter()
@@ -3321,6 +4156,48 @@ fn bridge_expectation_preserves_quote_targets(
         && targets_match(&quote.refund, &selected.refund)
 }
 
+fn reserved_obligations(intent: &fin_domain::FinancialIntent) -> Vec<ResourceAmount> {
+    intent
+        .expected
+        .iter()
+        .filter_map(|effect| match effect {
+            EffectConstraint::Debt {
+                resource,
+                asset,
+                direction: Direction::Increase,
+                maximum_change,
+                ..
+            } => Some(ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: asset.clone(),
+                    atoms: maximum_change.clone(),
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
+fn verified_obligations(effects: &[FinancialEffect]) -> Vec<ResourceAmount> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            FinancialEffect::DebtChange {
+                resource,
+                asset,
+                delta,
+                ..
+            } if !delta.is_negative() && !delta.magnitude().is_zero() => Some(ResourceAmount {
+                resource: resource.clone(),
+                amount: Amount {
+                    asset: asset.clone(),
+                    atoms: delta.magnitude(),
+                },
+            }),
+            _ => None,
+        })
+        .collect()
+}
 fn validate_cumulative_scope_caps(
     record: &FinancialPlanAuthorizationRecord,
     step_id: &str,
@@ -3348,6 +4225,7 @@ fn validate_cumulative_scope_caps(
     }
     let mut spent_debits = Vec::new();
     let mut spent_costs = Vec::new();
+    let mut incurred = Vec::new();
     for attempt in &record.attempts {
         if record.active_attempt_id.as_deref() == Some(attempt.attempt_id.as_str()) {
             continue;
@@ -3376,6 +4254,7 @@ fn validate_cumulative_scope_caps(
         };
         let operation: OperationRecord = from_value(raw)?;
         if let Some(verified) = operation.effects {
+            incurred = add_amounts(&incurred, &verified_obligations(&verified.effects))?;
             let (debits, costs, _) =
                 summarize_plan_effects(&verified.effects, &attempt.step_id, &record.usage)?;
             spent_debits = add_amounts(&spent_debits, &debits)?;
@@ -3386,8 +4265,30 @@ fn validate_cumulative_scope_caps(
             .iter()
             .find(|reservation| reservation.attempt_id == attempt.attempt_id)
         {
+            if let Some(preview) = operation.preview.as_ref() {
+                incurred = add_amounts(&incurred, &reserved_obligations(&preview.intent))?;
+            } else {
+                return Err(internal("Reserved attempt lacks its durable preview."));
+            }
             spent_debits = add_amounts(&spent_debits, &reservation.debits)?;
             spent_costs = add_cost_bounds(&spent_costs, &reservation.costs)?;
+        }
+    }
+    let proposed = add_amounts(&incurred, &reserved_obligations(&prepared.intent))?;
+    for obligation in proposed
+        .iter()
+        .filter(|_| !scope.maximum_obligations.is_empty())
+    {
+        if !scope.maximum_obligations.iter().any(|cap| {
+            cap.resource == obligation.resource
+                && cap.amount.asset == obligation.amount.asset
+                && cap.amount.atoms >= obligation.amount.atoms
+        }) {
+            return Err(plan_error(
+                "PLAN_OBLIGATION_CAP_EXCEEDED",
+                "Cumulative incurred debt exceeds the approved scope; repayment does not replenish borrowing authority.",
+                "Reduce the borrowing candidate or approve a revised finite borrowing scope.",
+            ));
         }
     }
     let remaining_debits = remaining_debits(&scope.maximum_debits, Some(&spent_debits))?;
@@ -3442,6 +4343,8 @@ fn step_authority_cannot_complete(
     permission: &FinancialPlanStepPermission,
     consumed_debits: &[ResourceAmount],
     aggregate_remaining_debits: &[ResourceAmount],
+    consumed_obligations: &[ResourceAmount],
+    prior_effects: &[FinancialEffect],
 ) -> Result<bool> {
     let remaining = remaining_debits(
         permission_debits(permission),
@@ -3481,7 +4384,7 @@ fn step_authority_cannot_complete(
             return Ok(true);
         }
     }
-    if step.completion.minimum_net_receipt.is_some() {
+    if let Some(target) = step.completion.minimum_net_receipt.as_ref() {
         let any_principal_capacity = remaining.iter().any(|item| {
             !item.amount.atoms.is_zero()
                 && aggregate_remaining_debits.iter().any(|aggregate| {
@@ -3490,21 +4393,119 @@ fn step_authority_cannot_complete(
                         && !aggregate.amount.atoms.is_zero()
                 })
         });
-        let deferred_capacity = permission
+        let receipt_capacity = permission
             .permission
             .as_ref()
             .and_then(|value| value.deferred_receipt.as_ref())
-            .zip(step.completion.minimum_net_receipt.as_ref())
-            .is_some_and(|(capacity, target)| {
+            .is_some_and(|capacity| {
                 capacity.resource == target.resource
                     && capacity.amount.asset == target.amount.asset
                     && capacity.amount.atoms >= target.amount.atoms
             });
-        if !any_principal_capacity && !deferred_capacity {
+        let obligation_receipt_capacity =
+            obligation_receipt_capacity(permission, target, consumed_obligations)?;
+        let exact_non_cash = exact_non_cash_receipt_scope(step, permission);
+        if !any_principal_capacity
+            && ((exact_non_cash && substantive_plan_source_effects(prior_effects)?)
+                || (!exact_non_cash && !receipt_capacity && !obligation_receipt_capacity))
+        {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn obligation_receipt_capacity(
+    permission: &FinancialPlanStepPermission,
+    target: &ResourceAmount,
+    consumed_obligations: &[ResourceAmount],
+) -> Result<bool> {
+    let Some(adapter) = permission.permission.as_ref() else {
+        return Ok(false);
+    };
+    let Some(scope) = adapter.cumulative_scope.as_ref() else {
+        return Ok(false);
+    };
+    let credit_is_scoped = adapter
+        .possible_credits
+        .iter()
+        .any(|credit| credit.resource == target.resource && credit.asset == target.amount.asset);
+    if !credit_is_scoped {
+        return Ok(false);
+    }
+    let remaining = remaining_debits(
+        &scope.maximum_obligations,
+        Some(&consumed_obligations.to_vec()),
+    )?;
+    Ok(remaining.iter().any(|cap| {
+        cap.resource == target.resource
+            && cap.amount.asset == target.amount.asset
+            && cap.amount.atoms >= target.amount.atoms
+    }))
+}
+
+fn cumulative_obligation_usage_by_scope(
+    record: &FinancialPlanAuthorizationRecord,
+    revision: &FinancialPlanRevision,
+    store: &Store,
+) -> Result<BTreeMap<String, Vec<ResourceAmount>>> {
+    let mut revisions = store
+        .financial_plan_revisions(&revision.plan_id)
+        .map_err(map_store)?
+        .into_iter()
+        .map(from_value::<FinancialPlanRevision>)
+        .collect::<Result<Vec<_>>>()?;
+    if !revisions
+        .iter()
+        .any(|candidate| candidate.revision_id == revision.revision_id)
+    {
+        revisions.push(revision.clone());
+    }
+
+    let mut usage = BTreeMap::<String, Vec<ResourceAmount>>::new();
+    for attempt in &record.attempts {
+        let Some(scope_id) = revisions
+            .iter()
+            .find(|candidate| candidate.revision_id == attempt.revision_id)
+            .and_then(|candidate| {
+                candidate
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == attempt.step_id)
+            })
+            .and_then(|permission| permission.permission.as_ref())
+            .and_then(|permission| permission.cumulative_scope.as_ref())
+            .map(|scope| scope.scope_id.clone())
+        else {
+            continue;
+        };
+        let Some(raw) = store.get_record(&attempt.attempt_id).map_err(map_store)? else {
+            return Err(plan_error(
+                "PLAN_ATTEMPT_MISSING",
+                "A cumulative-scope attempt record is missing.",
+                "Restore the original plan attempt before continuing.",
+            ));
+        };
+        let operation: OperationRecord = from_value(raw)?;
+        let obligations = if let Some(verified) = operation.effects {
+            verified_obligations(&verified.effects)
+        } else if record
+            .usage
+            .reservations
+            .iter()
+            .any(|reservation| reservation.attempt_id == attempt.attempt_id)
+        {
+            let Some(preview) = operation.preview.as_ref() else {
+                return Err(internal("Reserved attempt lacks its durable preview."));
+            };
+            reserved_obligations(&preview.intent)
+        } else {
+            Vec::new()
+        };
+        let current = usage.entry(scope_id).or_default();
+        *current = add_amounts(current, &obligations)?;
+    }
+    Ok(usage)
 }
 
 fn validate_plan_aggregate_remaining(
@@ -3648,6 +4649,8 @@ fn completion_met(
     effects: &[FinancialEffect],
     operation_succeeded: bool,
 ) -> Result<bool> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     if completion.operation_succeeded && !operation_succeeded {
         return Ok(false);
     }
@@ -3717,6 +4720,8 @@ fn completion_met(
 }
 
 fn completion_receipt_totals(effects: &[FinancialEffect]) -> Result<BTreeMap<String, BigUint>> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     let mut receipts = BTreeMap::<String, BigUint>::new();
     for effect in effects {
         match effect {
@@ -3866,6 +4871,8 @@ fn summarize_plan_effects(
     Vec<CostBound>,
     Vec<FinancialPlanProceeds>,
 )> {
+    let projected = super::conversion_sequences::project_effects(effects)?;
+    let effects = projected.as_slice();
     let mut debits = Vec::new();
     let mut costs = Vec::new();
     let mut credits = BTreeMap::<String, (ResourceId, fin_domain::AssetId, BigUint)>::new();
@@ -4056,7 +5063,8 @@ pub(super) fn account_financial_plan_effects(
         ),
     >::new();
     let mut credit_map = BTreeMap::<String, (ResourceId, fin_domain::AssetId, BigUint)>::new();
-    for effect in &verified.effects {
+    let projected = super::conversion_sequences::project_effects(&verified.effects)?;
+    for effect in &projected {
         match effect {
             FinancialEffect::CashDebit { resource, amount } => collect_amount(
                 &mut debit_map,
@@ -4340,12 +5348,24 @@ fn collect_amount(
     entry.2 += amount;
 }
 
+#[cfg(test)]
 fn validate_revision_transition(
     prior: Option<&FinancialPlanAuthorizationRecord>,
     next: &financial_plans::FinancialPlanSpec,
     next_permissions: &[FinancialPlanStepPermission],
     usage: &FinancialPlanUsage,
     store: &Store,
+) -> Result<()> {
+    validate_revision_transition_with_completed(prior, next, next_permissions, usage, store, &[])
+}
+
+fn validate_revision_transition_with_completed(
+    prior: Option<&FinancialPlanAuthorizationRecord>,
+    next: &financial_plans::FinancialPlanSpec,
+    next_permissions: &[FinancialPlanStepPermission],
+    usage: &FinancialPlanUsage,
+    store: &Store,
+    completed_steps: &[String],
 ) -> Result<()> {
     let Some(prior) = prior else {
         return Ok(());
@@ -4369,7 +5389,10 @@ fn validate_revision_transition(
             prior
                 .attempts
                 .iter()
-                .any(|attempt| attempt.step_id == step.step_id)
+                .any(|attempt| {
+                    attempt.step_id == step.step_id
+                        && !repairable_zero_effect_attempt(prior, attempt, store)
+                })
                 .then_some(index)
         })
         .collect::<Vec<_>>();
@@ -4384,10 +5407,69 @@ fn validate_revision_transition(
         for index in 0..=last_started {
             let old = &prior.revision.spec.steps[index];
             let new = &next.steps[index];
+            let step_attempts = prior
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.step_id == old.step_id)
+                .collect::<Vec<_>>();
+            if !step_attempts.is_empty()
+                && step_attempts
+                    .iter()
+                    .all(|attempt| repairable_zero_effect_attempt(prior, attempt, store))
+            {
+                if old.step_id != new.step_id
+                    || old.operation != new.operation
+                    || old.completion != new.completion
+                    || old.funding_dependencies != new.funding_dependencies
+                {
+                    return Err(plan_error(
+                        "PLAN_REVISION_HISTORY_CONFLICT",
+                        "A failed zero-effect attempt can change its input or action window while preserving its financial identity and accounting declarations.",
+                        "Keep the step operation, completion conditions, and funding dependencies unchanged.",
+                    ));
+                }
+                continue;
+            }
+            if completed_steps
+                .iter()
+                .any(|step_id| step_id == &old.step_id)
+            {
+                let old_permission = prior
+                    .revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == old.step_id)
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_PERMISSION_MISSING",
+                            "The prior revision has incomplete permission history.",
+                            "Restore the complete prior plan revision before replacing it.",
+                        )
+                    })?;
+                let new_permission = next_permissions
+                    .iter()
+                    .find(|permission| permission.step_id == old.step_id)
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_PERMISSION_MISSING",
+                            "A completed step has no replacement permission.",
+                            "Keep every completed step unchanged in the replacement revision.",
+                        )
+                    })?;
+                if old != new || old_permission != new_permission {
+                    return Err(plan_error(
+                        "PLAN_REVISION_HISTORY_CONFLICT",
+                        "A revision must preserve the recorded specification and permission for each completed step.",
+                        "Keep completed plan steps unchanged and revise only the remaining suffix.",
+                    ));
+                }
+                continue;
+            }
             if old.step_id != new.step_id
                 || old.operation != new.operation
                 || old.completion != new.completion
                 || old.funding_dependencies != new.funding_dependencies
+                || old.action_deadline_seconds != new.action_deadline_seconds
             {
                 return Err(plan_error(
                     "PLAN_REVISION_HISTORY_CONFLICT",
@@ -4520,6 +5602,56 @@ fn validate_revision_transition(
         }
     }
     Ok(())
+}
+
+fn completed_plan_step_ids(status: FinancialPlanStatus) -> Vec<String> {
+    status
+        .steps
+        .into_iter()
+        .filter(|step| step.state == FinancialPlanStepProgressState::Completed)
+        .map(|step| step.step_id)
+        .collect()
+}
+
+fn repairable_zero_effect_attempt(
+    prior: &FinancialPlanAuthorizationRecord,
+    attempt: &FinancialPlanAttemptLinkage,
+    store: &Store,
+) -> bool {
+    if attempt.submission_id.is_some() || !matches!(store.submission(&attempt.attempt_id), Ok(None))
+    {
+        return false;
+    }
+    let Some(operation) = store
+        .get_record(&attempt.attempt_id)
+        .ok()
+        .flatten()
+        .and_then(|value| from_value::<OperationRecord>(value).ok())
+    else {
+        return false;
+    };
+    repairable_zero_effect_record(prior, attempt, &operation, false)
+}
+
+fn repairable_zero_effect_record(
+    prior: &FinancialPlanAuthorizationRecord,
+    attempt: &FinancialPlanAttemptLinkage,
+    operation: &OperationRecord,
+    durable_submission_exists: bool,
+) -> bool {
+    !durable_submission_exists
+        && attempt.submission_id.is_none()
+        && matches!(
+            operation.status,
+            Status::Failed | Status::Expired | Status::Cancelled | Status::Rejected
+        )
+        && operation.submission.is_none()
+        && operation.dispatch_evidence.is_none()
+        && operation
+            .effects
+            .as_ref()
+            .is_none_or(|effects| effects.effects.is_empty())
+        && prior.active_attempt_id.as_deref() != Some(attempt.attempt_id.as_str())
 }
 
 fn validate_cumulative_revision_scopes(
@@ -4692,7 +5824,7 @@ fn expire_plan_if_needed(
     record: &mut FinancialPlanAuthorizationRecord,
 ) -> Result<()> {
     if record.revision.status == FinancialPlanAuthorizationStatus::Active
-        && parse_time(&record.revision.expires_at)? <= Utc::now()
+        && parse_time(&record.revision.expires_at)? <= engine.clock.now()
     {
         let expected = record.clone();
         record.revision.status = FinancialPlanAuthorizationStatus::Expired;
@@ -4704,7 +5836,7 @@ fn expire_plan_if_needed(
                 &record.revision.plan_id,
                 &to_value(&expected)?,
                 &to_value(record)?,
-                &now(),
+                &engine.clock.now().to_rfc3339(),
             )
             .map_err(map_store)?;
     }
@@ -4784,17 +5916,13 @@ mod tests {
     #[test]
     fn recovery_children_may_form_only_a_contiguous_parent_bound_chain() {
         let spec: financial_plans::FinancialPlanSpec = serde_json::from_value(json!({
-            "version":1,
-            "name":"recovery chain",
-            "steps":[
+            "version":1,"name":"recovery chain","steps":[
                 {"step_id":"create","operation":"order.create","input":{"wallet":"w"},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
                 {"step_id":"update","operation":"order.update","input":{"original_operation_id":null,"original_submission":null},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
                 {"step_id":"cancel","operation":"order.cancel","input":{"original_operation_id":null,"original_submission":null},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]},
                 {"step_id":"next-write","operation":"wallet.transfer","input":{},"permitted_variations":{},"completion":{"operation_succeeded":true},"funding_dependencies":[]}
-            ],
-            "aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}
-        }))
-        .unwrap();
+            ],"aggregate_bounds":{"maximum_debits":[],"maximum_costs":[]}
+        })).unwrap();
         let permission = |step_id: &str, parent: Option<&str>| {
             let recovery_parent =
                 parent.map(|step_id| financial_plans::FinancialPlanRecoveryParent {
@@ -4831,25 +5959,26 @@ mod tests {
             permission("next-write", None),
         ];
         assert!(validate_plan_recovery_permissions(&spec, &permissions).is_ok());
-
-        let mut gapped_permissions = permissions.clone();
-        gapped_permissions[1] = permission("update", None);
+        let mut gapped = permissions.clone();
+        gapped[1] = permission("update", None);
         assert_eq!(
-            validate_plan_recovery_permissions(&spec, &gapped_permissions)
+            validate_plan_recovery_permissions(&spec, &gapped)
                 .unwrap_err()
                 .code,
             "PLAN_RECOVERY_PARENT_INVALID"
         );
-
-        let mut wrong_parent_permissions = permissions;
-        wrong_parent_permissions[2] = permission("cancel", Some("update"));
+        let mut wrong_parent = permissions;
+        wrong_parent[2] = permission("cancel", Some("update"));
         assert_eq!(
-            validate_plan_recovery_permissions(&spec, &wrong_parent_permissions)
+            validate_plan_recovery_permissions(&spec, &wrong_parent)
                 .unwrap_err()
                 .code,
             "PLAN_RECOVERY_PARENT_INVALID"
         );
     }
+    include!("plan_revision_repair_tests.rs");
+    include!("non_cash_plan_source_tests.rs");
+    include!("exact_zero_cost_tests.rs");
 
     fn asset(reference: &str) -> AssetId {
         AssetId {
@@ -5090,6 +6219,7 @@ mod tests {
                 }),
                 intent: FinancialIntent::default(),
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -5129,6 +6259,7 @@ mod tests {
             plan: fin_domain::financial_plans::FinancialPlanSpec {
                 version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
                 name: "Post-persist guard".into(),
+                summary: Some("Synthetic post-persist authorization test".into()),
                 steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
                     step_id: "write".into(),
                     operation: "synthetic.postpersist".into(),
@@ -5145,13 +6276,14 @@ mod tests {
                         operation_succeeded: true,
                     },
                     funding_dependencies: vec![],
+                    action_deadline_seconds: None,
                 }],
                 aggregate_bounds: fin_domain::financial_plans::FinancialPlanBounds {
                     maximum_debits: vec![],
                     maximum_costs: vec![],
                 },
             },
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         }
@@ -5181,7 +6313,9 @@ mod tests {
             plan: financial_plans::FinancialPlanSpec {
                 version: financial_plans::FINANCIAL_PLAN_VERSION,
                 name: "Generic exact read".into(),
+                summary: None,
                 steps: vec![financial_plans::FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: "read-account".into(),
                     operation: "future.read".into(),
                     input: json!({"account":"account-1"}),
@@ -5203,7 +6337,7 @@ mod tests {
                     maximum_costs: vec![],
                 },
             },
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         }
@@ -5671,7 +6805,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_scope_without_fees_is_valid_but_zero_fee_caps_remain_invalid() {
+    fn exact_scope_without_fees_or_with_unique_zero_fee_identity_is_valid() {
         let debit = resource_amount("hl:spot:primary", "USDC", "11000000");
         let mut scope = FinancialPlanExactScope {
             mode: financial_plans::FinancialPlanExactMode::Exact,
@@ -5691,6 +6825,8 @@ mod tests {
             },
             treatment: CostTreatment::AdditionalDebit,
         });
+        validate_exact_scope(&scope).unwrap();
+        scope.maximum_costs.push(scope.maximum_costs[0].clone());
         assert_eq!(
             validate_exact_scope(&scope).unwrap_err().code,
             "PLAN_EXACT_SCOPE_INVALID"
@@ -5749,6 +6885,7 @@ mod tests {
         assert!(!completion_met(&insufficient_spend, &effects, false).unwrap());
 
         let already_spent_but_short_receipt = financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "step".into(),
             operation: "synthetic.write".into(),
             input: json!({}),
@@ -5770,6 +6907,8 @@ mod tests {
                 &step_permission,
                 &progress.0,
                 &aggregate_remaining,
+                &[],
+                &effects,
             )
             .unwrap()
         );
@@ -5863,6 +7002,7 @@ mod tests {
         scope.spec.maximum_debits.clear();
         scope.deferred_receipt = Some(resource_amount("destination", "ETH", "100"));
         let mut step = financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "claim".into(),
             operation: "synthetic.claim".into(),
             input: json!({}),
@@ -5874,7 +7014,7 @@ mod tests {
             },
             funding_dependencies: vec![],
         };
-        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         assert!(permission_debits(&approved).is_empty());
         for target in [
             resource_amount("other", "ETH", "100"),
@@ -5882,11 +7022,313 @@ mod tests {
             resource_amount("destination", "ETH", "101"),
         ] {
             step.completion.minimum_net_receipt = Some(target);
-            assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+            assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
         }
         step.completion.minimum_net_receipt = Some(resource_amount("destination", "ETH", "100"));
         approved.permission.as_mut().unwrap().deferred_receipt = None;
-        assert!(step_authority_cannot_complete(&step, &approved, &[], &[]).unwrap());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn obligation_bounded_credit_can_satisfy_receipt_completion_only_with_matching_scope() {
+        let mut approved = permission(json!({"borrow":"fixed"}), json!({}), "1");
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![resource_amount("wallet:one", "WETH", "400")],
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+            });
+        }
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "borrow".into(),
+            operation: "synthetic.borrow".into(),
+            input: json!({}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+            action_deadline_seconds: None,
+        };
+
+        assert!(!step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        assert!(
+            step_authority_cannot_complete(
+                &step,
+                &approved,
+                &[],
+                &[],
+                &[resource_amount("wallet:one", "WETH", "200")],
+                &[]
+            )
+            .unwrap()
+        );
+        assert!(
+            step_authority_cannot_complete(
+                &step,
+                &approved,
+                &[],
+                &[],
+                &[resource_amount("wallet:one", "WETH", "400")],
+                &[]
+            )
+            .unwrap()
+        );
+
+        approved.permission.as_mut().unwrap().possible_credits[0].resource =
+            ResourceId("wallet:other".into());
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        approved.permission.as_mut().unwrap().possible_credits[0] = FinancialPlanFundingIdentity {
+            resource: ResourceId("wallet:one".into()),
+            asset: asset("USDC"),
+        };
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+        approved
+            .permission
+            .as_mut()
+            .unwrap()
+            .possible_credits
+            .clear();
+        assert!(step_authority_cannot_complete(&step, &approved, &[], &[], &[], &[]).unwrap());
+    }
+
+    #[test]
+    fn plan_status_keeps_borrow_receipt_step_eligible_when_obligation_cap_covers_it() {
+        let mut record = prior_record();
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "borrow".into(),
+            operation: "synthetic.borrow".into(),
+            input: json!({"wallet":"synthetic-wallet"}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+            action_deadline_seconds: None,
+        };
+        let mut approved = permission(json!({"borrow":"fixed"}), json!({}), "1");
+        approved.step_id = "borrow".into();
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![resource_amount("wallet:one", "WETH", "400")],
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+            });
+        }
+        record.revision.spec.steps = vec![step];
+        record.revision.spec.aggregate_bounds.maximum_debits.clear();
+        record.revision.spec.aggregate_bounds.maximum_costs.clear();
+        record.revision.permissions = vec![approved];
+        record.revision.status = FinancialPlanAuthorizationStatus::Active;
+        record.usage = FinancialPlanUsage::default();
+        record.attempts.clear();
+        record.active_attempt_id = None;
+
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let status = engine.build_plan_status(&record, &record.revision).unwrap();
+        assert_eq!(
+            status.steps[0].state,
+            FinancialPlanStepProgressState::NotStarted
+        );
+        assert_eq!(status.next_eligible_step_id.as_deref(), Some("borrow"));
+        assert!(status.steps[0].blockers.is_empty());
+    }
+
+    #[test]
+    fn plan_status_keeps_position_withdrawal_receipt_step_eligible() {
+        let mut record = prior_record();
+        let step = financial_plans::FinancialPlanStepSpec {
+            step_id: "withdraw-position".into(),
+            operation: "aave.withdraw".into(),
+            input: json!({"amount":"all"}),
+            permitted_variations: json!({}),
+            completion: financial_plans::FinancialStepCompletion {
+                principal_spend: None,
+                minimum_net_receipt: Some(resource_amount("wallet:one", "WETH", "300")),
+                operation_succeeded: true,
+            },
+            funding_dependencies: vec![],
+            action_deadline_seconds: None,
+        };
+        let mut approved = permission(json!({"withdraw":"fixed"}), json!({}), "1");
+        approved.step_id = "withdraw-position".into();
+        {
+            let adapter = approved.permission.as_mut().unwrap();
+            adapter.spec.maximum_debits.clear();
+            adapter.spec.maximum_costs.push(CostBound {
+                location: AccountingLocation::Position {
+                    resource: ResourceId("wallet:one".into()),
+                    position: "aave:pool:weth:supply".into(),
+                    position_kind: fin_domain::PositionKind::Supply,
+                },
+                amount: Amount {
+                    asset: asset("WETH"),
+                    atoms: Quantity::new("400").unwrap(),
+                },
+                treatment: CostTreatment::IncludedInDebit,
+            });
+            adapter.possible_credits = vec![FinancialPlanFundingIdentity {
+                resource: ResourceId("wallet:one".into()),
+                asset: asset("WETH"),
+            }];
+            adapter.deferred_receipt = Some(resource_amount("wallet:one", "WETH", "400"));
+        }
+        record.revision.spec.steps = vec![step];
+        record.revision.spec.aggregate_bounds.maximum_debits.clear();
+        record.revision.spec.aggregate_bounds.maximum_costs.clear();
+        record.revision.permissions = vec![approved];
+        record.revision.status = FinancialPlanAuthorizationStatus::Active;
+        record.usage = FinancialPlanUsage::default();
+        record.attempts.clear();
+        record.active_attempt_id = None;
+
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![],
+            Arc::new(PlanTestAuthorizer),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let status = engine.build_plan_status(&record, &record.revision).unwrap();
+        assert_eq!(
+            status.steps[0].state,
+            FinancialPlanStepProgressState::NotStarted
+        );
+        assert_eq!(
+            status.next_eligible_step_id.as_deref(),
+            Some("withdraw-position")
+        );
+        assert!(status.steps[0].blockers.is_empty());
+    }
+
+    #[test]
+    fn cumulative_obligation_usage_counts_verified_and_uncertain_attempts() {
+        for verified in [true, false] {
+            let mut plan = prior_record();
+            plan.revision.permissions[0]
+                .permission
+                .as_mut()
+                .unwrap()
+                .cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                scope_id: "synthetic-borrow-scope".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+                maximum_obligations: vec![resource_amount("acct", "WETH", "10")],
+            });
+
+            let operation = if verified {
+                settled_effect_record(vec![FinancialEffect::DebtChange {
+                    resource: ResourceId("acct".into()),
+                    debt: "synthetic-liability".into(),
+                    asset: asset("WETH"),
+                    delta: fin_domain::SignedQuantity::new("6").unwrap(),
+                    anchor: None,
+                }])
+            } else {
+                let timestamp = now();
+                let prepared = PreparedOperation {
+                    operation: "synthetic.borrow".into(),
+                    input: json!({}),
+                    binding: json!({}),
+                    summary: "synthetic borrow reservation".into(),
+                    checks: vec![],
+                    warnings: vec![],
+                    observed_at: timestamp.clone(),
+                    expires_at: timestamp.clone(),
+                    valuation: None,
+                    action_deadline: None,
+                    intent: fin_domain::FinancialIntent {
+                        expected: vec![EffectConstraint::Debt {
+                            resource: ResourceId("acct".into()),
+                            debt: "synthetic-liability".into(),
+                            asset: asset("WETH"),
+                            direction: Direction::Increase,
+                            maximum_change: Quantity::new("6").unwrap(),
+                        }],
+                        ..fin_domain::FinancialIntent::default()
+                    },
+                    operation_version: 1,
+                };
+                OperationRecord {
+                    id: "attempt-1".into(),
+                    request_id: "request-1".into(),
+                    fingerprint: "fingerprint".into(),
+                    fingerprint_version: 1,
+                    operation: "synthetic.borrow".into(),
+                    input: json!({}),
+                    status: Status::Unknown,
+                    created_at: timestamp.clone(),
+                    updated_at: timestamp,
+                    preview: Some(prepared),
+                    approval: None,
+                    submission: Some(fin_domain::Submission {
+                        kind: "synthetic".into(),
+                        reference: "synthetic-submission".into(),
+                        data: json!({}),
+                    }),
+                    dispatch_evidence: None,
+                    effects: None,
+                    last_reconciliation_evidence: None,
+                    error: None,
+                    run_id: None,
+                    position_baseline: None,
+                }
+            };
+            let mut store = Store::in_memory().unwrap();
+            store
+                .create_request(
+                    &operation.id,
+                    &operation.request_id,
+                    &operation.fingerprint,
+                    &operation.operation,
+                    None,
+                    if verified { "completed" } else { "unknown" },
+                    &to_value(&operation).unwrap(),
+                    &now(),
+                )
+                .unwrap();
+            if !verified {
+                plan.usage
+                    .reservations
+                    .push(financial_plans::FinancialPlanReservation {
+                        attempt_id: "attempt-1".into(),
+                        step_id: "step-1".into(),
+                        debits: vec![],
+                        costs: vec![],
+                    });
+            }
+
+            let usage =
+                cumulative_obligation_usage_by_scope(&plan, &plan.revision, &store).unwrap();
+            assert_eq!(
+                usage.get("synthetic-borrow-scope"),
+                Some(&vec![resource_amount("acct", "WETH", "6")])
+            );
+        }
     }
 
     #[test]
@@ -6319,6 +7761,7 @@ mod tests {
 
     fn step_spec() -> financial_plans::FinancialPlanStepSpec {
         financial_plans::FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "step-1".into(),
             operation: "synthetic.write".into(),
             input: json!({"request_id": "seed-a"}),
@@ -6356,11 +7799,148 @@ mod tests {
     }
 
     #[test]
+    fn incurred_debt_caps_ignore_repayment_and_retain_uncertain_reservations_after_restart() {
+        for verified in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("SYNTHETIC-obligation.sqlite");
+            let mut store = Store::open(&path).unwrap();
+            let mut plan = prior_record();
+            let asset = resource_amount("acct", "USDT", "6").amount.asset;
+            plan.revision.permissions[0]
+                .permission
+                .as_mut()
+                .unwrap()
+                .cumulative_scope = Some(financial_plans::FinancialPlanCumulativeScope {
+                scope_id: "SYNTHETIC-debt".into(),
+                maximum_debits: vec![],
+                maximum_costs: vec![],
+                maximum_obligations: vec![resource_amount("acct", "USDT", "10")],
+            });
+            let candidate = |units: &str| PreparedOperation {
+                operation: "synthetic.borrow".into(),
+                input: json!({}),
+                binding: json!({}),
+                summary: "synthetic debt".into(),
+                checks: vec![],
+                warnings: vec![],
+                observed_at: now(),
+                expires_at: now(),
+                valuation: None,
+                action_deadline: None,
+                operation_version: 1,
+                intent: fin_domain::FinancialIntent {
+                    expected: vec![EffectConstraint::Debt {
+                        resource: ResourceId("acct".into()),
+                        debt: "SYNTHETIC-liability".into(),
+                        asset: asset.clone(),
+                        direction: Direction::Increase,
+                        maximum_change: Quantity::new(units).unwrap(),
+                    }],
+                    ..Default::default()
+                },
+            };
+            let submission = Submission {
+                kind: "synthetic".into(),
+                reference: "SYNTHETIC-submission".into(),
+                data: json!({}),
+            };
+            let effects = if verified {
+                Some(fin_domain::VerifiedEffects {
+                    evidence_version: 1,
+                    submission: submission.clone(),
+                    effects: vec![
+                        FinancialEffect::DebtChange {
+                            resource: ResourceId("acct".into()),
+                            debt: "SYNTHETIC-liability".into(),
+                            asset: asset.clone(),
+                            delta: fin_domain::SignedQuantity::new("6").unwrap(),
+                            anchor: None,
+                        },
+                        FinancialEffect::DebtChange {
+                            resource: ResourceId("acct".into()),
+                            debt: "SYNTHETIC-liability".into(),
+                            asset: asset.clone(),
+                            delta: fin_domain::SignedQuantity::new("-6").unwrap(),
+                            anchor: None,
+                        },
+                    ],
+                    evidence: json!({"synthetic":"gross accounting test only"}),
+                    observed_at: now(),
+                    proof_digest: "SYNTHETIC".into(),
+                })
+            } else {
+                None
+            };
+            let operation = OperationRecord {
+                id: "attempt-1".into(),
+                request_id: "SYNTHETIC-request".into(),
+                fingerprint: "SYNTHETIC".into(),
+                fingerprint_version: 1,
+                operation: "synthetic.borrow".into(),
+                input: json!({}),
+                status: if verified {
+                    Status::Completed
+                } else {
+                    Status::Unknown
+                },
+                created_at: now(),
+                updated_at: now(),
+                preview: Some(candidate("6")),
+                approval: None,
+                submission: Some(submission),
+                dispatch_evidence: None,
+                effects,
+                last_reconciliation_evidence: None,
+                error: None,
+                position_baseline: None,
+                run_id: None,
+            };
+            store
+                .create_request(
+                    &operation.id,
+                    &operation.request_id,
+                    &operation.fingerprint,
+                    &operation.operation,
+                    None,
+                    if verified { "completed" } else { "unknown" },
+                    &to_value(&operation).unwrap(),
+                    &now(),
+                )
+                .unwrap();
+            if !verified {
+                plan.usage
+                    .reservations
+                    .push(financial_plans::FinancialPlanReservation {
+                        attempt_id: "attempt-1".into(),
+                        step_id: "step-1".into(),
+                        debits: vec![],
+                        costs: vec![],
+                    });
+            }
+            drop(store);
+            let reopened = Store::open(path).unwrap();
+            validate_cumulative_scope_caps(&plan, "step-1", &candidate("4"), &reopened).unwrap();
+            assert_eq!(
+                validate_cumulative_scope_caps(&plan, "step-1", &candidate("5"), &reopened)
+                    .unwrap_err()
+                    .code,
+                "PLAN_OBLIGATION_CAP_EXCEEDED"
+            );
+        }
+        let legacy: financial_plans::FinancialPlanCumulativeScope = serde_json::from_value(
+            json!({"scope_id":"legacy","maximum_debits":[],"maximum_costs":[]}),
+        )
+        .unwrap();
+        assert!(legacy.maximum_obligations.is_empty());
+    }
+
+    #[test]
     fn cumulative_parent_scope_cannot_be_widened_by_a_plan_revision() {
         let mut prior = prior_record();
         let mut scoped = permission(json!({"route":"fixed"}), json!({}), "20");
         scoped.permission.as_mut().unwrap().cumulative_scope =
             Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![],
                 scope_id: "SYNTHETIC-bridge-parent".into(),
                 maximum_debits: vec![resource_amount("acct", "USDT", "20")],
                 maximum_costs: vec![],
@@ -6410,10 +7990,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn required_completion_spend_must_fit_aggregate_without_summing_optional_caps() {
+        let original = prior_record();
+        for (steps, target, aggregate, succeeds) in [
+            (1, "20", "19", false),
+            (2, "20", "30", false),
+            (2, "20", "40", true),
+            (2, "10", "20", true),
+        ] {
+            let mut spec = original.revision.spec.clone();
+            spec.steps.clear();
+            spec.aggregate_bounds.maximum_debits = vec![resource_amount("acct", "USDT", aggregate)];
+            let mut permissions = Vec::new();
+            for index in 0..steps {
+                let mut step = step_spec();
+                step.step_id = format!("step-{index}");
+                step.completion.principal_spend = Some(resource_amount("acct", "USDT", target));
+                let mut permitted = permission(json!({}), json!({}), "100");
+                permitted.step_id = step.step_id.clone();
+                spec.steps.push(step);
+                permissions.push(permitted);
+            }
+            let result = validate_plan_permissions(&spec, &permissions);
+            if succeeds {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "PLAN_COMPLETION_OUTSIDE_AGGREGATE");
+                assert_eq!(error.details.unwrap()["maximum_atoms"], aggregate);
+            }
+        }
+    }
+
+    #[test]
+    fn required_completion_spend_keeps_exact_resource_and_asset_identities_separate() {
+        let original = prior_record();
+        let mut spec = original.revision.spec.clone();
+        spec.steps.clear();
+        spec.aggregate_bounds.maximum_debits.clear();
+        let mut permissions = Vec::new();
+        for (index, (resource, token)) in [("acct", "USDT"), ("other", "USDT"), ("acct", "ETH")]
+            .into_iter()
+            .enumerate()
+        {
+            let amount = resource_amount(resource, token, "20");
+            let mut step = step_spec();
+            step.step_id = format!("step-{index}");
+            step.completion.principal_spend = Some(amount.clone());
+            let mut permitted = permission(json!({}), json!({}), "100");
+            permitted.step_id = step.step_id.clone();
+            permitted.permission.as_mut().unwrap().spec.maximum_debits = vec![amount.clone()];
+            spec.aggregate_bounds.maximum_debits.push(amount);
+            spec.steps.push(step);
+            permissions.push(permitted);
+        }
+        validate_plan_permissions(&spec, &permissions).unwrap();
+    }
+
     fn prior_record() -> FinancialPlanAuthorizationRecord {
         let spec = financial_plans::FinancialPlanSpec {
             version: 1,
             name: "Plan".into(),
+            summary: None,
             steps: vec![step_spec()],
             aggregate_bounds: financial_plans::FinancialPlanBounds {
                 maximum_debits: vec![resource_amount("acct", "USDT", "30")],
@@ -6459,6 +8098,7 @@ mod tests {
                 execution_binding_hash: "hash".into(),
                 submission_id: None,
                 result: None,
+                logical_request_id: None,
             }],
             active_attempt_id: None,
         }
@@ -6535,6 +8175,7 @@ mod tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         let error = engine
             .validate_plan_candidate(
@@ -7071,6 +8712,7 @@ mod tests {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         }
     }
     #[test]

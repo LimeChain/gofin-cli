@@ -1,12 +1,21 @@
 //! Integration-independent contracts. Secrets and signed payloads never enter these types.
+pub mod amendments;
 pub mod authority_expiry;
 pub mod boundaries;
+pub mod clock;
+pub mod compound_mutations;
+pub mod conversion_sequences;
+pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
+pub mod grouped_amendments;
 pub mod money;
+pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
+pub mod submission_validation;
 pub mod unpriced;
+pub mod unresolved_consumption;
 pub mod value_bounds;
 
 #[cfg(test)]
@@ -19,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+pub use submission_validation::RevalidatedOperation;
 
 pub type Result<T> = std::result::Result<T, FinError>;
 /// Reviewed-adapter metadata in a prepared operation binding for one finite
@@ -466,10 +476,25 @@ pub enum AccountFundingState {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EffectConstraint {
+    CompoundSubmissionMutations {
+        children: Vec<compound_mutations::MutationChild>,
+    },
+    GroupedSubmissionAmendments {
+        group: Box<grouped_amendments::GroupedAmendmentGroup>,
+    },
+    ConversionSequence {
+        scope: conversion_sequences::ConversionSequenceConstraint,
+    },
     /// A separately authorized request to remove the remainder of one durable submission.
     SubmissionCancellation {
         operation_id: String,
         submission: Submission,
+    },
+    /// Fresh exact approval for one linked authority revision, never a second fill owner.
+    SubmissionAmendment {
+        operation_id: String,
+        submission: Submission,
+        revision: Box<amendments::AmendmentScope>,
     },
     OriginMovement {
         from: AccountingLocation,
@@ -596,6 +621,15 @@ pub enum EffectConstraint {
     },
     /// Long/short exposure quantities, never custody or borrowed principal.
     DerivativePosition {
+        resource: ResourceId,
+        position: String,
+        asset: AssetId,
+        position_kind: PositionKind,
+        minimum_delta: SignedQuantity,
+        maximum_delta: SignedQuantity,
+    },
+    /// Native-asset segregated margin exposure; the corresponding loan remains separate debt.
+    MarginPosition {
         resource: ResourceId,
         position: String,
         asset: AssetId,
@@ -810,6 +844,9 @@ pub struct PreparedOperation {
     pub valuation: Option<Valuation>,
     pub intent: FinancialIntent,
     pub operation_version: u32,
+    /// Broker-resolved relative deadline, immutable for this plan attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_deadline: Option<plan_timing::ResolvedActionDeadline>,
 }
 pub type Preview = PreparedOperation;
 
@@ -910,10 +947,25 @@ impl RecoveryBinding {
 // anchors adjacent to the cumulative movement they authorize.
 #[allow(clippy::large_enum_variant)]
 pub enum FinancialEffect {
+    CompoundSubmissionMutations {
+        children: Vec<compound_mutations::MutationChildProof>,
+    },
+    GroupedSubmissionAmendments {
+        proof: grouped_amendments::GroupedAmendmentProof,
+    },
+    ConversionSequence {
+        execution: conversion_sequences::ConversionSequence,
+    },
     /// A separately authorized request to remove the remainder of one durable submission.
     SubmissionCancellation {
         operation_id: String,
         submission: Submission,
+    },
+    /// Proven mutation acknowledgment; monetary fills remain owned by the original operation.
+    SubmissionAmendment {
+        operation_id: String,
+        submission: Submission,
+        successor: Option<Submission>,
     },
     /// Provenance only: matching cash/position/debt effects apply actual balances once.
     OriginMovement {
@@ -1518,6 +1570,10 @@ pub struct Reconciliation {
     pub status: Status,
     pub evidence: Value,
     /// Required for terminal financial results, including cost-only proved failure.
+    /// Pending results may include cumulative verified effects. Such evidence must
+    /// contain immutable `proofEvents` with stable `eventId`s, preserve every prior
+    /// event, and respect the original cumulative caps. Completion minima apply
+    /// only at terminal settlement; unresolved reservations remain owned.
     pub verified: Option<VerifiedEffects>,
 }
 
@@ -1657,6 +1713,15 @@ pub trait Adapter: Send + Sync {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    /// Trusted planning allowance; None requires an explicit parent duration. No network calls.
+    fn plan_step_allowance(&self, operation: &str, _input: &Value) -> Result<Option<u64>> {
+        let definition = self
+            .definitions()
+            .into_iter()
+            .find(|d| d.name == operation)
+            .ok_or_else(|| FinError::validation("Unknown plan operation."))?;
+        plan_timing::definition_allowance(&definition, _input)
+    }
     /// Derive a reusable, balance-independent permission scope for one plan
     /// step. Implementations validate operation support, static identities,
     /// permissions and market metadata without requiring balances or freezing
@@ -1674,6 +1739,19 @@ pub trait Adapter: Send + Sync {
             "Use an operation with an explicitly supported plan permission scope.",
         ))
     }
+    /// Balance-independent admission before plan approval. Protected read-only
+    /// permission, fee, route and metadata queries are allowed; no mutations,
+    /// reservations or checks requiring future funding. Return explicit warnings
+    /// for deferred checks. Execution still validates mutable evidence.
+    async fn validate_plan_feasibility(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Vec<String>> {
+        Ok(vec![
+            "Adapter-specific feasibility checks are deferred until execution.".into(),
+        ])
+    }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.
     fn validate_boundary_candidate(
@@ -1687,6 +1765,30 @@ pub trait Adapter: Send + Sync {
             "This integration does not support boundary-based authorization.",
             "Use the ordinary exact-operation approval flow.",
         ))
+    }
+    async fn prepare_with_compound_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &compound_mutations::CompoundAmendmentContext,
+    ) -> Result<PreparedOperation> {
+        self.prepare_with_linked_context(
+            operation,
+            input,
+            context,
+            &amendments::AmendmentContext::default(),
+        )
+        .await
+    }
+    async fn prepare_with_linked_context(
+        &self,
+        operation: &str,
+        input: &Value,
+        context: &PreparationContext,
+        _linked: &amendments::AmendmentContext,
+    ) -> Result<PreparedOperation> {
+        self.prepare_with_context(operation, input, context).await
     }
     async fn prepare_with_context(
         &self,
@@ -1713,6 +1815,17 @@ pub trait Adapter: Send + Sync {
             "Do not begin the scoped run until every planned operation has a reviewed route proof.",
         ))
     }
+    /// Explicit opt-in to reuse initial preparation as final execution evidence.
+    /// The broker measures this window from before preparation, checks all
+    /// candidate/price deadlines, and serializes conflicting writes. Implementors
+    /// must perform exact final nonce/authority checks through their submit path.
+    /// None preserves the adapter's ordinary final revalidation contract.
+    fn preparation_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
     /// Revalidate a candidate through the explicit human configuration route.
     async fn revalidate_configuration(
@@ -1731,6 +1844,25 @@ pub trait Adapter: Send + Sync {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission>;
+    /// Reuse the broker's final adapter revalidation. Integrations that do not
+    /// implement this contract keep their ordinary validating submission path.
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit(validated.prepared(), journal).await
+    }
+    async fn submit_configuration_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit_configuration(validated.prepared(), journal)
+            .await
+    }
     /// Submit only through the explicit human configuration lifecycle.
     async fn submit_configuration(
         &self,
@@ -1744,6 +1876,15 @@ pub trait Adapter: Send + Sync {
             "Keep the request unresolved and use a reviewed human-only configuration operation.",
         ))
     }
+    /// Adapter-verified historical position observations bound to the original
+    /// preview/submission. Used only when the journal has no earlier Fin anchor;
+    /// never replaces trusted lineage or creates wallet cash/funding authority.
+    async fn verified_position_baselines(
+        &self,
+        _record: &OperationRecord,
+    ) -> Result<Vec<PositionAnchor>> {
+        Ok(Vec::new())
+    }
     async fn reconcile(&self, record: &OperationRecord) -> Result<Reconciliation>;
     /// Reconcile persisted human configuration submissions through the exact
     /// submission identity. This is a read/recovery operation, not authority
@@ -1754,6 +1895,21 @@ pub trait Adapter: Send + Sync {
             evidence: serde_json::json!({"reason":"Human configuration reconciliation is unsupported."}),
             verified: None,
         })
+    }
+    async fn reconcile_with_compound_context(
+        &self,
+        record: &OperationRecord,
+        _context: &compound_mutations::CompoundAmendmentContext,
+    ) -> Result<Reconciliation> {
+        self.reconcile_with_context(record, &amendments::AmendmentContext::default())
+            .await
+    }
+    async fn reconcile_with_context(
+        &self,
+        record: &OperationRecord,
+        _context: &amendments::AmendmentContext,
+    ) -> Result<Reconciliation> {
+        self.reconcile(record).await
     }
 }
 
@@ -1779,12 +1935,20 @@ pub enum PositionKind {
     VariableDebt,
     DerivativeLong,
     DerivativeShort,
+    MarginLong,
+    MarginShort,
 }
 impl PositionKind {
+    pub fn is_margin(&self) -> bool {
+        matches!(self, Self::MarginLong | Self::MarginShort)
+    }
     pub fn is_derivative(&self) -> bool {
         matches!(self, Self::DerivativeLong | Self::DerivativeShort)
     }
 }
+
+/// Broker-owned pre-action anchors in the immutable approved execution binding.
+pub const BASELINE_ANCHORS_KEY: &str = "_fin_verified_baseline_anchors";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

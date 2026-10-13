@@ -442,7 +442,8 @@ pub(super) async fn prepare_create(
                 position_lock_resource(&position_address),
             ],
         },
-        operation_version: 1,
+        action_deadline: None,
+            operation_version: 1,
     })
 }
 
@@ -1143,7 +1144,8 @@ pub(super) async fn prepare_update(
             expected: vec![],
             locks: vec![resource, ResourceId(request_resource), position_lock],
         },
-        operation_version: 1,
+        action_deadline: None,
+            operation_version: 1,
     })
 }
 
@@ -1371,7 +1373,8 @@ pub(super) async fn prepare_cancel(
             }],
             locks: intent_locks,
         },
-        operation_version: 1,
+        action_deadline: None,
+            operation_version: 1,
     })
 }
 
@@ -4803,6 +4806,7 @@ mod tests {
             expires_at: String::new(),
             valuation: None,
             intent: FinancialIntent::default(),
+            action_deadline: None,
             operation_version: 1,
         };
         assert!(validate_child_permission_candidate(&spec, &prepared).is_ok());

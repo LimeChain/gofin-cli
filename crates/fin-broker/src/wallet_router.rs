@@ -514,6 +514,23 @@ impl Adapter for WalletFamilyRouter {
             .preflight_return_route(operation, input, context)
             .await
     }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.prepared(prepared)
+            .ok()?
+            .preparation_reuse_window(prepared)
+    }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> fin_domain::Result<Vec<String>> {
+        self.route(input)?
+            .validate_plan_feasibility(operation, input)
+            .await
+    }
     async fn revalidate(
         &self,
         prepared: &PreparedOperation,
@@ -526,6 +543,28 @@ impl Adapter for WalletFamilyRouter {
         journal: Arc<dyn SubmissionJournal>,
     ) -> fin_domain::Result<Submission> {
         self.prepared(prepared)?.submit(prepared, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> fin_domain::Result<Submission> {
+        self.prepared(validated.prepared())?
+            .submit_revalidated(validated, journal)
+            .await
+    }
+    async fn verified_position_baselines(
+        &self,
+        record: &OperationRecord,
+    ) -> fin_domain::Result<Vec<fin_domain::PositionAnchor>> {
+        self.prepared(
+            record
+                .preview
+                .as_ref()
+                .ok_or_else(|| FinError::validation("The original preview is missing."))?,
+        )?
+        .verified_position_baselines(record)
+        .await
     }
     async fn reconcile(&self, record: &OperationRecord) -> fin_domain::Result<Reconciliation> {
         let prepared = record
@@ -544,6 +583,7 @@ mod tests {
     struct RoutedAdapter {
         reconciles: Arc<AtomicUsize>,
         snapshots: Arc<AtomicUsize>,
+        revalidated_submits: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -602,6 +642,19 @@ mod tests {
         ) -> fin_domain::Result<Submission> {
             Err(FinError::validation("test adapter does not submit"))
         }
+        async fn submit_revalidated(
+            &self,
+            validated: &fin_domain::RevalidatedOperation,
+            _: Arc<dyn SubmissionJournal>,
+        ) -> fin_domain::Result<Submission> {
+            validated.assert_fresh()?;
+            self.revalidated_submits.fetch_add(1, Ordering::SeqCst);
+            Ok(Submission {
+                kind: "revalidated-test".into(),
+                reference: "routed".into(),
+                data: Value::Null,
+            })
+        }
         async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
             self.reconciles.fetch_add(1, Ordering::SeqCst);
             Ok(Reconciliation {
@@ -639,6 +692,16 @@ mod tests {
         }
     }
 
+    struct TestJournal;
+    impl SubmissionJournal for TestJournal {
+        fn assert_authorized(&self) -> fin_domain::Result<()> {
+            Ok(())
+        }
+        fn persist_submission(&self, _: &Submission) -> fin_domain::Result<()> {
+            Ok(())
+        }
+    }
+
     struct EvmReadRpc {
         chain_id: u64,
         calls: Arc<AtomicUsize>,
@@ -663,6 +726,7 @@ mod tests {
     }
 
     fn prepared(network: &str) -> PreparedOperation {
+        let now = chrono::Utc::now();
         PreparedOperation {
             operation: "wallet.transfer".into(),
             input: json!({"network":network,"wallet":"saved-wallet"}),
@@ -670,11 +734,12 @@ mod tests {
             summary: "pending transfer".into(),
             checks: Vec::new(),
             warnings: Vec::new(),
-            observed_at: "2026-01-01T00:00:00Z".into(),
-            expires_at: "2026-01-01T00:05:00Z".into(),
+            observed_at: now.to_rfc3339(),
+            expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
             valuation: None,
             intent: fin_domain::FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         }
     }
 
@@ -684,6 +749,7 @@ mod tests {
         let evm: Arc<dyn Adapter> = Arc::new(RoutedAdapter {
             reconciles: reconciles.clone(),
             snapshots: Arc::new(AtomicUsize::new(0)),
+            revalidated_submits: Arc::new(AtomicUsize::new(0)),
         });
         let router = WalletFamilyRouter::new(Some(evm), BTreeMap::new());
         for network in ["evm", "ethereum"] {
@@ -723,11 +789,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_delegates_the_final_revalidated_candidate_without_revalidation() {
+        let delegated = Arc::new(AtomicUsize::new(0));
+        let evm: Arc<dyn Adapter> = Arc::new(RoutedAdapter {
+            reconciles: Arc::new(AtomicUsize::new(0)),
+            snapshots: Arc::new(AtomicUsize::new(0)),
+            revalidated_submits: delegated.clone(),
+        });
+        let router = WalletFamilyRouter::new(Some(evm), BTreeMap::new());
+        let candidate = prepared("ethereum");
+        let validated = fin_domain::RevalidatedOperation::after_revalidation(
+            candidate,
+            Arc::new(fin_domain::clock::SystemClock),
+        )
+        .unwrap();
+
+        let submission = router
+            .submit_revalidated(&validated, Arc::new(TestJournal))
+            .await
+            .unwrap();
+
+        assert_eq!(submission.kind, "revalidated-test");
+        assert_eq!(delegated.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn mixed_wallet_router_partitions_snapshot_scopes_by_family() {
         let evm_snapshots = Arc::new(AtomicUsize::new(0));
         let evm: Arc<dyn Adapter> = Arc::new(RoutedAdapter {
             reconciles: Arc::new(AtomicUsize::new(0)),
             snapshots: evm_snapshots.clone(),
+            revalidated_submits: Arc::new(AtomicUsize::new(0)),
         });
         let solana_calls = Arc::new(AtomicUsize::new(0));
         let solana_adapter = Arc::new(

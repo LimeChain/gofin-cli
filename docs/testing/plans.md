@@ -310,7 +310,10 @@ After update:
    funding, debit/fee totals and duration. Future proceeds must not appear as
    verified funds or guaranteed execution readiness.
 4. After conversational approval, authorize once. Confirm the native Fin prompt
-   identifies the same complete plan name, step count and human consent duration.
+   identifies the same complete plan name, optional complementary financial
+   summary, step count and human consent duration. With a summary, verify that
+   the full inputs, outcomes and fees you wrote remain readable; no words or
+   limits should be truncated. Include a legacy plan without a summary.
    Single-swap, mixed funding/bridge/swap and other named plans must use the same
    format, without replacing the name with an action or aggregate-fee inventory.
    Decline/cancel a separate deliberate approval request and verify no grant or

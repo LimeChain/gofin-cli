@@ -526,9 +526,33 @@ private func ammBoundarySynopsis(_ binding: [String: Any], summary: String) -> S
     return reason.count <= 300 ? reason : nil
 }
 
+// Exact plans bind their input, schema, connections and accounting scope in
+// the broker. They intentionally have no bounded adapter permission spec.
+// Check that the displayed exact scope agrees with that frozen plan variant;
+// schema/financial enforcement remains in the broker and Rust challenge parser.
+private func validExactAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
+    guard absentPresentationValue(permission["permission"]),
+          let exact = permission["exact"] as? [String: Any],
+          let scope = exact["scope"] as? [String: Any],
+          scope["mode"] as? String == "exact",
+          let variations = step["permitted_variations"] as? [String: Any],
+          NSDictionary(dictionary:scope).isEqual(to:variations),
+          let operation = step["operation"] as? String,
+          let input = step["input"] as? [String: Any] else { return false }
+    if !absentPresentationValue(step["action_deadline_seconds"]) {
+        return ["uniswap.swap", "ramses.swap"].contains(operation)
+            && input["deadline"] == nil
+            && presentationInteger(step["action_deadline_seconds"], minimum:1, maximum:600) != nil
+    }
+    return presentationInteger(input["deadline"], minimum:1) != nil
+}
+
 // Validate the reviewed adapter permission against its hash-bound plan step.
 // Concise plan prompts still reject malformed or mismatched AMM scopes.
 private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) -> Bool {
+    if !absentPresentationValue(permission["exact"]) {
+        return validExactAMMPlanStep(step, permission:permission)
+    }
     guard let operation = step["operation"] as? String,
           let venue = ammOperationPresentation(operation),
           let stepID = presentationString(step["step_id"], maximum: 80),
@@ -565,7 +589,6 @@ private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) 
           let rawAmount = presentationString(input["amount"], maximum: 100),
           let minimumOutput = presentationDecimal(input["min_output"]),
           let selectedSlippage = presentationInteger(input["slippage_bps"], maximum: 1000),
-          let deadline = presentationInteger(input["deadline"], minimum: 1),
           let requestFee = presentationDecimal(input["max_fee_eth"]),
           let maxInput = presentationDecimal(bounds["max_input"]),
           let maxFee = presentationDecimal(bounds["max_fee_eth"]),
@@ -577,6 +600,17 @@ private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) 
           let rateOutput = presentationString(rate["output_atoms"], maximum: 100),
           rateInput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil,
           rateOutput.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else { return false }
+
+    // Relative windows are approved before future-funded steps become eligible.
+    // The broker resolves their concrete deadline at preparation, within consent.
+    if !absentPresentationValue(step["action_deadline_seconds"]) {
+        guard ["uniswap.swap", "ramses.swap"].contains(operation),
+              input["deadline"] == nil,
+              presentationInteger(step["action_deadline_seconds"], minimum: 1,
+                                  maximum: maxDeadline) != nil else { return false }
+    } else {
+        guard presentationInteger(input["deadline"], minimum: 1) != nil else { return false }
+    }
 
     guard fixed["operation"] as? String == operation,
           additionalV3Identity(fixed, operation: venue, router: fixed["router"]),
@@ -647,12 +681,10 @@ private func validAMMPlanStep(_ step: [String: Any], permission: [String: Any]) 
     _ = router
     _ = minimumOutput // This is an initial request, not a floor for bounded requotes.
     _ = selectedSlippage
-    _ = deadline
     _ = maxSlippage
     _ = maxImpact
     _ = rateInput
     _ = rateOutput
-    _ = maxDeadline
     return true
 }
 
@@ -699,8 +731,9 @@ private func validPlanAggregateBounds(_ plan: [String: Any]) -> Bool {
 }
 
 // Every named revision uses the same concise prompt, independent of its adapters.
-// Read the name, step count and duration from the verified approval binding;
-// detailed amounts and limits remain in the conversational/terminal review.
+// Read the caller-authored name/summary and the step count/duration from the
+// verified approval binding. Display text does not grant financial authority;
+// the broker independently enforces the complete plan's structured limits.
 func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String) -> String? {
     guard binding["version"] as? Int == 1,
           binding["kind"] as? String == "financial_plan",
@@ -723,6 +756,21 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
           let duration = binding["valid_for_seconds"] as? NSNumber,
           CFGetTypeID(duration) != CFBooleanGetTypeID(), duration.doubleValue > 0,
           !summary.isEmpty, summary.count <= 4096 else { return nil }
+    var planSummary: String?
+    if let supplied = plan["summary"] {
+        guard let text = supplied as? String, !text.isEmpty,
+              text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
+              name.unicodeScalars.count + text.unicodeScalars.count <= 140,
+              text.unicodeScalars.allSatisfy({ scalar in
+                  let value = scalar.value
+                  return value > 0x1f && !(0x7f...0x9f).contains(value)
+                      && value != 0x2028 && value != 0x2029
+                      && value != 0x061c && value != 0x200e && value != 0x200f
+                      && !(0x202a...0x202e).contains(value)
+                      && !(0x2066...0x2069).contains(value)
+              }) else { return nil }
+        planSummary = text
+    }
     for (step, permission) in zip(steps, permissions) {
         guard let stepID = step["step_id"] as? String, !stepID.isEmpty,
               permission["step_id"] as? String == stepID,
@@ -753,12 +801,12 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
     let lead = revised == nil
         ? "approve the plan “\(name)”"
         : "approve the revised plan “\(name)”"
-    // The validated name is bounded to 80 Unicode scalars, so the complete
-    // lead fits. Include duration/step count only as a whole optional suffix.
+    // New summaries must fit in full with their name and approval limits.
+    // Existing plans without a summary retain their original presentation.
     guard lead.unicodeScalars.count <= authenticationReasonMaximumCharacters else { return nil }
     let durationSeconds = duration.uint64Value
     let details = " (\(steps.count) \(steps.count == 1 ? "step" : "steps"), \(approvalDuration(durationSeconds)))"
-    let detailed = lead + details
+    let detailed = lead + (planSummary.map { ". " + $0 } ?? "") + details
     let ammSteps = zip(steps, permissions).filter { step, _ in
         ammOperationPresentation(step["operation"] as? String ?? "") != nil
     }
@@ -766,6 +814,9 @@ func financialPlanAuthenticationReason(_ binding: [String: Any], summary: String
         guard ammSteps.allSatisfy({ validAMMPlanStep($0.0, permission: $0.1) }),
               validPlanAggregateBounds(plan),
               summary == "Approve the plan “\(name)” with \(steps.count) ordered steps for \(duration.uint64Value) seconds." else { return nil }
+    }
+    if planSummary != nil {
+        return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : nil
     }
     return detailed.unicodeScalars.count <= authenticationReasonMaximumCharacters ? detailed : lead
 }
@@ -781,6 +832,13 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
           let action = binding["action"] as? String else { return nil }
     if action == "initialize" { return "finish setup for your Mac account" }
     if action == "policy_set" { return "change your financial policy" }
+    if action == "configure" {
+        guard let operation = binding["operation"] as? String, let account = binding["account"] as? String,
+              let product = binding["product"] as? String, ["kraken", "krakenfutures"].contains(product),
+              operation.hasPrefix(product + "."),
+              !account.isEmpty, account.count <= 96, binding["parameters"] is [String: Any] else { return nil }
+        return compactAuthenticationReason(prefix: "configure ", summary: "\(operation) for account \(account)")
+    }
     guard ["add", "update", "remove"].contains(action),
           let connection = binding["connection"] as? [String: Any],
           let name = connection["name"] as? String, !name.isEmpty, name.count <= 96,
@@ -792,6 +850,8 @@ func configurationAuthenticationReason(_ binding: [String: Any]) -> String? {
     case "ethereum": providerName = "Ethereum"
     case "evm": providerName = "EVM"
     case "coingecko": providerName = "CoinGecko"
+    case "kraken": providerName = "Kraken"
+    case "krakenfutures": providerName = "Kraken Futures"
     default: return nil
     }
     let verb = action == "add" ? "save" : action == "update" ? "update" : "remove"
@@ -950,7 +1010,7 @@ func terminalConfigurationReviewed(_ review: TerminalConfigurationReview?, bindi
           review.bindingHash == hash, review.nonce == nonce,
           review.operation == operation, review.expiresAt == expiry,
           operation.hasPrefix("configuration:"),
-          let action = binding["action"] as? String, ["initialize", "add", "update", "remove", "policy_set"].contains(action),
+          let action = binding["action"] as? String, ["initialize", "add", "update", "remove", "policy_set", "configure"].contains(action),
           let movement = binding["financial_movement"] as? NSNumber,
           CFGetTypeID(movement) == CFBooleanGetTypeID(), !movement.boolValue,
           let authority = binding["future_financial_authority"] as? NSNumber,

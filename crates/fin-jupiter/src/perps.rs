@@ -1918,7 +1918,7 @@ impl PerpsAdapter {
             checks: vec![check("Pinned program instruction and request identity"), check("Mainnet-beta pool, custody and PDA"), check("Bounded network fee and funding"), check("Transaction simulation")],
             warnings: vec!["A submitted request is not a completed position change; Fin waits for the keeper's exact finalized event and position update.".into()],
             observed_at: Utc::now().to_rfc3339(), expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(),
-            valuation:Some(valuation), intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource.clone(), position_lock_resource(&position)] }, operation_version:1,
+            valuation:Some(valuation), intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource.clone(), position_lock_resource(&position)] }, action_deadline:None,operation_version:1,
         })
     }
 
@@ -2112,6 +2112,7 @@ impl PerpsAdapter {
             expires_at: (Utc::now() + ChronoDuration::seconds(20)).to_rfc3339(),
             valuation: Some(valuation),
             intent,
+            action_deadline: None,
             operation_version: 1,
         })
     }
@@ -3475,10 +3476,7 @@ impl Adapter for PerpsAdapter {
     }
 
     fn definitions(&self) -> Vec<Definition> {
-        let mut definitions = operation_definitions();
-        definitions.push(limit_create::operation_definition());
-        definitions.push(cancel::operation_definition());
-        definitions
+        operation_definitions()
     }
 
     fn connections(&self) -> Vec<ConnectionMetadata> {
@@ -3823,6 +3821,64 @@ impl Adapter for PerpsAdapter {
                     .dispatch(&frozen, &signer, prepared, journal)
                     .await;
             }
+        };
+        let sender = self.execute_sender(action);
+        wallet
+            .runtime()
+            .dispatch_with_sender(&frozen, &signer, prepared, journal, &sender)
+            .await
+    }
+
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        let operation = prepared.operation.as_str();
+        let wallet = self.wallet(&prepared.input)?;
+        let signer = wallet.signer().ok_or_else(unknown)?;
+        let frozen = freeze_prepared(&wallet, &signer, &prepared.binding).await?;
+        validated.assert_fresh()?;
+        if prepared
+            .binding
+            .get("message_sha256")
+            .and_then(Value::as_str)
+            != Some(frozen.message_sha256())
+        {
+            return Err(unreviewed());
+        }
+        // Final broker revalidation already checked the request, parent and
+        // instruction accounts and simulated this exact message. Recheck the
+        // fee on the frozen bytes without repeating the simulation or querying
+        // a second time for mutable keeper state.
+        if matches!(
+            operation,
+            OP_LIMIT_CREATE
+                | OP_LIMIT_CANCEL
+                | OP_LIMIT_UPDATE
+                | OP_TPSL_CREATE
+                | tpsl::OP_TPSL_UPDATE
+                | tpsl::OP_TPSL_CANCEL
+        ) {
+            wallet.runtime().validate_fee(&frozen).await?;
+            validated.assert_fresh()?;
+        }
+        let action = match operation {
+            OP_LIMIT_CREATE => limit_create::EXECUTE_ACTION,
+            OP_LIMIT_UPDATE => "update-limit-order",
+            OP_LIMIT_CANCEL => cancel::EXECUTE_ACTION,
+            OP_TPSL_CREATE => tpsl::EXECUTE_CREATE_ACTION,
+            tpsl::OP_TPSL_UPDATE => tpsl::EXECUTE_UPDATE_ACTION,
+            tpsl::OP_TPSL_CANCEL => tpsl::EXECUTE_CANCEL_ACTION,
+            OP_INCREASE | OP_DECREASE | OP_COLLATERAL_ADD | OP_COLLATERAL_REMOVE => {
+                return wallet
+                    .runtime()
+                    .dispatch(&frozen, &signer, prepared, journal)
+                    .await;
+            }
+            _ => return Err(unknown()),
         };
         let sender = self.execute_sender(action);
         wallet
@@ -6929,6 +6985,8 @@ pub fn operation_definitions() -> Vec<Definition> {
         completion: "Completed only after finalized transaction proof and a finalized PositionRequest read prove the exact new trigger price.".into(),
         semantics: json!({"network":NETWORK,"cluster":CLUSTER,"program":crate::jlp::PERPS_PROGRAM_ID,"instruction":"instantUpdateLimitOrder","request_account":POSITION_REQUEST_ACCOUNT,"parent_operation":OP_LIMIT_CREATE,"parent_binding":"authoritative durable create submission; caller-supplied binding is ignored","order_lifecycle":"update child never settles or releases original create escrow reservation; original create record owns future fill or cancellation","uncertain_submission":"reconcile_original_identity_never_retry"}),
     });
+    definitions.push(limit_create::operation_definition());
+    definitions.push(cancel::operation_definition());
     definitions
 }
 
@@ -8102,6 +8160,7 @@ mod tests {
                 expected: vec![],
                 locks: vec![],
             },
+            action_deadline: None,
             operation_version: 1,
         };
         let spec = BoundarySpec {

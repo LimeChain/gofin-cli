@@ -13,6 +13,7 @@ struct PositionObserver {
     positions: Vec<PositionState>,
     coverage: Vec<String>,
     calls: AtomicUsize,
+    fail_snapshot: bool,
 }
 
 #[async_trait]
@@ -50,6 +51,9 @@ impl Adapter for PositionObserver {
 
     async fn snapshot(&self) -> Result<StateSnapshot> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_snapshot {
+            return Err(FinError::validation("Synthetic observer unavailable."));
+        }
         Ok(StateSnapshot {
             state: FinancialState {
                 positions: self.positions.clone(),
@@ -273,6 +277,7 @@ fn prepared() -> PreparedOperation {
         observed_at: at.to_rfc3339(),
         expires_at: (at + chrono::Duration::minutes(2)).to_rfc3339(),
         valuation: None,
+        action_deadline: None,
         intent: FinancialIntent {
             debits: vec![],
             maximum_costs: vec![],
@@ -322,6 +327,7 @@ fn observer(
         positions,
         coverage,
         calls: AtomicUsize::new(0),
+        fail_snapshot: false,
     })
 }
 
@@ -453,6 +459,54 @@ fn record(
 }
 
 #[tokio::test]
+async fn validated_candidate_baseline_skips_unavailable_shared_observer() {
+    let source = Arc::new(PositionObserver {
+        resource: resource(),
+        definition_name: "synthetic.close_account".into(),
+        positions: vec![],
+        coverage: vec![],
+        calls: AtomicUsize::new(0),
+        fail_snapshot: true,
+    });
+    let engine = build_engine(vec![source.clone()]);
+    let mut prepared = prepared();
+    let mut native = anchor("2039280");
+    native.observed_at = prepared.observed_at.clone();
+    prepared.binding[fin_domain::BASELINE_ANCHORS_KEY] = json!([native.clone()]);
+
+    let baseline = engine
+        .capture_position_baseline(
+            "synthetic-operation",
+            &prepared,
+            &PreparationContext::default(),
+        )
+        .await
+        .unwrap();
+    assert!(baseline.is_none());
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+
+    // A malformed or stale native anchor fails before the observer is
+    // consulted; the optimization does not turn invalid evidence into authority.
+    let mut stale = prepared.clone();
+    let mut stale_anchor = native;
+    stale_anchor.observed_at = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    stale.binding[fin_domain::BASELINE_ANCHORS_KEY] = json!([stale_anchor]);
+    assert_eq!(
+        engine
+            .capture_position_baseline(
+                "synthetic-operation",
+                &stale,
+                &PreparationContext::default(),
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "INVALID_POSITION_BASELINE"
+    );
+    assert_eq!(source.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn external_account_close_baseline_is_bound_persisted_and_recovered_after_restart() {
     let observed = anchor("2039280");
     let source = observer(
@@ -514,6 +568,7 @@ async fn full_engine_pending_restart_settles_against_original_external_account_b
             positions: vec![position(anchor("2039280"))],
             coverage: vec![RESOURCE.into()],
             calls: AtomicUsize::new(0),
+            fail_snapshot: false,
         },
         finalized: std::sync::atomic::AtomicBool::new(false),
         submissions: AtomicUsize::new(0),
@@ -575,6 +630,7 @@ async fn missing_legacy_baseline_is_not_refreshed_after_dispatch() {
             positions: vec![position(anchor("2039280"))],
             coverage: vec![RESOURCE.into()],
             calls: AtomicUsize::new(0),
+            fail_snapshot: false,
         },
         finalized: std::sync::atomic::AtomicBool::new(false),
         submissions: AtomicUsize::new(0),

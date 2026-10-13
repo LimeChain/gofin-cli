@@ -3,12 +3,15 @@ SHELL := /bin/sh
 ARGS ?= --help
 DEV_ENV ?= local
 DEV_MODE ?= synthetic
+AAVE_FORK_CHAIN ?= 1
+AAVE_FORK_PIN ?=
+AAVE_FORK_POOL ?=
 DEV_CREDENTIALS_FILE ?=
 DEV_IMPORT_FLAGS ?=
 DEV_FLAGS ?=
 AMM_FORK_ARGS ?=
 
-.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-amm-fork test-integration test-delivery test check bundle release setup update uninstall
+.PHONY: help dev build dev-env-start dev-env-import dev-env-cli dev-env-stop dev-env-reset catalog test-ui test-dev-env test-fork test-amm-fork test-aave-fork test-integration test-delivery test check bundle release setup update uninstall
 
 help:
 	@printf '%s\n' \
@@ -25,6 +28,8 @@ help:
 	  'make test-dev-env      Synthetic environment, recovery and fork-runner tests; no Anvil' \
 	  'make test-fork         Explicit Ethereum fork verification; requires Anvil and archive access' \
 	  'make test-amm-fork     Owned AMM forks; AMM_FORK_ARGS="--dex ramses" tests Robinhood Ramses' \
+	  'make test-aave-cli-fork Public CLI named Aave lifecycle; AAVE_FORK_CHAIN=1|8453|42161' \
+	  'make test-aave-fork    Owned Aave V3 fork; AAVE_FORK_CHAIN=1|8453|42161, AAVE_FORK_POOL=optional-pool, AAVE_FORK_PIN=saved-pin.json' \
 	  'make test-integration  Isolated broker, journal, approval and installer fixtures' \
 	  'make test-delivery     Synthetic release and curl-installer tests' \
 	  'make test              Full offline Rust test suite' \
@@ -125,3 +130,13 @@ update:
 
 uninstall:
 	@/bin/sh scripts/dev-macos.sh uninstall
+
+# Explicit owned Aave fork; no secret import or remote signing.
+test-aave-fork:
+	@python3 scripts/verify-aave-v3-fork.py --chain "$(AAVE_FORK_CHAIN)" $(if $(AAVE_FORK_POOL),--pool "$(AAVE_FORK_POOL)",) $(if $(AAVE_FORK_PIN),--pin "$(AAVE_FORK_PIN)",)
+
+# Public CLI/engine named lifecycle on one owned deployed-state fork.
+.PHONY: test-aave-cli-fork
+test-aave-cli-fork:
+	@python3 scripts/test-aave-fork-receipt-proxy.py
+	@python3 scripts/verify-aave-cli-plan-fork.py --chain "$(AAVE_FORK_CHAIN)" $(if $(AAVE_FORK_PIN),--pin "$(AAVE_FORK_PIN)",)

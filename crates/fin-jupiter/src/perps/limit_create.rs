@@ -2403,7 +2403,7 @@ pub(super) async fn prepare(adapter: &PerpsAdapter, input: &Value) -> Result<Pre
                 }
                 expected
             }, locks:vec![resource,ResourceId(format!("solana:mainnet-beta:jupiter-perps-request:{request}")),super::position_lock_resource(&position)]
-        }, operation_version:1
+        }, action_deadline:None, operation_version:1
     })
 }
 

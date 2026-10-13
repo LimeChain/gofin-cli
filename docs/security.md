@@ -67,14 +67,20 @@ credentials, configuration and journal stay under `/Library/Fin/private`.
 The broker creates a fresh nonce, exact canonical binding hash and bounded expiry.
 Configuration review is in the protected human terminal; its consumed review proof
 binds that exact challenge before native Touch ID. Financial writes keep an
-independent trusted native review containing accounts, asset, quantities,
-destination, contracts, fees and applicable slippage limits. The internal signed
+independent trusted native review of their bound scope. Standalone writes display
+the applicable accounts, asset quantities, destination, contracts and fee/slippage
+limits. Named plans display their bound caller-authored name and optional financial
+summary, with step count and duration; these words are not broker-verified financial
+claims. The full structured plan remains independently enforced, and exact limits
+are available in terminal review. The internal signed
 helper at `/Library/Fin/runtime/authorization/Fin` presents the human name **Fin**.
 
 Each approval uses biometric-only Touch ID with zero reuse and no password fallback.
 The broker checks nonce, hash and timing and consumes approval once. Changed
-material parameters or expired consent require a new approval. Every cleanup write
-follows the same path. Client-supplied approval receipts, arbitrary signed venue
+material parameters outside approved bounds or expired consent require a new
+approval. A fresh candidate within an active plan's bounds reuses that authority.
+Every cleanup write follows the applicable exact or bounded authorization path.
+Client-supplied approval receipts, arbitrary signed venue
 methods, raw signing and live authorization-disable switches are unavailable.
 
 Persisted request and submission identities survive response loss and restart.
@@ -86,10 +92,4 @@ reset, migrated or replayed.
 
 ## Verification limits
 
-Installation, credential isolation, biometric financial writes and production/mainnet
-settlement require separate observed results in the [human checklist](testing/onboarding.md).
-Synthetic tests and native availability probes do not establish those cases. Live tests retain the
-[$100 allocation/movement and complete restoration contract](testing/README.md#live-test-contract).
-
-The TypeScript runtime and installer have been removed. Its source remains in
-[Git history](https://github.com/LimeChain/fin-cli/tree/39a7e95e52a2a51909033cce3733570f5a182fd5), together with historical reports. Those results do not establish Rust verification.
+Installation, credential isolation and biometric financial writes require separate observed results in the [human checklist](testing/onboarding.md). Synthetic tests and native availability probes do not establish those cases. Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for disposable-development live writes and verified settlement with automatic development approval. This evidence does not establish the production credential or Touch ID boundary.

@@ -361,7 +361,7 @@ def run_named_plan_tpsl(
         raise AssertionError("Public preview/read did not expose the selected wallet address.")
     plan_value = _plan(wallet, position)
     plan_input = json.dumps(plan_value, separators=(",", ":"))
-    preview = _call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
+    preview = _call(environment_name, ["plans", "preview", "--input", plan_input, "--valid-for", "10m", "--json"], env)
     review_hash = preview.get("review_hash")
     if not isinstance(review_hash, str) or not review_hash:
         raise AssertionError(f"Named TPSL plan preview omitted its review hash: {json.dumps(preview, sort_keys=True)}")

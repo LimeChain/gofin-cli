@@ -7,11 +7,11 @@ operations, reads state and prepares each step; Fin validates the request,
 obtains human approval, executes it and keeps durable records for reconciliation.
 The current adapters cover Binance funding, bounded spot and USDⓈ-M perpetual
 orders, Hyperliquid REST spot/perpetual trading and account actions, reusable
-EVM wallets on Ethereum, Arbitrum One and Robinhood Chain,
+EVM wallets on Ethereum, Base, Arbitrum One and Robinhood Chain,
 Relay transfers, including narrow canonical native-ETH routes, between reviewed
 EVM networks; Uniswap v3/v4 on reviewed deployments, Ramses v3 on Robinhood,
 Sushi v3 on Ethereum/Arbitrum and PancakeSwap v3 on Ethereum/Arbitrum/Robinhood;
-and Ethereum mainnet Aave.
+and reviewed Aave V3 markets on Ethereum, Base and Arbitrum.
 The [product concept](docs/fin-product-concept.md)
 describes the broader exchange, trading and DeFi scope. MCP and additional
 bridge providers follow later. Fin is open source; license selection is pending.
@@ -350,7 +350,8 @@ Read-only broker requests and independent observers run with bounded concurrency
 Financial mutations, reconciliation and configuration reload retain ordering;
 installation-wide policy, reservations and unresolved journal records still apply.
 RPC reads have one 10-second deadline across retries and fallback. Required
-preparation and post-approval evidence collection have 30-second stage deadlines.
+preparation, post-approval evidence collection and required external reads have
+120-second stage deadlines.
 Financial dispatch retains its immutable identity when the client stops waiting.
 
 For a coherent sequence, review a named plan before conversational approval,
@@ -638,6 +639,32 @@ inspect it before using explicit `--backup` conflict handling. Fin upgrades refr
 only existing, unmodified Fin-managed copies. See [skill maintenance](docs/companion-skill.md).
 Ensure `fin` is on the agent's PATH; restart the agent if it does not discover the skill.
 
+## Machine progress
+
+`--json` keeps its existing contract: exactly one command result or structured
+error. Add `--stream` to receive newline-delimited JSON progress followed by one
+terminal event, with no human text, color, or animation:
+
+```sh
+fin execute OPERATION --input INPUT_JSON --id ATTEMPT_ID --plan PLAN_ID --step STEP_ID --json --stream
+fin status OPERATION_ID --json --stream
+```
+
+Progress events have `{"type":"progress","stage":"preparing","context":{...}}`.
+Stages are `connecting`, `preparing`, `awaiting_approval`, `revalidating`,
+`submitting`, and `verifying`; only `connecting` is a local observation. Available
+command, operation, request, plan and step identities appear in `context`.
+The final event is `{"type":"result","result":{...},"context":{...}}` or
+`{"type":"error","error":{...},"context":{...}}`. The result/error payload and
+exit behavior match ordinary machine mode. Parse/startup errors may omit context.
+Inspect the result's status: a finished command can still report pending or
+unknown financial work. Reconcile the original operation until verified.
+
+Progress is best effort and may be dropped for slow readers. Closing the pipe
+does not cancel or replay a financial write. If no final event arrives, inspect
+`fin operations --json` and reconcile the original request/operation identity.
+Streaming changes presentation only; native authorization still applies.
+
 ## Binance account transfers
 
 `binance.transfer` supports two explicit signing routes for SPOT wallets. Set
@@ -700,6 +727,10 @@ Completion also requires a
 matching usable Binance credit and balance evidence. Delayed credit and lost
 responses retain the original submission and reservation: use
 `fin status OPERATION_ID --json`, never repeat with a new ID to recover.
+Binance status 6 (credited with withdrawals locked) can complete the deposit
+alongside status 1 once exact chain and free-balance evidence match. Fin releases
+its reservation and reports any Binance withdrawal hold separately; it cannot
+remove that exchange-side restriction.
 
 See the [deposit verification checklist](docs/testing/binance.md#evm-deposit-verification)
 for synthetic checks and the later human Touch ID session.
@@ -763,6 +794,18 @@ return plan or restoration is required. Inspect operations with
 `fin status OPERATION_ID --json`. The `run` command and `execute --run` argument
 are removed; stored financial records and unresolved reservations remain intact.
 
+For an `unknown` operation, default human output explains the uncertainty, retains
+the operation's reason and recovery guidance, and shows a command to check the
+original operation ID. It does not imply failure or permission to submit again.
+Default human execution and status results are concise: verified completion,
+submission awaiting verification, or the failure and its next action. Human
+execution reports broker-observed preparation, approval (when needed), final
+validation, submission and receipt verification stages. Stage changes never imply
+completion; a `pending` result still needs reconciliation of the original ID.
+Use `--verbose` for the full record; `--json` keeps the original structured result
+and emits no progress frames or human messages.
+Development output points to the same named environment through `make dev-env-cli`.
+
 Existing installations keep their stored limits, including the original $100
 values, until a human changes them. A previous requirement to execute inside a
 restoration run no longer governs new operations. Historical run records,
@@ -825,6 +868,17 @@ make dev ARGS='capabilities --json'    # regular debug CLI; broker commands use 
 make catalog                          # regenerate offline financial discovery
 make update                           # HUMAN Terminal: update installed local build; keep state
 ```
+
+For deposit execution and streaming regressions, run:
+
+```sh
+cargo test --locked -p fin-protocol
+cargo test --locked -p fin-broker --test binance_roundtrip
+```
+
+The named Arbitrum deposit fixture uses public broker socket dispatch and local
+HTTP RPC on ordinary 2 MiB worker stacks, including streamed revalidation,
+delayed exchange credit and restart recovery. It uses synthetic funds and approval.
 
 Names are scoped to the source worktree. Different worktrees and named environments
 can run concurrently with separate binary snapshots, sockets, journals, locks,
@@ -925,7 +979,7 @@ not global product limits. Follow the [live-test contract](docs/testing/README.m
 ## Exchange architecture and local verification
 
 Fin uses official **CCXT Rust 4.5.85** through `fin-exchange`, with Binance,
-Kraken, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
+Kraken Spot/Margin and Derivatives, Hyperliquid, OKX, Coinbase and Bybit enabled. Binance funding commands and stored operation identities remain
 compatible. Shared lifecycle checks, journaling and recovery stay in Fin; CCXT
 handles exchange connectivity and signing. Exact wire responses bypass floating
 point convenience types. See [exchange connectivity](docs/rust-architecture.md#exchange-connectivity-and-extension).
@@ -942,7 +996,9 @@ fin read exchange.ticker --input '{"exchange":"bybit","pair":"BTCUSDT"}' --json
 ```
 
 These use an installed broker and require no exchange credentials. They add no
-account enrollment or writes for these venues. `fin capabilities --json` distinguishes
+private authority for these reads. Kraken additionally has typed product-specific enrollment,
+private operations, administration and exports; see [Kraken REST integration](docs/kraken/README.md).
+`fin capabilities --json` distinguishes
 library reach, Fin's supported operations and verification status. Use the same
 `exchange.markets` command with each exchange name to discover native identifiers.
 OKX/Bybit use spot, Coinbase uses Advanced public products (market discovery is
@@ -1021,12 +1077,48 @@ identity and separate request/venue timestamps.
 
 A named plan authorizes ordered financial steps with one fresh Touch ID approval.
 The agent first presents the comprehensive plan and waits for conversational
-approval before requesting Fin authorization. Every named plan uses the same
-native prompt: `approve the plan “Name” (5 steps, 10 minutes)`. Revisions say
-`approve the revised plan`. The name, step count and duration come from the
-hash-bound approval; amounts, destinations, permitted variations and fee caps
-remain in the conversation and terminal review. This applies equally to single
-swaps, mixed sequences and plans using other adapters.
+approval before requesting Fin authorization. Give the plan an intent-led `name`
+and an optional short `summary` sentence describing the financial input, outcome
+and material fee limit. For example: `Fund Savings on Arbitrum` and
+`Move 25 USDC from Main to Savings, including fees up to 1 USDC.` Fin shows both
+in full in terminal review and Touch ID, followed by the step count and duration.
+Name and summary together may contain at most 140 Unicode characters; the name
+alone remains limited to 80. Both are hash-bound caller-authored text; the broker
+independently enforces the structured amounts, destinations, variations and caps.
+Older plans without a summary retain their existing prompt and binding.
+
+Plan review rejects required principal-spend totals that exceed the matching
+cumulative debit cap, using local exact arithmetic. Optional per-step ceilings
+may share a smaller aggregate budget. Review adds no live balance or simulation
+checks. Exact steps also run the adapter's balance-independent feasibility checks
+before approval, including supported fee, route and permission admission. Review
+returns `feasibility_warnings` for checks deferred until execution; a warning is
+not evidence those checks passed. Independent feasibility reads run in bounded
+batches. Each execution still validates current state before dispatch.
+
+Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
+transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
+change, while existing consent remains active. Fresh candidates pass all plan
+and protected policy limits again; price identity and malformed-bound failures
+do not qualify for automatic refresh.
+Internal candidates retain separate durable identities linked to the caller's
+original request ID. Reusing that ID returns or reconciles the latest recorded
+candidate; it does not start another retry series. Scope and budget violations,
+expired consent, and uncertain submissions are not automatically retried.
+
+Candidate freshness and transport failures report whether the agent should
+prepare another candidate under active consent, renew expired authority, or
+reconcile the original submission. Structured error details include
+`reauthorization_required`, `new_attempt_required` and `reconciliation_required`.
+A recorded failed attempt keeps its identity; a fresh candidate uses a new attempt
+ID. An uncertain submission keeps its original identity and reservation across
+restart. Fin never refreshes consent or replays an uncertain financial write.
+A new approved revision can repair a terminal, proved-unsubmitted zero-effect
+step. Completed steps retain their historical scope and consumption across
+adapter updates. Status returns stored progress promptly while another action
+runs; subsequent status checks reconcile when the execution queue is available.
+Revocation stops future submission admission without waiting for unrelated RPC
+work. An already admitted submission still requires reconciliation.
 
 The agent submits each step explicitly. Exact-input plans sequence the current
 operation registry, including transfers, withdrawals, deposits, orders, wallet
@@ -1039,7 +1131,12 @@ their separate human configuration approval.
 Ethereum, Arbitrum One and Robinhood Chain support reviewed single-pool
 Uniswap v3/v4 exact-input swaps through the shared `fin-amm` interface.
 Swap previews bind recipient, route, output floor, slippage, fee and deadline;
-typed EIP-2612/Permit2 signatures, when required, are created only after the
+revalidation preserves the original encoded receipt floor when quotes improve
+and rejects refreshed output below it. New EVM swap previews disclose a reserved
+1% USD pricing buffer, rounded upward to cents, so small USD price changes do
+not require another candidate. Protected budgets include the buffer; token
+amounts, minimum receipts, native fee caps and existing attempt ceilings stay fixed.
+Typed EIP-2612/Permit2 signatures, when required, are created only after the
 approved attempt is journaled. Standalone and operation-boundary swap reasons
 have a 300-character application cap; named plans use the common 240-character
 budget. Actual macOS dialog display remains to be checked. See the
@@ -1309,3 +1406,81 @@ fin schema pancakeswap.swap --json
 
 See [v3 fork verification](docs/testing/v3-forks.md) for isolated development,
 owned forks and the distinction between development approval and Touch ID.
+
+## Aave V3 markets and positions
+
+Discover reviewed deployments before enrollment with `fin schema aave.markets --json`.
+Read current compatibility, reserves and positions through an enrolled wallet:
+
+```sh
+fin read aave.markets --input '{"wallet":"wallet","network":"evm","chain_id":1}' --json
+fin read aave.reserves --input '{"wallet":"wallet","network":"evm","chain_id":42161}' --json
+fin read aave.positions --input '{"wallet":"wallet","network":"evm","chain_id":8453}' --json
+```
+
+For a read-only historical observation, `aave.reserves` and `aave.positions`
+accept optional `block_number` and return the canonical `block_hash`. Writes
+always use fresh state and reject that field.
+
+Aave operations accept optional `market` with an enabled exact pool address;
+omitting it preserves the configured default. The broker validates pool/provider,
+oracle, reserve identities and deployed backing revisions. Ethereum Core, Lido,
+EtherFi and Horizon are distinct markets. EtherFi's current reserve caps may
+prevent new positions; Horizon RWA token eligibility, transfer restrictions and
+trusted valuation remain prerequisites. Robinhood reports no reviewed Aave V3
+market. V2/V4, stable-rate writes, eMode changes, delegation and gateways are
+explicitly outside this integration. Native ETH uses separate wrap/unwrap steps.
+
+Supply, collateral, variable borrow, repay and withdraw use normal previews and
+execution, or named plans. Partial/full repay and withdraw retain exact quantity
+contracts; `amount: "all"` requires finite `max_amount` and proves zero residual
+scaled debt/claim. Borrowing requires `min_health_factor`; optional `max_debt_usd`
+and `max_debt_to_collateral_bps` constrain the total resulting position. Removing
+collateral with debt requires `min_health_factor > 1`, even when the protocol
+itself would permit the change. These are execution constraints, not protection
+against later price changes, interest or liquidation.
+
+Named Aave plan variations use `min_amount`, `max_amount`, `max_fee_eth` and, for
+borrowing, `max_cumulative_borrow` including finite mint rounding. Borrow plans
+also fix `max_debt_usd` and `max_debt_to_collateral_bps` in their input. Only
+quantity and fee selections vary; market, asset, spender, recipient, collateral
+setting, eMode and risk limits stay bound. Repayment never replenishes gross
+borrowing authority. Future scopes need no projected balances; each dispatch
+uses current state and verified prior steps.
+
+Run the owned deployed-state fork checks with `make test-aave-fork` and
+`make test-aave-cli-fork`; select the network with `AAVE_FORK_CHAIN=1`, `8453`
+or `42161`.
+
+## Plan timing
+
+Named plans automatically budget omitted durations from trusted operation and
+saved route metadata: 5 minutes per onchain write/immediate exchange action,
+15 minutes per withdrawal/fast bridge, plus 25% headroom (at least 5 minutes),
+rounded upward to 5 minutes. Bridge approval/reset writes count separately;
+bridge settlement is counted once. Longer saved arrival estimates increase the
+bridge allowance. Resting orders, TWAPs, delayed bridge stages and unclassified
+writes require an explicit `--valid-for`. Agents should calculate and disclose
+an explicit duration. Withdrawal → swap → fast bridge needs **45 minutes**.
+These allowances are planning budgets, not guarantees or transaction deadlines.
+
+For a future-funded Uniswap/Ramses plan step, set `action_deadline_seconds: 600`
+and omit `input.deadline`. Approval binds the relative window and financial
+scope; Fin resolves the concrete deadline when preparing an eligible attempt.
+The swap ceiling remains 600 seconds even under a 45-minute parent plan.
+Prepared deadlines and submission identities remain immutable. Quote freshness
+is independently enforced; the client's 300-second wait is a transport limit.
+
+`fin plans status PLAN_ID --json` reports remaining authority and whether the
+next action's full window fits. Insufficient time fails before preparation with
+`PLAN_INSUFFICIENT_AUTHORIZATION_TIME`. Reconcile unresolved attempts, preview a
+replacement with a suitable `--valid-for` and `--replaces REVISION_ID`, and obtain
+fresh Touch ID. A revision preserves completed progress and consumed authority.
+Expiry/cancellation blocks future dispatch while status continues reconciliation.
+See [timing verification and human checklist](docs/testing/plan-timing.md).
+
+A full relative action window must be shorter than the parent lifetime, leaving
+time for orchestration. Fin reports `PLAN_DURATION_CANNOT_FIT_ACTION_WINDOW`
+before approval if they cannot fit; choose an explicit longer duration or a
+shorter reviewed action window. For a single onchain step with an automatic
+10-minute parent, a 5-minute action window leaves the planned headroom.

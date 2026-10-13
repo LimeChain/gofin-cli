@@ -15,6 +15,10 @@ use zeroize::Zeroizing;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialReferences {
+    #[serde(default)]
+    pub kraken: Option<String>,
+    #[serde(default)]
+    pub krakenfutures: Option<String>,
     pub binance: Option<String>,
     #[serde(default)]
     pub binance_sub: Option<String>,
@@ -58,7 +62,26 @@ impl PolicyLimits {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct KrakenDevelopmentAccount {
+    pub product: String,
+    pub name: String,
+    pub account_id: String,
+    pub credential_ref: String,
+    #[serde(default)]
+    pub default_wallet_account_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnvironmentConfig {
+    #[serde(default)]
+    pub kraken_accounts: BTreeMap<String, KrakenDevelopmentAccount>,
+    #[serde(default)]
+    pub kraken_account_id: Option<String>,
+    #[serde(default)]
+    pub kraken_default_wallet_account_id: Option<String>,
+    #[serde(default)]
+    pub krakenfutures_account_id: Option<String>,
     pub format: String,
     pub environment_id: String,
     pub version: u32,
@@ -101,7 +124,10 @@ fn synthetic() -> String {
 
 impl EnvironmentConfig {
     pub fn credentials_is_empty(&self) -> bool {
-        self.credentials.binance.is_none()
+        self.kraken_accounts.is_empty()
+            && self.credentials.kraken.is_none()
+            && self.credentials.krakenfutures.is_none()
+            && self.credentials.binance.is_none()
             && self.credentials.binance_sub.is_none()
             && self.credentials.evm_primary.is_none()
             && self.credentials.evm_secondary.is_none()
@@ -111,6 +137,10 @@ impl EnvironmentConfig {
     pub fn empty(environment_id: &str) -> Self {
         Self {
             format: "fin-dev-config".into(),
+            kraken_accounts: BTreeMap::new(),
+            kraken_account_id: None,
+            kraken_default_wallet_account_id: None,
+            krakenfutures_account_id: None,
             environment_id: environment_id.into(),
             version: 2,
             mode: "synthetic".into(),
@@ -265,6 +295,183 @@ pub async fn import(
         ephemeral.push(("dev-import-sub".into(), key, transport_secret));
         additions.push(("binance_sub".into(), material));
     }
+    for (label, prefix) in [
+        ("kraken", "FIN_DEV_KRAKEN"),
+        ("krakenfutures", "FIN_DEV_KRAKENFUTURES"),
+    ] {
+        let key = values.get(&format!("{prefix}_API_KEY"));
+        let secret = values.get(&format!("{prefix}_SECRET"));
+        let identity = values.get(&format!("{prefix}_ACCOUNT_ID"));
+        if key.is_none() && secret.is_none() && identity.is_none() {
+            continue;
+        }
+        let key = key.ok_or_else(|| format!("{prefix}_API_KEY is required"))?;
+        let secret = secret.ok_or_else(|| format!("{prefix}_SECRET is required"))?;
+        let identity = identity
+            .ok_or_else(|| format!("{prefix}_ACCOUNT_ID is required for offline import"))?;
+        if identity.is_empty()
+            || identity.len() > 128
+            || !identity
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err("Kraken account ID is invalid".into());
+        }
+        let old_identity = if label == "kraken" {
+            &old.kraken_account_id
+        } else {
+            &old.krakenfutures_account_id
+        };
+        if old_identity
+            .as_ref()
+            .is_some_and(|v| v != identity.as_str())
+        {
+            return Err(
+                "Kraken reimport cannot change an existing physical account identity".into(),
+            );
+        }
+        let material = if label == "kraken" {
+            SecretMaterial::KrakenApi {
+                api_key: key.to_string(),
+                secret: secret.to_string(),
+            }
+        } else {
+            SecretMaterial::KrakenFuturesApi {
+                api_key: key.to_string(),
+                secret: secret.to_string(),
+            }
+        };
+        material
+            .validate_present()
+            .map_err(|_| "Kraken API key/secret format is invalid")?;
+        if label == "kraken" {
+            config.kraken_account_id = Some(identity.to_string());
+        } else {
+            config.krakenfutures_account_id = Some(identity.to_string());
+        }
+        additions.push((label.into(), material));
+    }
+    if let Some(id) = values.get("FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID") {
+        if !additions.iter().any(|(label, _)| label == "kraken") {
+            return Err(
+                "FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID requires a Spot credential import".into(),
+            );
+        }
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err("Kraken default wallet account ID is invalid".into());
+        }
+        if old
+            .kraken_default_wallet_account_id
+            .as_ref()
+            .is_some_and(|previous| previous != id.as_str())
+        {
+            return Err("Kraken reimport cannot change an existing default wallet alias".into());
+        }
+        config.kraken_default_wallet_account_id = Some(id.to_string());
+    }
+    for (product, prefix) in [
+        ("kraken", "FIN_DEV_KRAKEN"),
+        ("krakenfutures", "FIN_DEV_KRAKENFUTURES"),
+    ] {
+        for index in 1..=8 {
+            let slot = format!("{product}_{index}");
+            let prefix = format!("{prefix}_{index}");
+            let key = values.get(&format!("{prefix}_API_KEY"));
+            let secret = values.get(&format!("{prefix}_SECRET"));
+            let id = values.get(&format!("{prefix}_ACCOUNT_ID"));
+            let name = values.get(&format!("{prefix}_NAME"));
+            let wallet = values.get(&format!("{prefix}_DEFAULT_WALLET_ACCOUNT_ID"));
+            if [key, secret, id, name, wallet].iter().all(|v| v.is_none()) {
+                continue;
+            }
+            let key = key.ok_or_else(|| format!("{prefix}_API_KEY is required"))?;
+            let secret = secret.ok_or_else(|| format!("{prefix}_SECRET is required"))?;
+            let id =
+                id.ok_or_else(|| format!("{prefix}_ACCOUNT_ID is required for offline import"))?;
+            let valid_id = |v: &str| {
+                !v.is_empty()
+                    && v.len() <= 128
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            };
+            if !valid_id(id) {
+                return Err("Indexed Kraken account ID is invalid".into());
+            }
+            let previous = old.kraken_accounts.get(&slot);
+            if previous.is_some_and(|v| v.product != product || v.account_id != id.as_str()) {
+                return Err(
+                    "Kraken reimport cannot change an existing indexed physical account identity"
+                        .into(),
+                );
+            }
+            let name = name
+                .map(|v| v.to_string())
+                .or_else(|| previous.map(|v| v.name.clone()))
+                .unwrap_or_else(|| format!("dev-{product}-{index}"));
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            {
+                return Err("Indexed Kraken connection name is invalid".into());
+            }
+            if previous.is_some_and(|v| v.name != name) {
+                return Err("Kraken reimport cannot rename an existing indexed connection".into());
+            }
+            let default_wallet_account_id = wallet
+                .map(|v| v.to_string())
+                .or_else(|| previous.and_then(|v| v.default_wallet_account_id.clone()));
+            if default_wallet_account_id
+                .as_deref()
+                .is_some_and(|v| product != "kraken" || !valid_id(v))
+            {
+                return Err("Indexed Kraken default wallet alias is invalid".into());
+            }
+            if let Some(selected) = wallet
+                && previous
+                    .and_then(|v| v.default_wallet_account_id.as_deref())
+                    .is_some_and(|old| old != selected.as_str())
+            {
+                return Err(
+                    "Kraken reimport cannot change an existing indexed default wallet alias".into(),
+                );
+            }
+            let material = if product == "kraken" {
+                SecretMaterial::KrakenApi {
+                    api_key: key.to_string(),
+                    secret: secret.to_string(),
+                }
+            } else {
+                SecretMaterial::KrakenFuturesApi {
+                    api_key: key.to_string(),
+                    secret: secret.to_string(),
+                }
+            };
+            material
+                .validate_present()
+                .map_err(|_| "Indexed Kraken API key/secret format is invalid")?;
+            config.kraken_accounts.insert(
+                slot.clone(),
+                KrakenDevelopmentAccount {
+                    product: product.into(),
+                    name,
+                    account_id: id.to_string(),
+                    credential_ref: previous
+                        .map(|v| v.credential_ref.clone())
+                        .unwrap_or_default(),
+                    default_wallet_account_id,
+                },
+            );
+            additions.push((slot, material));
+        }
+    }
+    validate_kraken_group_identities(&config)?;
     let has_main = additions.iter().any(|(label, _)| label == "binance");
     let has_sub = additions.iter().any(|(label, _)| label == "binance_sub");
     let main_uid_input = values.get("FIN_DEV_BINANCE_UID").map(|v| v.to_string());
@@ -446,11 +653,20 @@ pub async fn import(
             })?;
         written.push(credential_dir.join(format!("{}.json", reference.as_str())));
         match label.as_str() {
+            "kraken" => config.credentials.kraken = Some(reference.as_str().into()),
+            "krakenfutures" => config.credentials.krakenfutures = Some(reference.as_str().into()),
             "binance" => config.credentials.binance = Some(reference.as_str().into()),
             "binance_sub" => config.credentials.binance_sub = Some(reference.as_str().into()),
             "evm_primary" => config.credentials.evm_primary = Some(reference.as_str().into()),
             "evm_secondary" => config.credentials.evm_secondary = Some(reference.as_str().into()),
             "solana" => config.credentials.solana = Some(reference.as_str().into()),
+            label if config.kraken_accounts.contains_key(label) => {
+                config
+                    .kraken_accounts
+                    .get_mut(label)
+                    .expect("validated indexed slot")
+                    .credential_ref = reference.as_str().into()
+            }
             _ => unreachable!(),
         }
     }
@@ -476,6 +692,11 @@ pub async fn import(
         return Err(error);
     }
     for (new_ref, old_ref) in [
+        (&config.credentials.kraken, &old_references.kraken),
+        (
+            &config.credentials.krakenfutures,
+            &old_references.krakenfutures,
+        ),
         (&config.credentials.binance, &old_references.binance),
         (&config.credentials.binance_sub, &old_references.binance_sub),
         (&config.credentials.evm_primary, &old_references.evm_primary),
@@ -490,6 +711,16 @@ pub async fn import(
             && let Some(reference) = old_ref
                 .as_deref()
                 .and_then(|value| CredentialRef::new(value).ok())
+        {
+            let _ = fs::remove_file(credential_dir.join(format!("{}.json", reference.as_str())));
+        }
+    }
+    for (slot, prior) in &old.kraken_accounts {
+        if config
+            .kraken_accounts
+            .get(slot)
+            .is_some_and(|new| new.credential_ref != prior.credential_ref)
+            && let Ok(reference) = CredentialRef::new(&prior.credential_ref)
         {
             let _ = fs::remove_file(credential_dir.join(format!("{}.json", reference.as_str())));
         }
@@ -684,6 +915,63 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
             });
         }
     }
+    for (provider, reference, identity) in [
+        (
+            "kraken",
+            config.credentials.kraken.as_ref(),
+            config.kraken_account_id.as_ref(),
+        ),
+        (
+            "krakenfutures",
+            config.credentials.krakenfutures.as_ref(),
+            config.krakenfutures_account_id.as_ref(),
+        ),
+    ] {
+        if let Some(reference) = reference {
+            let identity = identity.ok_or("Kraken account identity is missing")?;
+            let resource = ResourceId(format!("{provider}:account:{identity}"));
+            connections.push(if provider == "kraken" {
+                ConnectionConfig::Kraken {
+                    default_wallet_account_id: config.kraken_default_wallet_account_id.clone(),
+                    name: "dev-kraken".into(),
+                    resource,
+                    credential_ref: reference.clone(),
+                    physical_identity: identity.clone(),
+                    physical_identity_verified: false,
+                }
+            } else {
+                ConnectionConfig::KrakenFutures {
+                    name: "dev-krakenfutures".into(),
+                    resource,
+                    credential_ref: reference.clone(),
+                    physical_identity: identity.clone(),
+                    physical_identity_verified: false,
+                }
+            });
+        }
+    }
+    validate_kraken_group_identities(config)?;
+    for group in config.kraken_accounts.values() {
+        let resource = ResourceId(format!("{}:account:{}", group.product, group.account_id));
+        connections.push(if group.product == "kraken" {
+            ConnectionConfig::Kraken {
+                name: group.name.clone(),
+                resource,
+                credential_ref: group.credential_ref.clone(),
+                physical_identity: group.account_id.clone(),
+                physical_identity_verified: false,
+                default_wallet_account_id: group.default_wallet_account_id.clone(),
+            }
+        } else {
+            ConnectionConfig::KrakenFutures {
+                name: group.name.clone(),
+                resource,
+                credential_ref: group.credential_ref.clone(),
+                physical_identity: group.account_id.clone(),
+                physical_identity_verified: false,
+            }
+        });
+    }
     if let (Some(reference), Some(address)) = (
         config.credentials.solana.as_ref(),
         config.solana_address.as_ref(),
@@ -813,6 +1101,44 @@ pub fn broker_config(config: &EnvironmentConfig) -> Result<BrokerConfigV2, Strin
     Ok(runtime_config)
 }
 
+fn validate_kraken_group_identities(config: &EnvironmentConfig) -> Result<(), String> {
+    if config.kraken_accounts.len() > 16 {
+        return Err("Indexed Kraken account groups exceed the supported bound".into());
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    for (product, id, name) in [
+        ("kraken", config.kraken_account_id.as_deref(), "dev-kraken"),
+        (
+            "krakenfutures",
+            config.krakenfutures_account_id.as_deref(),
+            "dev-krakenfutures",
+        ),
+    ] {
+        if let Some(id) = id {
+            identities.insert((product, id));
+            names.insert(name);
+        }
+    }
+    for (slot, group) in &config.kraken_accounts {
+        if !matches!(group.product.as_str(), "kraken" | "krakenfutures")
+            || !(1..=8).any(|index| slot == &format!("{}_{index}", group.product))
+        {
+            return Err("Indexed Kraken product or slot is invalid".into());
+        }
+        if !identities.insert((&group.product, &group.account_id)) {
+            return Err(
+                "Kraken credential groups cannot duplicate an existing product custody identity"
+                    .into(),
+            );
+        }
+        if !names.insert(&group.name) {
+            return Err("Kraken credential groups need distinct connection names".into());
+        }
+    }
+    Ok(())
+}
+
 fn canonical_uid(uid: &str) -> bool {
     !uid.is_empty()
         && uid.len() <= 20
@@ -918,6 +1244,8 @@ mod tests {
         let mut legacy = EnvironmentConfig::empty("env");
         legacy.version = 1;
         legacy.credentials = CredentialReferences {
+            kraken: Some("550e8400-e29b-41d4-a716-446655440007".into()),
+            krakenfutures: Some("550e8400-e29b-41d4-a716-446655440008".into()),
             binance: Some("550e8400-e29b-41d4-a716-446655440001".into()),
             binance_sub: Some("550e8400-e29b-41d4-a716-446655440002".into()),
             evm_primary: Some("550e8400-e29b-41d4-a716-446655440003".into()),
@@ -925,6 +1253,16 @@ mod tests {
             solana: Some("550e8400-e29b-41d4-a716-446655440005".into()),
             jupiter: Some("550e8400-e29b-41d4-a716-446655440006".into()),
         };
+        legacy.kraken_accounts.insert(
+            "kraken_1".into(),
+            KrakenDevelopmentAccount {
+                product: "kraken".into(),
+                name: "primary spot account".into(),
+                account_id: "spot-account".into(),
+                credential_ref: "550e8400-e29b-41d4-a716-446655440009".into(),
+                default_wallet_account_id: Some("wallet-default".into()),
+            },
+        );
         legacy.policy = Some(custom_development_policy());
         legacy
             .rpc_urls
@@ -976,6 +1314,31 @@ mod tests {
         assert_eq!(
             recovered.credentials.solana.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440005")
+        );
+        assert_eq!(
+            recovered.credentials.kraken.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440007")
+        );
+        assert_eq!(
+            recovered.credentials.krakenfutures.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440008")
+        );
+        assert_eq!(
+            recovered
+                .kraken_accounts
+                .get("kraken_1")
+                .unwrap()
+                .credential_ref,
+            "550e8400-e29b-41d4-a716-446655440009"
+        );
+        assert_eq!(
+            recovered
+                .kraken_accounts
+                .get("kraken_1")
+                .unwrap()
+                .default_wallet_account_id
+                .as_deref(),
+            Some("wallet-default")
         );
         assert_eq!(
             recovered.credentials.jupiter.as_deref(),
@@ -1468,6 +1831,249 @@ mod tests {
                 ED25519_PEM.replace("\\n", "\n").replace("\\n", "\n")
             );
         }
+    }
+
+    fn indexed_fixture_file() -> String {
+        [
+            ("FIN_DEV_KRAKEN_1","synthetic-spot-only","spot-001","spot-fixture"),
+            ("FIN_DEV_KRAKENFUTURES_1","synthetic-master-only","master-001","master-fixture"),
+            ("FIN_DEV_KRAKENFUTURES_2","synthetic-child-only","child-001","child-fixture")
+        ].into_iter().map(|(prefix,key,id,name)|format!("{prefix}_API_KEY={key}\n{prefix}_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\n{prefix}_ACCOUNT_ID={id}\n{prefix}_NAME={name}\n")).collect::<String>()+"FIN_DEV_KRAKEN_1_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT\n"
+    }
+    #[tokio::test]
+    async fn indexed_kraken_import_loads_master_child_and_spot_without_network_and_rotates_one_slot()
+     {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let keys = dir.path().join("synthetic-only.env");
+        let mut initial = EnvironmentConfig::empty("env");
+        initial.policy = Some(custom_development_policy());
+        initial.write_atomic(&config_path).unwrap();
+        fs::write(&keys, indexed_fixture_file()).unwrap();
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+        import(&config_path, "env", &keys, &credential_dir, false, None)
+            .await
+            .unwrap();
+        let first = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(first.kraken_accounts.len(), 3);
+        assert!(!first.credentials_is_empty());
+        assert_eq!(first.policy, initial.policy);
+        let broker = broker_config(&first).unwrap();
+        assert_eq!(broker.connections.len(), 3);
+        assert!(
+            matches!(&broker.connections[0],ConnectionConfig::Kraken{name,default_wallet_account_id,..}if name=="spot-fixture"&&default_wallet_account_id.as_deref()==Some("WDEFAULT"))
+        );
+        assert!(broker.connections.iter().any(
+            |c| matches!(c,ConnectionConfig::KrakenFutures{name,..}if name=="master-fixture")
+        ));
+        let provider =
+            dev_credentials::DevelopmentCredentialProvider::new(credential_dir.clone()).unwrap();
+        use fin_exchange::ccxt::CredentialProvider;
+        assert_eq!(
+            provider
+                .credentials(&first.kraken_accounts["krakenfutures_2"].credential_ref)
+                .unwrap()
+                .api_key
+                .as_str(),
+            "synthetic-child-only"
+        );
+        let old_child = first.kraken_accounts["krakenfutures_2"]
+            .credential_ref
+            .clone();
+        fs::write(&keys,"FIN_DEV_KRAKENFUTURES_2_API_KEY=synthetic-rotated-child-only\nFIN_DEV_KRAKENFUTURES_2_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKENFUTURES_2_ACCOUNT_ID=child-001\n").unwrap();
+        import(&config_path, "env", &keys, &credential_dir, false, None)
+            .await
+            .unwrap();
+        let second = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(second.kraken_accounts.len(), 3);
+        assert_eq!(
+            second.kraken_accounts["krakenfutures_2"].name,
+            "child-fixture"
+        );
+        assert_eq!(
+            second.kraken_accounts["kraken_1"]
+                .default_wallet_account_id
+                .as_deref(),
+            Some("WDEFAULT")
+        );
+        assert_eq!(
+            second.kraken_accounts["krakenfutures_1"].credential_ref,
+            first.kraken_accounts["krakenfutures_1"].credential_ref
+        );
+        assert!(!credential_dir.join(format!("{old_child}.json")).exists());
+        assert!(
+            provider
+                .credentials(&second.kraken_accounts["krakenfutures_2"].credential_ref)
+                .is_ok()
+        );
+    }
+    #[tokio::test]
+    async fn indexed_kraken_reimport_rejects_identity_name_default_alias_and_custody_duplicates_atomically()
+     {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let keys = dir.path().join("synthetic-only.env");
+        fs::write(&keys, indexed_fixture_file()).unwrap();
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+        import(&config_path, "env", &keys, &credential_dir, false, None)
+            .await
+            .unwrap();
+        let original = fs::read(&config_path).unwrap();
+        let files = fs::read_dir(&credential_dir).unwrap().count();
+        let source = indexed_fixture_file();
+        for changed in [
+            source.replace("ACCOUNT_ID=child-001", "ACCOUNT_ID=other-identity"),
+            source.replace("NAME=child-fixture", "NAME=renamed-fixture"),
+            source.replace("ID=WDEFAULT", "ID=WOTHER"),
+            source.replace("ACCOUNT_ID=child-001", "ACCOUNT_ID=master-001"),
+            source.replace("NAME=child-fixture", "NAME=master-fixture"),
+        ] {
+            fs::write(&keys, changed).unwrap();
+            let error = import(&config_path, "env", &keys, &credential_dir, false, None)
+                .await
+                .unwrap_err();
+            assert!(!error.contains("synthetic-child-only"));
+            assert_eq!(fs::read(&config_path).unwrap(), original);
+            assert_eq!(fs::read_dir(&credential_dir).unwrap().count(), files);
+        }
+    }
+    #[tokio::test]
+    async fn indexed_kraken_partial_groups_and_legacy_alias_duplicates_cannot_create_credentials() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let keys = dir.path().join("synthetic-only.env");
+        fs::write(&keys, "FIN_DEV_KRAKENFUTURES_8_NAME=partial-fixture\n").unwrap();
+        fs::set_permissions(&keys, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            import(&config_path, "env", &keys, &credential_dir, false, None)
+                .await
+                .is_err()
+        );
+        assert!(!config_path.exists());
+        assert!(!credential_dir.exists());
+        let source = indexed_fixture_file()
+            + "FIN_DEV_KRAKEN_API_KEY=synthetic-legacy-only\nFIN_DEV_KRAKEN_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKEN_ACCOUNT_ID=spot-001\n";
+        fs::write(&keys, source).unwrap();
+        assert!(
+            import(&config_path, "env", &keys, &credential_dir, false, None)
+                .await
+                .is_err()
+        );
+        assert!(!config_path.exists());
+        assert!(!credential_dir.exists());
+    }
+    #[tokio::test]
+    async fn offline_kraken_import_keeps_products_separate_and_refuses_identity_swaps() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let credential_dir = dir.path().join("credentials");
+        let dotenv_path = dir.path().join("keys.env");
+        let source = "FIN_DEV_KRAKEN_API_KEY=synthetic-spot-key\nFIN_DEV_KRAKEN_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKEN_ACCOUNT_ID=synthetic-spot-account\nFIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT\nFIN_DEV_KRAKENFUTURES_API_KEY=synthetic-derivatives-key\nFIN_DEV_KRAKENFUTURES_SECRET=c3ludGhldGljLW5vbi1saXZlLWtleQ==\nFIN_DEV_KRAKENFUTURES_ACCOUNT_ID=synthetic-derivatives-account\n";
+        fs::write(&dotenv_path, source).unwrap();
+        fs::set_permissions(&dotenv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let config = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert!(config.credentials.kraken.is_some());
+        assert_eq!(
+            config.kraken_default_wallet_account_id.as_deref(),
+            Some("WDEFAULT")
+        );
+        assert!(config.credentials.krakenfutures.is_some());
+        let broker = broker_config(&config).unwrap();
+        assert_eq!(broker.connections.len(), 2);
+        assert!(broker.connections.iter().all(|c| matches!(
+            c,
+            ConnectionConfig::Kraken {
+                physical_identity_verified: false,
+                ..
+            } | ConnectionConfig::KrakenFutures {
+                physical_identity_verified: false,
+                ..
+            }
+        )));
+        let raw = fs::read_to_string(&config_path).unwrap();
+        assert!(!raw.contains("synthetic-spot-key"));
+        assert!(!raw.contains("c3ludGhldGlj"));
+        let before = fs::read(&config_path).unwrap();
+        fs::write(
+            &dotenv_path,
+            source.replace("synthetic-spot-account", "different-account"),
+        )
+        .unwrap();
+        assert!(
+            import(
+                &config_path,
+                "env",
+                &dotenv_path,
+                &credential_dir,
+                false,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(before, fs::read(&config_path).unwrap());
+        for invalid in [
+            source.replace("WDEFAULT", "WOTHER"),
+            source.replace("WDEFAULT", "bad/path"),
+        ] {
+            fs::write(&dotenv_path, invalid).unwrap();
+            assert!(
+                import(
+                    &config_path,
+                    "env",
+                    &dotenv_path,
+                    &credential_dir,
+                    false,
+                    None
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(before, fs::read(&config_path).unwrap());
+        }
+        // Omitting optional metadata on credential replacement preserves the alias.
+        fs::write(
+            &dotenv_path,
+            source.replace("FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT\n", ""),
+        )
+        .unwrap();
+        import(
+            &config_path,
+            "env",
+            &dotenv_path,
+            &credential_dir,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let config = EnvironmentConfig::read(&config_path, "env").unwrap();
+        assert_eq!(
+            config.kraken_default_wallet_account_id.as_deref(),
+            Some("WDEFAULT")
+        );
+        let selected = broker_config(&config)
+            .unwrap()
+            .connections
+            .into_iter()
+            .find(|c| matches!(c, ConnectionConfig::Kraken { .. }))
+            .unwrap();
+        assert!(
+            matches!(selected,ConnectionConfig::Kraken{default_wallet_account_id:Some(id),..} if id=="WDEFAULT")
+        );
     }
 
     #[tokio::test]

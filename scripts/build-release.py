@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import platform
 import re
 import shutil
@@ -41,20 +42,21 @@ they are not publisher signatures.
 """
 
 
-def run(args, root):
+def run(args, root, env=None):
     return subprocess.run(args, cwd=root, check=True, stdout=subprocess.PIPE,
-                          text=True).stdout.strip()
+                          text=True, env=env).stdout.strip()
 
 
 def resolve(root, tag=None, preview=False):
-    # Only read the version in the workspace.package section, not dependencies.
-    cargo = (root / "Cargo.toml").read_text(encoding="utf-8")
-    section = re.search(r"(?ms)^\[workspace\.package\]\s*\n(.*?)(?=^\[|\Z)", cargo)
-    versions = re.findall(r'^version\s*=\s*"([^"\n]+)"\s*(?:#.*)?$', section.group(1), re.M) if section else []
-    if len(versions) != 1 or not re.fullmatch(VERSION, versions[0]):
-        raise ValueError("Cargo workspace.package must contain one supported SemVer version")
     head = run(["git", "rev-parse", "HEAD"], root)
     if preview:
+        # Untagged local previews use Cargo only to generate their default name.
+        # Published releases derive their version solely from the Git tag.
+        cargo = (root / "Cargo.toml").read_text(encoding="utf-8")
+        section = re.search(r"(?ms)^\[workspace\.package\]\s*\n(.*?)(?=^\[|\Z)", cargo)
+        versions = re.findall(r'^version\s*=\s*"([^"\n]+)"\s*(?:#.*)?$', section.group(1), re.M) if section else []
+        if len(versions) != 1 or not re.fullmatch(VERSION, versions[0]):
+            raise ValueError("Cargo workspace.package must contain one supported SemVer version")
         suffix = ".preview." if "-" in versions[0] else "-preview."
         expected_tag = "v" + versions[0] + suffix + head[:12]
         if tag is not None and tag != expected_tag:
@@ -64,8 +66,6 @@ def resolve(root, tag=None, preview=False):
     if not match or (match.group(4) and any(part.isdigit() and len(part) > 1 and part[0] == "0"
                                            for part in match.group(4).split("."))):
         raise ValueError("tag must be vMAJOR.MINOR.PATCH with an optional SemVer prerelease")
-    if not preview and versions != [tag[1:]]:
-        raise ValueError("release tag must match the Cargo workspace.package version exactly")
     commit = head if preview else run(["git", "rev-parse", "--verify", "refs/tags/" + tag + "^{commit}"], root)
     if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise ValueError("invalid resolved source commit")
@@ -161,15 +161,16 @@ def build(root, metadata, target, output):
         raise ValueError("refusing to overwrite existing release assets")
     with tempfile.TemporaryDirectory(prefix="fin-release-") as temporary:
         bundle = Path(temporary) / "bundle"
+        build_env = dict(os.environ, FIN_RELEASE_VERSION=metadata["version"])
         if TARGETS[target][0] == "Darwin":
-            run(["/bin/sh", str(root / "scripts/package-rust-macos.sh"), str(bundle), "--verbose"], root)
+            run(["/bin/sh", str(root / "scripts/package-rust-macos.sh"), str(bundle), "--verbose"], root, env=build_env)
             files = read_bundle(bundle, MAC_FILES)
             original_info = ("source_commit={}\nsource_state=clean\narchitecture={}\nprofile=release\n"
                              .format(metadata["commit"], TARGETS[target][1])).encode()
             if files["BUILDINFO"] != original_info:
                 raise ValueError("native packager source provenance does not match the release")
         else:
-            run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "fin-cli"], root)
+            run(["cargo", "build", "--locked", "--release", "--target", target, "-p", "fin-cli"], root, env=build_env)
             binary = root / "target" / target / "release/fin"
             if binary.is_symlink() or not binary.is_file():
                 raise ValueError("compiler must produce a regular fin binary")

@@ -112,7 +112,9 @@ impl CredentialProvider for DevelopmentCredentialProvider {
         let reference = CredentialRef::new(raw).map_err(|_| denied())?;
         self.material(&reference, |material| {
             let (api_key, secret) = match material {
-                SecretMaterial::BinanceHmac { api_key, secret } => (api_key, secret),
+                SecretMaterial::BinanceHmac { api_key, secret }
+                | SecretMaterial::KrakenApi { api_key, secret }
+                | SecretMaterial::KrakenFuturesApi { api_key, secret } => (api_key, secret),
                 SecretMaterial::BinanceRsa {
                     api_key,
                     private_key,
@@ -173,6 +175,11 @@ impl BrokerCredentialProvider for DevelopmentCredentialProvider {
         })
     }
 
+    fn kraken_nonces(&self) -> Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+        Ok(Arc::new(fin_broker::kraken::DurableKrakenNonces::open(
+            &self.directory.join("nonces.sqlite"),
+        )?))
+    }
     fn envelope_signer(
         &self,
         reference: &CredentialRef,

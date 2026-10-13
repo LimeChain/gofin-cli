@@ -5,6 +5,10 @@ use std::collections::{BTreeSet, HashSet};
 
 mod binance;
 pub use binance::BinanceSpot;
+mod kraken;
+mod kraken_tokenized;
+pub use kraken::KrakenSpot;
+pub use kraken_tokenized::require_kraken_tokenized_quote_unit;
 #[cfg(test)]
 mod tests;
 
@@ -68,11 +72,8 @@ pub struct ExchangeSpotPrices {
 impl ExchangeSpotPrices {
     pub fn new(provider: CoinGeckoPrices) -> Result<Self> {
         let provider = Arc::new(provider);
-        Ok(Self::with_sources(
-            provider.clone(),
-            provider,
-            Arc::new(BinanceSpot::new()?),
-        ))
+        Self::with_sources(provider.clone(), provider, Arc::new(BinanceSpot::new()?))
+            .with_exchange_source("kraken", Arc::new(KrakenSpot::new()?))
     }
     /// Injectable sources share the same production selection/derivation/cache path.
     pub fn with_sources(
@@ -179,7 +180,9 @@ impl ExchangeSpotPrices {
                 );
             }
             let rows = &cache.markets.get(exchange).expect("inserted metadata").rows;
-            if matches!(asset.reference.as_str(), "USDC" | "USDT") {
+            if matches!(asset.reference.as_str(), "USDC" | "USDT")
+                || (exchange == "kraken" && asset.reference == "ZUSD")
+            {
                 if !rows.iter().any(|row| {
                     row.active
                         && (row.base_asset == asset.reference || row.quote_asset == asset.reference)
@@ -245,11 +248,18 @@ impl ExchangeSpotPrices {
                 }
             }
         }
-        let rates = self.rates().await?;
+        let rates = if chosen.iter().any(|(_, _, currency)| currency != "ZUSD") {
+            Some(self.rates().await?)
+        } else {
+            None
+        };
         let now = self.now();
-        validate_rates(&rates, now)?;
+        if let Some(rates) = &rates {
+            validate_rates(rates, now)?;
+        }
         assets.iter().zip(chosen).map(|(asset, (exchange, market, currency))| {
-            let rate = if currency == "USDC" { &rates.usdc } else { &rates.usdt };
+            let dollars=UsdQuote{usd_per_unit:"1".into(),updated_at:now.to_rfc3339(),observed_at:now.to_rfc3339(),source:"Kraken ZUSD fiat USD denomination (one US dollar per USD unit)".into()};
+            let rate = if currency=="ZUSD" {&dollars} else if currency == "USDC" { &rates.as_ref().expect("stablecoin conversion").usdc } else { &rates.as_ref().expect("stablecoin conversion").usdt };
             let fx_time = time(&rate.updated_at)?;
             if let Some(market) = market {
                 let book = cache.books.get(&(exchange.clone(), market.clone())).expect("validated book");
@@ -289,6 +299,7 @@ impl UsdPriceSource for ExchangeSpotPrices {
         let mut exchanges = Vec::new();
         let mut chains = Vec::new();
         for asset in assets {
+            require_kraken_tokenized_quote_unit(asset)?;
             if resolution::exchange_name(&asset.network).is_some() {
                 exchanges.push(asset.clone());
             } else {
@@ -429,7 +440,7 @@ fn validate_markets(rows: &[ExchangeMarket]) -> Result<()> {
     Ok(())
 }
 fn select_pair<'a>(rows: &'a [ExchangeMarket], asset: &str) -> Result<&'a ExchangeMarket> {
-    for currency in ["USDC", "USDT"] {
+    for currency in ["USDC", "USDT", "ZUSD"] {
         let selected: Vec<_> = rows
             .iter()
             .filter(|row| row.active && row.base_asset == asset && row.quote_asset == currency)

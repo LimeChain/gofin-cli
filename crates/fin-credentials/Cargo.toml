@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 fin-domain.workspace = true
 fin-authorization = { path = "../fin-authorization" }
 serde.workspace = true

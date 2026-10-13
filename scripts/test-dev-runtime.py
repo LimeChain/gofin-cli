@@ -134,6 +134,10 @@ class RuntimeIsolation(unittest.TestCase):
             for name in ("crates", "scripts", "skills"):
                 shutil.copytree(REPO / name, other / name,
                                 ignore=shutil.ignore_patterns("__pycache__"))
+            # These reviewed snapshots are compiled into fin-kraken. The second
+            # checkout must own its inputs instead of reusing cached originals.
+            shutil.copytree(REPO / "docs/kraken", other / "docs/kraken",
+                            ignore=shutil.ignore_patterns("__pycache__"))
             (other / "target").symlink_to(REPO / "target", target_is_directory=True)
             with (other / "crates/fin-cli/examples/fin-dev.rs").open("a") as source:
                 source.write("\n// Distinct source snapshot for isolation verification.\n")

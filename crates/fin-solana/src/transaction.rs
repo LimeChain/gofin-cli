@@ -3152,6 +3152,7 @@ mod tests {
             expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
             valuation: None,
             intent: fin_domain::FinancialIntent::default(),
+            action_deadline: None,
             operation_version: 1,
         };
         let journal = Arc::new(ExpiringJournal {

@@ -475,6 +475,35 @@ pub fn definitions() -> Vec<Definition> {
         admin::<BuilderFeeInput>("hyperliquid.builder.approve_fee", "Approve a named builder fee recipient and exact maximum rate.", json!({"approval":"human-only administrative authorization","fee_unit":"tenths of one basis point"})),
         admin::<SubaccountInput>("hyperliquid.account.create_subaccount", "Create a named subaccount.", json!({"approval":"human-only administrative authorization"})),
     ]);
+    for definition in &mut d {
+        if matches!(
+            definition.name.as_str(),
+            "hyperliquid.orders.place"
+                | "hyperliquid.orders.batch"
+                | "hyperliquid.orders.edit"
+                | "hyperliquid.orders.edit_batch"
+        ) {
+            definition.semantics["plan_immediate_orders"] = json!(true);
+        }
+        if definition.kind == OperationKind::Write
+            && !matches!(
+                definition.name.as_str(),
+                "hyperliquid.orders.place"
+                    | "hyperliquid.orders.batch"
+                    | "hyperliquid.orders.edit"
+                    | "hyperliquid.orders.edit_batch"
+                    | "hyperliquid.orders.schedule_cancel"
+                    | "hyperliquid.orders.twap"
+            )
+        {
+            definition.semantics["plan_allowance_seconds"] =
+                json!(if definition.name.ends_with(".withdraw") {
+                    fin_domain::plan_timing::WITHDRAWAL_ALLOWANCE_SECONDS
+                } else {
+                    fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+                });
+        }
+    }
     d
 }
 

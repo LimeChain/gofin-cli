@@ -22,6 +22,13 @@ pub struct FinancialPlanSpec {
     pub version: u32,
     /// Display label only. It grants no authority and is included in approval.
     pub name: String,
+    /// Optional caller-authored financial sentence shown after the plan name in
+    /// approval. It grants no authority; the complete plan remains bound. Use
+    /// one trimmed line, with at most 140 Unicode characters across name and
+    /// summary together. Control and bidirectional formatting are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 140))]
+    pub summary: Option<String>,
     pub steps: Vec<FinancialPlanStepSpec>,
     pub aggregate_bounds: FinancialPlanBounds,
 }
@@ -38,6 +45,10 @@ pub struct FinancialPlanStepSpec {
     pub permitted_variations: Value,
     pub completion: FinancialStepCompletion,
     pub funding_dependencies: Vec<FinancialPlanFundingDependency>,
+    /// Relative execution window, resolved only when an eligible attempt is prepared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub action_deadline_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -141,9 +152,11 @@ pub struct PlanPermission {
     pub recovery_parent: Option<FinancialPlanRecoveryParent>,
     pub possible_credits: Vec<FinancialPlanFundingIdentity>,
     pub fee_assets: Vec<AssetId>,
-    /// Receipt capacity for a deferred claim of already committed principal.
-    /// This grants no new debit authority; the adapter independently verifies
-    /// the original backing and the exact claim before dispatch.
+    /// Bounded receipt capacity backed by an existing claim or other
+    /// adapter-verified source that is not a plan debit, such as a deferred
+    /// claim or withdrawal from an existing position. This grants no new debit
+    /// authority; the adapter independently verifies the backing and exact
+    /// receipt before settlement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_receipt: Option<ResourceAmount>,
     /// Optional adapter-imposed upper bound on the parent plan consent life.
@@ -181,6 +194,10 @@ pub struct FinancialPlanRecoveryBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FinancialPlanCumulativeScope {
+    /// Gross newly incurred debt, independent of wallet debits. Verified debt
+    /// decreases never replenish this authority. Older JSON scopes omit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maximum_obligations: Vec<ResourceAmount>,
     pub scope_id: String,
     pub maximum_debits: Vec<ResourceAmount>,
     pub maximum_costs: Vec<CostBound>,
@@ -191,8 +208,9 @@ pub struct FinancialPlanCumulativeScope {
 pub struct FinancialPlanAuthorizationRequest {
     pub request_id: String,
     pub plan: FinancialPlanSpec,
-    #[serde(default = "default_valid_for_seconds")]
-    pub valid_for_seconds: u64,
+    /// Parent lifetime from native approval; omission uses the sequential planning budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_for_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces_revision_id: Option<String>,
     /// Hash returned by the latest preview. Authorization fails before Touch ID
@@ -201,25 +219,23 @@ pub struct FinancialPlanAuthorizationRequest {
     pub expected_review_hash: Option<String>,
 }
 
-fn default_valid_for_seconds() -> u64 {
-    600
-}
-
 impl FinancialPlanAuthorizationRequest {
     pub fn validate(&self) -> crate::Result<()> {
         self.plan.validate()?;
-        let Some(duration) = i64::try_from(self.valid_for_seconds)
-            .ok()
-            .and_then(chrono::Duration::try_seconds)
-        else {
-            return Err(FinError::validation(
-                "Plan consent duration must be a positive representable duration.",
-            ));
-        };
-        if duration <= chrono::Duration::zero() {
-            return Err(FinError::validation(
-                "Plan consent duration must be a positive representable duration.",
-            ));
+        if let Some(seconds) = self.valid_for_seconds {
+            let Some(duration) = i64::try_from(seconds)
+                .ok()
+                .and_then(chrono::Duration::try_seconds)
+            else {
+                return Err(FinError::validation(
+                    "Plan consent duration must be a positive representable duration.",
+                ));
+            };
+            if duration <= chrono::Duration::zero() {
+                return Err(FinError::validation(
+                    "Plan consent duration must be a positive representable duration.",
+                ));
+            }
         }
         if self
             .replaces_revision_id
@@ -245,7 +261,7 @@ impl FinancialPlanAuthorizationRequest {
 }
 
 impl FinancialPlanSpec {
-    /// Validate the plan's stable structural contract and display name.
+    /// Validate the plan's stable structural contract and approval text.
     pub fn validate(&self) -> crate::Result<()> {
         if self.version != FINANCIAL_PLAN_VERSION {
             return Err(FinError::validation(
@@ -253,6 +269,22 @@ impl FinancialPlanSpec {
             ));
         }
         validate_financial_plan_name(&self.name)?;
+        if let Some(summary) = &self.summary {
+            // Leave room for the native approval prefix, step count and full
+            // duration. Reject long text before approval instead of truncating
+            // material financial words in the prompt.
+            if summary.is_empty()
+                || summary.trim() != summary
+                || self.name.chars().count() + summary.chars().count() > 140
+                || summary
+                    .chars()
+                    .any(|c| c.is_control() || is_bidi_format_control(c))
+            {
+                return Err(FinError::validation(
+                    "Plan summaries must be one trimmed, nonempty line with no control or bidirectional formatting characters; name and summary together must contain at most 140 Unicode characters.",
+                ));
+            }
+        }
         if self.steps.is_empty() {
             return Err(FinError::validation(
                 "A financial plan must contain at least one step.",
@@ -389,6 +421,11 @@ pub struct FinancialPlanReview {
     pub carried_forward_usage: FinancialPlanUsage,
     pub remaining_debits: Vec<ResourceAmount>,
     pub remaining_costs: Vec<CostBound>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timing_warnings: Vec<FinError>,
+    /// Feasibility checks deferred until the step has actual execution state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feasibility_warnings: Vec<String>,
 }
 
 pub fn financial_plan_review_binding(
@@ -515,14 +552,20 @@ pub fn financial_plan_attempt_binding(
     if let Some(binding) = candidate.binding.as_object_mut() {
         binding.remove(PLAN_METADATA_KEY);
     }
-    serde_json::json!({
+    let mut binding = serde_json::json!({
         "version": 1,
         "kind": "financial_plan_step_attempt",
         "plan_id": plan_id,
         "revision_id": revision_id,
         "step_id": step_id,
         "attempt": boundaries::attempt_binding(&candidate),
-    })
+    });
+    if let Some(deadline) = &candidate.action_deadline {
+        binding["execution_input"] = candidate.input.clone();
+        binding["action_deadline"] =
+            serde_json::to_value(deadline).expect("deadline serialization");
+    }
+    binding
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -570,6 +613,8 @@ pub struct FinancialPlanStatus {
     pub remaining_costs: Vec<CostBound>,
     pub next_eligible_step_id: Option<String>,
     pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_timing: Option<crate::plan_timing::PlanAuthorizationTiming>,
 }
 
 /// Durable linkage allows retries to recover their original revision binding.
@@ -582,6 +627,10 @@ pub struct FinancialPlanAttemptLinkage {
     pub attempt_id: String,
     pub request_fingerprint: String,
     pub execution_binding_hash: String,
+    /// Original caller request ID shared by any automatically refreshed
+    /// candidates for this logical plan-step request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
     pub submission_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -620,7 +669,9 @@ mod tests {
         FinancialPlanSpec {
             version: FINANCIAL_PLAN_VERSION,
             name: "Synthetic sale".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "sell".into(),
                 operation: "binance.spot.order-place".into(),
                 input: serde_json::json!({}),
@@ -656,6 +707,108 @@ mod tests {
         assert!(plan_name("hidden\u{202e}name").is_err());
         assert!(plan_name("Arabic \u{061c} label").is_err());
         assert!(plan_name("duplicate labels are allowed").is_ok());
+    }
+
+    #[test]
+    fn validates_complete_summary_before_approval_without_truncation() {
+        let mut plan = sample_plan();
+        plan.summary = Some("Sell up to 10 BTC atoms within the reviewed fee limits.".into());
+        plan.validate().unwrap();
+        let remaining = 140 - plan.name.chars().count();
+        plan.summary = Some("é".repeat(remaining));
+        plan.validate().unwrap();
+        plan.summary = Some("界".repeat(remaining + 1));
+        assert!(plan.validate().is_err());
+        for text in [
+            "",
+            " ",
+            " leading",
+            "trailing ",
+            "line\nbreak",
+            "tab\there",
+            "escape\u{1b}",
+            "line\u{2028}break",
+            "paragraph\u{2029}break",
+            "hidden\u{202e}amount",
+            "Arabic\u{061c}amount",
+            "isolate\u{2066}amount\u{2069}",
+        ] {
+            plan.summary = Some(text.into());
+            assert!(plan.validate().is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
+    fn optional_summary_preserves_legacy_json_and_binds_changed_display_text() {
+        let original = sample_plan();
+        let legacy = serde_json::to_value(&original).unwrap();
+        assert!(legacy.get("summary").is_none());
+        let restored: FinancialPlanSpec = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(restored.summary.is_none());
+        assert_eq!(serde_json::to_value(&restored).unwrap(), legacy);
+        let usage = FinancialPlanUsage::default();
+        let legacy_review = serde_json::json!({
+            "version": 1, "kind": "financial_plan_review", "plan": legacy,
+            "permissions": [], "valid_for_seconds": 600,
+            "replaces_revision_id": null, "carried_forward_usage": usage,
+        });
+        let legacy_hash = crate::binding_hash(&legacy_review).unwrap();
+        assert_eq!(
+            legacy_hash,
+            "bde77e6a82728c30b158bd000c06958c90d1ec7d8a752445e1112795f695647a"
+        );
+        assert_eq!(
+            financial_plan_review_hash(&restored, &[], 600, None, &usage).unwrap(),
+            legacy_hash,
+        );
+        let approval =
+            financial_plan_approval_binding("plan", "revision", &restored, &[], 600, None, &usage);
+        let mut summarized = restored;
+        summarized.summary = Some("Sell up to 10 BTC atoms within the reviewed fee limits.".into());
+        let value = serde_json::to_value(&summarized).unwrap();
+        assert_eq!(
+            serde_json::from_value::<FinancialPlanSpec>(value).unwrap(),
+            summarized
+        );
+        let summary_hash = financial_plan_review_hash(&summarized, &[], 600, None, &usage).unwrap();
+        assert_ne!(summary_hash, legacy_hash);
+        let summarized_approval = financial_plan_approval_binding(
+            "plan",
+            "revision",
+            &summarized,
+            &[],
+            600,
+            None,
+            &usage,
+        );
+        assert_ne!(
+            crate::binding_hash(&approval).unwrap(),
+            crate::binding_hash(&summarized_approval).unwrap()
+        );
+        summarized.summary = Some("Sell up to 9 BTC atoms within the reviewed fee limits.".into());
+        assert_ne!(
+            financial_plan_review_hash(&summarized, &[], 600, None, &usage).unwrap(),
+            summary_hash
+        );
+    }
+
+    #[test]
+    fn legacy_plan_json_preserves_explicit_duration_and_omitted_deadlines() {
+        let historical = serde_json::json!({"request_id":"legacy", "plan":sample_plan(), "valid_for_seconds":600});
+        let request: FinancialPlanAuthorizationRequest =
+            serde_json::from_value(historical.clone()).unwrap();
+        assert_eq!(request.valid_for_seconds, Some(600));
+        assert!(request.plan.steps[0].action_deadline_seconds.is_none());
+        assert_eq!(serde_json::to_value(&request).unwrap(), historical);
+        let mut automatic = historical;
+        automatic
+            .as_object_mut()
+            .unwrap()
+            .remove("valid_for_seconds");
+        let request: FinancialPlanAuthorizationRequest =
+            serde_json::from_value(automatic.clone()).unwrap();
+        assert_eq!(request.valid_for_seconds, None);
+        assert_eq!(serde_json::to_value(&request).unwrap(), automatic);
     }
 
     #[test]
@@ -715,13 +868,13 @@ mod tests {
         let request = FinancialPlanAuthorizationRequest {
             request_id: "request-1".into(),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: Some("a".repeat(64)),
         };
         request.validate().unwrap();
         let mut invalid_duration = request;
-        invalid_duration.valid_for_seconds = u64::MAX;
+        invalid_duration.valid_for_seconds = Some(u64::MAX);
         assert!(invalid_duration.validate().is_err());
     }
 
@@ -739,6 +892,7 @@ mod tests {
             valuation: None,
             intent: crate::FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         let binding = financial_plan_attempt_binding(&prepared, "plan-1", "revision-1", "sell");
         assert!(

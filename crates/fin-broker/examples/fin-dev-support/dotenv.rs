@@ -43,13 +43,10 @@ pub fn parse_selected(
             continue;
         }
         let Some(key) = canonical_key(raw_key) else {
-            if provider.is_some() {
-                continue;
-            }
-            return Err(format!(
-                "credential file has an unsupported key on line {}",
-                line_number + 1
-            ));
+            // Credential exports can contain variables for unrelated tools or
+            // connectors. Import only explicitly supported Fin keys; selected
+            // provider parsing still avoids decoding unrelated credential values.
+            continue;
         };
         if provider.is_some_and(|selected| provider_for(key) != Some(selected)) {
             continue;
@@ -102,6 +99,16 @@ fn provider_for(key: &str) -> Option<&'static str> {
 }
 
 fn canonical_key(key: &str) -> Option<&str> {
+    for prefix in ["FIN_DEV_KRAKEN_", "FIN_DEV_KRAKENFUTURES_"] {
+        if let Some(rest) = key.strip_prefix(prefix)
+            && let Some((index, field)) = rest.split_once('_')
+            && matches!(index, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
+            && (matches!(field, "API_KEY" | "SECRET" | "ACCOUNT_ID" | "NAME")
+                || (prefix == "FIN_DEV_KRAKEN_" && field == "DEFAULT_WALLET_ACCOUNT_ID"))
+        {
+            return Some(key);
+        }
+    }
     Some(match key {
         "BINANCE_MASTER_ACCOUNT_API_KEY" => "FIN_DEV_BINANCE_API_KEY",
         "BINANCE_MASTER_ACCOUNT_API_PEM" => "FIN_DEV_BINANCE_PRIVATE_KEY_PEM",
@@ -110,7 +117,14 @@ fn canonical_key(key: &str) -> Option<&str> {
         "BINANCE_SUB_ACCOUNT_EMAIL" => "FIN_DEV_BINANCE_SUB_EMAIL",
         "ETH_WALLET_PK" => "FIN_DEV_EVM_PRIVATE_KEY",
         "SOLANA_PRIVATE_KEY" => "FIN_DEV_SOLANA_PRIVATE_KEY",
-        "FIN_DEV_BINANCE_API_KEY"
+        "FIN_DEV_KRAKEN_API_KEY"
+        | "FIN_DEV_KRAKEN_SECRET"
+        | "FIN_DEV_KRAKEN_ACCOUNT_ID"
+        | "FIN_DEV_KRAKEN_DEFAULT_WALLET_ACCOUNT_ID"
+        | "FIN_DEV_KRAKENFUTURES_API_KEY"
+        | "FIN_DEV_KRAKENFUTURES_SECRET"
+        | "FIN_DEV_KRAKENFUTURES_ACCOUNT_ID"
+        | "FIN_DEV_BINANCE_API_KEY"
         | "FIN_DEV_BINANCE_SECRET"
         | "FIN_DEV_BINANCE_PRIVATE_KEY_PEM"
         | "FIN_DEV_BINANCE_UID"
@@ -181,7 +195,10 @@ mod tests {
         assert_eq!(values["FIN_DEV_BINANCE_API_KEY"].as_str(), "abc");
         assert_eq!(values["FIN_DEV_BINANCE_SECRET"].as_str(), "a=b");
         assert!(parse("FIN_DEV_BINANCE_API_KEY=$(touch /tmp/nope)").is_err());
-        assert!(parse("PATH=/tmp").is_err());
+        assert!(
+            parse("FIN_DEV_BINANCE_API_KEY=abc\nPATH=/tmp\nOTHER_TOOL_TOKEN=opaque value #1\n")
+                .is_ok()
+        );
         assert!(parse("FIN_DEV_BINANCE_API_KEY=x\nFIN_DEV_BINANCE_API_KEY=y").is_err());
         let aliases = parse("BINANCE_MASTER_ACCOUNT_API_KEY=master\nBINANCE_MASTER_ACCOUNT_API_PEM=-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\nETH_WALLET_PK=1111111111111111111111111111111111111111111111111111111111111111").unwrap();
         assert_eq!(aliases["FIN_DEV_BINANCE_API_KEY"].as_str(), "master");
@@ -203,6 +220,22 @@ mod tests {
     }
 
     #[test]
+    fn indexed_kraken_groups_are_closed_and_bounded() {
+        for product in ["KRAKEN", "KRAKENFUTURES"] {
+            for index in 1..=8 {
+                assert!(parse(&format!("FIN_DEV_{product}_{index}_API_KEY=synthetic-only\nFIN_DEV_{product}_{index}_NAME=fixture-name")).is_ok());
+            }
+            for index in ["0", "9", "01", "999"] {
+                assert!(
+                    parse(&format!("FIN_DEV_{product}_{index}_API_KEY=synthetic-only")).is_err()
+                );
+            }
+            assert!(parse(&format!("FIN_DEV_{product}_1_URL=unsupported")).is_err());
+        }
+        assert!(parse("FIN_DEV_KRAKENFUTURES_1_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT").is_err());
+        assert!(parse("FIN_DEV_KRAKEN_1_DEFAULT_WALLET_ACCOUNT_ID=WDEFAULT").is_ok());
+    }
+    #[test]
     fn errors_do_not_include_secret_values() {
         let error =
             parse("FIN_DEV_BINANCE_API_KEY=topsecret\nFIN_DEV_BINANCE_API_KEY=other").unwrap_err();
@@ -215,24 +248,31 @@ mod tests {
         let values = parse_selected(
             "FIN_DEV_EVM_PRIVATE_KEY=$(never execute)\nFIN_DEV_BINANCE_API_KEY='malformed\nUNKNOWN_SECRET=do not inspect\nFIN_DEV_SOLANA_PRIVATE_KEY=abc\n",
             Some("solana"),
-        )
-        .unwrap();
+        ).unwrap();
         assert_eq!(values.len(), 1);
         assert_eq!(values["FIN_DEV_SOLANA_PRIVATE_KEY"].as_str(), "abc");
         assert!(
             parse_selected(
                 "SOLANA_PRIVATE_KEY=first\nFIN_DEV_SOLANA_PRIVATE_KEY=second\n",
-                Some("solana"),
+                Some("solana")
             )
             .is_err()
         );
-        let ignored = parse_selected(
-            "FIN_DEV_EVM_PRIVATE_KEY\nUNKNOWN_SECRET=broken'quote\nBINANCE_MASTER_ACCOUNT_API_KEY=a\nFIN_DEV_SOLANA_PRIVATE_KEY=key",
-            Some("solana"),
-        )
-        .unwrap();
+        let ignored = parse_selected("FIN_DEV_EVM_PRIVATE_KEY\nUNKNOWN_SECRET=broken'quote\nBINANCE_MASTER_ACCOUNT_API_KEY=a\nFIN_DEV_SOLANA_PRIVATE_KEY=key", Some("solana")).unwrap();
         assert_eq!(ignored.len(), 1);
         assert!(parse_selected("FIN_DEV_SOLANA_PRIVATE_KEY\n", Some("solana")).is_err());
         assert!(parse_selected("FIN_DEV_SOLANA_PRIVATE_KEY='broken\n", Some("solana")).is_err());
+    }
+
+    #[test]
+    fn ignores_unrelated_export_fields_without_importing_them() {
+        let values = parse("FIN_DEV_EVM_PRIVATE_KEY=synthetic\nKRAKEN_MASTER_API_KEY=ignored\nKRAKEN_PRIVATE_KEY=ignored-too\nKRAKEN_ACCOUNT_ID=account\nNEW_TOOL_TOKEN=opaque value\nPATH=/tmp/custom\n").unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values["FIN_DEV_EVM_PRIVATE_KEY"].as_str(), "synthetic");
+        assert!(!values.contains_key("KRAKEN_MASTER_API_KEY"));
+        assert!(!values.contains_key("NEW_TOOL_TOKEN"));
+        assert!(!values.contains_key("PATH"));
+        assert!(parse("KRAKEN_MASTER_API_KEY=value").is_err());
+        assert!(parse("NEW_TOOL_TOKEN=value").is_err());
     }
 }

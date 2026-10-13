@@ -8,6 +8,11 @@ maintained documentation.
 
 ## Integration baseline
 
+First-install configuration and its protected review share one configuration
+factory, so release-reviewed network and deployment profiles cannot drift between
+setup and approval. Review accepts only the two human-entered financial limits
+as policy overrides; all other setup fields must match the canonical defaults.
+
 AMM integration follows the current mainline, including Base, Hyperliquid and
 approval responsiveness. Versioned journal migrations preserve older records,
 credentials and pending recovery identities. Reviewed deployments remain an
@@ -33,6 +38,27 @@ technical details stay in structured review, which the LLM explains to the
 human. Bounded approval wording must not promise an initial minimum receipt
 that its permitted requotes could lower.
 
+Named-plan native presentation accepts the same Uniswap/Ramses relative action
+window as the broker: omit the absolute deadline and keep the positive window
+within the permission's deadline ceiling. Legacy absolute deadlines remain
+supported. The native parser rejects conflicting clocks before opening Touch ID;
+deadline resolution and parent-lifetime checks remain broker responsibilities.
+
+Human execution under an existing named plan follows the same plan-aware request
+as machine execution. It skips standalone approval previews, which cannot resolve
+relative plan deadlines and duplicate preparation. The terminal shows an execution
+activity indicator while the broker prepares and executes the approved step.
+
+EVM AMM revalidation anchors slippage to the quote used to prepare the immutable
+transaction. Improved quotes do not raise its minimum receipt; refreshed quotes
+and simulation must still cover the original encoded minimum, and the typed
+conversion effect keeps that same floor. Impact, route, nonce, fee, price identity
+and freshness checks remain independent. New EVM swap candidates reserve a fixed
+1% USD valuation buffer, rounded up to cents, before policy checks and approval.
+The summary discloses it; it grants no extra asset input or native fee units.
+Historical attempt ceilings remain unchanged. This avoids incidental cent-sized
+price tolerances without automatic retries, wider plan amounts or policy bypasses.
+
 Sushi v3 and PancakeSwap v3 use a closed, reviewed deployment map alongside
 legacy Uniswap/Ramses configuration. Router metadata, pool ABI, fee tiers and
 permit-compatible calldata are profile properties; shared financial accounting
@@ -55,6 +81,23 @@ terminal; the canonical approval still binds all scopes, amounts and fees.
 
 ## Approval responsiveness
 
+Binance deposit statuses 1 and 6 establish venue credit when travel-rule status
+is absent or clear. Composite settlement still requires canonical chain proof,
+exact transaction/destination/asset/amount matching and the exact free-balance
+increase. A verified status-6 deposit completes and releases Fin's reservation;
+its proof retains `withdrawal_locked: true` to distinguish Binance's withdrawal
+hold from deposit completion. Funding history preserves `creditState` and adds
+`credited` and `withdrawalLocked`; confirmed credits are not pending transfers
+in snapshots. This neither removes a Binance hold nor grants withdrawal authority.
+
+Uncertain operation results use a human-only presentation summary for ordinary
+`execute` and `status` commands. Preserve the adapter's reason, recovery guidance,
+warnings and latest reconciliation reason while leading with the unknown outcome
+and the original operation ID. The CLI supplies the selected development
+environment's status command; the installed CLI uses `fin status`. Machine and
+verbose output retain all record fields. This changes no authorization, journal,
+submission or settlement behavior.
+
 Keep ordinary preparation on adapter-selected state and installation-wide journal
 policy. Additive `SnapshotScope` selectors use physical resources, network IDs
 and exact assets; empty selectors retain the full view. Observer coverage remains
@@ -62,6 +105,13 @@ explicit and incomplete evidence never substitutes for required write preflight.
 Read-only connections and snapshot observers run concurrently with finite bounds;
 mutations, reconciliation and runtime replacement retain a single ordering gate.
 Configuration locks span dispatch so old policy cannot race protected maintenance.
+
+Progress observation heap-pins the financial execution future before wrapping it
+in task-local and concurrent delivery state. Keeping the large composite future
+inline multiplied stack usage and crashed deposit revalidation on ordinary
+2 MiB workers in unoptimized macOS builds. Workflow regressions exercise public
+socket dispatch, progress delivery and real HTTP transport on that same stack
+budget. Validation, approval, timeout and recovery rules remain unchanged.
 
 Bound external evidence collection, including RPC retries/fallback, while leaving
 financial dispatch and durable reconciliation under their original identities.
@@ -623,6 +673,11 @@ Compatible runtime updates refresh only recorded, existing, unmodified copies;
 conflicting or edited files remain for human review. Skill installation grants no
 financial authority. See the [companion skill guide](companion-skill.md).
 
+Companion skill 1.5.1 makes streamed execution conversational: agents promptly
+relay meaningful stages, explain longer waits about once a minute, and report
+verified amounts and fees before continuing the next authorized step. This is
+agent guidance over the existing stream, with no new execution or approval gate.
+
 ## AMM extension and Uniswap
 
 `fin-amm` supplies typed `quote` and `prepare_swap` contracts, exact asset
@@ -821,3 +876,78 @@ serialization is unchanged when the field is omitted, and started-step revisions
 cannot alter the declaration. Accounting remains application-independent.
 Independent public-CLI fork rehearsal and human observation are recorded
 separately; a successful plan preview alone is not execution evidence.
+
+## Aave V3 completion
+
+Reviewed market profiles are pinned to address-book commit
+`6a83d11893d6687bf6b9fd091a2a5320b3e1966e`. Protected additive configuration keeps
+custom defaults, legacy chain scope, credential references and pending bindings.
+Explicit pool selection is application-owned; cash snapshots remain unique while
+all enabled markets use one pinned capture and market-qualified position keys.
+
+Aave adapter modules own deployment selection, exact revision-specific math,
+ordered bounded reads, risk checks and balance-independent plan permissions.
+Horizon half-up kernels use source commit
+`311a59fb1cec23ee254e84b28759fd1faf9c3711`; revision-5 proofs are unchanged.
+Legacy mint/burn gains and losses are exact effects, never dust tolerances.
+External positions use independently validated original-preview observations only
+when no prior Fin lineage exists; observations never manufacture wallet cash or
+historical profit. Actual prior journal anchors always take precedence.
+
+Named plan cumulative scopes add optional `maximum_obligations`, consuming typed
+positive debt effects and retaining original-preview reservations while uncertain.
+Debt decreases cannot refund borrowing authority. Existing named-plan SQLite tables
+and immutable operation records need no SQL change: the existing version-1 JSON
+contract defaults absent obligation caps to empty and omits empty fields on output.
+Old scope round trips and restart are covered by focused tests; no credentials,
+financial state or pending writes are reset or replayed.
+
+Collateral-removal risk uses exact scaled burn/backing and per-reserve/eMode
+thresholds at a pinned block. Borrow checks isolate/siloed eligibility and ceiling
+state independently of reported borrowing capacity. Fresh dispatch and normal
+simulation remain required. Fee headroom now clips padded priority tips while
+retaining enough room for the observed base fee; frozen approved bids remain exact.
+See [Aave verification](testing/aave.md) for evidence classes and limitations.
+
+Historical Aave reserve/position reads now accept an explicit positive block
+number and bracket all observations with canonical hash checks. This enables
+inclusion-block risk verification through Fin; historical state cannot select
+a write state or supply financial authority. Borrowing advertises the neutral
+`requires_adapter_scope` contract so generic exact plan mode cannot omit its
+portfolio risk or cumulative borrowing limits. Submitted legacy recovery remains
+immutable; unsubmitted exact scopes bind the operation definition hash.
+
+Live verification exposed mixed quote timestamps during long preparation. EVM
+USD movement, fee and additional-debt scalars now derive upward from their same
+final per-asset micro-USD unit observations. All original timestamps remain
+attributed; the two-minute freshness rule is unchanged. This reduces repeated
+pricing calls and never restamps an expired earlier quote. Oracle USD units are
+independently checked for dollar debt ceilings.
+
+Main integration (11 October): retained the new Hyperliquid/AMM contracts and
+configuration authorization method alongside Aave. Required evidence stage deadlines are 120 seconds after the user-requested
+increase during live testing. Aave risk now reads every reserve through eight bounded
+workers at one block, a capture-local exact read cache and a final uncached hash
+check. Required failure drains workers; cancellation aborts children. No signer
+or cache survives a read capture. Public CLI named-plan fork rehearsals include
+future-funded supply, fixed borrowing risk, immutable duplicates, restart with
+outstanding debt, full scaled closure and revocation persistence.
+
+Closed-position reopening keeps prior proofs immutable but permits a new zero
+observation for a genuinely closed lineage after canonical identity checks.
+Nonzero and frozen attempts keep strict historical backing validation. This
+removes an unnecessary perpetual archive dependency without inventing principal,
+profit or authority; tests cover pruned state and malformed/reorganized evidence.
+
+At the user's request after observed live read-evidence delays, required
+preparation/revalidation and external-read stage deadlines are 120 seconds.
+Evidence freshness, approval expiry, immutable submissions and reservations
+retain their independent checks; submission/reconciliation is not cancelled
+by this evidence timer.
+
+Latest-main readiness verification passed: CLI named-plan owned forks on
+Ethereum/Base/Arbitrum, 45 fresh disposable-wallet live writes, full restoration
+and exact cash conservation, and restart preservation of 97 records including
+all 49 earlier records. Required read evidence uses 120-second stage deadlines.
+The signed bundle is prepared; human make update and the subsequently supplied
+protected-runtime/Touch ID scenario are pending. No installation, commit or push.

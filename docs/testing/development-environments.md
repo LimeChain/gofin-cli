@@ -42,16 +42,23 @@ checks. Synthetic dependencies live only in the separate development examples.
 
 ## Live development with disposable credentials
 
-The human supplies dedicated, noncritical keys in `.env.fin-dev`, using the
+For the complete agent-led build, scenario, repair and live settlement workflow,
+use [fin-e2e](../../skills/fin-e2e/SKILL.md). User invocation authorizes the bounded
+live-write test and optional restoration with automatic development approval. Reuse an existing
+import before requesting a credential file; the original file may already have
+been removed. The mechanics below also support manual development.
+
+The human supplies dedicated, noncritical keys in the gitignored `.env`, using the
 repository's [.env.fin-dev.example](../../.env.fin-dev.example) as a template.
 The file must be a regular, caller-owned file with mode 0600 and at most 32 KiB.
 The agent is allowed to read and import these development keys. They are not
 protected from the agent; private permissions only limit other local users.
 Never source the file as shell code. The importer accepts known literal
-assignments and rejects unknown settings, repeated keys and expansion syntax.
+assignments, ignores unrelated tool variables, and rejects repeated supported
+keys and expansion syntax in imported values.
 
 ```sh
-make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env.fin-dev"
+make dev-env-import DEV_ENV=live DEV_CREDENTIALS_FILE="$PWD/.env"
 make dev-env-start DEV_ENV=live DEV_MODE=live
 make dev-env-cli DEV_ENV=live ARGS='connections --json'
 make dev-env-cli DEV_ENV=live ARGS='capabilities --json'
@@ -135,6 +142,12 @@ different address. Development profile version 2 accepts existing version 1
 profiles and preserves their references and journal. Import does not establish
 financial verification; see the [Solana/Jupiter acceptance guide](solana-jupiter.md).
 
+A credential export may contain variables for other tools or connectors. The
+development importer reads only the supported credential keys
+above and ignores all other assignments, without retaining or importing their
+values. It still rejects malformed assignment lines, duplicate supported keys,
+and files that contain no supported Fin credentials.
+
 Default import is offline and requires public Binance UIDs and the subaccount
 email. To discover UIDs and verify identity with authenticated read-only calls:
 
@@ -178,14 +191,7 @@ Environment/process ownership locks still prevent two brokers from owning the
 same environment or cleanup from touching another environment's resources.
 Private file permissions do not protect keys from the trusted developing agent.
 
-Engine limits, exact valuation, duplicate prevention, durable submissions and
-proof-based settlement still apply. For an explicitly authorized real-fund test,
-record the initial state, chosen amounts/destinations, total allocation, costs
-and complete return path. The existing [$100 test contract](README.md#live-test-contract)
-continues to apply. This explicit mode skips Touch ID for writes and restoration;
-record those as automatic development approvals, never biometric acceptance.
-No live pass follows merely from importing keys, starting the broker, or
-receiving a submission identifier.
+Engine limits, exact valuation, duplicate prevention, durable submissions and proof-based settlement still apply. Record initial/final state, selected amounts/destinations, allocation, costs and verified live-write effects. The [live-test contract](README.md#live-test-contract) defaults to $20 per movement and $200 total; the skill allows documented finite agent overrides for complex actions. Restoration is optional and is not a pass blocker when difficult or impossible. This mode uses automatic development approval for writes and any restoration, never biometric acceptance. Importing keys, starting a broker or receiving a submission ID does not establish a live pass.
 
 ## State and process lifetimes
 

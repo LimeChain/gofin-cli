@@ -395,10 +395,12 @@ fn recovery_plan() -> FinancialPlanAuthorizationRecord {
             spec: FinancialPlanSpec {
                 version: 1,
                 name: "recovery test".into(),
+                summary: None,
                 steps: vec!["create", "cancel"]
                     .into_iter()
                     .map(|step_id| FinancialPlanStepSpec {
                         step_id: step_id.into(),
+                        action_deadline_seconds: None,
                         operation: if step_id == "create" {
                             "trigger.create"
                         } else {
@@ -459,6 +461,7 @@ fn linkage(step_id: &str, operation_id: &str) -> FinancialPlanAttemptLinkage {
         revision_id: "revision".into(),
         step_id: step_id.into(),
         attempt_id: operation_id.into(),
+        logical_request_id: None,
         request_fingerprint: format!("{operation_id}-fingerprint"),
         execution_binding_hash: format!("{operation_id}-binding"),
         submission_id: None,
@@ -485,6 +488,7 @@ fn op_record(
         valuation: None,
         intent: FinancialIntent::default(),
         operation_version: 1,
+        action_deadline: None,
     });
     OperationRecord {
         id: id.into(),

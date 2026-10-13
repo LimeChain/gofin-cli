@@ -18,7 +18,29 @@ pub(super) fn review(binding: &Value) -> Result<String> {
     }
     let action = binding["action"].as_str().unwrap_or("");
     let mut lines = Vec::new();
-    if action == "policy_set" {
+    if action == "configure" {
+        let operation = binding["operation"]
+            .as_str()
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration operation is missing."))?;
+        lines.push(format!(
+            "Configure {} | Account: {}",
+            safe(operation),
+            safe(binding["account"].as_str().unwrap_or(""))
+        ));
+        lines.push(format!(
+            "Product: {} | Physical account: {}",
+            safe(binding["product"].as_str().unwrap_or("")),
+            safe(binding["physical_identity"].as_str().unwrap_or(""))
+        ));
+        let fields = binding["parameters"]
+            .as_object()
+            .ok_or_else(|| error("INVALID_CHALLENGE", "Configuration parameters are missing."))?;
+        for (name, value) in fields {
+            lines.push(format!("{}: {}", safe(name), safe(&value.to_string())));
+        }
+        lines.push(safe(binding["warning"].as_str().unwrap_or("")));
+        lines.push("Touch ID approves this exact venue configuration attempt. No financial plan can authorize it.".into());
+    } else if action == "policy_set" {
         let previous: BrokerPolicy = serde_json::from_value(binding["previous_policy"].clone())
             .map_err(|_| error("INVALID_CHALLENGE", "Previous policy is invalid."))?;
         let next: BrokerPolicy = serde_json::from_value(binding["policy"].clone())
@@ -70,15 +92,7 @@ pub(super) fn review(binding: &Value) -> Result<String> {
                 )
             })?;
         config.validate()?;
-        let mut expected = BrokerConfigV2 {
-            version: 2,
-            approver_uid: config.approver_uid,
-            networks: NetworkConfig::reviewed_evm_networks(),
-            deployments: vec![DeploymentConfig::ethereum_mainnet()],
-            connections: vec![],
-            policy: BrokerPolicy::beta(),
-            extensions: BTreeMap::new(),
-        };
+        let mut expected = setup_configuration(config.approver_uid, BrokerPolicy::beta());
         expected.policy.max_movement_usd_micros = config.policy.max_movement_usd_micros.clone();
         expected.policy.max_run_allocation_usd_micros =
             config.policy.max_run_allocation_usd_micros.clone();
@@ -135,7 +149,45 @@ pub(super) fn review(binding: &Value) -> Result<String> {
             "credentials for connection"
         };
         lines.push(format!("{verb} {subject}: {}", safe(name(&connection))));
+        if let ConnectionConfig::Kraken {
+            default_wallet_account_id: Some(id),
+            ..
+        } = &connection
+        {
+            lines.push(format!("Default Funding wallet: {} | Relationship: human_verified; ownership: venue verified", safe(id)));
+            lines.push("Your selection aliases this wallet to Spot custody; Kraken does not identify the default alias.".into());
+        }
         match &connection {
+            ConnectionConfig::Kraken {
+                name,
+                physical_identity,
+                physical_identity_verified,
+                ..
+            }
+            | ConnectionConfig::KrakenFutures {
+                name,
+                physical_identity,
+                physical_identity_verified,
+                ..
+            } => {
+                lines.push(format!(
+                    "Kraken connection: {} | Account: {}",
+                    safe(name),
+                    safe(physical_identity)
+                ));
+                lines.push(format!(
+                    "Account identity: {}",
+                    if *physical_identity_verified {
+                        "venue verified"
+                    } else {
+                        "human confirmed"
+                    }
+                ));
+                lines.push(
+                    "Product-specific credentials checked with a read; financial writes untested."
+                        .into(),
+                );
+            }
             ConnectionConfig::CoinGecko {
                 api_plan, resource, ..
             } => {
@@ -597,15 +649,7 @@ mod tests {
 
     #[test]
     fn setup_review_matches_only_the_implemented_policy() {
-        let config = BrokerConfigV2 {
-            version: 2,
-            approver_uid: 501,
-            networks: NetworkConfig::reviewed_evm_networks(),
-            deployments: vec![DeploymentConfig::ethereum_mainnet()],
-            connections: vec![],
-            policy: BrokerPolicy::beta(),
-            extensions: BTreeMap::new(),
-        };
+        let config = setup_configuration(501, BrokerPolicy::beta());
         let mut binding = json!({"action":"initialize","financial_movement":false,"future_financial_authority":false,"configuration":config});
         let text = review(&binding).unwrap();
         assert!(text.contains("Confirm this Mac account as Fin's approver."));
@@ -623,6 +667,40 @@ mod tests {
         binding["configuration"]["policy"]["require_run_for_writes"] = true.into();
         assert!(review(&binding).is_err());
     }
+
+    #[test]
+    fn setup_review_rejects_changes_outside_the_collected_limits() {
+        let config = setup_configuration(501, BrokerPolicy::beta());
+        let original = json!({
+            "action": "initialize",
+            "financial_movement": false,
+            "future_financial_authority": false,
+            "configuration": config,
+        });
+        for (path, value) in [
+            ("/configuration/policy/preview_ttl_seconds", json!(60)),
+            (
+                "/configuration/policy/allow_unpriced_exchange_assets",
+                json!(true),
+            ),
+            (
+                "/configuration/networks/0/rpc_urls/0",
+                json!("https://example.invalid/rpc"),
+            ),
+            ("/configuration/deployments", json!([])),
+            ("/configuration/extensions", json!({"unexpected": true})),
+            ("/financial_movement", json!(true)),
+            ("/future_financial_authority", json!(true)),
+        ] {
+            let mut binding = original.clone();
+            *binding.pointer_mut(path).expect("setup field exists") = value;
+            assert_eq!(
+                review(&binding).unwrap_err().code,
+                "INVALID_CHALLENGE",
+                "{path}"
+            );
+        }
+    }
     #[test]
     fn unsafe_display_characters_and_financial_bindings_cannot_hide_material() {
         let mut binding = binance("main");
@@ -635,5 +713,19 @@ mod tests {
         binding["financial_movement"] = false.into();
         binding["connection"]["provider"] = "unsupported".into();
         assert!(review(&binding).is_err());
+    }
+    #[test]
+    fn default_wallet_review_discloses_exact_human_relationship() {
+        let binding = json!({"action":"add","financial_movement":false,"future_financial_authority":false,"connection":{"provider":"kraken","name":"spot","resource":"kraken:account:synthetic","credential_ref":"11111111-1111-4111-8111-111111111111","physical_identity":"synthetic","physical_identity_verified":false,"default_wallet_account_id":"WDEFAULT"}});
+        let text = review(&binding).unwrap();
+        assert!(text.contains("Default Funding wallet: WDEFAULT"));
+        assert!(text.contains("Relationship: human_verified; ownership: venue verified"));
+        assert!(text.contains("Kraken does not identify the default alias"));
+        let mut changed = binding.clone();
+        changed["connection"]["default_wallet_account_id"] = json!("WOTHER");
+        assert_ne!(
+            fin_domain::binding_hash(&binding).unwrap(),
+            fin_domain::binding_hash(&changed).unwrap()
+        );
     }
 }

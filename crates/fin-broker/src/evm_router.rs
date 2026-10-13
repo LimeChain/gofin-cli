@@ -344,6 +344,23 @@ impl Adapter for EvmNetworkRouter {
             .preflight_return_route(operation, input, context)
             .await
     }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.prepared(prepared)
+            .ok()?
+            .preparation_reuse_window(prepared)
+    }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> fin_domain::Result<Vec<String>> {
+        self.route(input)?
+            .validate_plan_feasibility(operation, input)
+            .await
+    }
     async fn revalidate(
         &self,
         prepared: &PreparedOperation,
@@ -356,6 +373,28 @@ impl Adapter for EvmNetworkRouter {
         journal: Arc<dyn SubmissionJournal>,
     ) -> fin_domain::Result<Submission> {
         self.prepared(prepared)?.submit(prepared, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> fin_domain::Result<Submission> {
+        self.prepared(validated.prepared())?
+            .submit_revalidated(validated, journal)
+            .await
+    }
+    async fn verified_position_baselines(
+        &self,
+        record: &OperationRecord,
+    ) -> fin_domain::Result<Vec<fin_domain::PositionAnchor>> {
+        self.prepared(
+            record
+                .preview
+                .as_ref()
+                .ok_or_else(|| FinError::validation("Original preview missing."))?,
+        )?
+        .verified_position_baselines(record)
+        .await
     }
     async fn reconcile(&self, record: &OperationRecord) -> fin_domain::Result<Reconciliation> {
         self.prepared(
@@ -417,7 +456,7 @@ mod tests {
         config.validate().unwrap();
         let applications =
             build_protected_applications(&config, Arc::new(NoCredentialAccess)).unwrap();
-        assert_eq!(applications.adapters.len(), 3);
+        assert_eq!(applications.adapters.len(), 5);
         let exchange = applications
             .adapters
             .iter()
@@ -525,7 +564,7 @@ mod tests {
     async fn shared_names_route_to_explicit_chain_and_return_one_reusable_wallet() {
         let router = router();
         let definitions = router.definitions();
-        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions.len(), 6);
         assert_eq!(
             definitions
                 .iter()
@@ -608,6 +647,7 @@ mod tests {
             valuation: None,
             intent: Default::default(),
             operation_version: 1,
+            action_deadline: None,
         };
         assert_eq!(
             router.prepared(&prepared).err().unwrap().code,

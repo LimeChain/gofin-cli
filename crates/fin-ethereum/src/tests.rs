@@ -252,6 +252,204 @@ mod final_submission_valuation_tests {
                 .any(|method| method == "eth_sendRawTransaction")
         );
     }
+
+    struct MovingClock(Mutex<chrono::DateTime<chrono::Utc>>);
+    impl fin_domain::clock::Clock for MovingClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+    struct ClockedPrices(Arc<MovingClock>);
+    #[async_trait]
+    impl WalletValuation for ClockedPrices {
+        async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+            Ok((
+                units.mul_div_ceil(
+                    &Quantity::from_u64(3_000_000_000),
+                    &quantity(pow10(asset.decimals)?),
+                )?,
+                "synthetic-clocked-eth-price".into(),
+            ))
+        }
+        async fn quote_observation(
+            &self,
+            asset: &AssetId,
+            units: Quantity,
+        ) -> Result<(Quantity, String, String)> {
+            let (value, source) = self.quote_usd(asset, units).await?;
+            Ok((value, source, self.0.0.lock().unwrap().to_rfc3339()))
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_transfer_preview_lasts_300_seconds_with_fresh_revalidation() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let start = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).unwrap();
+        let clock = Arc::new(MovingClock(Mutex::new(start)));
+        let adapter = counted_adapter(rpc.clone(), signer.clone())
+            .with_clock(clock.clone())
+            .with_wallet_valuation(Arc::new(ClockedPrices(clock.clone())));
+        let prepared = adapter
+            .prepare("wallet.transfer", &coin_transfer_input())
+            .await
+            .unwrap();
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&prepared.expires_at).unwrap(),
+            start + chrono::Duration::seconds(300),
+        );
+        let journal = Arc::new(CountingJournal::default());
+        for elapsed in [121, 299] {
+            *clock.0.lock().unwrap() = start + chrono::Duration::seconds(elapsed);
+            let fresh = adapter.revalidate(&prepared).await.unwrap();
+            assert_eq!(fresh.binding, prepared.binding);
+            assert_eq!(fresh.intent, prepared.intent);
+            // The original two-minute price observation has expired; only a
+            // freshly obtained quote lets this longer-lived envelope execute.
+            assert_eq!(
+                fin_domain::value_bounds::validate_at(&prepared, *clock.0.lock().unwrap())
+                    .unwrap_err()
+                    .code,
+                "STALE_VALUATION",
+            );
+            fin_domain::value_bounds::validate_at(&fresh, *clock.0.lock().unwrap()).unwrap();
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "SYNTHETIC_SIGNER_REACHED"
+            );
+        }
+        assert_eq!(signer.0.load(Ordering::SeqCst), 2);
+        let reads = rpc.calls.lock().unwrap().len();
+        let authorizations = journal.authorized.load(Ordering::SeqCst);
+        for elapsed in [300, 301] {
+            *clock.0.lock().unwrap() = start + chrono::Duration::seconds(elapsed);
+            assert_eq!(
+                adapter.revalidate(&prepared).await.unwrap_err().code,
+                "PREVIEW_EXPIRED"
+            );
+            assert_eq!(
+                adapter
+                    .submit(&prepared, journal.clone())
+                    .await
+                    .unwrap_err()
+                    .code,
+                "PREVIEW_EXPIRED"
+            );
+        }
+        let mut malformed = prepared.clone();
+        malformed.expires_at = "not-a-timestamp".into();
+        assert_eq!(
+            adapter.revalidate(&malformed).await.unwrap_err().code,
+            "PREVIEW_EXPIRED"
+        );
+        assert_eq!(rpc.calls.lock().unwrap().len(), reads);
+        assert_eq!(journal.authorized.load(Ordering::SeqCst), authorizations);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 2);
+        assert_eq!(journal.persisted.load(Ordering::SeqCst), 0);
+        assert_no_dispatch(&rpc);
+    }
+
+    #[tokio::test]
+    async fn engine_wallet_submission_reuses_fresh_preparation_without_duplicate_simulation() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = Arc::new(counted_adapter(rpc.clone(), signer.clone()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![a],
+            Arc::new(SyntheticApproval::default()),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let record = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-no-duplicate-simulations".into(),
+                operation: "wallet.wrap".into(),
+                input: wrap_input(),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            record.error.as_ref().unwrap().code,
+            "SYNTHETIC_SIGNER_REACHED"
+        );
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count(),
+            1,
+            "fresh preparation is reused through approval and submission must not repeat simulation"
+        );
+        assert_no_dispatch(&rpc);
+    }
+
+    struct NonceDriftApproval(Arc<Fixture>);
+    #[async_trait]
+    impl Authorizer for NonceDriftApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.nonce.store(1, Ordering::SeqCst);
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-nonce-drift-approval".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_preparation_keeps_final_pending_nonce_check() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = Arc::new(counted_adapter(rpc.clone(), signer.clone()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![a],
+            Arc::new(NonceDriftApproval(rpc.clone())),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let record = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-reused-preparation-nonce-drift".into(),
+                operation: "wallet.wrap".into(),
+                input: wrap_input(),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.error.as_ref().unwrap().code, "NONCE_CHANGED");
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|method| *method == "eth_getTransactionCount")
+                .count(),
+            2,
+            "one pending nonce read during preparation and one final nonce check before signing"
+        );
+        drop(calls);
+        assert_no_dispatch(&rpc);
+    }
     fn coin_transfer_input() -> Value {
         let mut value = input();
         value.as_object_mut().unwrap().extend(
@@ -1376,7 +1574,7 @@ async fn uniswap_requires_bound_pool_cash_legs_minimum_output_and_finite_allowan
     let p = a.prepare("uniswap.swap", &v).await.unwrap();
     assert_eq!(
         p.valuation.as_ref().unwrap().movement_usd_micros,
-        Quantity::from_u64(3_000_000)
+        Quantity::from_u64(3_030_000)
     );
     assert!(p.summary.contains("0.001"));
     assert!(p.summary.contains("for at least 2.97"));
@@ -1830,6 +2028,33 @@ impl EvmRpc for Fixture {
                     Erc20::transferCall::SELECTOR | Erc20::approveCall::SELECTOR => {
                         abi_value(!*self.erc20_false.lock().unwrap())
                     }
+                    AToken::POOLCall::SELECTOR => abi_value(addr(300)),
+                    AToken::UNDERLYING_ASSET_ADDRESSCall::SELECTOR => abi_value(addr(101)),
+                    Pool::getUserEModeCall::SELECTOR => abi_value(U256::ZERO),
+                    Pool::getConfigurationCall::SELECTOR => abi_value(
+                        U256::from(8000)
+                            | (U256::from(8500) << 16)
+                            | (U256::from(1) << 56)
+                            | (U256::from(1) << 58),
+                    ),
+                    Pool::getReserveDataCall::SELECTOR => abi_value(PoolReserveData {
+                        configuration: U256::from(8000) | (U256::from(8500) << 16),
+                        liquidityIndex: s.income.to::<u128>(),
+                        currentLiquidityRate: 0,
+                        variableBorrowIndex: s.debt_index.to::<u128>(),
+                        currentVariableBorrowRate: 0,
+                        currentStableBorrowRate: 0,
+                        lastUpdateTimestamp: U40::from(1),
+                        id: 0,
+                        aTokenAddress: addr(110),
+                        stableDebtTokenAddress: addr(115),
+                        variableDebtTokenAddress: addr(120),
+                        interestRateStrategyAddress: addr(130),
+                        accruedToTreasury: 0,
+                        unbacked: 0,
+                        isolationModeTotalDebt: 0,
+                    }),
+                    Pool::POOL_REVISIONCall::SELECTOR => abi_value(U256::from(10)),
                     Pool::ADDRESSES_PROVIDERCall::SELECTOR => abi_value(addr(200)),
                     AddressesProvider::getPoolCall::SELECTOR => abi_value(addr(300)),
                     AddressesProvider::getPriceOracleCall::SELECTOR => abi_value(addr(400)),
@@ -2274,12 +2499,135 @@ async fn failed_malformed_and_below_minimum_simulations_never_become_swap_previe
     }
 }
 
+/// Delayed local pricing proves overlap without relying on elapsed-time thresholds.
+#[derive(Default)]
+struct SwapPriceProbe {
+    active: Arc<AtomicUsize>,
+    peak: AtomicUsize,
+    requests: Mutex<Vec<AssetId>>,
+}
+#[async_trait]
+impl WalletValuation for SwapPriceProbe {
+    async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _guard = SnapshotReadGuard(self.active.clone());
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(asset.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let price = if asset.reference == "native" {
+            3_000_000_000
+        } else {
+            1_000_000
+        };
+        Ok((
+            units.mul_div_ceil(
+                &Quantity::from_u64(price),
+                &quantity(pow10(asset.decimals)?),
+            )?,
+            "synthetic exact asset price".into(),
+        ))
+    }
+}
+
 #[tokio::test]
-async fn requotes_preserve_the_frozen_minimum_and_independently_enforce_fresh_slippage() {
+async fn swap_uses_one_pinned_quote_per_phase_and_overlaps_independent_reads() {
+    let rpc = Arc::new(Fixture::new());
+    let probe = Arc::new(SnapshotProbeRpc::new(rpc));
+    let prices = Arc::new(SwapPriceProbe::default());
+    let a = probe_adapter(probe.clone(), 1).with_wallet_valuation(prices.clone());
+    let mut request = swap_input();
+    request["token_in"] = json!("native");
+    request["fee_tier"] = json!(500);
+    let prepared = a.prepare("uniswap.swap", &request).await.unwrap();
+    let original_binding = authorization_binding(&prepared);
+    for phase in 1..=2 {
+        if phase == 2 {
+            // A final validation still obtains fresh observations; nothing from
+            // preparation is cached across the authorization boundary.
+            let fresh = a.revalidate(&prepared).await.unwrap();
+            assert_eq!(authorization_binding(&fresh), original_binding);
+            assert_eq!(fresh.intent, prepared.intent);
+        }
+        let requests = probe.requests.lock().unwrap();
+        let selector_count = |selector: [u8; 4]| {
+            requests
+                .iter()
+                .filter(|(method, params)| {
+                    method == "eth_call"
+                        && params[0]["data"]
+                            .as_str()
+                            .is_some_and(|data| data.starts_with(&hex_bytes(&selector)))
+                })
+                .count()
+        };
+        assert_eq!(
+            selector_count(Quoter::quoteExactInputSingleCall::SELECTOR),
+            phase
+        );
+        assert_eq!(
+            selector_count(Erc20::decimalsCall::SELECTOR),
+            phase,
+            "Output metadata is read once per phase, not again for valuation"
+        );
+        assert_eq!(selector_count(Erc20::symbolCall::SELECTOR), phase);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, params)| method == "eth_call" && params[0].get("from").is_some())
+                .count(),
+            phase,
+            "Exact transaction simulation is retained in both phases"
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|(method, _)| method == "eth_sendRawTransaction")
+        );
+        drop(requests);
+        assert_eq!(prices.requests.lock().unwrap().len(), 2 * phase);
+        assert_eq!(prices.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(prices.active.load(Ordering::SeqCst), 0);
+        assert!(probe.peak.load(Ordering::SeqCst) >= 3);
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn parallel_metadata_failure_cancels_reads_and_never_reaches_simulation() {
+    let rpc = Arc::new(Fixture::new());
+    *rpc.missing_selector.lock().unwrap() = Some(Erc20::decimalsCall::SELECTOR);
+    let probe = Arc::new(SnapshotProbeRpc::new(rpc.clone()));
+    let a = probe_adapter(probe.clone(), 1);
+    let mut request = swap_input();
+    request["token_in"] = json!("native");
+    request["fee_tier"] = json!(500);
+    assert!(a.prepare("uniswap.swap", &request).await.is_err());
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    assert!(
+        !probe
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, params)| method == "eth_sendRawTransaction"
+                || method == "eth_estimateGas"
+                || (method == "eth_call" && params[0].get("from").is_some()))
+    );
+    // A failed group leaves no cached partial identity to affect another attempt.
+    *rpc.missing_selector.lock().unwrap() = None;
+    a.prepare("uniswap.swap", &request).await.unwrap();
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn requotes_preserve_the_approved_slippage_floor_without_penalizing_improvement() {
     for (explicit_minimum, output_atoms, expected) in [
         ("2.90", 2_999_000u64, None), // A falling quote never lowers the encoded minimum.
-        ("2.90", 3_001_000, Some("SLIPPAGE_LIMIT")), // A rising fresh slippage floor must still fit.
-        ("2.99", 3_001_000, None), // A stronger explicit receipt floor has enough headroom.
+        ("2.90", 3_001_000, None),    // Improvement must not raise an already frozen floor.
+        ("2.90", 3_500_000, None),    // Even a large improvement preserves the same minimum.
+        ("2.90", 2_985_000, None),    // Exactly the original 50 bps floor remains executable.
+        ("2.90", 2_984_999, Some("SLIPPAGE_LIMIT")), // One atom below that floor is rejected.
+        ("2.99", 3_001_000, None),    // A stronger explicit receipt floor has enough headroom.
         ("2.99", 2_989_999, Some("SLIPPAGE_LIMIT")), // The frozen floor must remain attainable.
     ] {
         let rpc = Arc::new(Fixture::new());
@@ -2302,7 +2650,15 @@ async fn requotes_preserve_the_frozen_minimum_and_independently_enforce_fresh_sl
         let result = a.revalidate(&prepared).await;
         match expected {
             Some(code) => assert_eq!(result.unwrap_err().code, code),
-            None => assert_eq!(result.unwrap().binding, original_binding),
+            None => {
+                let refreshed = result.unwrap();
+                assert_eq!(refreshed.binding, original_binding);
+                assert_eq!(refreshed.intent, prepared.intent);
+                assert_eq!(
+                    authorization_binding(&refreshed),
+                    authorization_binding(&prepared)
+                );
+            }
         }
         assert!(
             !rpc.calls
@@ -3310,6 +3666,12 @@ async fn withdrawal_credits_exact_proved_yield_and_closes_scaled_claim() {
 #[tokio::test]
 async fn borrow_ceil_rounding_is_deferred_and_repay_proves_interest_once() {
     let rpc = Arc::new(Fixture::new());
+    {
+        let mut states = rpc.states.lock().unwrap();
+        let state = states.get_mut(&20).unwrap();
+        state.scaled_supply = U256::from(10_000_000);
+        state.collateral = true;
+    }
     let a = adapter(rpc.clone());
     let p = a
         .prepare("aave.borrow", &aave_input("aave.borrow"))
@@ -4148,6 +4510,10 @@ async fn conditional_routes_prove_dependencies_without_simulation_or_unselected_
             .filter_map(|position| position.anchor)
             .collect(),
     };
+    rpc.call_overrides.lock().unwrap().insert(
+        AToken::UNDERLYING_ASSET_ADDRESSCall::SELECTOR,
+        abi_value(addr(100)),
+    );
     let yielded_preview = a
         .prepare_with_context("aave.withdraw", &withdraw, &yielded_context)
         .await
@@ -5196,7 +5562,8 @@ mod wallet_only_tests {
                     "wallet.balances",
                     "wallet.token",
                     "wallet.allowance",
-                    "wallet.receipt"
+                    "wallet.receipt",
+                    "aave.markets"
                 ]
                 .into_iter()
                 .collect()
@@ -5926,7 +6293,9 @@ mod wallet_only_tests {
             let plan = FinancialPlanSpec {
                 version: 1,
                 name: format!("Synthetic {operation} plan"),
+                summary: None,
                 steps: vec![FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: step_id.into(),
                     operation: operation.into(),
                     input: input.clone(),
@@ -5954,7 +6323,7 @@ mod wallet_only_tests {
             let mut authorization_request = FinancialPlanAuthorizationRequest {
                 request_id: format!("synthetic-plan-{operation}"),
                 plan,
-                valid_for_seconds: 600,
+                valid_for_seconds: Some(600),
                 replaces_revision_id: None,
                 expected_review_hash: None,
             };
@@ -6052,7 +6421,9 @@ mod wallet_only_tests {
         let plan = FinancialPlanSpec {
             version: 1,
             name: "Synthetic wrap settlement".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "wrap".into(),
                 operation: "wallet.wrap".into(),
                 input: input.clone(),
@@ -6086,7 +6457,7 @@ mod wallet_only_tests {
         let mut request = FinancialPlanAuthorizationRequest {
             request_id: "synthetic-wrap-plan-approval".into(),
             plan,
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -6096,6 +6467,13 @@ mod wallet_only_tests {
             .unwrap();
         request.expected_review_hash = Some(review.review_hash);
         let approved = engine.authorize_financial_plan(request).await.unwrap();
+        let estimates_before_attempt = rpc
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == "eth_estimateGas")
+            .count();
         let record = engine
             .execute_financial_plan_step(
                 &approved.plan_id,
@@ -6110,6 +6488,17 @@ mod wallet_only_tests {
             .await
             .unwrap();
         assert_eq!(record.status, Status::Completed, "{:?}", record.error);
+        assert_eq!(
+            rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count()
+                - estimates_before_attempt,
+            1,
+            "the named-plan attempt prepares once and reuses that same-source executable candidate"
+        );
         assert!(record.effects.is_some());
         assert_eq!(
             record.preview.as_ref().unwrap().binding
@@ -7184,3 +7573,6 @@ mod additional_v3_profiles {
         );
     }
 }
+
+#[path = "aave_tests.rs"]
+mod aave_tests;

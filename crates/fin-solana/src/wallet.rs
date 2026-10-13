@@ -443,6 +443,7 @@ impl SolanaWalletAdapter {
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
             valuation: Some(valuation),
             intent,
+            action_deadline: None,
             operation_version: 1,
         };
         fin_domain::value_bounds::bind(&mut prepared);
@@ -789,6 +790,7 @@ impl SolanaWalletAdapter {
                 expected,
                 locks: vec![resource],
             },
+            action_deadline: None,
             operation_version: 1,
         };
         fin_domain::value_bounds::bind(&mut prepared);
@@ -1087,6 +1089,7 @@ impl SolanaWalletAdapter {
                 expected: vec![EffectConstraint::Conversion { resource: resource.clone(), input: wrapped, maximum_input: amount.clone(), output: native, minimum_output: amount }],
                 locks: vec![resource],
             },
+            action_deadline: None,
             operation_version: 1,
         };
         fin_domain::value_bounds::bind(&mut prepared);
@@ -1595,6 +1598,7 @@ impl SolanaWalletAdapter {
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
             valuation: Some(valuation),
             intent,
+            action_deadline: None,
             operation_version: 1,
         };
         fin_domain::value_bounds::bind(&mut prepared);
@@ -1680,7 +1684,7 @@ impl SolanaWalletAdapter {
                 "SOLANA_BLOCKHASH_EXPIRED",
                 "prepare",
                 "The frozen transaction blockhash has expired; no replacement was created.",
-                "Prepare and approve a new transfer operation.",
+                "Prepare a fresh candidate within active plan or boundary authority; otherwise request new approval.",
             ));
         }
         let frozen = self
@@ -2865,7 +2869,7 @@ impl Adapter for SolanaWalletAdapter {
                 decimals: 9,
             }],
             deferred_receipt: None,
-            authorization_seconds: Some(600),
+            authorization_seconds: None,
             cumulative_scope: None,
         })
     }
@@ -2876,6 +2880,16 @@ impl Adapter for SolanaWalletAdapter {
     ) -> Result<()> {
         let identity = prepared_authorization_identity(self, prepared)?;
         self.validate_wallet_candidate(spec, prepared, &identity)
+    }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        matches!(
+            prepared.operation.as_str(),
+            "wallet.transfer" | "wallet.wrap" | "wallet.unwrap"
+        )
+        .then_some(std::time::Duration::from_secs(30))
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         let frozen = self.freeze_prepared(prepared).await?;
@@ -2899,6 +2913,28 @@ impl Adapter for SolanaWalletAdapter {
         let frozen = self.freeze_prepared(prepared).await?;
         self.runtime.validate_fee(&frozen).await?;
         self.runtime.simulate(&frozen).await?;
+        self.runtime
+            .dispatch(&frozen, signer, prepared, journal)
+            .await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            failure(
+                "SOLANA_WALLET_READ_ONLY",
+                "dispatch",
+                "This enrolled wallet is read-only.",
+                "Enroll a protected Solana signer before dispatch.",
+            )
+        })?;
+        let frozen = self.freeze_prepared(prepared).await?;
+        self.runtime.validate_fee(&frozen).await?;
+        validated.assert_fresh()?;
         self.runtime
             .dispatch(&frozen, signer, prepared, journal)
             .await
@@ -3465,7 +3501,7 @@ pub fn operation_definitions() -> Vec<Definition> {
             examples:if token {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","mint":"So11111111111111111111111111111111111111112"})]} else if receipt {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","signature":"5Z...","message_sha256":"0000000000000000000000000000000000000000000000000000000000000000"})]} else if transfer {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","recipient":"11111111111111111111111111111111","amount":"0.01","max_fee_sol":"0.00001","requestId":"stable-attempt-id"})]} else {vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta"})]},
             coverage:if token {"One binary-verified mint account at finalized commitment, including extension metadata and transfer limitations.".into()} else if receipt {"Finalized transaction status plus cryptographically verified message/signatures and balance/token effect evidence.".into()} else if transfer {"Native SOL and SPL Token/Token-2022 transfers. Exact amounts, stable request identity, explicit network fee cap, simulation, extension-aware fee/memo/hook handling and finalized balance-delta verification.".into()} else {"Wallet-owned native SOL and token accounts selected by both SPL Token program owners, including non-associated token accounts. External application positions are separate.".into()},
             completion:if transfer {"A successful RPC response is not completion; settle only after the original signature is finalized and exact SOL debits, recipient credit and network fee are verified.".into()} else {"Read-only finalized mainnet-beta observation. Amounts are exact atom strings.".into()},
-            semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","financial_movement":transfer,"account_discovery":"All owned accounts for both supported token programs; not ATA-only.","portfolio_scope":"Wallet-owned tokens only; application positions are reported by their application observer.","implemented_transfer_assets":["native SOL","SPL Token","Token-2022"],"bounded_authorization":if transfer {json!({"supported":true,"scope":"fixed wallet, mainnet-beta cluster, recipient, mint and selected token accounts","bounds":{"max_amount":"exact decimal in the selected asset's units","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"optional separate account funding cap"},"candidate_request_id":"may vary per attempt","plan_permission_balance_independent":true,"plan_authorization_max_seconds":600})} else {Value::Null}}),
+            semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","financial_movement":transfer,"account_discovery":"All owned accounts for both supported token programs; not ATA-only.","portfolio_scope":"Wallet-owned tokens only; application positions are reported by their application observer.","implemented_transfer_assets":["native SOL","SPL Token","Token-2022"],"bounded_authorization":if transfer {json!({"supported":true,"scope":"fixed wallet, mainnet-beta cluster, recipient, mint and selected token accounts","bounds":{"max_amount":"exact decimal in the selected asset's units","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"optional separate account funding cap"},"candidate_request_id":"may vary per attempt","plan_permission_balance_independent":true,"plan_authorization_duration":"finite parent plan duration; candidate freshness and blockhash expiry remain independent"})} else {Value::Null}}),
         }
     }).collect::<Vec<_>>();
     definitions.push(Definition {
@@ -3473,7 +3509,7 @@ pub fn operation_definitions() -> Vec<Definition> {
         input_schema:json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","amount","max_fee_sol","requestId"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"amount":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_fee_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$"},"max_account_funding_sol":{"type":"string","pattern":"^[0-9]+(\\.[0-9]{1,9})?$","description":"Required only when Fin must create the wallet's wrapped-SOL associated account; refundable rent remains wallet-owned."},"token_account":{"type":"string","maxLength":44},"requestId":{"type":"string","minLength":1,"maxLength":128}}}),
         output_schema:json!({"type":"object","required":["operation","binding","intent"],"properties":{"operation":{"const":"wallet.wrap"},"binding":{"type":"object"},"intent":{"type":"object"}}}),
         error_schema:json!({"type":"object","required":["code","stage","message","next_action"],"properties":{"code":{"type":"string"},"stage":{"type":"string"},"message":{"type":"string"},"next_action":{"type":"string"}}}),
-        examples:vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","amount":"0.1","max_fee_sol":"0.00001","requestId":"stable-wrap-id"})], coverage:"Exact conversion to a wallet-owned wrapped-SOL token account, idempotent associated-account creation when absent under an explicit rent cap, simulation, durable identity, and finalized native/token proof.".into(), completion:"Settles only after finalized SOL lamport and wrapped-token deltas match the conversion, any new wallet-owned rent funding, and network fee.".into(), semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","token_mint":"So11111111111111111111111111111111111111112","account_creation":"Creates only the wallet's associated token address, with bounded rent funding; existing accounts are preserved.","bounded_authorization":{"supported":true,"scope":"fixed wallet, cluster, wrapped-SOL mint and wallet token account","bounds":{"max_amount":"exact SOL quantity","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"separate wallet-owned rent funding cap"},"plan_permission_balance_independent":true,"plan_authorization_max_seconds":600}}),
+        examples:vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","amount":"0.1","max_fee_sol":"0.00001","requestId":"stable-wrap-id"})], coverage:"Exact conversion to a wallet-owned wrapped-SOL token account, idempotent associated-account creation when absent under an explicit rent cap, simulation, durable identity, and finalized native/token proof.".into(), completion:"Settles only after finalized SOL lamport and wrapped-token deltas match the conversion, any new wallet-owned rent funding, and network fee.".into(), semantics:json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","token_mint":"So11111111111111111111111111111111111111112","account_creation":"Creates only the wallet's associated token address, with bounded rent funding; existing accounts are preserved.","bounded_authorization":{"supported":true,"scope":"fixed wallet, cluster, wrapped-SOL mint and wallet token account","bounds":{"max_amount":"exact SOL quantity","max_fee_sol":"maximum SOL network fee","max_account_funding_sol":"separate wallet-owned rent funding cap"},"plan_permission_balance_independent":true,"plan_authorization_duration":"finite parent plan duration; candidate freshness and blockhash expiry remain independent"}}),
     });
     definitions.push(Definition {
         name: "wallet.unwrap".into(),
@@ -3486,8 +3522,14 @@ pub fn operation_definitions() -> Vec<Definition> {
         examples: vec![json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","amount":"0.05","max_fee_sol":"0.00001","max_temporary_rent_sol":"0.003","requestId":"stable-unwrap-id"})],
         coverage: "Partial unwrap from an existing initialized wallet-owned classic wrapped-SOL account. Uses a request-bound create-with-seed temporary token account, returns its rent by closing that newly created account in the same transaction, and proves exact finalized token/native deltas.".into(),
         completion: "Settles only after the exact original request is finalized, the existing wrapped-SOL balance falls by the approved amount, native SOL rises by amount less the actual fee, and the temporary account is closed.".into(),
-        semantics: json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","token_mint":"So11111111111111111111111111111111111111112","existing_account":"Preserved; partial unwraps are supported.","temporary_account":"Deterministic for requestId, created and closed in the same transaction.","temporary_rent":"Explicitly capped as transient liquidity and returned on successful close.","bounded_authorization":{"supported":true,"scope":"fixed wallet, cluster, wrapped-SOL mint and source token account","bounds":{"max_amount":"exact wrapped-SOL quantity","max_fee_sol":"maximum SOL network fee","max_temporary_rent_sol":"separate transient liquidity cap"},"plan_permission_balance_independent":true,"plan_authorization_max_seconds":600}}),
+        semantics: json!({"network":NETWORK,"cluster":CLUSTER,"commitment":"finalized","token_mint":"So11111111111111111111111111111111111111112","existing_account":"Preserved; partial unwraps are supported.","temporary_account":"Deterministic for requestId, created and closed in the same transaction.","temporary_rent":"Explicitly capped as transient liquidity and returned on successful close.","bounded_authorization":{"supported":true,"scope":"fixed wallet, cluster, wrapped-SOL mint and source token account","bounds":{"max_amount":"exact wrapped-SOL quantity","max_fee_sol":"maximum SOL network fee","max_temporary_rent_sol":"separate transient liquidity cap"},"plan_permission_balance_independent":true,"plan_authorization_duration":"finite parent plan duration; candidate freshness and blockhash expiry remain independent"}}),
     });
+    for definition in &mut definitions {
+        if definition.kind == OperationKind::Write {
+            definition.semantics["plan_allowance_seconds"] =
+                json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS);
+        }
+    }
     definitions
 }
 
@@ -3704,6 +3746,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revalidated_transfer_skips_duplicate_simulation_and_checks_expiry() {
+        struct MovingClock(Arc<Mutex<chrono::DateTime<chrono::Utc>>>);
+        impl fin_domain::clock::Clock for MovingClock {
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                *self.0.lock().unwrap()
+            }
+        }
+
+        let signer = test_signer();
+        let owner = signer.address().to_owned();
+        let rpc = Arc::new(Rpc::default());
+        let adapter = SolanaWalletAdapter::new(
+            "revalidated",
+            &owner,
+            Some(signer),
+            rpc.clone(),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        let input = json!({
+            "wallet":"revalidated",
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "recipient":bs58::encode([92u8; 32]).into_string(),
+            "amount":"0.0001",
+            "max_fee_sol":"0.00001",
+            "requestId":"reuse-transfer"
+        });
+        let prepared = adapter.prepare("wallet.transfer", &input).await.unwrap();
+        assert_eq!(*rpc.simulations.lock().unwrap(), 1);
+        assert_eq!(
+            adapter.preparation_reuse_window(&prepared),
+            Some(std::time::Duration::from_secs(30))
+        );
+        let validated = fin_domain::RevalidatedOperation::after_revalidation(
+            prepared.clone(),
+            Arc::new(fin_domain::clock::SystemClock),
+        )
+        .unwrap();
+        adapter
+            .submit_revalidated(&validated, Arc::new(Journal::default()))
+            .await
+            .unwrap();
+        assert_eq!(*rpc.simulations.lock().unwrap(), 1);
+        assert!(rpc.signed.lock().unwrap().is_some());
+
+        let delayed_rpc = Arc::new(Rpc::default());
+        let delayed_adapter = SolanaWalletAdapter::new(
+            "delayed",
+            &owner,
+            Some(test_signer()),
+            delayed_rpc.clone(),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        let delayed_input = json!({
+            "wallet":"delayed",
+            "network":"solana",
+            "cluster":"mainnet-beta",
+            "recipient":bs58::encode([93u8; 32]).into_string(),
+            "amount":"0.0001",
+            "max_fee_sol":"0.00001",
+            "requestId":"delayed-transfer"
+        });
+        let delayed_prepared = delayed_adapter
+            .prepare("wallet.transfer", &delayed_input)
+            .await
+            .unwrap();
+        let clock = Arc::new(Mutex::new(chrono::Utc::now()));
+        *delayed_rpc.advance_clock_after_fee.lock().unwrap() = Some(clock.clone());
+        let delayed_validated = fin_domain::RevalidatedOperation::after_revalidation(
+            delayed_prepared,
+            Arc::new(MovingClock(clock)),
+        )
+        .unwrap();
+        let error = delayed_adapter
+            .submit_revalidated(&delayed_validated, Arc::new(Journal::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "PREVIEW_EXPIRED");
+        assert!(delayed_rpc.signed.lock().unwrap().is_none());
+
+        let expired_rpc = Arc::new(Rpc::default());
+        let expired_adapter = SolanaWalletAdapter::new(
+            "expired",
+            &owner,
+            Some(test_signer()),
+            expired_rpc.clone(),
+            Arc::new(Prices),
+        )
+        .unwrap();
+        let mut expired_input = input;
+        expired_input["wallet"] = json!("expired");
+        expired_input["requestId"] = json!("expired-transfer");
+        let expired = expired_adapter
+            .prepare("wallet.transfer", &expired_input)
+            .await
+            .unwrap();
+        *expired_rpc.block_height.lock().unwrap() = 101;
+        let expired = fin_domain::RevalidatedOperation::after_revalidation(
+            expired,
+            Arc::new(fin_domain::clock::SystemClock),
+        )
+        .unwrap();
+        let error = expired_adapter
+            .submit_revalidated(&expired, Arc::new(Journal::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "SOLANA_BLOCKHASH_EXPIRED");
+        assert!(expired_rpc.signed.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn wallet_plan_permissions_cover_transfer_wrap_unwrap_without_balance_enrollment() {
         let signer = test_signer();
         let owner = signer.address().to_owned();
@@ -3723,7 +3878,7 @@ mod tests {
             .prepare_plan_permission("wallet.transfer", &transfer, &bounds)
             .await
             .unwrap();
-        assert_eq!(permission.authorization_seconds, Some(600));
+        assert_eq!(permission.authorization_seconds, None);
         assert!(permission.possible_credits.is_empty());
         assert_eq!(
             permission.spec.maximum_debits[0].amount.atoms,
@@ -3739,7 +3894,7 @@ mod tests {
             wrap_permission.possible_credits[0].asset.reference,
             "So11111111111111111111111111111111111111112"
         );
-        assert_eq!(wrap_permission.authorization_seconds, Some(600));
+        assert_eq!(wrap_permission.authorization_seconds, None);
 
         let unwrap = json!({"wallet":"planned","network":"solana","cluster":"mainnet-beta","amount":"0.0001","max_fee_sol":"0.00001","max_temporary_rent_sol":"0.003","requestId":"plan-unwrap"});
         let unwrap_permission = adapter.prepare_plan_permission(
@@ -3811,6 +3966,9 @@ mod tests {
         requested_rent_lengths: Mutex<Vec<usize>>,
         failed_transaction: Mutex<bool>,
         balance_reads: Mutex<u32>,
+        simulations: Mutex<u32>,
+        block_height: Mutex<u64>,
+        advance_clock_after_fee: Mutex<Option<Arc<Mutex<chrono::DateTime<chrono::Utc>>>>>,
     }
     #[async_trait]
     impl SolanaRpc for Rpc {
@@ -3821,15 +3979,21 @@ mod tests {
                     json!({"context":{"slot":10},"value":{"blockhash":solana_hash::Hash::default().to_string(),"lastValidBlockHeight":100}})
                 }
                 "getSlot" => json!(10),
-                "getFeeForMessage" => json!({"context":{"slot":10},"value":5000}),
+                "getFeeForMessage" => {
+                    if let Some(clock) = self.advance_clock_after_fee.lock().unwrap().as_ref() {
+                        *clock.lock().unwrap() += chrono::Duration::seconds(61);
+                    }
+                    json!({"context":{"slot":10},"value":5000})
+                }
                 "simulateTransaction" => {
+                    *self.simulations.lock().unwrap() += 1;
                     json!({"context":{"slot":10},"value":{"err":null,"unitsConsumed":10,"logs":[]}})
                 }
                 "getBalance" => {
                     *self.balance_reads.lock().unwrap() += 1;
                     json!({"context":{"slot":10},"value":100_000_000})
                 }
-                "getBlockHeight" => json!(10),
+                "getBlockHeight" => json!(*self.block_height.lock().unwrap()),
                 "getEpochInfo" => json!({"epoch":2}),
                 "getMinimumBalanceForRentExemption" => {
                     let size = params
@@ -4582,6 +4746,17 @@ mod tests {
             definition.output_schema["properties"]["descriptor"]["properties"]["supply_atoms"]["type"],
             "string"
         );
+        let definitions = operation_definitions();
+        for operation in ["wallet.transfer", "wallet.wrap", "wallet.unwrap"] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == operation)
+                .unwrap();
+            assert_eq!(
+                definition.semantics["plan_allowance_seconds"],
+                fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+            );
+        }
     }
 
     #[tokio::test]

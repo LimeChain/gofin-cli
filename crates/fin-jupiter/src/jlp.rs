@@ -394,7 +394,7 @@ impl JlpAdapter {
             format_sol_lamports(fee_cap),
             format_sol_lamports(rent_cap),
         );
-        Ok(PreparedOperation { operation: operation.into(), input: input.clone(), binding, summary, checks:vec![check("Pinned JLP mint and Perps program"),check("IDL instruction arguments and token accounts"),check("Network fee bound"),check("Account funding cap"),check("Simulation"),check("Blockhash expiry")], warnings:vec!["Settlement is reported only after finalized chain evidence proves exact token balance changes and costs.".into()], observed_at:Utc::now().to_rfc3339(), expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(), valuation:Some(valuation), intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource] }, operation_version:1 })
+        Ok(PreparedOperation { operation: operation.into(), input: input.clone(), binding, summary, checks:vec![check("Pinned JLP mint and Perps program"),check("IDL instruction arguments and token accounts"),check("Network fee bound"),check("Account funding cap"),check("Simulation"),check("Blockhash expiry")], warnings:vec!["Settlement is reported only after finalized chain evidence proves exact token balance changes and costs.".into()], observed_at:Utc::now().to_rfc3339(), expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(), valuation:Some(valuation), intent:FinancialIntent { debits, maximum_costs, expected, locks:vec![resource] }, action_deadline:None, operation_version:1 })
     }
 
     async fn custody_by_symbol(&self, symbol: &str) -> Result<Value> {
@@ -697,7 +697,7 @@ impl Adapter for JlpAdapter {
             }],
             fee_assets: vec![asset("native", 9)],
             deferred_receipt: None,
-            authorization_seconds: Some(600),
+            authorization_seconds: None,
             cumulative_scope: None,
         })
     }
@@ -763,6 +763,33 @@ impl Adapter for JlpAdapter {
         let wallet = self.wallet(&prepared.input)?;
         let signer = wallet.signer().ok_or_else(unknown)?;
         let tx = freeze_from_binding(&prepared.binding, &wallet, &signer).await?;
+        if prepared.binding["message_sha256"].as_str() != Some(tx.message_sha256()) {
+            return Err(FinError::new(
+                "JLP_MESSAGE_CHANGED",
+                "dispatch",
+                "The frozen JLP transaction no longer matches the approved message.",
+                "Keep the operation unresolved and prepare a new exact request.",
+            ));
+        }
+        wallet
+            .runtime()
+            .dispatch(&tx, &signer, prepared, journal)
+            .await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        if prepared.operation != OP_MINT && prepared.operation != OP_BURN {
+            return Err(unknown());
+        }
+        let wallet = self.wallet(&prepared.input)?;
+        let signer = wallet.signer().ok_or_else(unknown)?;
+        let tx = freeze_from_binding(&prepared.binding, &wallet, &signer).await?;
+        validated.assert_fresh()?;
         if prepared.binding["message_sha256"].as_str() != Some(tx.message_sha256()) {
             return Err(FinError::new(
                 "JLP_MESSAGE_CHANGED",
@@ -2053,7 +2080,7 @@ fn net_account_funding(
 }
 
 pub fn operation_definitions() -> Vec<Definition> {
-    [OP_INFO, OP_MINT, OP_BURN]
+    let mut definitions: Vec<_> = [OP_INFO, OP_MINT, OP_BURN]
         .into_iter()
         .map(|operation| Definition {
             name: operation.into(),
@@ -2078,7 +2105,14 @@ pub fn operation_definitions() -> Vec<Definition> {
             completion: if operation == OP_INFO { "Provider pool metadata only; it is not a wallet balance or complete exposure snapshot.".into() } else { "Completed only when finalized chain proof verifies the exact JLP conversion and bounded fee.".into() },
             semantics: json!({"network":NETWORK,"cluster":CLUSTER,"program":PERPS_PROGRAM_ID,"jlp_mint":JLP_MINT,"accepted_custodies":["WBTC","ETH","SOL","USDC"],"provider_success_is_settlement":false,"ambiguous_submission":"reconcile original durable transaction; never replay","fee_units":"maximum_network_fee_lamports is exact lamports","rent_units":"maximum_account_funding_lamports is refundable owned account funding, not a network fee","plan_permissions":[OP_MINT,OP_BURN]}),
         })
-        .collect()
+        .collect();
+    for definition in &mut definitions {
+        if definition.kind == OperationKind::Write {
+            definition.semantics["plan_allowance_seconds"] =
+                json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS);
+        }
+    }
+    definitions
 }
 
 fn output_schema(operation: &str) -> Value {
@@ -2399,6 +2433,7 @@ mod tests {
                     expected,
                     locks: vec![resource],
                 },
+                action_deadline: None,
                 operation_version: 1,
             }),
             approval: None,

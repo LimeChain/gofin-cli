@@ -139,7 +139,7 @@ def run_named_plan_limit(
         raise AssertionError("Read-only limit preview omitted the deterministic position PDA.")
     plan = _plan(wallet_address, position)
     payload = json.dumps(plan, separators=(",", ":"))
-    preview = _call(environment, ["plans", "preview", "--input", payload, "--json"], env)
+    preview = _call(environment, ["plans", "preview", "--input", payload, "--valid-for", "10m", "--json"], env)
     review_hash = preview.get("review_hash")
     if not isinstance(review_hash, str) or not review_hash:
         raise AssertionError(f"Limit plan preview omitted its review hash: {json.dumps(preview, sort_keys=True)}")

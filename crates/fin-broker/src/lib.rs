@@ -5,7 +5,9 @@
 //! point exists for synthetic adapter/credential harnesses.
 
 mod amm_deployments;
+mod artifacts;
 mod bridge;
+pub mod configure;
 pub mod deposit;
 pub mod enrollment;
 mod evm_public_data;
@@ -13,6 +15,10 @@ mod evm_router;
 pub mod hyperliquid_deposit;
 mod hyperliquid_transport;
 pub mod hyperliquid_withdrawal;
+pub mod kraken;
+mod kraken_aliases;
+mod kraken_deposit;
+mod kraken_pricing;
 mod policy;
 mod pricing;
 mod pricing_cache;
@@ -37,7 +43,7 @@ use fin_engine::{Engine, EngineOptions};
 use fin_engine::{RunAllocation, RunPlan, RunResult};
 #[cfg(test)]
 use fin_protocol::RunBeginRequest;
-use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request};
+use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_with_progress};
 use fin_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -70,7 +76,7 @@ const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
-const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
 
@@ -118,11 +124,31 @@ pub struct DeploymentConfig {
     pub v3_deployments: BTreeMap<fin_ethereum::V3Dex, fin_ethereum::V3DeploymentConfig>,
     #[serde(default)]
     pub aave: Option<fin_ethereum::AaveConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aave_markets: Vec<fin_ethereum::AaveConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConnectionConfig {
+    Kraken {
+        /// Human-selected default alias; authenticated owned-wallet membership is checked on use.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_wallet_account_id: Option<String>,
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+    },
+    #[serde(rename = "krakenfutures")]
+    KrakenFutures {
+        name: String,
+        resource: ResourceId,
+        credential_ref: String,
+        physical_identity: String,
+        physical_identity_verified: bool,
+    },
     Binance {
         name: String,
         resource: ResourceId,
@@ -238,7 +264,12 @@ impl DeploymentConfig {
                 } else if network.chain_id == 8453 {
                     fin_ethereum::EthereumConfig::base_aave(vec![]).aave
                 } else {
-                    None
+                    fin_ethereum::aave::reviewed_markets(network.chain_id)
+                        .first()
+                        .map(|m| fin_ethereum::AaveConfig {
+                            pool: m.pool.clone(),
+                            oracle: m.oracle.clone(),
+                        })
                 };
                 (uniswap.is_some()
                     || ramses.is_some()
@@ -253,6 +284,13 @@ impl DeploymentConfig {
                     ramses,
                     v3_deployments,
                     aave,
+                    aave_markets: fin_ethereum::aave::reviewed_markets(network.chain_id)
+                        .into_iter()
+                        .map(|m| fin_ethereum::AaveConfig {
+                            pool: m.pool,
+                            oracle: m.oracle,
+                        })
+                        .collect(),
                 })
             })
             .collect()
@@ -272,6 +310,7 @@ impl DeploymentConfig {
             ramses: amm_deployments::reviewed_ramses(1),
             v3_deployments: amm_deployments::reviewed_v3_deployments(1),
             aave: defaults.aave,
+            aave_markets: defaults.aave_markets,
         }
     }
 }
@@ -292,6 +331,7 @@ impl BrokerPolicy {
 
 impl BrokerConfigV2 {
     pub fn validate(&self) -> fin_domain::Result<()> {
+        kraken_aliases::validate(self)?;
         if self.version != 2 || self.approver_uid < 501 {
             return Err(error(
                 "CONFIG_VERSION_OR_APPROVER_INVALID",
@@ -377,6 +417,59 @@ impl BrokerConfigV2 {
         let mut identities = BTreeSet::new();
         for connection in &self.connections {
             let (name, resource) = match connection {
+                ConnectionConfig::Kraken {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    ..
+                }
+                | ConnectionConfig::KrakenFutures {
+                    name,
+                    resource,
+                    credential_ref,
+                    physical_identity,
+                    ..
+                } => {
+                    if let ConnectionConfig::Kraken {
+                        default_wallet_account_id: Some(id),
+                        ..
+                    } = connection
+                        && (id.is_empty()
+                            || id.len() > 128
+                            || !id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+                    {
+                        return Err(error(
+                            "CONFIG_KRAKEN_CONNECTION_INVALID",
+                            "configuration",
+                            "The default wallet account ID is invalid.",
+                            "Update the relationship in your human Terminal.",
+                        ));
+                    }
+                    let provider = if matches!(connection, ConnectionConfig::Kraken { .. }) {
+                        "kraken"
+                    } else {
+                        "krakenfutures"
+                    };
+                    if physical_identity.is_empty()
+                        || physical_identity.len() > 128
+                        || !physical_identity
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                        || resource.0 != format!("{provider}:account:{physical_identity}")
+                        || fin_credentials::CredentialRef::new(credential_ref).is_err()
+                    {
+                        return Err(error(
+                            "CONFIG_KRAKEN_CONNECTION_INVALID",
+                            "configuration",
+                            "Kraken product, account identity or credential reference is invalid.",
+                            "Repair this connection in your human Terminal.",
+                        ));
+                    }
+                    (name, resource)
+                }
                 ConnectionConfig::CoinGecko {
                     name,
                     resource,
@@ -644,6 +737,9 @@ impl BrokerConfigV2 {
 pub fn operation_definitions() -> Vec<Definition> {
     let mut definitions = fin_binance::operation_definitions();
     definitions.extend(fin_exchange::DefaultExchangeProfile::definitions());
+    definitions.extend(fin_kraken::contracts::definitions("kraken"));
+    definitions.extend(fin_kraken::contracts::definitions("krakenfutures"));
+    definitions.push(fin_kraken::funding::deposit_definition());
     definitions.extend(fin_ethereum::operation_definitions());
     definitions.extend(fin_solana::operation_definitions());
     definitions.extend(fin_jupiter::operation_definitions());
@@ -731,6 +827,11 @@ fn canonical_uid(value: &str) -> bool {
 }
 
 pub trait BrokerCredentialProvider: fin_exchange::ccxt::CredentialProvider + Send + Sync {
+    fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+        Err(FinError::validation(
+            "This credential provider has no durable Kraken nonce allocator.",
+        ))
+    }
     fn usd_price_source(
         &self,
         _credential: &fin_credentials::CredentialRef,
@@ -816,7 +917,9 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
         self.store
             .with_material(&reference, |material| {
                 let (api_key, secret) = match material {
-                    fin_credentials::SecretMaterial::BinanceHmac { api_key, secret } => {
+                    fin_credentials::SecretMaterial::BinanceHmac { api_key, secret }
+                    | fin_credentials::SecretMaterial::KrakenApi { api_key, secret }
+                    | fin_credentials::SecretMaterial::KrakenFuturesApi { api_key, secret } => {
                         (api_key, secret)
                     }
                     fin_credentials::SecretMaterial::BinanceRsa {
@@ -843,6 +946,11 @@ impl fin_exchange::ccxt::CredentialProvider for ProtectedCredentialProvider {
 }
 
 impl BrokerCredentialProvider for ProtectedCredentialProvider {
+    fn kraken_nonces(&self) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+        Ok(Arc::new(kraken::DurableKrakenNonces::open(
+            std::path::Path::new("/Library/Fin/private/kraken-nonces.sqlite"),
+        )?))
+    }
     fn usd_price_source(
         &self,
         credential: &fin_credentials::CredentialRef,
@@ -890,7 +998,9 @@ impl BrokerCredentialProvider for ProtectedCredentialProvider {
                 fin_credentials::SecretMaterial::BinanceHmac { .. }
                 | fin_credentials::SecretMaterial::BinanceRsa { .. }
                 | fin_credentials::SecretMaterial::BinanceEd25519 { .. }
-                | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. } => Err(error(
+                | fin_credentials::SecretMaterial::CoinGeckoApiKey { .. }
+                | fin_credentials::SecretMaterial::KrakenApi { .. }
+                | fin_credentials::SecretMaterial::KrakenFuturesApi { .. } => Err(error(
                     "CREDENTIAL_TYPE_MISMATCH",
                     "credentials",
                     "Credential is not an Ethereum wallet key.",
@@ -1199,10 +1309,10 @@ pub fn build_applications_with_network_transports(
         };
     let pricing_source: Arc<dyn fin_pricing::UsdPriceSource> = match &solana_prices {
         Some(solana_prices) => Arc::new(pricing::NetworkUsdPriceSource::new(
-            source,
+            source.clone(),
             solana_prices.clone(),
         )),
-        None => source,
+        None => source.clone(),
     };
     let binance_prices = Arc::new(SharedUsdValuator::with_source(pricing_source));
     let wallet_prices = binance_prices.clone();
@@ -1270,6 +1380,7 @@ pub fn build_applications_with_network_transports(
             .find(|deployment| deployment.network == network.id)
         {
             fin_ethereum::EthereumConfig {
+                aave_markets: deployment.aave_markets.clone(),
                 chain_id: network.chain_id,
                 confirmations: network.confirmations,
                 require_finalized: network.chain_id != 1
@@ -1601,6 +1712,15 @@ pub fn build_applications_with_network_transports(
             )));
         }
     }
+    adapters.extend(kraken::adapters(
+        config,
+        credentials.clone(),
+        Arc::new(kraken_pricing::KrakenCollateralPrices(source.clone())),
+        ethereum_adapters
+            .values()
+            .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+            .collect(),
+    )?);
     let valuator: Arc<dyn AssetValuator> = binance_prices;
     Ok(ProtectedApplications {
         adapters,
@@ -1844,6 +1964,24 @@ fn concurrent_read_request(request: &BrokerRequest) -> bool {
     ) || matches!(request, BrokerRequest::Read { operation, .. } if !matches!(operation.as_str(), "bridge.quotes" | "bridge.status" | "bridge.recovery"))
 }
 
+// These paths either collect read-only evidence or atomically update authority.
+// Financial writes still serialize in the engine; revocation races are ordered
+// against durable submission by the store's authority/CAS checks.
+fn independent_request(request: &BrokerRequest) -> bool {
+    matches!(
+        request,
+        BrokerRequest::Preview { .. }
+            | BrokerRequest::PreviewPlan { .. }
+            | BrokerRequest::PreviewPlanStep { .. }
+            | BrokerRequest::PreviewBoundary { .. }
+            | BrokerRequest::PreviewBoundaryAuthorization { .. }
+            | BrokerRequest::PlanStatus { .. }
+            | BrokerRequest::Status { .. }
+            | BrokerRequest::RevokePlan { .. }
+            | BrokerRequest::RevokeBoundary { .. }
+    )
+}
+
 pub struct BrokerRuntime {
     pub engine: Arc<Engine>,
     config: Arc<BrokerConfigV2>,
@@ -1859,6 +1997,8 @@ pub struct BrokerRuntime {
     mutation_gate: AsyncMutex<()>,
     verified_account_names: Mutex<BTreeSet<String>>,
     account_identity_gates: BTreeMap<String, AsyncMutex<()>>,
+    artifacts: Arc<Mutex<artifacts::ArtifactCache>>,
+    artifact_profiles: Mutex<Vec<Arc<fin_kraken::KrakenProfile>>>,
 }
 
 struct ValuatorPriceProvider {
@@ -1875,6 +2015,20 @@ impl fin_engine::TrustedAssetPriceProvider for ValuatorPriceProvider {
 pub fn compose_runtime(
     config: BrokerConfigV2,
     dependencies: RuntimeDependencies,
+) -> fin_domain::Result<Arc<BrokerRuntime>> {
+    compose_runtime_with_clock(
+        config,
+        dependencies,
+        Arc::new(fin_domain::clock::SystemClock),
+    )
+}
+
+/// Internal deterministic composition. The protected entry point always uses system UTC.
+#[doc(hidden)]
+pub fn compose_runtime_with_clock(
+    config: BrokerConfigV2,
+    dependencies: RuntimeDependencies,
+    clock: Arc<dyn fin_domain::clock::Clock>,
 ) -> fin_domain::Result<Arc<BrokerRuntime>> {
     config.validate()?;
     let options = EngineOptions {
@@ -1918,7 +2072,8 @@ pub fn compose_runtime(
             dependencies.authorizer,
             options,
         )?
-        .with_cost_origin_price_provider(price_provider),
+        .with_cost_origin_price_provider(price_provider)
+        .with_clock(clock),
     );
     if let Some(bridge) = &dependencies.bridge {
         bridge.attach_engine(Arc::downgrade(&engine))?;
@@ -1950,6 +2105,8 @@ pub fn compose_runtime(
         mutation_gate: AsyncMutex::new(()),
         verified_account_names: Mutex::new(BTreeSet::new()),
         account_identity_gates,
+        artifacts: Arc::new(Mutex::new(artifacts::ArtifactCache::default())),
+        artifact_profiles: Mutex::new(vec![]),
     }))
 }
 
@@ -1967,6 +2124,7 @@ async fn protected_runtime_from_config(
     validate_installation()?;
     let store = open_protected_store()?;
     let credentials = Arc::new(ProtectedCredentialProvider::open()?);
+    let artifact_profiles = kraken::profiles(&config, credentials.clone(), None, None)?;
     let applications = build_protected_applications(&config, credentials)?;
     let authorizer = Arc::new(MacOsAuthorizer::protected(config.approver_uid)?);
     let runtime = compose_runtime(
@@ -1979,12 +2137,31 @@ async fn protected_runtime_from_config(
             bridge: applications.bridge,
         },
     )?;
+    runtime.attach_kraken_artifacts(artifact_profiles)?;
     runtime.protected_config_check.store(true, Ordering::SeqCst);
     runtime.require_account_identity_verification();
     Ok(runtime)
 }
 
 impl BrokerRuntime {
+    /// Synthetic and protected composition attach only typed product profiles.
+    pub fn attach_kraken_artifacts(
+        &self,
+        profiles: Vec<fin_kraken::KrakenProfile>,
+    ) -> fin_domain::Result<()> {
+        let mut attached = self
+            .artifact_profiles
+            .lock()
+            .map_err(|_| internal_error())?;
+        if !attached.is_empty() || self.protected_config_check.load(Ordering::SeqCst) {
+            return Err(FinError::validation(
+                "Artifact providers cannot be replaced after protected startup.",
+            ));
+        }
+        *attached = profiles.into_iter().map(Arc::new).collect();
+        Ok(())
+    }
+
     /// Gate account operations on verified venue identity. Local discovery and
     /// recovery inventory remain available while a venue is unavailable.
     pub fn require_account_identity_verification(&self) {
@@ -2126,9 +2303,10 @@ impl BrokerRuntime {
     }
 
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
-        // Read concurrency grants no execution authority. Reconciliation,
-        // grants, revocation, previews and submission remain globally ordered.
-        let _mutation_guard = if concurrent_read_request(&request) {
+        // Read/control concurrency grants no execution authority. Submission
+        // admission remains serialized; slow I/O cannot hide status or revocation.
+        let _mutation_guard = if concurrent_read_request(&request) || independent_request(&request)
+        {
             None
         } else {
             Some(self.mutation_gate.lock().await)
@@ -2195,7 +2373,9 @@ impl BrokerRuntime {
                 | R::BoundaryStatus { .. }
                 | R::PlanStatus { .. }
                 | R::RevokePlan { .. }
-        );
+                | R::ArtifactChunk { .. }
+                | R::ReleaseArtifact { .. }
+        ) || matches!(&request,R::Status { id } if id.starts_with("configuration:"));
         let public_market_read = matches!(&request, R::Read { operation, .. }
             if matches!(operation.as_str(), "exchange.order-book" | "exchange.markets" | "exchange.ticker"));
         if !local_management && !public_market_read {
@@ -2274,9 +2454,81 @@ impl BrokerRuntime {
                 serde_json::to_value(self.engine.read(&operation, &input).await?)
                     .map_err(|_| internal_error())
             }
+            R::ReadArtifact { operation, input } => {
+                let profile = self
+                    .artifact_profiles
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .iter()
+                    .find(|profile| {
+                        fin_exchange::ExchangeProfile::definitions(profile.as_ref())
+                            .iter()
+                            .any(|d| d.name == operation)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        FinError::new(
+                            "ARTIFACT_PROVIDER_UNAVAILABLE",
+                            "read",
+                            "This runtime has no export provider for the selected operation.",
+                            "Use a supported enrolled Kraken product and explicit --output path.",
+                        )
+                    })?;
+                let reservation = artifacts::Reservation::begin(self.artifacts.clone())?;
+                let (content_type, bytes) = profile.artifact(&operation, &input).await?;
+                let provider =
+                    fin_kraken::contracts::contract(fin_kraken::contracts::endpoint(&operation)?)
+                        .client
+                        .as_str();
+                reservation.publish(provider, &content_type, bytes)
+            }
+            R::ArtifactChunk {
+                artifact_id,
+                offset,
+            } => self
+                .artifacts
+                .lock()
+                .map_err(|_| internal_error())?
+                .chunk(&artifact_id, offset),
+            R::ReleaseArtifact { artifact_id } => Ok(self
+                .artifacts
+                .lock()
+                .map_err(|_| internal_error())?
+                .release(&artifact_id)),
             R::Preview { operation, input } => {
                 serde_json::to_value(self.engine.preview(&operation, &input).await?)
                     .map_err(|_| internal_error())
+            }
+            R::ConfigurationPreview { operation, input }
+                if configure::is_kraken_operation(&operation) =>
+            {
+                let profile = self
+                    .artifact_profiles
+                    .lock()
+                    .map_err(|_| internal_error())?
+                    .iter()
+                    .find(|profile| {
+                        fin_exchange::ExchangeProfile::definitions(profile.as_ref())
+                            .iter()
+                            .any(|definition| definition.name == operation)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        FinError::new(
+                            "CONFIGURATION_PROVIDER_UNAVAILABLE",
+                            "configuration",
+                            "The selected Kraken configuration profile is unavailable.",
+                            "Enroll the matching Kraken product before previewing its settings.",
+                        )
+                    })?;
+                let prepared = tokio::time::timeout(
+                    OBSERVER_READ_TIMEOUT, configure::preview(&profile, &operation, &input)
+                ).await.map_err(|_| FinError::new(
+                    "CONFIGURATION_PREVIEW_TIMEOUT", "configuration",
+                    "The configuration permission check exceeded its deadline; no change was submitted.",
+                    "Retry the same dry-run after venue connectivity recovers.",
+                ))??;
+                serde_json::to_value(prepared).map_err(|_| internal_error())
             }
             R::ConfigurationPreview { operation, input } => serde_json::to_value(
                 self.engine
@@ -2383,6 +2635,14 @@ impl BrokerRuntime {
             .map_err(|_| internal_error()),
             R::Execute { request } => serde_json::to_value(self.engine.execute(request).await?)
                 .map_err(|_| internal_error()),
+            R::Status { id } if id.starts_with("configuration:") => {
+                if !self.protected_config_check.load(Ordering::SeqCst) {
+                    return Err(FinError::validation(
+                        "Protected configuration attempts are not available in this synthetic runtime.",
+                    ));
+                }
+                configure::status(&self.config, &id).await
+            }
             R::Status { id } => serde_json::to_value(self.engine.status(&id, true).await?)
                 .map_err(|_| internal_error()),
             R::Operations => {
@@ -3090,6 +3350,9 @@ fn protocol_methods() -> Vec<&'static str> {
         "policy_show",
         "doctor",
         "read",
+        "read_artifact",
+        "artifact_chunk",
+        "release_artifact",
         "preview",
         "configuration_preview",
         "preview_boundary_authorization",
@@ -3535,9 +3798,9 @@ async fn serve_connection_with_timeouts(
             "Connect from the enrolled human account.",
         ));
     }
-    let request = {
+    let (request, progress) = {
         let mut reader = BufReader::new(&mut stream);
-        tokio::time::timeout(timeouts.frame_read, read_request(&mut reader))
+        tokio::time::timeout(timeouts.frame_read, read_request_with_progress(&mut reader))
             .await
             .map_err(|_| {
                 error(
@@ -3607,7 +3870,8 @@ async fn serve_connection_with_timeouts(
     // Keep this runtime revision pinned throughout dispatch. A reload waits for
     // active reads/writes and swaps only after protected composition succeeds.
     let runtime = shared_runtime.read().await;
-    let response = runtime.handle(request).await;
+    let response =
+        fin_protocol::progress::observe(&mut stream, progress, runtime.handle(request)).await;
     write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
     Ok(())
 }
@@ -3615,9 +3879,16 @@ async fn serve_connection_with_timeouts(
 async fn acquire_request_configuration_lock(
     timeout: Duration,
 ) -> fin_domain::Result<ConfigurationLock> {
+    acquire_configuration_lock(false, timeout).await
+}
+
+async fn acquire_configuration_lock(
+    exclusive: bool,
+    timeout: Duration,
+) -> fin_domain::Result<ConfigurationLock> {
     tokio::time::timeout(timeout, async {
         loop {
-            if let Some(lock) = try_lock_protected_configuration(false)? {
+            if let Some(lock) = try_lock_protected_configuration(exclusive)? {
                 return Ok(lock);
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -3708,6 +3979,18 @@ fn peer_local_error(error: &FinError) -> bool {
 }
 
 async fn serve_listener_with_timeouts(
+    listener: UnixListener,
+    runtime: Arc<BrokerRuntime>,
+    expected_uid: u32,
+    timeouts: IpcTimeouts,
+) -> fin_domain::Result<()> {
+    // Synthetic listeners own their isolated journal. Production performs this
+    // step after launchd activation, under the protected configuration lock.
+    runtime.engine.recover_interrupted()?;
+    serve_started_listener(listener, runtime, expected_uid, timeouts).await
+}
+
+async fn serve_started_listener(
     listener: UnixListener,
     runtime: Arc<BrokerRuntime>,
     expected_uid: u32,
@@ -3811,7 +4094,14 @@ pub async fn serve_protected(runtime: Arc<BrokerRuntime>) -> fin_domain::Result<
                 "Check the installed Broker socket activation service.",
             )
         })?;
-        serve_listener(listener, runtime, approver_uid).await
+        // Socket ownership must be established before recovery can declare any
+        // previous work interrupted. Exclude separate configuration processes;
+        // ordinary composition and reload must never cancel active attempts.
+        let startup_guard =
+            acquire_configuration_lock(true, IPC_CONFIGURATION_LOCK_TIMEOUT).await?;
+        runtime.engine.recover_interrupted()?;
+        drop(startup_guard);
+        serve_started_listener(listener, runtime, approver_uid, IpcTimeouts::PRODUCTION).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -4199,6 +4489,7 @@ mod tests {
                     locks: vec![self.resource.clone()],
                 },
                 operation_version: 1,
+                action_deadline: None,
             })
         }
 
@@ -6524,7 +6815,9 @@ mod tests {
             plan: fin_domain::financial_plans::FinancialPlanSpec {
                 version: 1,
                 name: "Synthetic snapshot read".into(),
+                summary: None,
                 steps: vec![fin_domain::financial_plans::FinancialPlanStepSpec {
+                    action_deadline_seconds: None,
                     step_id: "snapshot".into(),
                     operation: "fin.snapshot".into(),
                     input: json!({}),
@@ -6546,7 +6839,7 @@ mod tests {
                     maximum_costs: vec![],
                 },
             },
-            valid_for_seconds: 600,
+            valid_for_seconds: Some(600),
             replaces_revision_id: None,
             expected_review_hash: None,
         };
@@ -6798,6 +7091,154 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&response).unwrap()
+    }
+
+    #[tokio::test]
+    async fn listener_recovers_orphans_but_parallel_composition_cannot_cancel_active_preparation() {
+        struct PausedPreparation {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl Adapter for PausedPreparation {
+            fn definitions(&self) -> Vec<Definition> {
+                vec![Definition {
+                    name: "synthetic.write".into(),
+                    description: "Isolated paused preparation".into(),
+                    kind: OperationKind::Write,
+                    execution_actor: ExecutionActor::AgentInvocable,
+                    input_schema: json!({"type":"object"}),
+                    output_schema: json!({}),
+                    error_schema: json!({}),
+                    examples: vec![],
+                    coverage: "Synthetic only".into(),
+                    completion: "Never submits".into(),
+                    semantics: json!({}),
+                }]
+            }
+            async fn read(&self, _: &str, _: &Value) -> fin_domain::Result<Value> {
+                unreachable!()
+            }
+            async fn prepare(&self, _: &str, _: &Value) -> fin_domain::Result<PreparedOperation> {
+                self.started.notify_one();
+                self.release.notified().await;
+                Err(FinError::new(
+                    "SYNTHETIC_PREPARATION_STOP",
+                    "preflight",
+                    "Test finished preparation.",
+                    "No submission.",
+                ))
+            }
+            async fn revalidate(
+                &self,
+                _: &PreparedOperation,
+            ) -> fin_domain::Result<PreparedOperation> {
+                unreachable!()
+            }
+            async fn submit(
+                &self,
+                _: &PreparedOperation,
+                _: Arc<dyn SubmissionJournal>,
+            ) -> fin_domain::Result<Submission> {
+                panic!("No fixture submission")
+            }
+            async fn reconcile(&self, _: &OperationRecord) -> fin_domain::Result<Reconciliation> {
+                unreachable!()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("journal.sqlite");
+        let mut store = Store::open(&database).unwrap();
+        let orphan = json!({"id":"orphan","request_id":"orphan-request","fingerprint":"orphan-fp",
+            "fingerprint_version":1,"operation":"synthetic.write","input":{},
+            "status":"awaiting_approval","created_at":now(),"updated_at":now()});
+        store
+            .create_request(
+                "orphan",
+                "orphan-request",
+                "orphan-fp",
+                "synthetic.write",
+                None,
+                "awaiting_approval",
+                &orphan,
+                &now(),
+            )
+            .unwrap();
+        drop(store);
+        let adapter = Arc::new(PausedPreparation {
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        });
+        let compose = || {
+            compose_runtime(
+                config(),
+                RuntimeDependencies {
+                    store: Store::open(&database).unwrap(),
+                    adapters: vec![adapter.clone()],
+                    authorizer: Arc::new(ReadOnlyAuthorizer),
+                    valuator: Arc::new(FixtureValuator),
+                    bridge: None,
+                },
+            )
+            .unwrap()
+        };
+        let runtime = compose();
+        assert_eq!(
+            runtime.engine.status("orphan", false).await.unwrap().status,
+            fin_domain::Status::AwaitingApproval
+        );
+        let socket = dir.path().join("broker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let serving = tokio::spawn(serve_listener(listener, runtime.clone(), unsafe {
+            libc::geteuid()
+        }));
+        assert!(socket_request(&socket, BrokerRequest::Operations).await.ok);
+        assert_eq!(
+            runtime.engine.status("orphan", false).await.unwrap().status,
+            fin_domain::Status::Cancelled
+        );
+        let execute_socket = socket.clone();
+        let execute = tokio::spawn(async move {
+            socket_request(
+                &execute_socket,
+                BrokerRequest::Execute {
+                    request: OperationRequest {
+                        request_id: "active-request".into(),
+                        operation: "synthetic.write".into(),
+                        input: json!({}),
+                        run_id: None,
+                    },
+                },
+            )
+            .await
+        });
+        adapter.started.notified().await;
+        let active = runtime
+            .engine
+            .operations()
+            .unwrap()
+            .into_iter()
+            .find(|row| row.request_id == "active-request")
+            .unwrap();
+        assert_eq!(active.status, fin_domain::Status::AwaitingApproval);
+        let other_runtime = compose();
+        assert_eq!(
+            other_runtime
+                .engine
+                .status(&active.id, false)
+                .await
+                .unwrap(),
+            active
+        );
+        drop(other_runtime);
+        adapter.release.notify_one();
+        let result = execute.await.unwrap();
+        assert!(result.ok, "{:?}", result.error);
+        let result = result.result.unwrap();
+        assert_eq!(result["error"]["code"], "SYNTHETIC_PREPARATION_STOP");
+        assert!(result["submission"].is_null());
+        assert!(socket_request(&socket, BrokerRequest::DaemonStop).await.ok);
+        serving.await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -7165,7 +7606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_mutations_and_revocation_are_serialized_while_reads_continue() {
+    async fn status_and_revocation_bypass_queued_work_while_stop_still_drains() {
         let runtime = runtime();
         let held_dispatch = runtime.mutation_gate.lock().await;
         let mutators = [
@@ -7181,10 +7622,22 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(runtime.handle(BrokerRequest::Capabilities).await.ok);
-        assert!(tasks.iter().all(|task| !task.is_finished()));
+        let revoke = tokio::time::timeout(Duration::from_secs(1), tasks.remove(0))
+            .await
+            .expect("revocation must bypass unrelated queued work")
+            .unwrap();
+        assert!(!revoke.ok); // Missing grant is reported promptly.
+        assert!(!tasks[0].is_finished()); // Service stop still drains mutations.
+        let status = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.handle(BrokerRequest::PlanStatus {
+                plan_id: "missing".into(),
+            }),
+        )
+        .await
+        .expect("stored status must remain responsive");
+        assert!(!status.ok);
         drop(held_dispatch);
-        let revoke = tasks.remove(0).await.unwrap();
-        assert!(!revoke.ok); // Missing synthetic grant; no dispatch escaped the gate.
         assert!(tasks.remove(0).await.unwrap().ok);
     }
 
@@ -7486,6 +7939,7 @@ mod tests {
                     valuation: None,
                     intent: fin_domain::FinancialIntent::default(),
                     operation_version: 1,
+                    action_deadline: None,
                 }),
                 approval: None,
                 submission: None,

@@ -178,7 +178,7 @@ fn withdrawal_input() -> Value {
 
 #[tokio::test]
 async fn fresh_quote_updates_within_approved_ceiling_keep_one_approval_and_submission() {
-    let prices = Arc::new(ScriptedPrices::new(&["1.0003", "1.0002", "1.0001"]));
+    let prices = Arc::new(ScriptedPrices::new(&["1.0002", "1.0001"]));
     let transport = Arc::new(RecordingTransport::default());
     let adapter = Arc::new(
         BinanceAdapter::new(
@@ -208,7 +208,7 @@ async fn fresh_quote_updates_within_approved_ceiling_keep_one_approval_and_submi
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
     assert!(record.submission.is_some(), "{record:?}");
-    assert_eq!(prices.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
     let prepared = record.preview.as_ref().unwrap();
     assert_eq!(
         prepared
@@ -227,17 +227,16 @@ async fn fresh_quote_updates_within_approved_ceiling_keep_one_approval_and_submi
     assert_eq!(engine.execute(request).await.unwrap().id, record.id);
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 1);
+    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn engine_rejects_third_quote_movement_before_any_binance_post() {
+async fn engine_rejects_final_quote_movement_before_any_binance_post() {
     // This synthetic price feed values a selected 99-unit withdrawal at $99
-    // for prepare and engine revalidation, then $100.98 at Binance's final
-    // submit revalidation. Engine execution performs adapter prepare (1.00),
-    // its post-approval revalidation (1.00), then Binance submit performs the
-    // final adapter revalidation (1.02). The last quote must not escape the
-    // approved $100 movement ceiling.
-    let prices = Arc::new(ScriptedPrices::new(&["1.02", "1.00", "1.00"]));
+    // during preparation, then $100.98 in the engine's single post-approval
+    // adapter revalidation. Submission must reuse the checked candidate;
+    // the final quote must not escape the approved $100 movement ceiling.
+    let prices = Arc::new(ScriptedPrices::new(&["1.02", "1.00"]));
     let transport = Arc::new(RecordingTransport::default());
     let adapter = Arc::new(
         BinanceAdapter::new(
@@ -271,7 +270,7 @@ async fn engine_rejects_third_quote_movement_before_any_binance_post() {
         .await
         .unwrap();
 
-    assert_eq!(prices.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(prices.calls.load(Ordering::SeqCst), 2);
     assert_eq!(authorizer.0.load(Ordering::SeqCst), 1);
     assert_eq!(transport.posts.load(Ordering::SeqCst), 0);
     assert!(record.approval.is_some());

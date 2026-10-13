@@ -164,6 +164,23 @@ struct ApprovalPresentationTests {
         assert(configurationAuthenticationReason(policy) == "change your financial policy")
         assert(nativeApprovalReasonForOS(configurationAuthenticationReason(policy)!) == "change your financial policy")
         assert(reviewed(policy))
+        let administrative: [String: Any] = ["action":"configure", "financial_movement":false, "future_financial_authority":false,
+            "operation":"krakenfutures.set-self-trade-strategy", "product":"krakenfutures", "account":"SYNTHETIC-futures", "parameters":["strategy":"REJECT_TAKER"]]
+        assert(reviewed(administrative))
+        assert(configurationAuthenticationReason(administrative) == "configure krakenfutures.set-self-trade-strategy for account SYNTHETIC-futures")
+        var crossedProduct = administrative; crossedProduct["product"] = "kraken"
+        assert(configurationAuthenticationReason(crossedProduct) == nil)
+        crossedProduct["operation"] = "kraken.remove-export"; crossedProduct["product"] = "krakenfutures"
+        assert(configurationAuthenticationReason(crossedProduct) == nil)
+        var administrativeFunds = administrative; administrativeFunds["financial_movement"] = true
+        assert(!reviewed(administrativeFunds)); assert(configurationAuthenticationReason(administrativeFunds) == nil)
+        var malformedAdmin = administrative; malformedAdmin.removeValue(forKey:"parameters")
+        assert(configurationAuthenticationReason(malformedAdmin) == nil)
+        for (provider, title) in [("kraken", "Kraken"), ("krakenfutures", "Kraken Futures")] {
+            var venue = binding; var account = connection; account["provider"] = provider; venue["connection"] = account
+            assert(configurationAuthenticationReason(venue) == "save the \(title) connection \"SYNTHETIC-main\"")
+        }
+
         assert(!reviewed(policy, "changed"))
         for (action, verb) in [("add", "save"), ("update", "update"), ("remove", "remove")] {
             var candidate = binding; candidate["action"] = action
@@ -512,6 +529,32 @@ struct ApprovalPresentationTests {
         let planPermission: [String: Any] = ["step_id":"transfer", "exact":["scope":["mode":"exact", "maximum_debits":[[String:Any]](), "maximum_costs":[[String:Any]](), "possible_credits":[[String:Any]]()], "definition_hash":"schema", "connections_hash":"connections"]]
         let planBinding: [String: Any] = ["version":1, "kind":"financial_plan", "plan_id":"synthetic-plan", "revision_id":"synthetic-revision", "name":"Synthetic rotation", "plan":["name":"Synthetic rotation", "steps":[planStep]], "permissions":[planPermission], "valid_for_seconds":600]
         assert(financialPlanAuthenticationReason(planBinding, summary:"Full swap scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 step, 10 minutes)")
+        let financialSummary = "Send 0.01 ETH to Savings; fees up to 0.001 ETH."
+        var summarizedPlan = planBinding
+        summarizedPlan["plan"] = ["name":"Synthetic rotation", "summary":financialSummary, "steps":[planStep]]
+        let summarizedReason = "approve the plan “Synthetic rotation”. \(financialSummary) (1 step, 10 minutes)"
+        assert(financialPlanAuthenticationReason(summarizedPlan, summary:"Broker scope") == summarizedReason)
+        assert(nativeApprovalReasonForOS(summarizedReason) == summarizedReason)
+        summarizedPlan["replaces_revision_id"] = "synthetic-prior-revision"
+        assert(financialPlanAuthenticationReason(summarizedPlan, summary:"Broker scope") == "approve the revised plan “Synthetic rotation”. \(financialSummary) (1 step, 10 minutes)")
+        let invalidPlanSummaries: [Any] = ["", " leading", "trailing ", "line\nbreak", "tab\there", "escape\u{1b}",
+                                   "line\u{2028}break", "paragraph\u{2029}break", "hidden\u{202e}amount",
+                                   "Arabic\u{061c}amount", "isolate\u{2066}amount\u{2069}",
+                                   String(repeating: "界", count: 140), true, NSNull()]
+        for invalidSummary in invalidPlanSummaries {
+            var invalid = planBinding
+            invalid["plan"] = ["name":"Synthetic rotation", "summary":invalidSummary, "steps":[planStep]]
+            assert(financialPlanAuthenticationReason(invalid, summary:"Broker scope") == nil)
+        }
+        var maximumSummaryPlan = planBinding
+        let maximumSummary = String(repeating: "界", count: 140 - "Synthetic rotation".unicodeScalars.count)
+        maximumSummaryPlan["plan"] = ["name":"Synthetic rotation", "summary":maximumSummary, "steps":[planStep]]
+        maximumSummaryPlan["replaces_revision_id"] = "synthetic-prior-revision"
+        maximumSummaryPlan["valid_for_seconds"] = NSNumber(value: UInt64.max)
+        let maximumSummaryReason = financialPlanAuthenticationReason(maximumSummaryPlan, summary:"Broker scope")!
+        assert(maximumSummaryReason.contains(maximumSummary))
+        assert(maximumSummaryReason.contains(approvalDuration(UInt64.max)))
+        assert(maximumSummaryReason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
         var generatedPermission = planPermission; generatedPermission["generated_input_fields"] = ["/requestId"]
         var generatedPlan = planBinding; generatedPlan["permissions"] = [generatedPermission]
         assert(financialPlanAuthenticationReason(generatedPlan, summary:"Full scope is in the terminal review.") == "approve the plan “Synthetic rotation” (1 step, 10 minutes)")
@@ -581,8 +624,140 @@ struct ApprovalPresentationTests {
                                                                                      "amount":["asset":nativeAsset, "atoms":"1000000000000000"],
                                                                                      "treatment":"additional_debit"]]]],
                                       "permissions":[ammPlanPermission], "valid_for_seconds":600]
+        // Exact AMM plans use the same frozen schema/connection hashes as
+        // other exact steps; they have no bounded adapter permission spec.
+        var exactAMMPlan = ammPlan
+        var exactAMMBody = ammPlan["plan"] as! [String: Any]
+        var exactAMMStep = swapPlanStep
+        let exactAMMScope: [String: Any] = ["mode":"exact",
+            "maximum_debits":ammSpec["maximum_debits"]!, "maximum_costs":ammSpec["maximum_costs"]!,
+            "possible_credits":[["resource":"ethereum:1:\(signerAddress)", "asset":outputAsset]]]
+        exactAMMStep["permitted_variations"] = exactAMMScope
+        exactAMMBody["steps"] = [exactAMMStep]
+        exactAMMPlan["plan"] = exactAMMBody
+        let exactAMMPermission: [String: Any] = ["step_id":"swap", "exact":["scope":exactAMMScope,
+            "definition_hash":"SYNTHETIC-schema", "connections_hash":"SYNTHETIC-connections"]]
+        exactAMMPlan["permissions"] = [exactAMMPermission]
+        let exactAMMSummary = "Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds."
+        let exactAMMReason = "approve the plan “Synthetic bounded swap” (1 step, 10 minutes)"
+        assert(financialPlanAuthenticationReason(exactAMMPlan, summary:exactAMMSummary) == exactAMMReason)
+        func exactAMMWith(step: [String: Any] = exactAMMStep,
+                          permission: [String: Any] = exactAMMPermission) -> [String: Any] {
+            var result = exactAMMPlan
+            var body = exactAMMBody; body["steps"] = [step]
+            result["plan"] = body; result["permissions"] = [permission]
+            return result
+        }
+        var relativeExactStep = exactAMMStep
+        var relativeExactInput = swapInput; relativeExactInput.removeValue(forKey:"deadline")
+        relativeExactStep["input"] = relativeExactInput
+        relativeExactStep["action_deadline_seconds"] = 600
+        assert(financialPlanAuthenticationReason(exactAMMWith(step:relativeExactStep), summary:exactAMMSummary) == exactAMMReason)
+        for invalidWindow: Any in [0, -1, 601, true, "600", 1.5, NSNull()] {
+            var invalid = relativeExactStep; invalid["action_deadline_seconds"] = invalidWindow
+            assert(financialPlanAuthenticationReason(exactAMMWith(step:invalid), summary:exactAMMSummary) == nil)
+        }
+        for conflictingDeadline: Any in [1791500000, NSNull()] {
+            var invalid = relativeExactStep; var input = relativeExactInput
+            input["deadline"] = conflictingDeadline; invalid["input"] = input
+            assert(financialPlanAuthenticationReason(exactAMMWith(step:invalid), summary:exactAMMSummary) == nil)
+        }
+        for field in ["scope", "definition_hash", "connections_hash"] {
+            var permission = exactAMMPermission; var exact = permission["exact"] as! [String: Any]
+            exact.removeValue(forKey:field); permission["exact"] = exact
+            assert(financialPlanAuthenticationReason(exactAMMWith(permission:permission), summary:exactAMMSummary) == nil)
+        }
+        for field in ["maximum_debits", "maximum_costs", "possible_credits"] {
+            var malformedScope = exactAMMScope; malformedScope[field] = "SYNTHETIC-invalid-array"
+            var step = exactAMMStep; step["permitted_variations"] = malformedScope
+            var permission = exactAMMPermission; var exact = permission["exact"] as! [String: Any]
+            exact["scope"] = malformedScope; permission["exact"] = exact
+            assert(financialPlanAuthenticationReason(exactAMMWith(step:step, permission:permission), summary:exactAMMSummary) == nil)
+        }
+        for operation in ["uniswap.swap", "ramses.swap", "sushi.swap", "pancakeswap.swap"] {
+            var exactVenueStep = exactAMMStep; exactVenueStep["operation"] = operation
+            assert(financialPlanAuthenticationReason(exactAMMWith(step:exactVenueStep), summary:exactAMMSummary) == exactAMMReason)
+        }
+        var mismatchedExactStep = exactAMMStep
+        var mismatchedExactScope = exactAMMScope; mismatchedExactScope["maximum_debits"] = [[String: Any]]()
+        mismatchedExactStep["permitted_variations"] = mismatchedExactScope
+        assert(financialPlanAuthenticationReason(exactAMMWith(step:mismatchedExactStep), summary:exactAMMSummary) == nil)
+        var ambiguousAMMPermission = exactAMMPermission
+        ambiguousAMMPermission["permission"] = ammPlanPermission["permission"]
+        assert(financialPlanAuthenticationReason(exactAMMWith(permission:ambiguousAMMPermission), summary:exactAMMSummary) == nil)
+        assert(financialPlanAuthenticationReason(exactAMMPlan, summary:"Different broker scope") == nil)
+        // One concise prompt supports mixed permission variants and venues.
+        var boundedSecondStep = swapPlanStep; boundedSecondStep["step_id"] = "bounded-swap"
+        var boundedSecondPermission = ammPlanPermission; boundedSecondPermission["step_id"] = "bounded-swap"
+        var mixedAMMPlan = exactAMMPlan; var mixedAMMBody = exactAMMBody
+        mixedAMMBody["steps"] = [exactAMMStep, boundedSecondStep]
+        mixedAMMPlan["plan"] = mixedAMMBody
+        mixedAMMPlan["permissions"] = [exactAMMPermission, boundedSecondPermission]
+        assert(financialPlanAuthenticationReason(mixedAMMPlan,
+            summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 600 seconds.")
+            == "approve the plan “Synthetic bounded swap” (2 steps, 10 minutes)")
+        var krakenSecondStep = planStep; krakenSecondStep["operation"] = "kraken.add-order"
+        krakenSecondStep["step_id"] = "kraken-buy"
+        var krakenSecondPermission = planPermission; krakenSecondPermission["step_id"] = "kraken-buy"
+        mixedAMMBody["steps"] = [relativeExactStep, krakenSecondStep]
+        mixedAMMPlan["plan"] = mixedAMMBody
+        mixedAMMPlan["permissions"] = [exactAMMPermission, krakenSecondPermission]
+        mixedAMMPlan["valid_for_seconds"] = 2700
+        assert(financialPlanAuthenticationReason(mixedAMMPlan,
+            summary:"Approve the plan “Synthetic bounded swap” with 2 ordered steps for 2700 seconds.")
+            == "approve the plan “Synthetic bounded swap” (2 steps, 45 minutes)")
         let ammPlanReason = financialPlanAuthenticationReason(ammPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
         assert(ammPlanReason == "approve the plan “Synthetic bounded swap” (1 step, 10 minutes)")
+        var summarizedAMMPlan = ammPlan
+        var summarizedAMMSpec = ammPlan["plan"] as! [String: Any]
+        summarizedAMMSpec["summary"] = "Swap up to 0.1 WETH for at least 190 USDC; gas up to 0.001 ETH."
+        summarizedAMMPlan["plan"] = summarizedAMMSpec
+        assert(financialPlanAuthenticationReason(summarizedAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == "approve the plan “Synthetic bounded swap”. Swap up to 0.1 WETH for at least 190 USDC; gas up to 0.001 ETH. (1 step, 10 minutes)")
+        assert(financialPlanAuthenticationReason(summarizedAMMPlan, summary:"Different broker scope") == nil)
+        // Future-funded swaps bind a relative window, not an already-ticking
+        // absolute deadline. Exercise the same parser used before Touch ID.
+        func relativePlan(_ base: [String: Any], window: Any = 600,
+                          absolute: Any? = nil) -> [String: Any] {
+            var result = base
+            var body = result["plan"] as! [String: Any]
+            var steps = body["steps"] as! [[String: Any]]
+            var input = steps[0]["input"] as! [String: Any]
+            input["deadline"] = absolute
+            steps[0]["input"] = input
+            steps[0]["action_deadline_seconds"] = window
+            body["steps"] = steps
+            result["plan"] = body
+            result["valid_for_seconds"] = 2700
+            return result
+        }
+        let relativeSummary = "Approve the plan “Synthetic bounded swap” with 1 ordered steps for 2700 seconds."
+        let relativeReason = "approve the plan “Synthetic bounded swap”. Swap up to 0.1 WETH for at least 190 USDC; gas up to 0.001 ETH. (1 step, 45 minutes)"
+        let relativeAMMPlan = relativePlan(summarizedAMMPlan)
+        assert(financialPlanAuthenticationReason(relativeAMMPlan, summary:relativeSummary) == relativeReason)
+        var revisedRelative = relativeAMMPlan
+        revisedRelative["replaces_revision_id"] = "synthetic-prior-relative-revision"
+        assert(financialPlanAuthenticationReason(revisedRelative, summary:relativeSummary) == relativeReason.replacingOccurrences(of:"approve the plan", with:"approve the revised plan"))
+        for invalidWindow: Any in [0, -1, 601, true, "600", 1.5] {
+            assert(financialPlanAuthenticationReason(relativePlan(summarizedAMMPlan, window:invalidWindow), summary:relativeSummary) == nil)
+        }
+        for conflictingDeadline: Any in [1791500000, NSNull()] {
+            assert(financialPlanAuthenticationReason(relativePlan(summarizedAMMPlan, absolute:conflictingDeadline), summary:relativeSummary) == nil)
+        }
+        assert(financialPlanAuthenticationReason(relativePlan(summarizedAMMPlan, window:NSNull()), summary:relativeSummary) == nil)
+        // Null optional window retains the legacy absolute-deadline contract.
+        assert(financialPlanAuthenticationReason(relativePlan(summarizedAMMPlan, window:NSNull(), absolute:1791500000), summary:relativeSummary) == relativeReason)
+        var tighterRelativePlan = relativeAMMPlan
+        var tighterSpec = ammSpec
+        var tighterBounds = ammSpec["parameters"] as! [String: Any]
+        tighterBounds["max_deadline_seconds"] = 300
+        tighterSpec["parameters"] = tighterBounds
+        var tighterPermission = ammPlanPermission
+        var tighterBody = ammPlanPermission["permission"] as! [String: Any]
+        tighterBody["spec"] = tighterSpec
+        tighterPermission["permission"] = tighterBody
+        tighterRelativePlan["permissions"] = [tighterPermission]
+        assert(financialPlanAuthenticationReason(tighterRelativePlan, summary:relativeSummary) == nil)
+        assert(financialPlanAuthenticationReason(relativePlan(tighterRelativePlan, window:300), summary:relativeSummary) == relativeReason)
         assert(nativeApprovalReasonForOS(ammPlanReason + ".") == ammPlanReason)
         var revisedAMMPlan = ammPlan; revisedAMMPlan["replaces_revision_id"] = "synthetic-prior-amm-revision"
         assert(financialPlanAuthenticationReason(revisedAMMPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.") == "approve the revised plan “Synthetic bounded swap” (1 step, 10 minutes)")
@@ -620,6 +795,7 @@ struct ApprovalPresentationTests {
         ramsesPlan["permissions"] = [ramsesPlanPermission]
         let ramsesPlanReason = financialPlanAuthenticationReason(ramsesPlan, summary:"Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds.")!
         assert(ramsesPlanReason == ammPlanReason)
+        assert(financialPlanAuthenticationReason(relativePlan(ramsesPlan), summary:relativeSummary) == "approve the plan “Synthetic bounded swap” (1 step, 45 minutes)")
         for (operation, dex, _, tier) in [("sushi.swap", "sushi", "Sushi", 3000), ("pancakeswap.swap", "pancakeswap", "PancakeSwap", 2500)] {
             var step = swapPlanStep; step["operation"] = operation
             var input = swapInput; input["fee_tier"] = tier; step["input"] = input
@@ -637,6 +813,7 @@ struct ApprovalPresentationTests {
             let summary = "Approve the plan “Synthetic bounded swap” with 1 ordered steps for 600 seconds."
             let reason = financialPlanAuthenticationReason(forkPlan, summary:summary)!
             assert(reason == ammPlanReason)
+            assert(financialPlanAuthenticationReason(relativePlan(forkPlan), summary:relativeSummary) == nil)
             assert(reason.unicodeScalars.count <= authenticationReasonMaximumCharacters)
             var revisedForkPlan = forkPlan; revisedForkPlan["replaces_revision_id"] = "synthetic-prior-fork-revision"
             let revisedReason = "approve the revised plan “Synthetic bounded swap” (1 step, 10 minutes)"

@@ -7,8 +7,16 @@ use serde_json::{Value, json};
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub wallet: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_debt_usd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_debt_to_collateral_bps: Option<u16>,
     pub network: String,
     pub chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +74,7 @@ pub const OPERATIONS: &[&str] = &[
     "ramses.quote",
     "sushi.quote",
     "pancakeswap.quote",
+    "aave.markets",
     "aave.reserves",
     "aave.positions",
     "wallet.transfer",
@@ -95,13 +104,16 @@ pub fn is_read(operation: &str) -> bool {
             | "ramses.quote"
             | "sushi.quote"
             | "pancakeswap.quote"
+            | "aave.markets"
             | "aave.reserves"
             | "aave.positions"
     )
 }
 fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str]) {
     match operation {
-        "wallet.balances" | "aave.reserves" | "aave.positions" => (&["tokens"], &[]),
+        "aave.markets" => (&[], &[]),
+        "wallet.balances" => (&["tokens"], &[]),
+        "aave.reserves" | "aave.positions" => (&["tokens", "block_number"], &[]),
         "wallet.token" => (&["token"], &["token"]),
         "wallet.allowance" => (&["token", "spender"], &["token", "spender"]),
         "wallet.permit2.allowance" => (&["token", "spender"], &["token", "spender"]),
@@ -126,7 +138,13 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
             &["token", "amount", "recipient"],
         ),
         "aave.withdraw" => (
-            &["token", "amount", "recipient", "max_amount"],
+            &[
+                "token",
+                "amount",
+                "recipient",
+                "max_amount",
+                "min_health_factor",
+            ],
             &["token", "amount", "recipient"],
         ),
         "wallet.wrap" => (&["amount"], &["amount"]),
@@ -191,15 +209,32 @@ fn extras(operation: &str) -> (&'static [&'static str], &'static [&'static str])
         ),
         "aave.supply" => (&["token", "amount"], &["token", "amount"]),
         "aave.borrow" => (
-            &["token", "amount", "min_health_factor"],
+            &[
+                "token",
+                "amount",
+                "min_health_factor",
+                "max_debt_usd",
+                "max_debt_to_collateral_bps",
+            ],
             &["token", "amount", "min_health_factor"],
         ),
         "aave.repay" => (&["token", "amount", "max_amount"], &["token", "amount"]),
-        "aave.collateral" => (&["token", "enabled"], &["token", "enabled"]),
+        "aave.collateral" => (
+            &["token", "enabled", "min_health_factor"],
+            &["token", "enabled"],
+        ),
         _ => (&[], &[]),
     }
 }
 pub fn parse(operation: &str, input: &Value) -> Result<Request> {
+    parse_input(operation, input, false)
+}
+
+pub(crate) fn parse_plan_template(operation: &str, input: &Value) -> Result<Request> {
+    parse_input(operation, input, true)
+}
+
+fn parse_input(operation: &str, input: &Value, plan_template: bool) -> Result<Request> {
     if !OPERATIONS.contains(&operation) {
         return Err(FinError::validation(
             "This EVM operation is not implemented.",
@@ -211,6 +246,7 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
     let (allowed, required) = extras(operation);
     for key in object.keys() {
         if !["wallet", "network", "chain_id"].contains(&key.as_str())
+            && !(operation.starts_with("aave.") && key == "market")
             && !allowed.contains(&key.as_str())
             && !(!is_read(operation) && ["request_id", "max_fee_eth"].contains(&key.as_str()))
         {
@@ -220,6 +256,12 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
         }
     }
     for field in required {
+        if plan_template
+            && *field == "deadline"
+            && matches!(operation, "uniswap.swap" | "ramses.swap")
+        {
+            continue;
+        }
         if object.get(*field).is_none_or(Value::is_null) {
             return Err(FinError::validation(format!(
                 "Required operation field {field} is missing."
@@ -334,6 +376,11 @@ pub fn parse(operation: &str, input: &Value) -> Result<Request> {
             "Only supported full-balance operations accept all, and require finite max_amount.",
         ));
     }
+    if request.block_number == Some(0) {
+        return Err(FinError::validation(
+            "Historical block_number must be positive.",
+        ));
+    }
     if request.max_amount.is_some() && request.amount.as_deref() != Some("all") {
         return Err(FinError::validation(
             "max_amount is valid only with amount all; exact quantities have no detached cap.",
@@ -347,7 +394,7 @@ pub fn definitions() -> Vec<Definition> {
         let (allowed,required)=extras(operation);
         let mut schema=serde_json::to_value(schema_for!(Request)).expect("schema serialization");
         schema["properties"].as_object_mut().expect("object schema").retain(|name,_|
-            ["wallet","network","chain_id"].contains(&name.as_str()) || allowed.contains(&name.as_str()) ||
+            ["wallet","network","chain_id"].contains(&name.as_str()) || (operation.starts_with("aave.") && name == "market") || allowed.contains(&name.as_str()) ||
             (!read && ["request_id","max_fee_eth"].contains(&name.as_str())));
         let mut fields=vec!["wallet","network","chain_id"];
         fields.extend_from_slice(required);
@@ -361,10 +408,10 @@ pub fn definitions() -> Vec<Definition> {
         let decimal=json!({"type":"string","pattern":"^(0|[1-9][0-9]*)(\\.[0-9]+)?$","maxLength":100});
         let contract=json!({"type":"string","pattern":"^0x[0-9a-fA-F]{40}$"});
         for (name,value) in [
-            ("wallet",json!({"type":"string","minLength":1,"maxLength":80})),("chain_id",json!({"type":"integer","minimum":1})),
+            ("block_number",json!({"type":"integer","minimum":1,"description":"Optional historical state block for read-only Aave observations. Omission uses the current head; financial writes always use fresh state."})),("wallet",json!({"type":"string","minLength":1,"maxLength":80})),("chain_id",json!({"type":"integer","minimum":1})),
             ("request_id",json!({"type":"string","minLength":1,"maxLength":128})),("max_fee_eth",decimal.clone()),("max_amount",decimal.clone()),("min_output",decimal.clone()),("min_health_factor",decimal.clone()),
             ("amount",if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap"|"sushi.swap"|"pancakeswap.swap"){json!({"anyOf":[decimal.clone(),{"const":"all"}]})}else{decimal.clone()}),
-            ("recipient",contract.clone()),("spender",contract.clone()),("token_in",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token_out",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token",json!({"anyOf":[contract.clone(),{"const":"native"}]})),
+            ("market",contract.clone()),("max_debt_usd",decimal.clone()),("max_debt_to_collateral_bps",json!({"type":"integer","minimum":1,"maximum":10000})),("recipient",contract.clone()),("spender",contract.clone()),("token_in",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token_out",json!({"anyOf":[contract.clone(),{"const":"native"}]})),("token",json!({"anyOf":[contract.clone(),{"const":"native"}]})),
             ("tokens",json!({"type":"array","items":contract,"maxItems":64,"uniqueItems":true})),("transaction_hash",json!({"type":"string","pattern":"^0x[0-9a-fA-F]{64}$"})),
             ("fee_tier",json!({"type":"integer","enum":[100,500,3000,10000]})),("tick_spacing",json!({"type":"integer","enum":[1,5,10,50,100,200]})),("max_pool_fee_ppm",json!({"type":"integer","minimum":0,"maximum":999999,"description":"Maximum fee observed from the Ramses pool at the pinned quote block. This is a quote-time ceiling, not an on-chain in-transaction fee cap."})),("slippage_bps",json!({"type":"integer","minimum":0,"maximum":1000})),("max_price_impact_bps",json!({"type":"integer","minimum":0,"maximum":10000,"default":10000})),("deadline",json!({"type":"integer","minimum":1})),("protocol",json!({"type":"string","enum":["v3","v4"],"default":"v3"})),("v4_pool_key",serde_json::to_value(schema_for!(super::V4PoolKey)).expect("v4 pool key schema")),("enabled",json!({"type":"boolean"}))
         ]{if properties.contains_key(name){properties.insert(name.into(),value);}}
@@ -405,7 +452,25 @@ pub fn definitions() -> Vec<Definition> {
             }
         }
         let mut examples = vec![example(operation)];
-        if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap"|"sushi.swap"|"pancakeswap.swap") {
+        if operation.starts_with("aave.") {
+            if matches!(*operation,"aave.reserves"|"aave.positions") {
+                semantics["state_block"] = json!("block_number selects a historical read-only observation with canonical block/hash checks; it never supplies financial write authority or current-funds evidence.");
+            }
+            if *operation == "aave.markets" {
+                semantics["reviewed_market_profiles"] = json!(fin_networks::all().iter().map(|n|json!({"chain_id":n.chain_id,"markets":super::aave::reviewed_markets(n.chain_id),"available":!super::aave::reviewed_markets(n.chain_id).is_empty()})).collect::<Vec<_>>());
+                semantics["source_commit"] = json!(super::aave::ADDRESS_BOOK_COMMIT);
+            }
+            if !read {
+                semantics["broker_generated_attempt_input_fields"] = json!(["/request_id"]);
+                semantics["plan_permission"] = json!({"supported":true,"bounds_schema":schemars::schema_for!(super::aave::permissions::AaveBounds),"variable_fields":["amount","max_fee_eth"],"fixed_fields":"All remaining fields, including market, asset, recipient, collateral setting and risk limits."});
+                if *operation == "aave.borrow" {
+                    semantics["plan_permission"]["requires_adapter_scope"] = json!(true);
+                }
+            }
+            semantics["market"] = json!("Optional exact enabled pool address; omission preserves the configured legacy default. Market identity is immutable within authorization.");
+            semantics["risk"] = json!("Health factor and debt limits are fresh execution constraints, not guarantees against later interest, price changes or liquidation.");
+        }
+        if matches!(*operation,"aave.repay"|"aave.withdraw"|"wallet.unwrap"|"uniswap.swap"|"ramses.swap") {
             let mut all=example(operation);
             all["amount"]=json!("all");
             all["max_amount"]=json!("2");
@@ -424,6 +489,14 @@ pub fn definitions() -> Vec<Definition> {
                 example["chain_id"] = json!(4663);
                 example["tick_spacing"] = json!(1);
             }
+        }
+        if !read { semantics["plan_allowance_seconds"] = json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS); }
+        if matches!(*operation, "uniswap.swap" | "ramses.swap") {
+            semantics["plan_relative_deadline"] = json!({"field":"deadline","maximum_seconds":super::amm_permissions::MAX_DEADLINE_SECONDS});
+        }
+        if matches!(*operation, "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap") {
+            semantics["quote_revalidation"] = json!("Slippage fixes the minimum receipt from the preparation quote. Revalidation preserves that encoded floor and rejects refreshed output below it; improved quotes do not raise it. Fresh impact, route, identity, simulation and fee checks still apply.");
+            semantics["usd_pricing_buffer"] = json!({"basis_points":100,"rounding":"up to cents","scope":"New swap candidates reserve the full buffered USD movement/fee ceiling under protected policy. Asset amounts and native fee caps do not increase. Existing attempt ceilings are never widened; refreshed prices retain their actual identities and timestamps."});
         }
         Definition {
             name: (*operation).into(),
@@ -495,6 +568,9 @@ pub fn description(operation: &str) -> &'static str {
         "ramses.quote" => {
             "Quote one explicitly selected reviewed Ramses v3-compatible pool spacing."
         }
+        "aave.markets" => {
+            "List enabled Aave V3 markets and pinned deployment compatibility; unavailable networks are explicit."
+        }
         "aave.reserves" => {
             "Discover all Aave reserve eligibility, limits, receipt and debt identities."
         }
@@ -513,7 +589,7 @@ pub fn description(operation: &str) -> &'static str {
         "uniswap.swap" => "Execute bounded exact-input Uniswap v3 or v4 single-pool swap.",
         "ramses.swap" => "Execute a bounded exact-input Ramses v3-compatible single-pool swap.",
         "aave.supply" => {
-            "Supply underlying into Aave v3 with exact revision-5 scaled backing proof."
+            "Supply underlying into the selected reviewed Aave V3 market with exact revision-specific backing proof."
         }
         "aave.borrow" => "Borrow variable-rate debt with explicit collateral/health bounds.",
         "aave.repay" => "Repay variable debt; all requires bounded maximum and finite allowance.",

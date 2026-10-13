@@ -156,6 +156,8 @@ struct DevRequest {
     build_id: String,
     mode: String,
     request: BrokerRequest,
+    #[serde(default)]
+    progress: bool,
 }
 
 #[derive(Serialize)]
@@ -329,6 +331,7 @@ impl Adapter for SyntheticAdapter {
                 locks: vec![],
             },
             operation_version: 1,
+            action_deadline: None,
         })
     }
 
@@ -760,6 +763,7 @@ async fn run(args: Args) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     let mut owned_fork_metadata = serde_json::Map::new();
+    let mut artifact_profiles = vec![];
     let (runtime_config, adapters, valuator, bridge) = if args.mode == "live" {
         let runtime_config = profile::broker_config(&environment_config)?;
         let credentials = Arc::new(
@@ -768,6 +772,9 @@ async fn run(args: Args) -> Result<(), String> {
             )
             .map_err(|_| "development credential store is unavailable")?,
         );
+        artifact_profiles =
+            fin_broker::kraken::profiles(&runtime_config, credentials.clone(), None, None)
+                .map_err(|_| "development export profiles could not be initialized")?;
         let source: Arc<dyn fin_pricing::UsdPriceSource> = Arc::new(
             fin_pricing::ExchangeSpotPrices::new(
                 fin_pricing::CoinGeckoPrices::new().map_err(|_| "public pricing is unavailable")?,
@@ -878,6 +885,9 @@ async fn run(args: Args) -> Result<(), String> {
         },
     )
     .map_err(|e| e.to_string())?;
+    runtime
+        .attach_kraken_artifacts(artifact_profiles)
+        .map_err(|e| e.to_string())?;
     if args.mode == "live" {
         runtime.require_account_identity_verification();
     }
@@ -1135,7 +1145,12 @@ async fn serve_peer(
                 "Use the CLI built for this development environment.",
             ))
         } else {
-            handle_request(&runtime, request.request).await
+            fin_protocol::progress::observe(
+                reader.get_mut(),
+                request.progress,
+                handle_request(&runtime, request.request),
+            )
+            .await
         };
     if is_capabilities
         && response.ok

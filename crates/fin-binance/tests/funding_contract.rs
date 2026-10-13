@@ -518,6 +518,23 @@ fn deposit_credit_is_distinct_from_chain_submission_and_locked_balance() {
     .unwrap();
     assert!(!locked.usable_deposit_credit());
     assert!(locked.locked_deposit_credit());
+    assert!(locked.confirmed_deposit_credit());
+    let state = fin_binance::DepositCreditState::from(&locked);
+    assert!(state.credited && state.locked);
+    for status in [0, 2, 7, 8] {
+        let row = FundingHistoryRow {
+            status,
+            ..locked.clone()
+        };
+        assert!(!row.confirmed_deposit_credit());
+    }
+    for travel_rule_status in [Some(1), Some(2)] {
+        let row = FundingHistoryRow {
+            travel_rule_status,
+            ..locked.clone()
+        };
+        assert!(!row.confirmed_deposit_credit());
+    }
 }
 
 #[test]
@@ -2338,6 +2355,64 @@ struct PagedTransferSnapshotTransport {
     accounts: std::sync::atomic::AtomicUsize,
     transfer_requests: std::sync::Mutex<Vec<(Option<String>, String)>>,
     total_count: usize,
+}
+
+struct DepositCreditSnapshotTransport {
+    inner: EmptyHistorySnapshotTransport,
+    row: Value,
+}
+
+#[async_trait::async_trait]
+impl fin_binance::BinanceTransport for DepositCreditSnapshotTransport {
+    async fn request(
+        &self,
+        credential: &fin_binance::CredentialHandle,
+        request: BinanceRequest,
+    ) -> std::result::Result<Value, fin_binance::TransportError> {
+        if request.endpoint == BinanceEndpoint::DepositHistory {
+            Ok(json!([self.row]))
+        } else {
+            self.inner.request(credential, request).await
+        }
+    }
+}
+
+#[tokio::test]
+async fn confirmed_locked_deposit_is_not_an_in_flight_transfer_in_snapshot() {
+    use fin_domain::Adapter;
+    for (status, travel_rule_status, credited) in
+        [(6, 0, true), (1, 0, true), (6, 1, false), (0, 0, false)]
+    {
+        let adapter = fin_binance::BinanceAdapter::new(
+            main_and_child_config(),
+            std::sync::Arc::new(DepositCreditSnapshotTransport {
+                inner: EmptyHistorySnapshotTransport {
+                    accounts: std::sync::atomic::AtomicUsize::new(0),
+                    from_emails: std::sync::Mutex::new(Vec::new()),
+                },
+                row: json!({"id":"synthetic-credit","coin":"ETH","amount":"0.01","status":status,"travelRuleStatus":travel_rule_status,"insertTime":chrono::Utc::now().timestamp_millis()}),
+            }),
+            None,
+            None,
+        ).unwrap();
+        let history = adapter
+            .read(
+                "binance.deposit-history",
+                &json!({"account":"main-fixture"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history["records"][0]["credited"], credited);
+        assert_eq!(history["records"][0]["withdrawalLocked"], status == 6);
+        let snapshot = adapter.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.pending.is_empty(),
+            credited,
+            "{status}/{travel_rule_status}: {:?}",
+            snapshot.pending
+        );
+        assert_eq!(snapshot.state.in_flight.is_empty(), credited);
+    }
 }
 
 #[async_trait::async_trait]

@@ -8,3 +8,6 @@ pub mod ccxt;
 mod default_profile;
 pub use default_profile::{DefaultExchangeProfile, PublicExchangeData};
 mod order_book;
+
+#[cfg(feature = "kraken")]
+pub mod kraken;

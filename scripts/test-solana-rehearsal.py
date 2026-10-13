@@ -32,7 +32,33 @@ USDC_MINT = OUTPUT_MINT
 JLP_MINT = "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4"
 
 
+def decode_cli_output(stdout: str, args: list[str]) -> dict:
+    if "--stream" not in args:
+        return json.loads(stdout)
+    events = [json.loads(line) for line in stdout.splitlines()]
+    if not events or events[-1].get("type") not in {"result", "error"}:
+        raise AssertionError("Stream ended without a terminal event; recover the original operation.")
+    if any(event.get("type") != "progress" for event in events[:-1]):
+        raise AssertionError("Stream must contain progress followed by exactly one terminal event.")
+    allowed = {"connecting", "preparing", "awaiting_approval", "revalidating", "submitting", "verifying"}
+    if any(event.get("stage") not in allowed for event in events[:-1]):
+        raise AssertionError("Unexpected execution stage in NDJSON progress.")
+    if "\x1b" in stdout:
+        raise AssertionError("Machine stream contains terminal control characters.")
+    final = events[-1]
+    return final["result"] if final["type"] == "result" else {"error": final["error"]}
+
+
+def execution_args(args: list[str]) -> list[str]:
+    # Exercise the new machine UX through actual CLI/broker financial workflows;
+    # read/discovery calls continue checking the single-value JSON contract.
+    if args and args[0] in {"execute", "status"} and "--json" in args and "--stream" not in args:
+        return [*args, "--stream"]
+    return args
+
+
 def call(name: str, args: list[str], env: dict[str, str]) -> dict:
+    args = execution_args(args)
     result = subprocess.run(
         [sys.executable, str(DEV), "cli", name, "--", *args],
         cwd=REPO,
@@ -46,13 +72,14 @@ def call(name: str, args: list[str], env: dict[str, str]) -> dict:
             f"CLI command failed ({' '.join(args[:2])}): {result.stderr or result.stdout}"
         )
     try:
-        return json.loads(result.stdout)
+        return decode_cli_output(result.stdout, args)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"CLI did not return JSON for {' '.join(args[:2])}.") from error
 
 
 def call_pending(name: str, args: list[str], env: dict[str, str]) -> dict:
     """Keep structured pending/unknown output even when Fin uses a failure exit code."""
+    args = execution_args(args)
     result = subprocess.run(
         [sys.executable, str(DEV), "cli", name, "--", *args],
         cwd=REPO,
@@ -62,7 +89,7 @@ def call_pending(name: str, args: list[str], env: dict[str, str]) -> dict:
         timeout=60,
     )
     try:
-        value = json.loads(result.stdout)
+        value = decode_cli_output(result.stdout, args)
     except json.JSONDecodeError as error:
         raise RuntimeError(
             f"CLI did not return structured JSON for {' '.join(args[:2])}: "
@@ -941,7 +968,7 @@ def main() -> int:
             if trigger_only:
                 plan_input = trigger_recovery_plan(balance["wallet"])
                 parsed_plan = json.loads(plan_input)
-                plan_preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
+                plan_preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--valid-for", "10m", "--json"], env)
                 if not plan_preview.get("review_hash"):
                     raise AssertionError("Trigger recovery plan preview omitted its review hash.")
                 plan_approval = call(
@@ -1857,7 +1884,7 @@ def main() -> int:
 
                 plan_input = perps_collateral_plan(balance["wallet"], position)
                 plan = json.loads(plan_input)
-                preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
+                preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--valid-for", "10m", "--json"], env)
                 if not preview.get("review_hash"):
                     raise AssertionError("The collateral plan preview omitted its review hash.")
                 approval = call(
@@ -1968,9 +1995,11 @@ def main() -> int:
 
                 plan_input = jlp_plan(balance["wallet"])
                 plan_preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
+                if plan_preview.get("valid_for_seconds") != 900:
+                    raise AssertionError("Two JLP steps should receive a 15-minute plan budget.")
                 plan_approval = call(environment_name,
                     ["plans", "authorize", "--input", plan_input, "--id", "jlp-roundtrip-plan",
-                     "--valid-for", "10m", "--review-hash", plan_preview["review_hash"], "--json"], env)
+                     "--review-hash", plan_preview["review_hash"], "--json"], env)
                 plan_id = plan_approval.get("plan_id") or plan_approval.get("id")
                 if not plan_id:
                     raise AssertionError("The JLP named plan omitted its durable plan ID.")
@@ -2014,12 +2043,14 @@ def main() -> int:
 
             plan_input = future_funded_plan(balance["wallet"])
             plan_preview = call(environment_name, ["plans", "preview", "--input", plan_input, "--json"], env)
+            if plan_preview.get("valid_for_seconds") != 900:
+                raise AssertionError("Wrap/swap should receive a 15-minute plan budget.")
             if not plan_preview.get("review_hash"):
                 raise AssertionError("Named plan preview omitted the review hash.")
             plan_approval = call(
                 environment_name,
                 ["plans", "authorize", "--input", plan_input, "--id", "solana-future-funded-plan",
-                 "--valid-for", "10m", "--review-hash", plan_preview["review_hash"], "--json"],
+                 "--review-hash", plan_preview["review_hash"], "--json"],
                 env,
             )
             plan_id = plan_approval.get("plan_id") or plan_approval.get("id")

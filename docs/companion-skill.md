@@ -6,6 +6,26 @@ reconcile uncertain outcomes. It does not authorize financial actions. Current
 operations, networks and provider details come from `capabilities`, `explain`
 and `schema`, rather than a second catalog in the skill.
 
+The agent gives a plan an intent-led name and one complementary financial
+`summary` sentence covering its input, outcome and material fee cap. Name and
+summary together fit within 140 Unicode characters, with names still limited
+to 80. Both are bound to the review and shown in full in Touch ID; they convey
+caller-authored intent while Fin enforces the structured plan independently.
+Older plans can omit the summary without changing their approval bindings.
+The skill also asks for brief updates at milestones established by Fin's
+results, with status/reconciliation for pending work and no invented progress.
+When installed discovery advertises it, the skill uses `--json --stream` for
+financial execution and reconciliation, relays meaningful broker stages, and
+reads the final result status before claiming completion. Ordinary `--json`
+remains a single value for existing consumers. Stream interruption requires
+recovering the same identity, never a fresh financial action.
+Agents relay those stages in conversation while consuming the stream; raw tool
+output alone does not keep the human informed. They combine closely spaced
+events, give a brief factual update about once a minute during longer waits,
+and announce each verified outcome and next action without requiring the human
+to poll. Submission activity, recorded submission and verified receipt remain
+distinct. The final update includes actual amounts, fees and unresolved work.
+
 ## Install and inspect
 
 Run as your own user, without sudo:

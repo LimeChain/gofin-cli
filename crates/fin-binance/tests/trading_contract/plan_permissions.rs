@@ -223,8 +223,10 @@ fn two_step_plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic ETH round trip".into(),
+        summary: None,
         steps: vec![
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "buy-eth".into(),
                 operation: "binance.spot.order-place".into(),
                 input: buy,
@@ -237,6 +239,7 @@ fn two_step_plan() -> FinancialPlanSpec {
                 funding_dependencies: vec![],
             },
             FinancialPlanStepSpec {
+                action_deadline_seconds: None,
                 step_id: "sell-eth".into(),
                 operation: "binance.spot.order-place".into(),
                 input: sell,
@@ -271,7 +274,7 @@ fn plan_request() -> FinancialPlanAuthorizationRequest {
     FinancialPlanAuthorizationRequest {
         request_id: "SYNTHETIC-plan-approval".into(),
         plan: two_step_plan(),
-        valid_for_seconds: 600,
+        valid_for_seconds: Some(600),
         replaces_revision_id: None,
         expected_review_hash: None,
     }
@@ -346,7 +349,9 @@ fn withdrawal_plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic named destination withdrawal".into(),
+        summary: None,
         steps: vec![FinancialPlanStepSpec {
+            action_deadline_seconds: None,
             step_id: "withdraw".into(),
             operation: "binance.withdraw".into(),
             input,
@@ -984,6 +989,19 @@ async fn aggregate_debit_cap_is_enforced_across_individually_larger_step_scopes(
     let mut request = plan_request();
     request.request_id = "SYNTHETIC-plan-aggregate-approval".into();
     request.plan = plan;
+    let rejected = engine
+        .authorize_financial_plan(request.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.code, "PLAN_COMPLETION_OUTSIDE_AGGREGATE");
+    assert_eq!(approvals.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(venue.posts.load(Ordering::SeqCst), 0);
+
+    // An optional first BUY may share the cumulative allowance with a required
+    // second BUY. Review does not sum optional per-step ceilings. If the agent
+    // spends too much on the first step, execution must still block the second.
+    request.plan.steps[0].completion.principal_spend = None;
+    request.plan.steps[0].completion.operation_succeeded = true;
     let approved = engine.authorize_financial_plan(request).await.unwrap();
 
     let first = engine
@@ -1094,7 +1112,7 @@ async fn expired_plan_recovers_duplicate_attempt_and_accepts_a_fresh_revision() 
     );
     let mut request = plan_request();
     request.request_id = "SYNTHETIC-plan-expiring-approval".into();
-    request.valid_for_seconds = 2;
+    request.valid_for_seconds = Some(2);
     let approved = engine.authorize_financial_plan(request).await.unwrap();
     let original = plan_operation_request("SYNTHETIC-plan-expired-original-attempt", "BUY", "0.02");
     let result = engine
@@ -1190,17 +1208,30 @@ async fn revoked_pending_plan_reconciles_after_restart_without_replay_and_then_c
     );
     drop(engine);
 
-    let restarted = make_engine(
-        venue.clone(),
-        prices,
-        approvals.clone(),
-        Store::open(&database).unwrap(),
+    let reopened_store = Store::open(&database).unwrap();
+    let persisted: fin_domain::financial_plans::FinancialPlanAuthorizationRecord =
+        serde_json::from_value(
+            reopened_store
+                .financial_plan(&approved.plan_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(persisted.attempts.len(), 1);
+    assert_eq!(persisted.attempts[0].attempt_id, pending.id);
+    assert_eq!(
+        persisted.attempts[0].logical_request_id.as_deref(),
+        Some(original.request_id.as_str())
     );
+    assert_ne!(pending.request_id, original.request_id);
+
+    let restarted = make_engine(venue.clone(), prices, approvals.clone(), reopened_store);
     let retry = restarted
         .execute_financial_plan_step(&approved.plan_id, "buy-eth", original)
         .await
         .unwrap();
     assert_eq!(retry.id, pending.id);
+    assert_eq!(retry.request_id, pending.request_id);
     assert_eq!(venue.posts.load(Ordering::SeqCst), 1);
     assert_eq!(approvals.calls.load(Ordering::SeqCst), 1);
 
@@ -1228,7 +1259,7 @@ async fn revoked_pending_plan_reconciles_after_restart_without_replay_and_then_c
     assert_eq!(reconciled.steps[0].attempts[0].attempt_id, pending.id);
     assert_eq!(
         reconciled.steps[0].attempts[0].request_id,
-        "SYNTHETIC-plan-pending-restart-attempt"
+        pending.request_id
     );
     assert!(!reconciled.steps[0].verified_receipts.is_empty());
     assert_eq!(

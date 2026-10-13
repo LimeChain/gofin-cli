@@ -85,6 +85,7 @@ pub struct BridgeAdapter {
     state: Mutex<Option<BridgeStateRepository>>,
     engine: Mutex<Option<std::sync::Weak<Engine>>>,
     valuator: Arc<SharedUsdValuator>,
+    clock: Arc<dyn fin_domain::clock::Clock>,
 }
 
 impl BridgeAdapter {
@@ -210,7 +211,14 @@ impl BridgeAdapter {
             state: Mutex::new(None),
             engine: Mutex::new(None),
             valuator,
+            clock: Arc::new(fin_domain::clock::SystemClock),
         })
+    }
+
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn attach_state(&self, state: BridgeStateRepository) -> fin_domain::Result<()> {
@@ -399,7 +407,7 @@ impl BridgeAdapter {
             || !fin_domain::price_freshness::is_fresh(
                 &price.observed_at,
                 &price.source,
-                chrono::Utc::now(),
+                self.clock.now(),
             )
         {
             return Err(error(
@@ -2162,7 +2170,7 @@ impl BridgeAdapter {
                 },
             }],
             evidence,
-            observed_at: now(),
+            observed_at: self.clock.now().to_rfc3339(),
             proof_digest: String::new(),
         };
         proof.proof_digest = fin_domain::bridge_settlement_digest(&proof)?;
@@ -2384,7 +2392,7 @@ impl BridgeAdapter {
                 amount,
             }],
             evidence,
-            observed_at: now(),
+            observed_at: self.clock.now().to_rfc3339(),
             proof_digest: String::new(),
         };
         proof.proof_digest = fin_domain::bridge_settlement_digest(&proof)?;
@@ -2545,7 +2553,7 @@ impl BridgeAdapter {
                     amount,
                 }],
                 evidence,
-                observed_at: now(),
+                observed_at: self.clock.now().to_rfc3339(),
                 proof_digest: String::new(),
             };
             proof.proof_digest = fin_domain::bridge_settlement_digest(&proof)?;
@@ -2711,13 +2719,14 @@ impl BridgeAdapter {
         plan.fixed_scope_digest =
             fin_bridge::base_canonical::scope_digest(&saved.quote, &bounds, sender)?;
         let mut prepared = PreparedOperation {
+            action_deadline: None,
             operation:"bridge.transfer".into(), input:input.clone(),
             binding:json!({"resource":resource,"transaction":transaction,"transfer_id":record.id,"step_id":link.step_id,"step_kind":link.kind,"step_dependencies":link.depends_on,"grant_id":null,"quote_id":saved.quote.quote_id,"route_id":saved.quote.route_id,"quote":saved.quote,"intent":saved.quote.intent,"plan_digest":plan.fixed_scope_digest,"plan":plan,"step_ids":saved.step_ids,"step":step,"bounds":bounds,"source_locator":locator,"base_withdrawal":verified,"base_witness":witness,
                 (fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":null,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":bounds,"settlement_expectation":expectation}}),
             summary:self.summary(saved,&link.kind,alias),
             checks:vec![Check{name:"saved Base withdrawal identity and current portal stage".into(),status:CheckStatus::Passed,detail:"The broker materialized this exact stage from settled source proof; no new principal is moved.".into()}],
             warnings:vec!["Canonical withdrawal timing follows current on-chain proof maturity and game validity; source confirmation is not destination credit.".into()],
-            observed_at:now(), expires_at:(chrono::Utc::now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1,
+            observed_at:self.clock.now().to_rfc3339(), expires_at:(self.clock.now()+chrono::Duration::seconds(90)).to_rfc3339(),valuation:Some(valuation),intent,operation_version:1,
         };
         fin_domain::value_bounds::bind(&mut prepared);
         Ok(prepared)
@@ -3426,6 +3435,52 @@ fn settlement_policy_from_rules(
 
 #[async_trait]
 impl Adapter for BridgeAdapter {
+    fn plan_step_allowance(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> fin_domain::Result<Option<u64>> {
+        if operation != "bridge.transfer" {
+            let definition = self
+                .definitions()
+                .into_iter()
+                .find(|d| d.name == operation)
+                .ok_or_else(|| FinError::validation("Unknown bridge plan operation."))?;
+            return fin_domain::plan_timing::definition_allowance(&definition, input);
+        }
+        let requested = self.transfer_input(input)?;
+        let record = self
+            .state()?
+            .transfer(&requested.transfer_id)
+            .map_err(store_error)?
+            .ok_or_else(|| {
+                error(
+                    "BRIDGE_TRANSFER_UNKNOWN",
+                    "authorization",
+                    "Saved bridge route is missing.",
+                    "Obtain a bridge quote before plan review.",
+                )
+            })?;
+        let saved = self.saved_quote(&record)?;
+        if requested.step_kind.is_destination_stage()
+            || (saved.quote.provider == "base_canonical"
+                && saved.quote.intent.source.chain_id == 8453)
+        {
+            return Ok(None);
+        }
+        Ok(Some(
+            if matches!(
+                requested.step_kind,
+                BridgeStepKind::Approval | BridgeStepKind::ResetAllowance
+            ) {
+                fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+            } else {
+                fin_domain::plan_timing::WITHDRAWAL_ALLOWANCE_SECONDS
+                    .max(saved.quote.estimated_arrival_seconds.unwrap_or(0))
+            },
+        ))
+    }
+
     fn definitions(&self) -> Vec<Definition> {
         Self::operation_definitions()
     }
@@ -3456,7 +3511,7 @@ impl Adapter for BridgeAdapter {
             })
             .map(|transfer| format!("bridge transfer {} is {:?}", transfer.id, transfer.state))
             .collect::<Vec<_>>();
-        Ok(StateSnapshot { state: fin_domain::FinancialState::default(), observed_at: now(), complete: pending.is_empty(), coverage: vec!["EVM wallet snapshots are reported by the EVM network adapter; this observer reports active submitted bridge steps and in-transit principal. Unused quote options are not pending financial operations.".into()], pending })
+        Ok(StateSnapshot { state: fin_domain::FinancialState::default(), observed_at: self.clock.now().to_rfc3339(), complete: pending.is_empty(), coverage: vec!["EVM wallet snapshots are reported by the EVM network adapter; this observer reports active submitted bridge steps and in-transit principal. Unused quote options are not pending financial operations.".into()], pending })
     }
 
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
@@ -4054,10 +4109,11 @@ impl Adapter for BridgeAdapter {
             (fin_domain::BRIDGE_STEP_METADATA_KEY):{"transfer_id":record.id,"grant_id":record.grant_id,"step_id":link.step_id,"kind":step_kind_name(&link.kind),"bounds":selected_bounds,"settlement_expectation":expectation,"prospective_debit":prospective_debit},
         });
         let mut prepared = PreparedOperation {
+            action_deadline: None,
             operation: operation.into(), input: input.clone(), binding, summary,
             checks: vec![Check { name:"reviewed Relay order and step identity".into(), status:CheckStatus::Passed, detail:"Prepared from the broker-stored quote and exact normalized step.".into() }],
             warnings: saved.quote.refund_paths.iter().filter(|path| path.minimum.is_zero()).map(|_| "One or more permitted refund paths have a zero minimum; refund deductions may leave an unrecovered loss.".into()).collect(),
-            observed_at: now(), expires_at: saved.quote.valid_until.clone(), valuation: Some(valuation), intent, operation_version:1,
+            observed_at: self.clock.now().to_rfc3339(), expires_at: saved.quote.valid_until.clone(), valuation: Some(valuation), intent, operation_version:1,
         };
         // Ordinary exact approval uses the shared fresh-price ceiling. Once
         // a finite bridge grant is bound, its selected amount/fee/USD bounds
@@ -4467,6 +4523,7 @@ impl Adapter for BridgeAdapter {
             deferred_receipt,
             authorization_seconds: bounds.authorization_seconds.map(u64::from),
             cumulative_scope: Some(fin_domain::financial_plans::FinancialPlanCumulativeScope {
+                maximum_obligations: vec![],
                 scope_id: record.id,
                 maximum_debits,
                 maximum_costs,
@@ -4646,7 +4703,7 @@ impl Adapter for BridgeAdapter {
             )?;
             let mut fresh = prepared.clone();
             fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
-            fin_domain::value_bounds::carry(prepared, &mut fresh)?;
+            fin_domain::value_bounds::carry_at(prepared, &mut fresh, self.clock.now())?;
             return Ok(fresh);
         }
         if quote.provider == "base_canonical"
@@ -4726,7 +4783,7 @@ impl Adapter for BridgeAdapter {
         )?;
         let mut fresh = prepared.clone();
         fresh.valuation = Some(self.value_intent(&fresh.intent).await?);
-        fin_domain::value_bounds::carry(prepared, &mut fresh)?;
+        fin_domain::value_bounds::carry_at(prepared, &mut fresh, self.clock.now())?;
         fresh.binding = prepared.binding.clone();
         Ok(fresh)
     }
@@ -4745,6 +4802,18 @@ impl Adapter for BridgeAdapter {
                 "Reconcile the original step before preparing a replacement.",
             ));
         }
+        let validated =
+            fin_domain::RevalidatedOperation::after_revalidation(fresh, self.clock.clone())?;
+        self.submit_revalidated(&validated, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn fin_domain::SubmissionJournal>,
+    ) -> fin_domain::Result<fin_domain::Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        journal.assert_candidate(prepared)?;
         let transaction: FrozenTransaction =
             serde_json::from_value(prepared.binding["transaction"].clone())
                 .map_err(|_| FinError::validation("Frozen bridge transaction is invalid."))?;
@@ -4754,7 +4823,7 @@ impl Adapter for BridgeAdapter {
             .ok_or_else(|| FinError::validation("Bridge chain runtime disappeared."))?
             .runtime
             .clone();
-        runtime.submit(&transaction, json!({"operation":"bridge.transfer","transfer_id":prepared.binding["transfer_id"],"step_id":prepared.binding["step_id"],"kind":prepared.binding["step_kind"]}), journal).await
+        runtime.submit_revalidated(&transaction, json!({"operation":"bridge.transfer","transfer_id":prepared.binding["transfer_id"],"step_id":prepared.binding["step_id"],"kind":prepared.binding["step_kind"]}), journal, validated).await
     }
 
     async fn reconcile(

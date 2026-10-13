@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
@@ -64,6 +64,7 @@ struct DevRequest<'a> {
     build_id: &'a str,
     mode: &'a str,
     request: BrokerRequest,
+    progress: bool,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +110,13 @@ fn response_matches(
 
 #[async_trait]
 impl Transport for DevelopmentTransport {
+    fn status_recovery_command(&self, id: &str) -> Option<String> {
+        Some(development_status_command(
+            std::env::var("FIN_DEV_ENV_NAME").ok().as_deref(),
+            id,
+        ))
+    }
+
     fn development_mode(&self) -> bool {
         true
     }
@@ -163,15 +171,29 @@ impl Transport for DevelopmentTransport {
                 build_id: &self.build_id,
                 mode: self.mode.as_str(),
                 request,
+                progress: fin_domain::execution_progress::enabled(),
             },
         )
         .await
         .map_err(|_| uncertain())?;
-        let response = read_bounded_line(&mut reader, MAX_RESPONSE_FRAME_BYTES, response_timeout)
-            .await
-            .map_err(|_| uncertain())?;
-        let response: DevResponse =
-            serde_json::from_slice(&response).map_err(|_| identity_error())?;
+        let response: DevResponse = tokio::time::timeout(response_timeout, async {
+            for _ in 0..64 {
+                let response =
+                    read_bounded_line(&mut reader, MAX_RESPONSE_FRAME_BYTES, response_timeout)
+                        .await
+                        .map_err(|_| uncertain())?;
+                if let Ok(frame) =
+                    serde_json::from_slice::<fin_protocol::progress::ProgressFrame>(&response)
+                {
+                    fin_domain::execution_progress::emit(frame.progress);
+                    continue;
+                }
+                return serde_json::from_slice(&response).map_err(|_| identity_error());
+            }
+            Err(identity_error())
+        })
+        .await
+        .map_err(|_| uncertain())??;
         if !response_matches(&response, &self.identity, &self.build_id, self.mode) {
             return Err(identity_error());
         }
@@ -194,12 +216,12 @@ async fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result
         .map_err(|_| unavailable())
 }
 
-async fn read_bounded_line<R: AsyncRead + Unpin>(
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, FinError> {
-    let mut limited = BufReader::new(reader.take((max + 1) as u64));
+    let mut limited = reader.take((max + 1) as u64);
     let mut bytes = Vec::with_capacity(128);
     let read = tokio::time::timeout(timeout, limited.read_until(b'\n', &mut bytes))
         .await
@@ -267,6 +289,22 @@ fn unavailable() -> FinError {
     )
 }
 
+fn development_status_command(name: Option<&str>, id: &str) -> String {
+    // Names supplied by the Make wrapper follow fin-dev.py's validation. Check
+    // again before displaying a copyable command; this is guidance, not authority.
+    match name.filter(|name| {
+        !name.is_empty()
+            && name.len() <= 48
+            && name.as_bytes()[0].is_ascii_alphanumeric()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+    }) {
+        Some(name) => format!("make dev-env-cli DEV_ENV={name} ARGS='status {id}'"),
+        None => format!("Use the same development environment's CLI to run status {id}."),
+    }
+}
+
 fn identity_error() -> FinError {
     FinError::new(
         "DEVELOPMENT_IDENTITY_MISMATCH",
@@ -278,7 +316,11 @@ fn identity_error() -> FinError {
 
 fn startup_failure(arguments: &[OsString], error: FinError) -> ! {
     if arguments.iter().any(|argument| argument == "--json") {
-        println!("{}", machine_error_json(error));
+        if arguments.iter().any(|argument| argument == "--stream") {
+            let _ = production_cli::json_stream::JsonStream::stdout().finish(Err(error));
+        } else {
+            println!("{}", machine_error_json(error));
+        }
     } else {
         eprintln!("✗ {}", error.message);
         eprintln!("{}", error.next_action);
@@ -391,7 +433,44 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn coalesced_progress_lines_retain_every_frame() {
+        let mut reader = tokio::io::BufReader::new(
+            &b"{\"progress\":\"preparing\"}\n{\"progress\":\"submitting\"}\n{\"response\":true}\n"
+                [..],
+        );
+        for expected in [
+            "{\"progress\":\"preparing\"}",
+            "{\"progress\":\"submitting\"}",
+            "{\"response\":true}",
+        ] {
+            let line =
+                super::read_bounded_line(&mut reader, 1024, std::time::Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            assert_eq!(line, expected.as_bytes());
+        }
+    }
     use super::*;
+
+    #[test]
+    fn status_guidance_stays_in_the_selected_development_environment() {
+        assert_eq!(
+            development_status_command(Some("learn"), "synthetic-operation-1"),
+            "make dev-env-cli DEV_ENV=learn ARGS='status synthetic-operation-1'"
+        );
+        for name in [
+            None,
+            Some(""),
+            Some("learn; touch unwanted"),
+            Some("-other"),
+        ] {
+            let text = development_status_command(name, "synthetic-operation-1");
+            assert!(text.contains("same development environment"));
+            assert!(!text.contains("Next: fin status"));
+            assert!(!text.contains("touch unwanted"));
+        }
+    }
 
     #[test]
     fn cancellation_contract_distinguishes_pre_dispatch_from_uncertain_write() {
@@ -429,6 +508,7 @@ mod tests {
             build_id: "build",
             mode: "live",
             request: BrokerRequest::Capabilities,
+            progress: false,
         })
         .unwrap();
         assert_eq!(request_json["mode"], "live");

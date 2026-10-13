@@ -8,6 +8,7 @@ mod exchange_tests;
 
 pub struct SharedUsdValuator {
     source: Arc<dyn UsdPriceSource>,
+    clock: Arc<dyn fin_domain::clock::Clock>,
 }
 
 /// Dispatch exact Solana mint identities to Jupiter Price V3 while retaining
@@ -87,7 +88,15 @@ impl SharedUsdValuator {
         )?)))
     }
     pub fn with_source(source: Arc<dyn UsdPriceSource>) -> Self {
-        Self { source }
+        Self {
+            source,
+            clock: Arc::new(fin_domain::clock::SystemClock),
+        }
+    }
+    #[doc(hidden)]
+    pub fn with_clock(mut self, clock: Arc<dyn fin_domain::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
     async fn quote(&self, asset: &AssetId) -> fin_domain::Result<UsdQuote> {
         match self.source.quote(asset).await {
@@ -113,7 +122,7 @@ impl SharedUsdValuator {
         units: Quantity,
     ) -> fin_domain::Result<(Quantity, String, String)> {
         let quote = self.quote(asset).await?;
-        let current = Utc::now();
+        let current = self.clock.now();
         if !fin_domain::price_freshness::is_fresh(&quote.updated_at, &quote.source, current)
             || quote.source.trim().is_empty()
             || quote.source.len() > 1024
@@ -191,7 +200,7 @@ impl fin_binance::BinancePriceProvider for SharedUsdValuator {
             return Err(invalid_quote());
         }
         for (asset, quote) in assets.iter().zip(&quotes) {
-            validate_binance_quote(asset, quote)?;
+            validate_binance_quote(asset, quote, self.clock.now())?;
         }
         Ok(())
     }
@@ -204,7 +213,7 @@ impl fin_binance::BinancePriceProvider for SharedUsdValuator {
         let quote = self.quote(&asset).await?;
         // Check the same typed source contract before passing whole-unit prices
         // to Binance's exact decimal valuation path.
-        validate_binance_quote(&asset, &quote)?;
+        validate_binance_quote(&asset, &quote, self.clock.now())?;
         let source = quote_source(&asset, &quote);
         Ok(fin_binance::PriceQuote {
             usd_per_unit: quote.usd_per_unit,
@@ -220,8 +229,11 @@ fn quote_source(asset: &AssetId, quote: &UsdQuote) -> String {
         format!("{}; updated:{}", quote.source, quote.updated_at)
     }
 }
-fn validate_binance_quote(asset: &AssetId, quote: &UsdQuote) -> fin_domain::Result<()> {
-    let current = Utc::now();
+fn validate_binance_quote(
+    asset: &AssetId,
+    quote: &UsdQuote,
+    current: chrono::DateTime<Utc>,
+) -> fin_domain::Result<()> {
     if !fin_domain::price_freshness::is_fresh(&quote.updated_at, &quote.source, current)
         || quote.source.trim().is_empty()
         || quote.source.len() > 1024

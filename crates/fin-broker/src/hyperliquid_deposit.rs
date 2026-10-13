@@ -491,6 +491,7 @@ impl HyperliquidEthereumDepositAdapter {
             valuation: Some(valuation),
             intent,
             operation_version: 1,
+            action_deadline: None,
         })
     }
 
@@ -1845,6 +1846,7 @@ mod tests {
             valuation: None,
             intent: inner_intent,
             operation_version: 1,
+            action_deadline: None,
         };
         let deposit_input = json!({
             "requestId":"synthetic-deposit",
@@ -1897,6 +1899,7 @@ mod tests {
             valuation: None,
             intent,
             operation_version: 1,
+            action_deadline: None,
         };
         let source_submission = Submission {
             kind: "ethereum".into(),
@@ -2471,6 +2474,7 @@ mod tests {
                     locks: vec![],
                 },
                 operation_version: 1,
+                action_deadline: None,
             },
             account: "synthetic-hl".into(),
             owner: "0x1111111111111111111111111111111111111111".into(),

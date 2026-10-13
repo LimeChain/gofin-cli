@@ -46,6 +46,19 @@ impl Token {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Reserve {
     pub token: Token,
+    pub a_token_revision: Quantity,
+    pub variable_debt_revision: Quantity,
+    pub configuration: Quantity,
+    pub borrowable_in_isolation: bool,
+    pub siloed_borrowing: bool,
+    pub isolation_debt_ceiling: Quantity,
+    pub isolation_debt_ceiling_decimals: u8,
+    pub normalized_income: Quantity,
+    pub normalized_variable_debt: Quantity,
+    pub liquidity_rate_ray: Quantity,
+    pub variable_borrow_rate_ray: Quantity,
+    pub last_update_timestamp: u64,
+    pub access_restrictions: Vec<String>,
     pub a_token: String,
     pub stable_debt_token: String,
     pub variable_debt_token: String,
@@ -166,7 +179,7 @@ impl EthereumAdapter {
                 "error_code":"VALUATION_UNAVAILABLE"
             });
         };
-        let current = chrono::Utc::now();
+        let current = self.clock.now();
         if observed > current + chrono::Duration::seconds(5)
             || current.signed_duration_since(observed) > chrono::Duration::seconds(120)
         {
@@ -308,7 +321,7 @@ impl EthereumAdapter {
                 && let Ok(state) = Permit2::allowanceCall::abi_decode_returns(&bytes)
                 && U256::from(state.amount) >= u256(&quote.input)?
                 && state.amount < fin_evm::alloy::primitives::aliases::U160::MAX
-                && state.expiration.to::<u64>() > chrono::Utc::now().timestamp().max(0) as u64
+                && state.expiration.to::<u64>() > self.clock.now().timestamp().max(0) as u64
             {
                 return Ok(NoPermission);
             }
@@ -482,9 +495,20 @@ impl EthereumAdapter {
             "ZERO_ADDRESS",
             "Token identity must be a deployed nonzero address.",
         )?;
-        self.runtime.code_at(a, block).await?;
-        let decimals = self.runtime.call(a, &Erc20::decimalsCall {}, block).await?;
+        let (_, decimals, symbol) = tokio::try_join!(
+            self.runtime.code_at(a, block),
+            self.runtime.call(a, &Erc20::decimalsCall {}, block),
+            self.token_symbol(a, block),
+        )?;
         pow10(decimals)?;
+        Ok(Token {
+            reference: lower_address(a),
+            decimals,
+            symbol,
+        })
+    }
+
+    async fn token_symbol(&self, a: Address, block: Option<u64>) -> Result<String> {
         let symbol = match self.runtime.call(a, &Erc20::symbolCall {}, block).await {
             Ok(s) => s,
             Err(_) => {
@@ -509,11 +533,7 @@ impl EthereumAdapter {
             "TOKEN_METADATA_INVALID",
             "Token symbol is not a valid bounded display label.",
         )?;
-        Ok(Token {
-            reference: lower_address(a),
-            decimals,
-            symbol,
-        })
+        Ok(symbol)
     }
     pub(crate) async fn balance_of(
         &self,
@@ -563,6 +583,16 @@ impl EthereumAdapter {
             .call(pool, &Pool::ADDRESSES_PROVIDERCall {}, block)
             .await?;
         self.runtime.code_at(provider, block).await?;
+        if let Some(profile) = aave::reviewed_markets(self.config.chain_id)
+            .into_iter()
+            .find(|p| p.pool == self.aave().map(|a| a.pool.as_str()).unwrap_or(""))
+        {
+            require(
+                provider == address(&profile.addresses_provider)?,
+                "DEPLOYMENT_IDENTITY_MISMATCH",
+                "Pool provider differs from the reviewed market identity.",
+            )?;
+        }
         require(
             self.runtime
                 .call(provider, &AddressesProvider::getPoolCall {}, block)
@@ -673,7 +703,63 @@ impl EthereumAdapter {
                 block,
             )
             .await?;
+        let pool = address(&self.aave()?.pool)?;
+        let configuration = self
+            .runtime
+            .call(pool, &Pool::getConfigurationCall { asset }, block)
+            .await?;
+        let a_token_revision = self
+            .runtime
+            .call(
+                receipts.aTokenAddress,
+                &AToken::ATOKEN_REVISIONCall {},
+                block,
+            )
+            .await?;
+        let variable_debt_revision = self
+            .runtime
+            .call(
+                receipts.variableDebtTokenAddress,
+                &AToken::DEBT_TOKEN_REVISIONCall {},
+                block,
+            )
+            .await?;
+        let normalized_income = self
+            .runtime
+            .call(pool, &Pool::getReserveNormalizedIncomeCall { asset }, block)
+            .await?;
+        let normalized_variable_debt = self
+            .runtime
+            .call(
+                pool,
+                &Pool::getReserveNormalizedVariableDebtCall { asset },
+                block,
+            )
+            .await?;
+        let deployed = self
+            .runtime
+            .call(pool, &Pool::getReserveDataCall { asset }, block)
+            .await?;
         Ok(Reserve {
+            liquidity_rate_ray: quantity(U256::from(deployed.currentLiquidityRate)),
+            variable_borrow_rate_ray: quantity(U256::from(deployed.currentVariableBorrowRate)),
+            last_update_timestamp: deployed.lastUpdateTimestamp.to::<u64>(),
+            access_restrictions: if self.horizon_math() {
+                vec!["Horizon collateral eligibility and issuer transfer permissions are reserve-specific. Writes use the wallet itself as beneficiary and must pass exact simulation; no issuer permission is granted by Fin.".into()]
+            } else {
+                vec![]
+            },
+            borrowable_in_isolation: !((configuration >> 61usize) & U256::from(1)).is_zero(),
+            siloed_borrowing: !((configuration >> 62usize) & U256::from(1)).is_zero(),
+            isolation_debt_ceiling: quantity(
+                (configuration >> 212usize) & ((U256::from(1) << 40usize) - U256::from(1)),
+            ),
+            isolation_debt_ceiling_decimals: 2,
+            a_token_revision: quantity(a_token_revision),
+            variable_debt_revision: quantity(variable_debt_revision),
+            configuration: quantity(configuration),
+            normalized_income: quantity(normalized_income),
+            normalized_variable_debt: quantity(normalized_variable_debt),
             token,
             a_token: lower_address(receipts.aTokenAddress),
             stable_debt_token: lower_address(receipts.stableDebtTokenAddress),
@@ -845,10 +931,25 @@ impl EthereumAdapter {
     ) -> Result<(Quantity, String, String)> {
         self.runtime.assert_chain().await?;
         let token = self.token(reference, None).await?;
+        self.quote_verified_asset_usd_observed(&token.asset(self), units)
+            .await
+    }
+
+    /// Internal preparation already verified this exact asset on this chain.
+    /// Reuse that identity within the phase; prices and timestamps stay fresh.
+    pub(crate) async fn quote_verified_asset_usd_observed(
+        &self,
+        asset: &AssetId,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
+        require(
+            asset.network == format!("ethereum:{}", self.config.chain_id),
+            "CHAIN_MISMATCH",
+            "Valuation asset belongs to another chain.",
+        )?;
         if let Some(provider) = &self.wallet_valuation {
-            let (value, source, observed_at) = provider
-                .quote_observation(&token.asset(self), units.clone())
-                .await?;
+            let (value, source, observed_at) =
+                provider.quote_observation(asset, units.clone()).await?;
             require(
                 !source.trim().is_empty() && (units.is_zero() || !value.is_zero()),
                 "VALUATION_UNAVAILABLE",
@@ -861,7 +962,7 @@ impl EthereumAdapter {
                     "Price observation timestamp is malformed.",
                 )
             })?;
-            let current = chrono::Utc::now();
+            let current = self.clock.now();
             require(
                 observed <= current + chrono::Duration::seconds(5)
                     && current.signed_duration_since(observed) <= chrono::Duration::seconds(120),
@@ -875,8 +976,8 @@ impl EthereumAdapter {
             "VALUATION_UNAVAILABLE",
             "No trusted wallet valuation provider is configured on this network.",
         )?;
-        let (value, source) = self.quote_protocol_usd(reference, units).await?;
-        Ok((value, source, now()))
+        let (value, source) = self.quote_protocol_usd(&asset.reference, units).await?;
+        Ok((value, source, self.clock.now().to_rfc3339()))
     }
     // Aave collateral/debt risk uses the protocol's own oracle. The same helper
     // preserves isolated legacy policy fixtures when no provider is injected.
@@ -1020,7 +1121,7 @@ impl EthereumAdapter {
             )
         })?;
         fin_evm::hash(&block_hash)?;
-        let observed_at = now();
+        let observed_at = self.clock.now().to_rfc3339();
         let protocol = super::uniswap::Protocol::parse(protocol)?;
         require(
             dex == "uniswap" || protocol == super::uniswap::Protocol::V3,
@@ -1065,8 +1166,7 @@ impl EthereumAdapter {
             "V4_POOL_UNEXPECTED",
             "V3 venues do not accept a v4 pool key.",
         )?;
-        let ti = self.token(input, block).await?;
-        let to = self.token(output, block).await?;
+        let (ti, to) = tokio::try_join!(self.token(input, block), self.token(output, block))?;
         require(
             ti.reference != to.reference,
             "SWAP_ASSET_INVALID",
@@ -1111,12 +1211,10 @@ impl EthereumAdapter {
             "SWAP_ASSET_INVALID",
             "The v3 route resolves to the same pool currency.",
         )?;
-        self.runtime
-            .code_at(address(profile.factory)?, block)
-            .await?;
-        self.runtime
-            .code_at(address(profile.quoter)?, block)
-            .await?;
+        tokio::try_join!(
+            self.runtime.code_at(address(profile.factory)?, block),
+            self.runtime.code_at(address(profile.quoter)?, block),
+        )?;
         if profile.factory_lookup == super::uniswap::profile::FactoryLookup::TickSpacingI24 {
             let expected_deployer = profile.pool_deployer.expect("Ramses deployer");
             self.runtime
@@ -1224,26 +1322,14 @@ impl EthereumAdapter {
             }
             self.runtime.code_at(pool, block).await?;
             let (pool_token0, pool_token1, slot, actual_fee) = if profile.dex_id == "ramses" {
-                let token0 = self
-                    .runtime
-                    .call(pool, &RamsesPool::token0Call {}, block)
-                    .await?;
-                let token1 = self
-                    .runtime
-                    .call(pool, &RamsesPool::token1Call {}, block)
-                    .await?;
-                let slot = self
-                    .runtime
-                    .call(pool, &RamsesPool::slot0Call {}, block)
-                    .await?;
-                let dynamic_fee = self
-                    .runtime
-                    .call(pool, &RamsesPool::feeCall {}, block)
-                    .await?;
-                let observed_spacing = self
-                    .runtime
-                    .call(pool, &RamsesPool::tickSpacingCall {}, block)
-                    .await?;
+                let (token0, token1, slot, dynamic_fee, observed_spacing) = tokio::try_join!(
+                    self.runtime.call(pool, &RamsesPool::token0Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::token1Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::slot0Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::feeCall {}, block),
+                    self.runtime
+                        .call(pool, &RamsesPool::tickSpacingCall {}, block),
+                )?;
                 require(
                     observed_spacing
                         == fin_evm::alloy::primitives::aliases::I24::try_from(i64::from(fee))
@@ -1253,28 +1339,26 @@ impl EthereumAdapter {
                 )?;
                 (token0, token1, slot.sqrtPriceX96, dynamic_fee.to::<u32>())
             } else {
-                let token0 = self
-                    .runtime
-                    .call(pool, &UniswapPool::token0Call {}, block)
-                    .await?;
-                let token1 = self
-                    .runtime
-                    .call(pool, &UniswapPool::token1Call {}, block)
-                    .await?;
-                let sqrt_price = match profile.pool_abi {
-                    V3PoolAbi::UniswapV3 => {
-                        self.runtime
-                            .call(pool, &UniswapPool::slot0Call {}, block)
-                            .await?
-                            .sqrtPriceX96
-                    }
-                    V3PoolAbi::PancakeV3 => {
-                        self.runtime
-                            .call(pool, &PancakePool::slot0Call {}, block)
-                            .await?
-                            .sqrtPriceX96
-                    }
-                };
+                let (token0, token1, sqrt_price) = tokio::try_join!(
+                    self.runtime.call(pool, &UniswapPool::token0Call {}, block),
+                    self.runtime.call(pool, &UniswapPool::token1Call {}, block),
+                    async {
+                        Ok::<_, FinError>(match profile.pool_abi {
+                            V3PoolAbi::UniswapV3 => {
+                                self.runtime
+                                    .call(pool, &UniswapPool::slot0Call {}, block)
+                                    .await?
+                                    .sqrtPriceX96
+                            }
+                            V3PoolAbi::PancakeV3 => {
+                                self.runtime
+                                    .call(pool, &PancakePool::slot0Call {}, block)
+                                    .await?
+                                    .sqrtPriceX96
+                            }
+                        })
+                    },
+                )?;
                 if super::uniswap::profile::additional_dex(profile.dex_id).is_some() {
                     let factory = self
                         .runtime
@@ -1413,8 +1497,7 @@ impl EthereumAdapter {
         key: &super::V4PoolKey,
         block: Option<u64>,
     ) -> Result<SwapQuote> {
-        let ti = self.token(input, block).await?;
-        let to = self.token(output, block).await?;
+        let (ti, to) = tokio::try_join!(self.token(input, block), self.token(output, block))?;
         require(
             ti.reference != to.reference,
             "SWAP_ASSET_INVALID",
@@ -1534,7 +1617,7 @@ impl EthereumAdapter {
                 zero_for_one,
                 swap_fee_ppm,
             ),
-            observed_at: now(),
+            observed_at: self.clock.now().to_rfc3339(),
             block_number: block,
             block_hash: None,
             router: None,
@@ -1555,16 +1638,75 @@ impl EthereumAdapter {
         let w = self.resolve(&r, false)?;
         self.runtime.assert_chain().await?;
         let owner = address(&w.address)?;
-        let block = rpc_u64(
-            &self
+        let block = if let Some(block) = r.block_number {
+            block
+        } else {
+            rpc_u64(
+                &self
+                    .runtime
+                    .rpc
+                    .request("eth_blockNumber", json!([]))
+                    .await?,
+            )?
+        };
+        let aave_header = if operation.starts_with("aave.") {
+            let header = self
                 .runtime
                 .rpc
-                .request("eth_blockNumber", json!([]))
-                .await?,
-        )?;
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([fin_evm::block_tag(Some(block)), false]),
+                )
+                .await?;
+            fin_evm::hash(header["hash"].as_str().unwrap_or(""))?;
+            require(
+                rpc_u64(&header["number"])? == block,
+                "AAVE_READ_CHANGED",
+                "Aave read block identity differs.",
+            )?;
+            Some(header)
+        } else {
+            None
+        };
         let mut summary: Option<String> = None;
         let mut discovery = None;
         let data = match operation {
+            "aave.markets" => {
+                let mut markets = Vec::new();
+                for market in self.market_configs() {
+                    let mut input = input.clone();
+                    input["market"] = json!(market.pool);
+                    let selected = self.selected_market(&input)?;
+                    let a = selected.as_ref().unwrap_or(self);
+                    let profile = aave::reviewed_markets(self.config.chain_id)
+                        .into_iter()
+                        .find(|m| m.pool == market.pool);
+                    let ready = a.data_provider(Some(block)).await;
+                    let pool_revision = a
+                        .runtime
+                        .call(
+                            address(&market.pool)?,
+                            &Pool::POOL_REVISIONCall {},
+                            Some(block),
+                        )
+                        .await;
+                    let compatible = pool_revision
+                        .as_ref()
+                        .is_ok_and(|r| a.compatible_pool_revision(*r));
+                    markets.push(json!({"pool":market.pool,"oracle":market.oracle,"profile":profile,"backing_source_commit":if a.horizon_math() { Some(aave::math::HORIZON_SOURCE_COMMIT) } else { None },"pool_revision":pool_revision.as_ref().ok().map(|v| quantity(*v)),"risk_revision_compatible":compatible,"provider_verified":ready.is_ok(),"error":ready.err(),"supported_operations":["aave.reserves","aave.positions","aave.supply","aave.borrow","aave.repay","aave.withdraw","aave.collateral"],"write_compatibility":"Selected reserve token revisions, access restrictions and current protocol state are checked before dispatch."}));
+                }
+                summary = Some(if markets.is_empty() {
+                    "No reviewed compatible Aave V3 market on this network.".into()
+                } else {
+                    format!(
+                        "{} enabled Aave V3 markets; default {}. Next: inspect aave.reserves for current eligibility and caps.",
+                        markets.len(),
+                        self.aave()?.pool
+                    )
+                });
+                json!({"version":"v3","markets":markets,"available":!self.market_configs().is_empty(),"unavailable_reason":if self.market_configs().is_empty() { Some("No reviewed compatible Aave V3 deployment on this network.") } else { None },"address_book_commit":aave::ADDRESS_BOOK_COMMIT,"unsupported":["v2","v4","stable-rate writes","eMode changes","delegation","gateway flows"]})
+            }
+
             "wallet.token" => {
                 let token = self
                     .token(r.token.as_deref().expect("schema"), Some(block))
@@ -1709,21 +1851,23 @@ impl EthereumAdapter {
                 json!(quote)
             }
             "aave.reserves" => {
-                let mut reserves = Vec::new();
-                for t in self.all_tokens(r.tokens.as_ref(), Some(block)).await? {
-                    reserves.push(self.reserve(&t, Some(block)).await?)
-                }
-                json!(reserves)
+                let rows = self
+                    .aave_rows(r.tokens.as_ref(), owner, block, false)
+                    .await?;
+                let blocked = rows
+                    .iter()
+                    .filter(|r| r["paused"] == true || r["frozen"] == true || r["active"] != true)
+                    .count();
+                summary = Some(format!(
+                    "{} exact Aave reserves checked; {blocked} paused, frozen or inactive. Caps, liquidity and permissions are checked again before each write. Next: use --json for token identities and current restrictions.",
+                    rows.len()
+                ));
+                json!(rows)
             }
             "aave.positions" => {
-                let mut positions = Vec::new();
-                for t in self.all_tokens(r.tokens.as_ref(), Some(block)).await? {
-                    let reserve = self.reserve(&t, Some(block)).await?;
-                    positions.push(
-                        self.user_reserve(&reserve.token, owner, Some(block))
-                            .await?,
-                    )
-                }
+                let positions = self
+                    .aave_rows(r.tokens.as_ref(), owner, block, true)
+                    .await?;
                 let account = self
                     .runtime
                     .call(
@@ -1732,13 +1876,41 @@ impl EthereumAdapter {
                         Some(block),
                     )
                     .await?;
-                json!({"positions":positions,"account":{"collateral_base":quantity(account.totalCollateralBase),"debt_base":quantity(account.totalDebtBase),"available_borrow_base":quantity(account.availableBorrowsBase),"liquidation_threshold_bps":quantity(account.currentLiquidationThreshold),"health_factor":quantity(account.healthFactor)},"all_reserves":r.tokens.is_none()})
+                summary = Some(aave::reads::position_summary(
+                    &positions,
+                    &quantity(account.totalDebtBase),
+                    &quantity(account.healthFactor),
+                ));
+                json!({"positions":positions,"emode_category":quantity(self.aave_mode(owner,Some(block)).await?),"account":{"collateral_base":quantity(account.totalCollateralBase),"debt_base":quantity(account.totalDebtBase),"available_borrow_base":quantity(account.availableBorrowsBase),"liquidation_threshold_bps":quantity(account.currentLiquidationThreshold),"health_factor":quantity(account.healthFactor)},"all_reserves":r.tokens.is_none()})
             }
             _ => return Err(FinError::validation("Unsupported read.")),
         };
-        let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":now(),"block":block,"data":data,"discovery":discovery});
+        let state_hash = aave_header.as_ref().map(|h| h["hash"].clone());
+        if let Some(before) = aave_header {
+            let after = self
+                .runtime
+                .rpc
+                .request(
+                    "eth_getBlockByNumber",
+                    json!([fin_evm::block_tag(Some(block)), false]),
+                )
+                .await?;
+            require(
+                after["hash"] == before["hash"] && rpc_u64(&after["number"])? == block,
+                "AAVE_READ_CHANGED",
+                "Aave read block identity changed.",
+            )?;
+        }
+        let mut result = json!({"operation":operation,"resource":resource(self.config.chain_id,owner),"chain_id":self.config.chain_id,"observed_at":self.clock.now().to_rfc3339(),"block":block,"data":data,"discovery":discovery});
+        if let Some(hash) = state_hash {
+            result["block_hash"] = hash;
+        }
         if let Some(summary) = summary {
-            result["summary"] = json!(summary);
+            result["summary"] = json!(if r.block_number.is_some() {
+                format!("State at block {block}: {summary}")
+            } else {
+                summary
+            });
         }
         Ok(result)
     }

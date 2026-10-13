@@ -3,7 +3,7 @@
 This is a pending human-run acceptance checklist for the protected macOS CLI.
 It is not a live-write authorization. Automated and fork tests do not establish
 Touch ID behavior, protected credential isolation, or mainnet settlement. Read
-the [shared testing contract](README.md) and [Ethereum guide](ethereum.md).
+the [verification guide](README.md#verification-evidence). Agent-led live development verification uses [$fin-e2e](../../skills/fin-e2e/SKILL.md); the installed production commands below are for the separate human session.
 
 The examples below contain no token or wallet contract addresses. Supply the
 exact addresses you independently reviewed for the selected network. Do not
@@ -44,12 +44,7 @@ protected signer reusable across reviewed EVM networks; deployments, balances,
 fees and route identities are network-specific. Read-only enrollment can be
 used for discovery, but it cannot authorize swaps.
 
-Before any write, agree and record the complete forward and return path,
-selected wallet, token addresses, network, protocol/pool, fees, gas source,
-and restoration of balances and allowances. Snapshot the initial wallet
-balances and exact allowance state for every token/router pair to be touched.
-Use only the reviewed installed runtime. Do not begin if the route back, gas,
-cost budget or exact token identity is unresolved.
+Before any write, record the intended workflow, selected wallet, token addresses, network, protocol/pool, fees, gas source and expected final holdings and allowances. Snapshot initial wallet balances and exact allowance state for every token/router pair to be touched. Restoration is optional unless a return leg is part of the requested scenario. Use only the reviewed installed runtime for this human checklist. Resolve funding, cost budget and exact token identity before submission.
 
 ## Prepare concrete unsigned review files
 
@@ -68,7 +63,7 @@ python3 scripts/prepare-amm-touch-id-checklist.py \
 
 Choose one execution path in the generated checklist. Authorization request IDs
 are distinct from returned authority/plan IDs; its commands extract the returned
-IDs. Review every file and the complete return path before any write. These
+IDs. Review every file and any requested return leg before a write. These
 files use 0.001 ETH, selected 50 bps slippage, maximum 100 bps slippage/impact,
 and an exact 98% initial rate floor. Delayed previews must be regenerated and
 reviewed; the helper grants no authority. Existing approved floors and usage
@@ -77,22 +72,13 @@ pending until a human actually sees them.
 
 ## Acceptance limits for this round
 
-Apply these ceilings together across every network, v3/v4 version, retry,
-approval, and cleanup write in the round:
+The following swap bounds describe this specific human checklist. Use [$fin-e2e](../../skills/fin-e2e/SKILL.md) for current live-development budget defaults, finite overrides, policy alignment and optional restoration. Count every network, protocol version, retry and chosen cleanup write in the same scenario accounting:
 
 - One forward swap spends at most `0.001` native ETH. Start with selected
   slippage at 50 bps; no request or authorization may exceed 100 bps.
 - Maximum accepted quoted price impact is 100 bps. The fixed minimum rate is
   98% of the initial reviewed quote for the same input quantity.
-- Set personal policy to at most $10 movement per operation and $100 rolling
-  24-hour gross allocation. Confirm no existing usage makes the planned test
-  exceed either limit:
-
-  ```sh
-  fin policy show
-  fin policy set --max-movement-usd 10 --max-run-allocation-usd 100
-  fin policy show
-  ```
+- Inspect `fin policy show` and confirm the planned gross movements and fees fit the selected finite policy and authorization limits, including existing usage. Production policy changes require the human's configuration approval. Isolated development policy is configured through the skill.
 
 - Keep total execution and cleanup costs below $20 equivalent for the entire
   round. The CLI policy has no separate cross-network $20 fee counter, so keep
@@ -101,12 +87,7 @@ approval, and cleanup write in the round:
   transactions, failed/reverted gas, retries, and restoration. Do not proceed
   if remaining cost headroom is unclear.
 
-The $100 rolling gross allocation is installation-wide across commands and
-networks and unresolved submissions remain reserved until reconciled. It does
-not replace the $10 movement check or the human's $20 aggregate cost ledger.
-Never raise a limit to make a test pass. For rollups, wait for Fin's canonical
-sequencer-inclusion settlement result; this checklist does not require or imply
-an additional finalized-tag wait.
+Rolling gross allocation is cumulative across commands and networks; unresolved submissions remain reserved until reconciled. It does not replace per-movement or scenario cost accounting. Scope changes require fresh applicable authority through Fin; never silently enlarge an existing grant. For rollups, wait for Fin's canonical sequencer-inclusion settlement result; this checklist does not require an additional finalized-tag wait.
 
 ## Discover exact assets, route and permission state
 
@@ -313,9 +294,7 @@ Include ordered steps, exact `step_id`, `operation: "uniswap.swap"`,
 `funding_dependencies` unless a later step explicitly consumes verified prior
 output. `aggregate_bounds.maximum_debits` and `maximum_costs` must use exact
 resource, network, asset reference, decimals and atomic quantities from the
-reviewed wallet/quote. Keep their totals within the same $10 movement, $20 cost,
-and $100 gross round limits. Prepare and review the complete return path before
-any write; do not represent future proceeds as already verified funds.
+reviewed wallet/quote. Keep totals within the selected finite movement, gross allocation and cost limits. Include any required return leg in the reviewed plan; do not represent future proceeds as already verified funds.
 
 ```sh
 fin schema plans.authorize --json
@@ -363,13 +342,7 @@ Record each case separately, with all requests remaining under the round caps:
    `fin plans status ID`; never blindly replay with a fresh ID.
 5. **Revocation:** cancel the boundary/plan and verify subsequent dispatch is
    denied while read/status/reconciliation remain available.
-6. **Restore:** use verified receipts and fresh balances to return the test
-   asset exposure and wallet allocation to baseline net unavoidable costs.
-   Restore every modified ERC-20 allowance and Permit2 allowance to its
-   recorded intended state; verify amount, expiry and nonce. Permit2 expiry
-   zero restoration has the timestamp caveat above. Keep native ETH for cleanup
-   gas. Reconcile every write and do not call the test complete while any
-   return, allowance or submission is unresolved.
+6. **Optional restoration:** if chosen, use verified receipts and fresh balances to restore asset exposure and allowances to their intended state, accounting for unavoidable costs. Verify ERC-20 and Permit2 amount, expiry and nonce; Permit2 expiry zero has the timestamp caveat above. Report restoration as performed, partial or skipped and disclose retained exposure. Reconcile every attempted write and report any unresolved optional restoration separately from required scenario results.
 
 ## Automated checks and evidence
 
@@ -387,7 +360,7 @@ These tests use synthetic signers, local fixtures, and fake authorizers. They
 never establish Touch ID or protected credential isolation. A human should
 record install/update, identity checks, native prompt appearance, approval and
 denial, expiry, in-bounds no-second-prompt behavior, out-of-bounds rejection,
-receipt settlement, policy/cost totals, and complete restoration independently.
+receipt settlement, policy/cost totals, and optional restoration status independently.
 Mark installation, Touch ID behavior, credential isolation and live settlement
 pending until observed in the protected production runtime. Do not use this
 checklist to broadcast from an agent-controlled terminal.

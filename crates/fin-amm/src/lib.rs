@@ -222,7 +222,15 @@ pub fn validate_swap(request: &AmmSwapRequest, now: DateTime<Utc>) -> Result<Qua
         ));
     }
     if q.price_impact_bps > request.maximum_price_impact_bps {
-        return Err(bound("Quote price impact exceeds the approved maximum."));
+        return Err(
+            bound("Quote price impact exceeds the approved maximum.").with_details(
+                serde_json::json!({
+                    "reason": "price_impact_exceeded",
+                    "observed_price_impact_bps": q.price_impact_bps,
+                    "maximum_price_impact_bps": request.maximum_price_impact_bps,
+                }),
+            ),
+        );
     }
     if q.evidence.block_number.is_some() != q.evidence.block_hash.is_some() {
         return Err(FinError::validation(
@@ -241,7 +249,14 @@ pub fn validate_swap(request: &AmmSwapRequest, now: DateTime<Utc>) -> Result<Qua
     }
     let minimum = minimum_output(request)?;
     if minimum > q.output.atoms {
-        return Err(bound("Minimum output exceeds the quoted output."));
+        return Err(
+            bound("Minimum output exceeds the quoted output.").with_details(serde_json::json!({
+                "reason": "minimum_output_unattainable",
+                "minimum_output_atoms": minimum,
+                "quote_output_atoms": q.output.atoms,
+                "output_asset": q.output.asset,
+            })),
+        );
     }
     Ok(minimum)
 }
@@ -253,9 +268,15 @@ pub fn validate_refreshed_output(
     refreshed_output: &Quantity,
 ) -> Result<()> {
     if refreshed_output < prepared_minimum {
-        return Err(bound(
-            "Refreshed output falls below the approved minimum-output floor.",
-        ));
+        return Err(
+            bound("Refreshed output falls below the approved minimum-output floor.").with_details(
+                serde_json::json!({
+                    "reason": "minimum_output_unattainable",
+                    "minimum_output_atoms": prepared_minimum,
+                    "quote_output_atoms": refreshed_output,
+                }),
+            ),
+        );
     }
     Ok(())
 }
@@ -343,6 +364,7 @@ pub fn prepared_operation(
         valuation: None,
         intent,
         operation_version: 1,
+        action_deadline: None,
     })
 }
 
@@ -479,12 +501,11 @@ mod tests {
             .with_timezone(&Utc);
         let mut r = request();
         let floor = validate_swap(&r, now).unwrap();
-        assert_eq!(
-            validate_refreshed_output(&floor, &Quantity::new("97").unwrap())
-                .unwrap_err()
-                .code,
-            "AMM_BOUND_EXCEEDED"
-        );
+        let error = validate_refreshed_output(&floor, &Quantity::new("97").unwrap()).unwrap_err();
+        assert_eq!(error.code, "AMM_BOUND_EXCEEDED");
+        let details = error.details.unwrap();
+        assert_eq!(details["minimum_output_atoms"], "99");
+        assert_eq!(details["quote_output_atoms"], "97");
         r.quote.maximum_fee.atoms = Quantity::new("4").unwrap();
         assert_eq!(
             validate_swap(&r, now).unwrap_err().code,

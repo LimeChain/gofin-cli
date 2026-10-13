@@ -90,7 +90,13 @@ def identity_for(broker: Path, cli: Path) -> str:
 def source_build_id() -> str:
     """Stable pre-build identity embedded in both development examples."""
     digest = hashlib.sha256()
-    candidates = [REPO / name for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "skills/fin/SKILL.md")]
+    candidates = [REPO / name for name in (
+        "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "skills/fin/SKILL.md",
+        # Kraken embeds its reviewed contracts and source inventories with
+        # include_str!; changing them changes a compiled execution contract.
+        "docs/kraken/contracts.json", "docs/kraken/kraken-ccxt.json",
+        "docs/kraken/krakenfutures-ccxt.json",
+    )]
     for base in (REPO / "crates",):
         for root, dirs, files in os.walk(base):
             dirs[:] = sorted(d for d in dirs if d not in {"target", ".git"})
@@ -532,6 +538,7 @@ def cli_invocation(name: str, args: list[str]) -> tuple[list[str], dict[str, str
                 "FIN_DEV_DATABASE": metadata["database"], "FIN_DEV_IDENTITY": metadata["environment_identity"],
                 "FIN_DEV_BUILD_ID": metadata["build_id"],
                 "FIN_DEV_ENVIRONMENT_ID": metadata["environment_id"],
+                "FIN_DEV_ENV_NAME": name,
                 "FIN_DEV_MODE": metadata.get("mode", "synthetic")})
     command = [str(cli_bin), "--identity", metadata["environment_identity"],
                "--build-id", metadata["build_id"], "--mode", metadata.get("mode", "synthetic"), *args]

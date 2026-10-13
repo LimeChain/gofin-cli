@@ -17,6 +17,7 @@ pub mod exchange_spot;
 pub mod resolution;
 pub use exchange_spot::{
     ExchangeSpotPrices, SpotBook, SpotMarketSource, StablecoinRates, StablecoinUsdSource,
+    require_kraken_tokenized_quote_unit,
 };
 pub use resolution::{
     ExchangeAssetKey, ExchangeAssetResolver, ExchangeMarket, ExchangeMarketSource, IdentityStore,

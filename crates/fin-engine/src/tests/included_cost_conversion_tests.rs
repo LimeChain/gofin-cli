@@ -246,7 +246,7 @@ fn cash_conversion_binds_cross_unit_gross_net_cost_and_anchor() {
     record.approval.as_mut().unwrap().binding_hash =
         binding_hash(&authorization_binding(prepared)).unwrap();
     let intent = &record.preview.as_ref().unwrap().intent;
-    validate_cost_bound_contract(intent, None).unwrap();
+    validate_cost_bound_contract(intent).unwrap();
     let verified = proof(&record, effects.clone());
     assert_eq!(
         validate_effects(&record, &verified, &Status::Completed),
@@ -377,7 +377,7 @@ fn escrow_conversion_binds_only_the_filled_input_and_rejects_reuse_or_cost_misma
     let prepared = record.preview.as_ref().unwrap();
     record.approval.as_mut().unwrap().binding_hash =
         binding_hash(&authorization_binding(prepared)).unwrap();
-    validate_cost_bound_contract(&prepared.intent, None).unwrap();
+    validate_cost_bound_contract(&prepared.intent).unwrap();
     let fill_digest = "a1".repeat(32);
     let verified = progress_proof(
         &record,

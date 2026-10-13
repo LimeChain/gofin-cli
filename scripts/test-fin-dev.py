@@ -180,6 +180,23 @@ for rel,src in [(Path('target/debug/examples/fin-dev-broker'),os.environ['TEST_B
         return subprocess.CompletedProcess([], code, captured.get("stdout", stdout.getvalue()),
                                            captured.get("stderr", stderr.getvalue()))
 
+    def test_embedded_kraken_contracts_change_build_identity_but_reports_do_not(self):
+        fin_dev.REPO = self.repo_a
+        snapshots = self.repo_a / "docs/kraken"
+        snapshots.mkdir(parents=True)
+        inputs = ("contracts.json", "kraken-ccxt.json", "krakenfutures-ccxt.json")
+        for name in inputs:
+            (snapshots / name).write_text('{"source":"original"}\n')
+        original = fin_dev.source_build_id()
+        (snapshots / "evidence-matrix.json").write_text('{"status":"passed"}\n')
+        self.assertEqual(fin_dev.source_build_id(), original)
+        for name in inputs:
+            source = snapshots / name
+            source.write_text('{"source":"changed"}\n')
+            self.assertNotEqual(fin_dev.source_build_id(), original)
+            source.write_text('{"source":"original"}\n')
+            self.assertEqual(fin_dev.source_build_id(), original)
+
     def test_two_worktrees_run_distinct_builds_and_same_ids_are_isolated(self):
         first = self.start_at(self.repo_a, "alpha")
         second = self.start_at(self.repo_b, "alpha")

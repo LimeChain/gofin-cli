@@ -297,13 +297,16 @@ fn version_three_upgrade_keeps_legacy_uncertain_submission_and_reservation() {
         INSERT INTO signer_nonces(signer_scope,last_nonce) VALUES ('synthetic-signer',123);
         DROP TABLE financial_plan_attempts; DROP TABLE financial_plan_requests; DROP TABLE financial_plan_revisions; DROP TABLE financial_plans;
         DROP TABLE bridge_allocation_owners; DROP TABLE bridge_transit; DROP TABLE bridge_step_links; DROP TABLE bridge_quote_revisions; DROP TABLE bridge_settlement_proofs; DROP TABLE bridge_evidence_ids; DROP TABLE bridge_transfers;
+        DROP TABLE IF EXISTS unresolved_cost_events; DROP TABLE IF EXISTS unresolved_cost_consumption;
+        DROP TABLE IF EXISTS grouped_amendment_scopes; DROP TABLE IF EXISTS grouped_amendment_children; DROP TABLE IF EXISTS grouped_amendment_revisions; DROP TABLE IF EXISTS grouped_amendments;
+        DROP TABLE IF EXISTS compound_amendment_children; DROP TABLE IF EXISTS operation_amendments; DROP TABLE IF EXISTS operation_proof_events;
         PRAGMA user_version=3;").unwrap();
     let reopened = Store::open(&path).unwrap();
     assert_eq!(reopened.get_record("legacy").unwrap(), Some(submitted));
     assert_eq!(
         sql.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        10
+        fin_store::SCHEMA_VERSION
     );
     let exact: String = sql
         .query_row(

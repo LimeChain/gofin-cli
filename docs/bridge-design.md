@@ -5,7 +5,7 @@ The isolated disposable-development run completed both canonical native-ETH
 routes and all three Relay bridge legs with automatic development approval.
 That run does not establish protected installation or human Touch ID, which
 remain pending.
-Use the [Rust architecture](rust-architecture.md), [approval contracts](implementation-plan.md#approval-contracts)
+Use the [Rust architecture](rust-architecture.md), [authorization contracts](rust-architecture.md#write-lifecycle-and-authorization)
 and [live-test contract](testing/README.md#live-test-contract) alongside this design.
 
 ## Scope and provider choice
@@ -345,8 +345,7 @@ $100. This isolated disposable-development scenario has an explicitly
 user-authorized $300 gross rolling limit and at most $200 of unique test
 capital across the funding leg, three Relay legs, and both canonical legs. Count source
 gas and every fee within those limits. Do not
-interpret this scenario-specific authorization as a change to Fin's global
-acceptance-test contract or configured product limits.
+interpret this historical scenario-specific authorization as a default for new tests. New live E2E scenarios follow [$fin-e2e](../skills/fin-e2e/SKILL.md), including its finite budget overrides.
 
 Use one stable intent ID per transfer and separate operation IDs per declared
 step. Serialize source submissions from the shared wallet for nonce safety.

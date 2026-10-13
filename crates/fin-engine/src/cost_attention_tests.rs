@@ -87,6 +87,7 @@ impl Adapter for BaseProofAdapter {
             operation: operation.into(),
             input: input.clone(),
             operation_version: 1,
+            action_deadline: None,
             binding: json!({"chain":8453,"fixture":"SYNTHETIC-no-value-write"}),
             summary: "SYNTHETIC Base approval write".into(),
             checks: vec![],

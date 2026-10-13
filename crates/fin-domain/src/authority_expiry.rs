@@ -153,6 +153,33 @@ pub fn validate_authority_expiry(
     Ok(())
 }
 
+/// Reject already impossible absolute deadlines before a named-plan adapter is
+/// asked to prepare. Relative fields are resolved separately by the broker.
+pub fn validate_plan_input_deadlines(
+    definition: &Definition,
+    input: &Value,
+    expires_at: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let expiry = DateTime::parse_from_rfc3339(expires_at)
+        .map_err(|_| FinError::validation("Invalid plan authorization expiry."))?;
+    for pointer in metadata_fields(definition)? {
+        let value = input.pointer(&pointer).and_then(deadline).ok_or_else(|| {
+            FinError::validation("Required concrete action deadline is missing or invalid.")
+        })?;
+        if value as i128 <= at.timestamp() as i128 || value as i128 > expiry.timestamp() as i128 {
+            let expired = value as i128 <= at.timestamp() as i128;
+            return Err(FinError::new(
+                if expired { "PLAN_ACTION_DEADLINE_EXPIRED" } else { "PLAN_ACTION_DEADLINE_AFTER_AUTHORIZATION" },
+                "financial_plan", if expired { "The action deadline has expired. No candidate was prepared." } else { "The action deadline exceeds the plan authorization. No candidate was prepared." },
+                "For a future action, use an approved relative deadline template; otherwise choose a fresh deadline within active authority or approve a replacement revision.",
+            ).with_details(json!({"deadline_pointer":pointer,"deadline_unix_seconds":value,
+                "observed_at":at.to_rfc3339(),"expires_at":expires_at,"reauthorization_required":!expired})));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +217,7 @@ mod tests {
             valuation: None,
             intent: FinancialIntent::default(),
             operation_version: 1,
+            action_deadline: None,
         }
     }
     fn metadata(pointer: &str) -> Value {

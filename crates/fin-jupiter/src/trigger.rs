@@ -942,6 +942,7 @@ impl TriggerAdapter {
         input: &Value,
         wallet: &SolanaWalletAdapter,
         tx: &TriggerTx,
+        simulate: bool,
     ) -> Result<(FrozenTransaction, adapter::AuxiliaryEffects)> {
         let signer = wallet.signer().ok_or_else(|| {
             FinError::new(
@@ -1132,7 +1133,9 @@ impl TriggerAdapter {
         }
         validate_trigger_instructions(operation, input, wallet, &tx.order, &frozen).await?;
         wallet.runtime().validate_fee(&frozen).await?;
-        wallet.runtime().simulate(&frozen).await?;
+        if simulate {
+            wallet.runtime().simulate(&frozen).await?;
+        }
         Ok((frozen, auxiliary))
     }
 }
@@ -1731,7 +1734,7 @@ impl Adapter for TriggerAdapter {
             }
             self.validate_order_cancellation_origin(input, &wallet, &tx.order)?;
         }
-        let (frozen, auxiliary) = self.inspect(operation, input, &wallet, &tx).await?;
+        let (frozen, auxiliary) = self.inspect(operation, input, &wallet, &tx, true).await?;
         let resource = ResourceId(format!("solana:mainnet-beta:{}", wallet.address()));
         let order_resource = ResourceId(format!("solana:mainnet-beta:trigger-order:{}", tx.order));
         let (asset, amount) = if operation == CREATE {
@@ -2002,7 +2005,7 @@ impl Adapter for TriggerAdapter {
                 tx.order, asset.reference
             )
         };
-        Ok(PreparedOperation{operation:operation.into(),input:input.clone(),binding:json!({"kind":effect_name,"wallet_address":wallet.address(),"order_key":tx.order,"request_id":tx.request_id,"original_operation_id":cancellation_parent.as_ref().map(|(id,_)|id),"original_submission":cancellation_parent.as_ref().map(|(_,s)|s),"original_funding_accounts":cancellation_parent_funding,"transaction_base64":tx.encoded,"message_sha256":frozen.message_sha256(),"input_mint":asset.reference,"input_decimals":asset.decimals,"input_token_program":input_token_program,"output_mint":output_mint,"output_decimals":output_asset.map(|output|output.decimals),"output_token_program":output_token_program,"amount_atoms":amount.to_string(),"output_atoms":if operation==CREATE{Some(atoms(input,"taking_amount_atoms")?.to_string())}else{None},"last_valid_block_height":frozen.last_valid_block_height(),"fee_payer":frozen.fee_payer(),"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds}),summary,checks:vec![pass("Pinned Limit Order V2 instruction and account layout"),pass("Exact maker, escrow and token mint binding"),pass("Network fee limit"),pass("Account funding limit"),pass("Simulation"),pass("Blockhash expiry")],warnings:vec!["Placement moves assets into escrow; it does not complete the later swap. Rent-bearing accounts remain refundable funding and are tracked separately from fees. Fill, expiry and cancellation are separate states.".into()],observed_at:Utc::now().to_rfc3339(),expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(),valuation:Some(valuation),intent:FinancialIntent{debits,maximum_costs:vec![fee_bound],expected,locks:vec![resource,order_resource]},operation_version:1})
+        Ok(PreparedOperation{operation:operation.into(),input:input.clone(),binding:json!({"kind":effect_name,"wallet_address":wallet.address(),"order_key":tx.order,"request_id":tx.request_id,"original_operation_id":cancellation_parent.as_ref().map(|(id,_)|id),"original_submission":cancellation_parent.as_ref().map(|(_,s)|s),"original_funding_accounts":cancellation_parent_funding,"transaction_base64":tx.encoded,"message_sha256":frozen.message_sha256(),"input_mint":asset.reference,"input_decimals":asset.decimals,"input_token_program":input_token_program,"output_mint":output_mint,"output_decimals":output_asset.map(|output|output.decimals),"output_token_program":output_token_program,"amount_atoms":amount.to_string(),"output_atoms":if operation==CREATE{Some(atoms(input,"taking_amount_atoms")?.to_string())}else{None},"last_valid_block_height":frozen.last_valid_block_height(),"fee_payer":frozen.fee_payer(),"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds}),summary,checks:vec![pass("Pinned Limit Order V2 instruction and account layout"),pass("Exact maker, escrow and token mint binding"),pass("Network fee limit"),pass("Account funding limit"),pass("Simulation"),pass("Blockhash expiry")],warnings:vec!["Placement moves assets into escrow; it does not complete the later swap. Rent-bearing accounts remain refundable funding and are tracked separately from fees. Fill, expiry and cancellation are separate states.".into()],observed_at:Utc::now().to_rfc3339(),expires_at:(Utc::now()+ChronoDuration::seconds(20)).to_rfc3339(),valuation:Some(valuation),intent:FinancialIntent{debits,maximum_costs:vec![fee_bound],expected,locks:vec![resource,order_resource]},action_deadline:None,operation_version:1})
     }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         let wallet = self.wallet(&prepared.input)?;
@@ -2021,7 +2024,7 @@ impl Adapter for TriggerAdapter {
                 .into(),
         };
         let (frozen, auxiliary) = self
-            .inspect(&prepared.operation, &prepared.input, &wallet, &tx)
+            .inspect(&prepared.operation, &prepared.input, &wallet, &tx, true)
             .await?;
         if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
             return Err(changed());
@@ -2085,11 +2088,54 @@ impl Adapter for TriggerAdapter {
                 .into(),
         };
         let (frozen, _auxiliary) = self
-            .inspect(&prepared.operation, &prepared.input, &wallet, &tx)
+            .inspect(&prepared.operation, &prepared.input, &wallet, &tx, true)
             .await?;
         if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
             return Err(changed());
         }
+        let sender = TriggerExecuteSender {
+            api: self.api.clone(),
+            request_id: tx.request_id,
+            expires_at: prepared.expires_at.clone(),
+        };
+        wallet
+            .runtime()
+            .dispatch_with_sender(&frozen, &signer, prepared, journal, &sender)
+            .await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        let wallet = self.wallet(&prepared.input)?;
+        let signer = wallet.signer().ok_or_else(unknown)?;
+        let tx = TriggerTx {
+            encoded: prepared.binding["transaction_base64"]
+                .as_str()
+                .ok_or_else(bad_response)?
+                .into(),
+            request_id: prepared.binding["request_id"]
+                .as_str()
+                .ok_or_else(bad_response)?
+                .into(),
+            order: prepared.binding["order_key"]
+                .as_str()
+                .ok_or_else(bad_response)?
+                .into(),
+        };
+        // Recheck the order, account graph, intent and fee after approval. The
+        // broker has already simulated this exact candidate during final
+        // revalidation, so the handoff omits only a second simulation.
+        let (frozen, _) = self
+            .inspect(&prepared.operation, &prepared.input, &wallet, &tx, false)
+            .await?;
+        if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
+            return Err(changed());
+        }
+        validated.assert_fresh()?;
         let sender = TriggerExecuteSender {
             api: self.api.clone(),
             request_id: tx.request_id,

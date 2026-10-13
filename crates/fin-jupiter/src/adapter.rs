@@ -291,6 +291,7 @@ impl JupiterAdapter {
         intent: &SwapIntent,
         wallet: &SolanaWalletAdapter,
         candidate: &Candidate,
+        simulate: bool,
     ) -> Result<FrozenTransaction> {
         let signer = wallet.signer().ok_or_else(|| {
             FinError::new(
@@ -343,7 +344,9 @@ impl JupiterAdapter {
         };
         validate_frozen_intent(intent, wallet, &frozen, candidate).await?;
         runtime.validate_fee(&frozen).await?;
-        runtime.simulate(&frozen).await?;
+        if simulate {
+            runtime.simulate(&frozen).await?;
+        }
         Ok(frozen)
     }
 
@@ -481,7 +484,9 @@ impl Adapter for JupiterAdapter {
         let candidate = self
             .fetch_candidate(&intent, &wallet, RequestPriority::Financial)
             .await?;
-        let frozen = self.freeze_candidate(&intent, &wallet, &candidate).await?;
+        let frozen = self
+            .freeze_candidate(&intent, &wallet, &candidate, true)
+            .await?;
         let runtime = wallet.runtime();
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let (rfq_native_input_direct, rfq_native_output_direct) =
@@ -588,7 +593,7 @@ impl Adapter for JupiterAdapter {
                     });
                 }
                 expected
-            },locks:vec![resource]},operation_version:1,
+            },locks:vec![resource]},action_deadline:None,operation_version:1,
         })
     }
 
@@ -714,7 +719,7 @@ impl Adapter for JupiterAdapter {
                 decimals: 9,
             }],
             deferred_receipt: None,
-            authorization_seconds: Some(600),
+            authorization_seconds: None,
             cumulative_scope: None,
         })
     }
@@ -782,6 +787,10 @@ impl Adapter for JupiterAdapter {
         )
     }
 
+    fn preparation_reuse_window(&self, prepared: &PreparedOperation) -> Option<Duration> {
+        (prepared.operation == OP_SWAP).then_some(Duration::from_secs(30))
+    }
+
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         if prepared.operation != OP_SWAP {
             return Err(unknown_operation());
@@ -789,7 +798,9 @@ impl Adapter for JupiterAdapter {
         let intent = Self::intent(&prepared.input)?;
         let wallet = self.wallet(&prepared.input)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = self.freeze_candidate(&intent, &wallet, &candidate).await?;
+        let frozen = self
+            .freeze_candidate(&intent, &wallet, &candidate, true)
+            .await?;
         if prepared
             .binding
             .get("message_sha256")
@@ -800,7 +811,7 @@ impl Adapter for JupiterAdapter {
                 "JUPITER_MESSAGE_CHANGED",
                 "revalidation",
                 "The immutable Jupiter transaction no longer matches the approved message.",
-                "Keep the operation unresolved and prepare a new exact swap for approval.",
+                "Keep the operation unresolved and prepare a fresh candidate within active plan or boundary authority; otherwise request new approval.",
             ));
         }
         let height = wallet
@@ -818,7 +829,7 @@ impl Adapter for JupiterAdapter {
                 "SOLANA_BLOCKHASH_EXPIRED",
                 "revalidation",
                 "The approved Jupiter transaction has expired and was not sent.",
-                "Prepare and approve a new operation; do not replay the expired transaction.",
+                "Prepare a fresh candidate within active plan or boundary authority; otherwise request new approval. Do not replay the expired transaction.",
             ));
         }
         Ok(prepared.clone())
@@ -836,7 +847,9 @@ impl Adapter for JupiterAdapter {
         let wallet = self.wallet(&prepared.input)?;
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = self.freeze_candidate(&intent, &wallet, &candidate).await?;
+        let frozen = self
+            .freeze_candidate(&intent, &wallet, &candidate, true)
+            .await?;
         if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
             return Err(FinError::new(
                 "JUPITER_MESSAGE_CHANGED",
@@ -845,6 +858,68 @@ impl Adapter for JupiterAdapter {
                 "Keep the operation unresolved and prepare a new exact swap for approval.",
             ));
         }
+        if let Some(request_id) = candidate.request_id.as_ref() {
+            let sender = MetaExecuteSender {
+                api: self.api.clone(),
+                request_id: request_id.clone(),
+                expires_at: prepared.expires_at.clone(),
+            };
+            wallet
+                .runtime()
+                .dispatch_with_sender(&frozen, &signer, prepared, journal, &sender)
+                .await
+        } else {
+            wallet
+                .runtime()
+                .dispatch(&frozen, &signer, prepared, journal)
+                .await
+        }
+    }
+
+    async fn submit_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        let prepared = validated.prepared();
+        if prepared.operation != OP_SWAP {
+            return Err(unknown_operation());
+        }
+        let intent = Self::intent(&prepared.input)?;
+        let wallet = self.wallet(&prepared.input)?;
+        let signer = wallet.signer().ok_or_else(unknown_operation)?;
+        let candidate = Candidate::from_binding(&prepared.binding)?;
+        let frozen = self
+            .freeze_candidate(&intent, &wallet, &candidate, false)
+            .await?;
+        if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
+            return Err(FinError::new(
+                "JUPITER_MESSAGE_CHANGED",
+                "dispatch",
+                "The frozen transaction no longer matches the approved message.",
+                "Keep the operation unresolved and prepare a new exact swap for approval.",
+            ));
+        }
+        let height = wallet
+            .runtime()
+            .rpc()
+            .request("getBlockHeight", json!([{"commitment":"confirmed"}]))
+            .await?
+            .as_u64()
+            .ok_or_else(bad_provider_response)?;
+        if frozen
+            .last_valid_block_height()
+            .is_some_and(|last_valid| height > last_valid)
+        {
+            return Err(FinError::new(
+                "SOLANA_BLOCKHASH_EXPIRED",
+                "dispatch",
+                "The approved Jupiter transaction has expired and was not sent.",
+                "Prepare a fresh candidate within active plan or boundary authority; otherwise request new approval. Do not replay the expired transaction.",
+            ));
+        }
+        validated.assert_fresh()?;
         if let Some(request_id) = candidate.request_id.as_ref() {
             let sender = MetaExecuteSender {
                 api: self.api.clone(),
@@ -3696,7 +3771,38 @@ fn swap_operation_definitions() -> Vec<Definition> {
     let schema = swap::definition_input_schema();
     let quote_schema = json!({"type":"object","additionalProperties":false,"required":["wallet","network","cluster","input_mint","output_mint","amount_atoms"],"properties":{"wallet":{"type":"string","minLength":1},"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"},"input_mint":{"type":"string"},"output_mint":{"type":"string"},"amount_atoms":{"type":"string","pattern":"^[0-9]+$"},"route":{"type":"string","enum":["meta_aggregator","router"]},"maximum_slippage_bps":{"type":"integer","minimum":0,"maximum":10000}}});
     let output = swap::definition_output_schema();
-    [OP_QUOTE,OP_SWAP].into_iter().map(|name|Definition{name:name.into(),description:if name==OP_QUOTE{"Get a current exact-mint Jupiter quote on Solana mainnet-beta.".into()}else{"Prepare and submit one bounded Jupiter Swap v2 conversion through an enrolled Solana wallet.".into()},kind:if name==OP_QUOTE{OperationKind::Read}else{OperationKind::Write},execution_actor:if name==OP_QUOTE{ExecutionActor::AgentReadable}else{ExecutionActor::AgentInvocable},input_schema:if name==OP_QUOTE{quote_schema.clone()}else{schema.clone()},output_schema:output.clone(),error_schema:json!({"type":"object","required":["code","stage","message","next_action"]}),examples:vec![if name==OP_QUOTE {json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","output_mint":"2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo","amount_atoms":"1000000","route":"meta_aggregator"})} else {json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","output_mint":"2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo","amount_atoms":"1000000","minimum_output_atoms":"900000","maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0,"route":"meta_aggregator"})}],coverage:"Exact input SOL/SPL to SOL/SPL Swap v2 through Meta-Aggregator /order+/execute or Router /build+RPC. DFlow instructions can be decoded for diagnostics, but writes remain unavailable until its action-account graph proves the exact wallet input source and output destination; multi-action and DynamicRoute formats also remain unreviewed.".into(),completion:if name==OP_QUOTE{"Provider quote only; it creates no financial submission.".into()}else{"Completed only after finalized chain evidence proves the exact input debit, minimum output credit and bounded network fee.".into()},semantics:json!({"network":NETWORK,"cluster":CLUSTER,"mainnet":true,"route_choice":["meta_aggregator","router"],"keyless_default":true,"uncertain_submission":"reconcile_original_identity_no_retry","quote_is_settlement":false,"dflow":{"instruction_idl":"pinned diagnostic decoder","write_status":"fail_closed_unreviewed","required_review":"bind each action to exact wallet source, intermediate and destination accounts; verify total debit and fees","currently_unreviewed":["action_account_graph","multi_action_routes","DynamicRouteV1","nonzero_orchestrator_flags"]}})}).collect()
+    let mut definitions: Vec<_> = [OP_QUOTE, OP_SWAP]
+        .into_iter()
+        .map(|name| Definition {
+            name: name.into(),
+            description: if name == OP_QUOTE {
+                "Get a current exact-mint Jupiter quote on Solana mainnet-beta.".into()
+            } else {
+                "Prepare and submit one bounded Jupiter Swap v2 conversion through an enrolled Solana wallet.".into()
+            },
+            kind: if name == OP_QUOTE { OperationKind::Read } else { OperationKind::Write },
+            execution_actor: if name == OP_QUOTE { ExecutionActor::AgentReadable } else { ExecutionActor::AgentInvocable },
+            input_schema: if name == OP_QUOTE { quote_schema.clone() } else { schema.clone() },
+            output_schema: output.clone(),
+            error_schema: json!({"type":"object","required":["code","stage","message","next_action"]}),
+            examples: vec![if name == OP_QUOTE {
+                json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","output_mint":"2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo","amount_atoms":"1000000","route":"meta_aggregator"})
+            } else {
+                json!({"wallet":"wallet","network":"solana","cluster":"mainnet-beta","input_mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","output_mint":"2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo","amount_atoms":"1000000","minimum_output_atoms":"900000","maximum_slippage_bps":100,"maximum_platform_fee_bps":0,"maximum_network_fee_lamports":10000,"maximum_account_funding_lamports":0,"route":"meta_aggregator"})
+            }],
+            coverage: "Exact input SOL/SPL to SOL/SPL Swap v2 through Meta-Aggregator /order+/execute or Router /build+RPC. DFlow instructions can be decoded for diagnostics, but writes remain unavailable until its action-account graph proves the exact wallet input source and output destination; multi-action and DynamicRoute formats also remain unreviewed.".into(),
+            completion: if name == OP_QUOTE { "Provider quote only; it creates no financial submission.".into() } else { "Completed only after finalized chain evidence proves the exact input debit, minimum output credit and bounded network fee.".into() },
+            semantics: json!({"network":NETWORK,"cluster":CLUSTER,"mainnet":true,"route_choice":["meta_aggregator","router"],"keyless_default":true,"uncertain_submission":"reconcile_original_identity_no_retry","quote_is_settlement":false,"dflow":{"instruction_idl":"pinned diagnostic decoder","write_status":"fail_closed_unreviewed","required_review":"bind each action to exact wallet source, intermediate and destination accounts; verify total debit and fees","currently_unreviewed":["action_account_graph","multi_action_routes","DynamicRouteV1","nonzero_orchestrator_flags"]}}),
+        })
+        .collect();
+    if let Some(swap) = definitions
+        .iter_mut()
+        .find(|definition| definition.name == OP_SWAP)
+    {
+        swap.semantics["plan_allowance_seconds"] =
+            json!(fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS);
+    }
+    definitions
 }
 
 /// Offline operation catalog for the complete Jupiter application crate.
@@ -3875,6 +3981,45 @@ fn bad_provider_response() -> FinError {
 mod valuation_tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn swap_exposes_trusted_five_minute_plan_allowance() {
+        let definitions = operation_definitions();
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == OP_SWAP)
+            .unwrap();
+        assert_eq!(
+            definition.semantics["plan_allowance_seconds"],
+            fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+        );
+        for operation in [
+            "jupiter.perps.increase_market",
+            "jupiter.perps.limit.create",
+            "jupiter.perps.tpsl.create",
+            "jupiter.limit.create",
+        ] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == operation)
+                .unwrap_or_else(|| panic!("missing operation definition: {operation}"));
+            assert_eq!(
+                definition.semantics.get("plan_allowance_seconds"),
+                None,
+                "asynchronous or standing operation {operation} needs an explicit plan duration"
+            );
+        }
+        for operation in ["jupiter.jlp.mint", "jupiter.jlp.burn"] {
+            let definition = definitions
+                .iter()
+                .find(|definition| definition.name == operation)
+                .unwrap();
+            assert_eq!(
+                definition.semantics["plan_allowance_seconds"],
+                fin_domain::plan_timing::ONCHAIN_ALLOWANCE_SECONDS
+            );
+        }
+    }
 
     #[test]
     fn recipient_extension_checks_distinguish_metadata_from_blocked_public_credits() {
@@ -4261,6 +4406,7 @@ mod valuation_tests {
                 ],
                 ..FinancialIntent::default()
             },
+            action_deadline: None,
             operation_version: 1,
         };
         let record = OperationRecord {

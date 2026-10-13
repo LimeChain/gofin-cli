@@ -1,6 +1,6 @@
 # Rust implementation architecture
 
-The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface; the [product concept](fin-product-concept.md) defines scope. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md); historical TypeScript results in Git history do not establish Rust verification.
+The compiled Rust workspace contains the CLI, protected broker, terminal enrollment, typed financial engine, Binance funding adapter, reusable EVM wallets, reviewed EVM Uniswap and Ethereum/Base Aave adapters, a typed Hyperliquid adapter, plus Relay and canonical bridge adapters. Commands in the [README](../README.md) describe the current interface. Implementation alone is not acceptance evidence. Human installation, credential isolation and real Touch ID require separate observed results under the [testing guide](testing/README.md).
 
 ## One CLI and a protected execution role
 
@@ -252,6 +252,48 @@ Each operation owns typed request, prepared execution, and evidence structures. 
 
 An operation implements preparation, revalidation, submission, and reconciliation. Its definition also includes description, examples, input/output/error schemas, field semantics, authority requirements, read/write/configuration classification, and completion criteria.
 
+The engine owns final validation and checks binding, valuation, policy and
+reservation before handing the complete immutable candidate to `submit_revalidated`.
+An adapter can opt into `preparation_reuse_window`: reviewed EVM and Solana
+wallet operations and swaps reuse initial preparation for at most 30 seconds measured from before
+preparation starts, provided all candidate/price deadlines remain valid. Both
+monotonic and wall-clock ages must fit. Delayed approval or preparation falls back
+to adapter revalidation; other adapters keep their original revalidation contract.
+Reuse never restores evidence from the journal or changes approved financial
+bounds. Aave risk paths retain final revalidation. This in-process handoff is not serialized or restored from
+the journal. Exchange, wallet and bridge submission reuse that evidence without
+another preparation or simulation; direct submissions and adapters without this
+contract retain their validating path. Candidate and price expiry remain local
+checks at signing/dispatch, along with current authority and revocation. EVM
+submission rereads the pending nonce and verifies the exact frozen envelope;
+permit templates additionally materialize and simulate signed calldata once.
+Solana keeps its exact frozen message, signer roles, blockhash lifetime and final
+fee/authority checks; it never refreshes an uncertain transaction to reuse approval.
+Every path persists its immutable submission identity before dispatch.
+Wallet-funded Kraken deposits select the exact nested transfer transaction from
+that immutable binding and retain the validated outer candidate for journal
+authority and price-freshness checks through signing and dispatch.
+
+The shared EVM wallet/swap/Aave preparation path gives transaction previews five
+minutes. Revalidation still refreshes pricing within its independent freshness
+limits and preserves the original onchain deadlines.
+
+Human clients opt into bounded progress frames on the existing authenticated
+broker connection. The engine emits fixed stage enums at actual preparation,
+approval, final validation, submission and reconciliation boundaries. These are
+UI observations only, never authority or completion evidence. Delivery runs
+independently of execution: a disconnected or backpressured observer cannot
+cancel, delay indefinitely or repeat dispatch. Legacy and machine clients retain
+one final response, with unchanged operation records and error contracts.
+
+AMM preparation obtains one pinned protocol quote and uses it for shared bound
+validation and transaction construction. Final revalidation obtains its own fresh
+quote and retains exact simulation; there is no duplicate outer quote pass.
+Independent token metadata, pool-state and deployment reads run concurrently at
+the same selected block. USD valuation reuses the phase's verified asset identity
+and requests at most three distinct asset prices concurrently, preserving source
+identity and observation time. There is no cross-phase metadata or quote cache.
+
 The command registry also covers installation, daemon lifecycle, onboarding, and connection management. Help, `explain`, schemas, and implementation must use the same definitions. Generate structural schemas from Rust types with Serde/Schemars, retain explicit semantic validation, and pin schema-generation behavior with contract fixtures. Keep existing financial verbs and JSON behavior compatible where practical; document deliberate changes and migrations.
 
 Discovery must work before installation of the protected component, without credentials or a running broker. It must say who runs an interactive command, what safe arguments it accepts, how secret input is collected, what human approval is needed, what it changes, what checks actually run, and how success or failure is checked. See the required [onboarding/discovery contract](onboarding.md).
@@ -300,13 +342,18 @@ are informative and may be refreshed; they cannot authorize a write.
 
 ### Pricing evidence and approved USD ceilings
 
-This subsection describes legacy and standalone exact-operation approval.
-Operation-boundary attempts use fresh USD evidence for protected policy but do
-not inherit these incidental cent-rounded consent ceilings.
+These ceilings bind individual attempts, separately from reusable quantity
+consent. EVM attempts retain their USD reservation under standalone, boundary
+and named-plan execution; boundary consent itself does not freeze a unit price.
 
 Binance and EVM preparation attach versioned `_fin_usd_ceiling_v1` metadata using the
 shared domain helper. Movement, fee and extra-allocation maxima round upward to
 cents before initial policy checks/reservation and appear in the review summary.
+New EVM AMM swap candidates first add a fixed 1% pricing buffer, then round up
+to cents. The complete ceiling is reserved and checked against protected movement
+and rolling-allocation limits before approval or dispatch. This is independent
+of swap slippage: exact input, receipt and native gas limits do not increase.
+The summary discloses the buffer; old attempt records keep their original caps.
 Composite deposits carry the wallet transfer's ceilings into their outer approval
 while preserving the original nested transaction and historical deposit records.
 The immutable approval binds these ceilings and exact priced asset/unit/provider
@@ -321,6 +368,11 @@ evidence. Changed execution terms, increased ceilings, incompatible identities,
 stale quotes and unavailable providers still fail. Final submission revalidation
 uses the same contract. Historical bindings without this metadata retain the
 legacy exact-quote hash and pending records are never replayed or rebound.
+
+AMM revalidation keeps the original quote's slippage floor and the exact encoded
+minimum output in both calldata and typed conversion effects. A better quote
+does not impose a new minimum. A worse quote must still meet the frozen floor;
+fresh impact, route, identity, simulation and fee checks continue to apply.
 
 ## Write lifecycle and authorization
 
@@ -354,7 +406,7 @@ Administration retains its separate protected human path. See the
 
 A separate versioned financial-plan contract binds a name, ordered step identities,
 exact registry input scopes or adapter variation scopes, completion conditions, funding dependencies,
-aggregate asset/fee caps and duration. The default lifetime is 600 seconds from
+aggregate asset/fee caps and duration. The omitted lifetime uses the shared sequential planning budget from
 successful approval; the native challenge has its separate short lifetime.
 The prompt identifies the plan by its bound name while terminal review presents
 all permissions. Names are labels, never authority or unique identifiers.
@@ -378,9 +430,13 @@ including authority-only operations; optional amount conditions are conjunctive.
 Plan metadata is engine-owned, stripped before adapter calls and retained in the
 durable operation record and journal, preserving strict adapter binding parsers.
 
-Generic permission review validates structure without pretending to check live
-balances, permissions, markets or simulation. These checks remain deferred; it
-does not require future balances or freeze execution quotes. Each explicit attempt reuses the normal prepare/revalidate/submit path
+Generic exact permission review validates structure and invokes the adapter's
+balance-independent `validate_plan_feasibility` hook before approval. Protected
+read-only permission, route and fee queries are allowed; mutations, reservations
+and balance-dependent admission are not. Unsupported checks return explicit
+review warnings and remain mandatory at execution. Independent hook calls use
+bounded concurrency. Review does not require future balances or freeze execution
+quotes. Each explicit attempt uses the normal prepare/validate/submit path
 with distinct plan authority; no independently usable child grants exist. The
 journal checks the active revision, step eligibility, funding, cumulative caps,
 expiry, revocation and protected policy at dispatch. Typed verified effects and
@@ -392,8 +448,18 @@ predecessor credit and current balances. Reservations are counted once, and
 intermediate credits never replenish gross authority. Exact-input operations
 preserve ordinary conservative USD policy charges for
 non-cash exposure as well as cash movements. Revisions retain usage and
-started-step scope; only unstarted steps may be restructured. Restart never
-replays work. Expired or revoked plans can still reconcile submitted attempts.
+financially started-step scope. Terminal never-submitted zero-effect attempts
+can be repaired by a freshly approved revision. Completed steps retain their
+historical specification and permission instead of regenerating execution
+permission against changed adapter metadata. Named steps refresh at most two
+proved-unsubmitted transient failures within one invocation and active authority.
+Numeric USD attempt-ceiling changes also qualify, after validating priced
+asset/unit/provider identities; malformed bounds and identity changes do not.
+Every fresh candidate repeats plan and protected policy checks without widening
+existing authority or rebinding the failed attempt's ceiling. The
+durable logical-request linkage preserves idempotency of the latest candidate.
+Restart never replays work and releases unsubmitted bridge claims atomically with
+operation cancellation and reservations. Expired or revoked plans can still reconcile submitted attempts.
 Historical restoration runs remain separate recovery data.
 
 An operation definition may explicitly name string JSON pointers that Fin
@@ -433,6 +499,15 @@ Use SQLite through `rusqlite`, durable journaling, unique request IDs, and atomi
 
 Request identity distinguishes a retry from a deliberately new action. Changed parameters under the same request ID conflict. After timeout or restart, reconcile the original venue identifier or transaction hash before considering any new write. Do not promise universal exactly-once execution.
 
+The service runs interrupted-operation recovery once after acquiring its listening
+socket, before accepting requests. Protected startup holds the exclusive
+configuration lock during recovery; ordinary runtime composition and configuration
+reload never recover operation records, since another runtime can still be active. Unsubmitted
+approvals are cancelled and their reservations released; submitted operations
+become uncertain and keep their original identities and reservations. Existing
+named-plan authority retains its original scope and expiry. Recovery never
+requests approval or submits a write.
+
 Endpoints without a client correlation ID can append immutable dispatch evidence
 through `SubmissionJournal::persist_dispatch_evidence`. The broker checks the
 exact already-persisted submission; SQLite atomically saves the receipt without
@@ -442,9 +517,24 @@ identity and application-specific history still need verification before typed
 financial effects settle. A crash before receipt persistence leaves unknown
 authority; a matching amount/time alone cannot recover a lost transaction ID.
 
-The broker keeps one serialized mutation/settlement queue and bounded concurrent read requests. Snapshot observers run concurrently with a 10-second evidence deadline and report partial coverage. Required preparation/revalidation have 30-second deadlines; RPC reads share a 10-second budget across identity, retries and fallback. The financial submission future is never cancelled by an evidence timeout. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
+Financial execution retains the engine's serialized queue for reservations,
+nonces and duplicate control. Read-only previews, stored status and revocation
+bypass the broker's broad mutation gate. A busy execution queue causes operation
+and plan status to return durable progress promptly; reconciliation runs when
+available and is bounded as observation, never as financial dispatch. Revocation
+and submission admission are ordered by the store's atomic authority/CAS checks;
+revocation cannot recall an already admitted submission. Snapshot observers run
+concurrently with a 10-second evidence deadline and report partial coverage.
+Preparation/revalidation, reconciliation observations and external reads have
+120-second deadlines; RPC reads share a 10-second budget across identity, retries
+and fallback. Independent EVM reads overlap within each phase, with original
+request tags and final pending-nonce checks retained. The financial submission
+future is never cancelled by an evidence timeout. Further per-resource execution
+concurrency must preserve nonce control, cumulative policy and deduplication.
 
-Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Keep a read-only migration/parity path for TS records where required by the implementation goal.
+Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Preserve supported legacy records through explicit, versioned migrations and verify interrupted-upgrade recovery.
+
+Journal schema 16 merges two historical version-10 layouts: upstream ordered settlement progress and signer nonces, and Kraken immutable native proof events. It recognizes each complete layout and Kraken versions 11–15, validates the exact known table columns, and adds missing tables without rewriting approvals, submissions, proof JSON/digests, ledger effects, consumed-cost watermarks or reservations. Each committed intermediate migration remains reopenable. Incomplete or foreign layouts fail closed; upgrading a journal never dispatches an operation.
 
 ## Verified financial effects and exact arithmetic
 
@@ -501,7 +591,7 @@ cost caps, reservations, per-write approval and original-request recovery remain
 mandatory. Priced-to-unpriced or source/pair changes require a new approval.
 Previously excluded amounts remain honestly excluded in retained records;
 disabling the exception does not disable reconciliation. Historical scoped runs
-reject estimates, preserving the acceptance-test budget/restoration contract.
+reject estimates so test accounting remains fully valued.
 
 Anonymous public access is best effort. Optional Demo/Pro keys are enrolled
 through protected `connections add --provider coingecko`; the broker retrieves
@@ -518,13 +608,13 @@ valuation.
 
 Use exact decimal strings at boundaries, integer quantities with explicit asset/scale internally, checked `U256` conversion at EVM boundaries, and exact signed deltas and valuation arithmetic. Never pass financial quantities or policy valuations through `f64`. Use explicit conservative rounding for reserves; requested amounts must not be silently rounded. A fixed-width decimal type is not a universal container for 256-bit chain values.
 
-Carry forward these demonstrated TS requirements:
+Preserve these financial accounting requirements:
 
 - Preserve finer Binance observed precision separately from spendable chain units. Observed residuals must not disappear through numeric conversion.
 - Aave supplied underlying, scaled receipt units, accrual indices, and debt are different quantities. Reviewed protocol math and historical evidence establish backing; do not hide rounding with a tolerance.
 - Receipt tokens and their underlying position are not separate wealth. Borrowed proceeds and debt remain distinct; test allocation counts proceeds without netting debt.
 - Chain inclusion, canonical finality, intended effects, and spendable exchange credit have separate completion criteria.
-- Live acceptance tests separately restore principal, positions and allowances and reconcile costs under the testing contract; ordinary operations may retain intentional portfolio changes.
+- Live E2E tests verify the required financial effects and reconcile costs under [$fin-e2e](../skills/fin-e2e/SKILL.md). Baseline restoration is optional unless it is part of the requested scenario.
 
 Human-owned policy has two exact USD ceilings. The movement ceiling includes
 gross movement plus maximum execution costs. The legacy-named
@@ -544,11 +634,7 @@ limits until an explicit human change. Legacy run-required configuration no
 longer gates ordinary execution. No migration removes pending identities,
 financial evidence or reservations, or broadens approved operation authority.
 
-The $100 development budget, baseline snapshots, complete return plans and
-cleanup completion are LLM live-testing instructions in
-[the testing guide](testing/README.md#live-test-contract), not runtime policy.
-There is no normal/verification execution classification. Personal policy never
-authorizes exceeding the independent live-test instructions.
+Use [$fin-e2e](../skills/fin-e2e/SKILL.md) for live development verification, scenario budgets and optional restoration. Align the isolated environment’s finite policy and authorizations with the scenario through Fin. There is no normal/verification execution classification; production policy remains human-owned.
 
 ## Exchange connectivity and extension
 
@@ -685,3 +771,25 @@ full final cumulative effects, including fills already observed during progress,
 and releases the remaining liability once. A terminal failed order preserves
 its proved partial fills and attributable costs. Adapters must not report
 incremental deltas as though they were cumulative snapshots.
+
+## Independent plan clocks
+
+Parent plan lifetimes begin at successful native approval. Omitted durations are
+resolved by the broker from trusted adapter timing metadata and persisted routes;
+explicit durations retain their exact value. Shared domain arithmetic adds 25%
+headroom (minimum five minutes) and rounds upward to five minutes. Review hashes
+bind the resolved duration. Revisions budget incomplete steps and retain usage.
+
+Relative `action_deadline_seconds` is a plan-template field, initially supported
+by reviewed AMM definitions. Template schema projection removes only the trusted
+absolute deadline requirement. Concrete preparation reinstates the original
+schema. The broker binds one resolved instant and deadline to each attempt;
+revalidation and reconciliation reuse it. AMM maximum action horizon remains
+600 seconds without limiting parent lifetime. Adapter-specific consent ceilings
+continue to limit the parent. Historical records omit new optional fields and
+retain their original hashes and deadline behavior.
+
+An internal Clock dependency supplies deterministic expiry/freshness fixtures.
+Production constructors select system UTC; no public clock-selection or approval
+bypass exists. Planning budgets, action windows, native challenge expiry, quote
+freshness and client transport deadlines remain distinct.

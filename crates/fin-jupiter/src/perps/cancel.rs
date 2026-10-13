@@ -482,7 +482,8 @@ pub(super) async fn prepare(adapter: &PerpsAdapter, input: &Value) -> Result<Pre
                 super::position_lock_resource(&existing.position),
             ],
         },
-        operation_version: 1,
+        action_deadline: None,
+            operation_version: 1,
     })
 }
 
@@ -1072,6 +1073,7 @@ mod signer_scope_tests {
                 expected: vec![],
                 locks: vec![],
             },
+            action_deadline: None,
             operation_version: 1,
         };
         (spec, prepared)

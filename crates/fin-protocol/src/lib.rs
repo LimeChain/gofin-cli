@@ -3,6 +3,7 @@
 //! approval receipts, arbitrary venue methods, or client-supplied final state.
 
 pub mod daemon;
+pub mod progress;
 
 use fin_domain::boundaries::BoundaryAuthorizationRequest;
 use fin_domain::financial_plans::FinancialPlanAuthorizationRequest;
@@ -27,6 +28,20 @@ pub enum BrokerRequest {
     Read {
         operation: String,
         input: Value,
+    },
+    /// Begin a bounded export read; no caller file paths cross the broker boundary.
+    ReadArtifact {
+        operation: String,
+        input: Value,
+    },
+    /// Fetch one bounded chunk from an immutable, expiring export handle.
+    ArtifactChunk {
+        artifact_id: String,
+        offset: u64,
+    },
+    /// Release an export handle after verified local delivery.
+    ReleaseArtifact {
+        artifact_id: String,
     },
     Preview {
         operation: String,
@@ -130,6 +145,15 @@ pub enum BrokerRequest {
     DaemonStop,
 }
 
+/// Public metadata only; administrative approval is never accepted over IPC.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureRequest {
+    pub operation: String,
+    pub input: Value,
+    pub request_id: String,
+}
+
 /// Retired wire payload retained so old clients receive an explicit retirement error.
 /// New operations do not create restoration runs.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -183,6 +207,15 @@ impl BrokerResponse {
 pub async fn read_request<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> Result<Option<BrokerRequest>, FinError> {
+    read_request_with_progress(reader)
+        .await
+        .map(|request| request.map(|(request, _)| request))
+}
+
+/// Old clients retain one final response; only explicit observers receive stages.
+pub async fn read_request_with_progress<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<(BrokerRequest, bool)>, FinError> {
     let mut bytes = Vec::with_capacity(1024);
     let read = reader
         .take((MAX_FRAME_BYTES + 1) as u64)
@@ -198,9 +231,13 @@ pub async fn read_request<R: AsyncBufRead + Unpin>(
     if bytes.last() != Some(&b'\n') {
         return Err(protocol_error("The request frame must end with a newline."));
     }
-    let request = serde_json::from_slice(&bytes)
+    // Decode typed structs directly so duplicate keys are still rejected.
+    if let Ok(request) = serde_json::from_slice::<BrokerRequest>(&bytes) {
+        return Ok(Some((request, false)));
+    }
+    let envelope: progress::RequestEnvelope = serde_json::from_slice(&bytes)
         .map_err(|_| protocol_error("The request frame is not valid protocol JSON."))?;
-    Ok(Some(request))
+    Ok(Some((envelope.request, envelope.progress)))
 }
 
 pub fn encode_response(response: &BrokerResponse) -> Result<Vec<u8>, FinError> {
@@ -346,7 +383,7 @@ mod tests {
             Some(BrokerRequest::AuthorizePlan { request })
                 if request.request_id == "request-1"
                     && request.plan.name == "sample two step plan"
-                    && request.valid_for_seconds == 600
+                    && request.valid_for_seconds == Some(600)
         ));
 
         let attempt = serde_json::json!({
