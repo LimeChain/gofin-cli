@@ -229,7 +229,7 @@ pub fn machine_contract() -> Value {
         "requires":"--json",
         "stdout":"NDJSON: zero or more progress events, then exactly one result or error event when output is available",
         "stderr":"no prose, animation, color or terminal prompts",
-        "progress_schema":{"type":"object","required":["type","stage"],"properties":{"type":{"const":"progress"},"stage":{"enum":["connecting","preparing","awaiting_approval","revalidating","submitting","verifying"]},"context":{"type":"object"}}},
+        "progress_schema":{"type":"object","required":["type","stage"],"properties":{"type":{"const":"progress"},"stage":{"enum":["connecting","preparing","refreshing_candidate","awaiting_approval","revalidating","submitting","verifying"]},"context":{"type":"object"}}},
         "result_schema":{"type":"object","required":["type","result"],"properties":{"type":{"const":"result"},"result":{"description":"Unchanged command output schema"},"context":{"type":"object"}}},
         "error_schema":{"type":"object","required":["type","error"],"properties":{"type":{"const":"error"},"error":schema::<FinError>(),"context":{"type":"object"}}},
         "context":"Command plus available operation, request_id, plan_id, step_id or operation_id. Parse/startup errors may omit context. Newly assigned operation IDs are in the final result.",
