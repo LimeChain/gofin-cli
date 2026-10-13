@@ -254,7 +254,7 @@ mod final_submission_valuation_tests {
     }
 
     #[tokio::test]
-    async fn engine_wallet_submission_uses_one_initial_and_one_final_simulation() {
+    async fn engine_wallet_submission_reuses_fresh_preparation_without_duplicate_simulation() {
         let rpc = Arc::new(Fixture::new());
         let signer = Arc::new(CountingSigner::default());
         let a = Arc::new(counted_adapter(rpc.clone(), signer.clone()));
@@ -286,9 +286,68 @@ mod final_submission_valuation_tests {
                 .iter()
                 .filter(|method| *method == "eth_estimateGas")
                 .count(),
-            2,
-            "one initial preparation and one final revalidation; submission must not repeat either"
+            1,
+            "fresh preparation is reused through approval and submission must not repeat simulation"
         );
+        assert_no_dispatch(&rpc);
+    }
+
+    struct NonceDriftApproval(Arc<Fixture>);
+    #[async_trait]
+    impl Authorizer for NonceDriftApproval {
+        async fn authorize(&self, challenge: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+            self.0.nonce.store(1, Ordering::SeqCst);
+            Ok(ApprovalAudit {
+                mechanism: "synthetic-nonce-drift-approval".into(),
+                binding_hash: challenge.binding_hash.clone(),
+                challenge_nonce: challenge.nonce.clone(),
+                approved_at: now(),
+                expires_at: challenge.expires_at.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_preparation_keeps_final_pending_nonce_check() {
+        let rpc = Arc::new(Fixture::new());
+        let signer = Arc::new(CountingSigner::default());
+        let a = Arc::new(counted_adapter(rpc.clone(), signer.clone()));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![a],
+            Arc::new(NonceDriftApproval(rpc.clone())),
+            EngineOptions::default(),
+        )
+        .unwrap();
+        let record = engine
+            .execute(OperationRequest {
+                request_id: "synthetic-reused-preparation-nonce-drift".into(),
+                operation: "wallet.wrap".into(),
+                input: wrap_input(),
+                run_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(record.error.as_ref().unwrap().code, "NONCE_CHANGED");
+        assert_eq!(signer.0.load(Ordering::SeqCst), 0);
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|method| *method == "eth_getTransactionCount")
+                .count(),
+            2,
+            "one pending nonce read during preparation and one final nonce check before signing"
+        );
+        drop(calls);
         assert_no_dispatch(&rpc);
     }
     fn coin_transfer_input() -> Value {
@@ -6307,6 +6366,13 @@ mod wallet_only_tests {
             .unwrap();
         request.expected_review_hash = Some(review.review_hash);
         let approved = engine.authorize_financial_plan(request).await.unwrap();
+        let estimates_before_attempt = rpc
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|method| *method == "eth_estimateGas")
+            .count();
         let record = engine
             .execute_financial_plan_step(
                 &approved.plan_id,
@@ -6321,6 +6387,17 @@ mod wallet_only_tests {
             .await
             .unwrap();
         assert_eq!(record.status, Status::Completed, "{:?}", record.error);
+        assert_eq!(
+            rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|method| *method == "eth_estimateGas")
+                .count()
+                - estimates_before_attempt,
+            1,
+            "the named-plan attempt prepares once and reuses that same-source executable candidate"
+        );
         assert!(record.effects.is_some());
         assert_eq!(
             record.preview.as_ref().unwrap().binding

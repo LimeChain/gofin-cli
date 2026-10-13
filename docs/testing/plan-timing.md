@@ -20,7 +20,9 @@ Uniswap and Ramses templates can set `action_deadline_seconds` and omit
 orchestration time left; otherwise review fails before native approval. Each
 eligible preparation resolves one deadline within the approved window (maximum
 600 seconds) and parent expiry. The resolution and concrete input enter the
-immutable attempt hash. Revalidation, retries and recovery reuse them.
+immutable attempt hash. Revalidation and reconciliation of that attempt reuse
+them. A proved-unsubmitted automatic refresh creates a separately bound candidate
+with a newly resolved deadline inside the same active authority.
 
 Status reports remaining authorization and whether the next full action window
 fits. `PLAN_INSUFFICIENT_AUTHORIZATION_TIME` fails before preparation/reservation.
@@ -33,6 +35,20 @@ Existing serialized records retain absent optional fields, original deadlines,
 consumption and approval bindings. No SQL schema change or credential migration
 is required for these additive contracts. Registration/configuration changes
 still fail closed for future dispatch; reconciliation keeps original identities.
+
+Fresh supported EVM preparation can satisfy final validation without another
+quote/simulation pass, within its 30-second reuse window measured from preparation
+start. Independent EVM reads overlap; the final pending nonce, candidate/price
+expiry and authority checks remain at submission. Unsupported adapters or aged
+evidence retain final revalidation. Named-plan transient failures before any
+submission may refresh at most twice; duplicate caller IDs follow their durable
+latest candidate, including after restart. Scope errors and uncertainty do not
+enter that retry path.
+
+Regression coverage includes no-send bridge-claim cleanup on restart, repairable
+failed steps, archived completed permissions, pre-approval feasibility errors,
+stored status/revocation responsiveness, slow preparation, delayed approval,
+expired price evidence, bounded retry exhaustion and lost-response idempotency.
 
 ## Reproducible checks
 

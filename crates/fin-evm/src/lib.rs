@@ -1341,6 +1341,32 @@ pub struct CanonicalReceipt {
     pub fee: U256,
     pub receipt: Value,
 }
+
+fn receipt_inclusion_pending(receipt: &Value, transaction: &Value) -> Result<bool> {
+    let mut pending = false;
+    for response in [receipt, transaction] {
+        for field in ["blockHash", "blockNumber"] {
+            match response.get(field) {
+                None | Some(Value::Null) => pending = true,
+                Some(value) if field == "blockHash" => {
+                    let value = value.as_str().ok_or_else(|| {
+                        error(
+                            "INVALID_HASH",
+                            "validation",
+                            "Expected an exact 32-byte Ethereum hash.",
+                        )
+                    })?;
+                    hash(value)?;
+                }
+                Some(value) => {
+                    rpc_u64(value)?;
+                }
+            }
+        }
+    }
+    Ok(pending)
+}
+
 impl EvmRuntime {
     pub fn new(
         rpc: Arc<dyn EvmRpc>,
@@ -1460,18 +1486,13 @@ impl EvmRuntime {
         )
     }
     pub async fn fees(&self) -> Result<(U256, U256)> {
-        let block = self
-            .rpc
-            .request("eth_getBlockByNumber", json!(["latest", false]))
-            .await?;
+        let (block, priority) = tokio::try_join!(
+            self.rpc
+                .request("eth_getBlockByNumber", json!(["latest", false])),
+            self.rpc.request("eth_maxPriorityFeePerGas", json!([])),
+        )?;
         let base = rpc_u256(&block["baseFeePerGas"])?;
-        let priority = rpc_u256(
-            &self
-                .rpc
-                .request("eth_maxPriorityFeePerGas", json!([]))
-                .await?,
-        )?
-        .max(U256::from(10_000_000));
+        let priority = rpc_u256(&priority)?.max(U256::from(10_000_000));
         let max = base
             .checked_mul(U256::from(2))
             .and_then(|v| v.checked_add(priority))
@@ -1494,17 +1515,18 @@ impl EvmRuntime {
     ) -> Result<PreparedCall> {
         self.assert_chain().await?;
         let request = json!({"from":lower_address(sender),"to":lower_address(to),"value":hex_quantity(value),"data":hex_bytes(&calldata)});
-        let simulation = rpc_bytes(
-            &self
-                .rpc
-                .request("eth_call", json!([request.clone(), "latest"]))
-                .await?,
-        )?;
-        let estimate = rpc_u64(
-            &self
-                .rpc
-                .request("eth_estimateGas", json!([request]))
-                .await?,
+        let ((simulation, estimate), (required, priority), nonce) = tokio::try_join!(
+            async {
+                let (simulation, estimate) = tokio::try_join!(
+                    self.rpc
+                        .request("eth_call", json!([request.clone(), "latest"])),
+                    self.rpc
+                        .request("eth_estimateGas", json!([request.clone()])),
+                )?;
+                Ok::<_, FinError>((rpc_bytes(&simulation)?, rpc_u64(&estimate)?))
+            },
+            self.fees(),
+            self.pending_nonce(sender),
         )?;
         let gas = estimate
             .checked_mul(120)
@@ -1517,7 +1539,6 @@ impl EvmRuntime {
                     "Gas estimate exceeds its protocol bound.",
                 )
             })?;
-        let (required, priority) = self.fees().await?;
         let affordable = maximum_total_fee / U256::from(gas.max(1));
         if affordable < required {
             return Err(error(
@@ -1550,14 +1571,18 @@ impl EvmRuntime {
             to: lower_address(to),
             value: quantity(value),
             calldata: hex_bytes(&calldata),
-            nonce: self.pending_nonce(sender).await?,
+            nonce,
             gas,
             max_fee_per_gas: quantity(max),
             max_priority_fee_per_gas: quantity(max_priority),
             rollup_fee: None,
         };
         transaction.consensus()?;
-        transaction.rollup_fee = self.rollup_fee_bound(&transaction).await?;
+        let (rollup_fee, balance) = tokio::try_join!(
+            self.rollup_fee_bound(&transaction),
+            self.balance(sender, None),
+        )?;
+        transaction.rollup_fee = rollup_fee;
         let extras = fees::bound_cost(&transaction)?;
         let execution_budget = maximum_total_fee.checked_sub(extras).ok_or_else(|| {
             error(
@@ -1589,7 +1614,7 @@ impl EvmRuntime {
                 "Current conservative gas cost exceeds the explicit maximum fee.",
             ));
         }
-        if self.balance(sender, None).await?
+        if balance
             < value.checked_add(cost).ok_or_else(|| {
                 error("U256_OVERFLOW", "preview", "Gross debit overflows uint256.")
             })?
@@ -1872,32 +1897,35 @@ impl EvmRuntime {
             ));
         }
         self.assert_chain().await?;
-        let latest = self
-            .rpc
-            .request("eth_getBlockByNumber", json!(["latest", false]))
-            .await?;
+        let request = transaction.rpc_call();
+        let sender = address(&transaction.sender)?;
+        let (latest, nonce, (), simulation, estimate, balance) = tokio::try_join!(
+            self.rpc
+                .request("eth_getBlockByNumber", json!(["latest", false])),
+            self.pending_nonce(sender),
+            self.revalidate_rollup_fee(transaction),
+            async {
+                self.rpc
+                    .request("eth_call", json!([request.clone(), "latest"]))
+                    .await
+                    .and_then(|value| rpc_bytes(&value))
+            },
+            async {
+                self.rpc
+                    .request("eth_estimateGas", json!([request.clone()]))
+                    .await
+                    .and_then(|value| rpc_u64(&value))
+            },
+            self.balance(sender, None),
+        )?;
         validate_frozen_fee_bid(transaction, rpc_u256(&latest["baseFeePerGas"])?)?;
-        if self.pending_nonce(address(&transaction.sender)?).await? != transaction.nonce {
+        if nonce != transaction.nonce {
             return Err(error(
                 "NONCE_CHANGED",
                 "submission",
                 "Pending nonce differs from the authorized frozen envelope.",
             ));
         }
-        self.revalidate_rollup_fee(transaction).await?;
-        let request = transaction.rpc_call();
-        let simulation = rpc_bytes(
-            &self
-                .rpc
-                .request("eth_call", json!([request.clone(), "latest"]))
-                .await?,
-        )?;
-        let estimate = rpc_u64(
-            &self
-                .rpc
-                .request("eth_estimateGas", json!([request]))
-                .await?,
-        )?;
         if estimate > transaction.gas {
             return Err(error(
                 "GAS_BOUND_CHANGED",
@@ -1914,7 +1942,7 @@ impl EvmRuntime {
                     "Gross debit overflows uint256.",
                 )
             })?;
-        if self.balance(address(&transaction.sender)?, None).await? < debit {
+        if balance < debit {
             return Err(error(
                 "INSUFFICIENT_GAS_BALANCE",
                 "submission",
@@ -2178,6 +2206,9 @@ impl EvmRuntime {
                 "RPC transaction fields differ from the original approved envelope.",
             ));
         }
+        if receipt_inclusion_pending(&receipt, &reported)? {
+            return Ok(None);
+        }
         let block_number = rpc_u64(&receipt["blockNumber"])?;
         let block_hash = read_hash(&receipt["blockHash"])?;
         if read_hash(&reported["blockHash"])? != block_hash
@@ -2282,6 +2313,9 @@ impl EvmRuntime {
                 "reconciliation",
                 "RPC receipt and transaction do not match the reported candidate hash.",
             ));
+        }
+        if receipt_inclusion_pending(&receipt, &reported)? {
+            return Ok(None);
         }
         let block_number = rpc_u64(&receipt["blockNumber"])?;
         let block_hash = hash(receipt["blockHash"].as_str().unwrap_or(""))?;
@@ -2589,6 +2623,195 @@ mod http_rpc_tests {
                 "eth_blockNumber"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn receipt_with_verified_transaction_but_null_inclusion_is_pending() {
+        let tx_hash = format!("0x{}", "11".repeat(32));
+        let sender = "0x4444444444444444444444444444444444444444";
+        let to = "0x5555555555555555555555555555555555555555";
+        let receipt = json!({
+            "transactionHash":tx_hash,
+            "blockHash":null,
+            "blockNumber":null
+        });
+        let reported = json!({
+            "hash":tx_hash,
+            "blockHash":null,
+            "blockNumber":null,
+            "from":sender,
+            "to":to,
+            "chainId":"0x1",
+            "type":"0x2",
+            "nonce":"0x0",
+            "gas":"0x5208",
+            "value":"0x0",
+            "input":"0x",
+            "maxFeePerGas":"0x2",
+            "maxPriorityFeePerGas":"0x1",
+            "accessList":[]
+        });
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt),
+            FixtureResponse::Json(reported),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: sender.into(),
+            to: to.into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: tx_hash,
+            data: json!({}),
+        };
+
+        assert!(
+            runtime
+                .receipt(&submission, &transaction, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            worker.join().unwrap(),
+            vec![
+                "eth_chainId",
+                "eth_chainId",
+                "eth_getTransactionReceipt",
+                "eth_getTransactionByHash"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_receipt_with_null_inclusion_is_pending_but_malformed_hash_fails() {
+        let tx_hash = format!("0x{}", "11".repeat(32));
+        let mut receipt = json!({
+            "transactionHash":tx_hash,
+            "blockHash":null,
+            "blockNumber":"0x10"
+        });
+        let mut transaction = json!({
+            "hash":tx_hash,
+            "blockHash":null,
+            "blockNumber":"0x10",
+            "from":"0x4444444444444444444444444444444444444444"
+        });
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt.clone()),
+            FixtureResponse::Json(transaction.clone()),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        assert!(
+            runtime
+                .observe_receipt(&tx_hash, 1, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        worker.join().unwrap();
+
+        receipt["blockHash"] = json!("0xnot-a-hash");
+        transaction["blockHash"] = json!("0xnot-a-hash");
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt.clone()),
+            FixtureResponse::Json(transaction.clone()),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let error = runtime
+            .observe_receipt(&tx_hash, 1, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_HASH");
+        worker.join().unwrap();
+
+        receipt["blockHash"] = json!("0xnot-a-hash");
+        transaction["blockHash"] = Value::Null;
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt),
+            FixtureResponse::Json(transaction),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let error = runtime
+            .observe_receipt(&tx_hash, 1, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "INVALID_HASH");
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn null_inclusion_does_not_hide_original_envelope_mismatch() {
+        let tx_hash = format!("0x{}", "11".repeat(32));
+        let receipt = json!({
+            "transactionHash":tx_hash,
+            "blockHash":null,
+            "blockNumber":null
+        });
+        let reported = json!({
+            "hash":tx_hash,
+            "blockHash":null,
+            "blockNumber":null,
+            "from":"0x6666666666666666666666666666666666666666",
+            "to":"0x5555555555555555555555555555555555555555",
+            "chainId":"0x1",
+            "type":"0x2",
+            "nonce":"0x0",
+            "gas":"0x5208",
+            "value":"0x0",
+            "input":"0x",
+            "maxFeePerGas":"0x2",
+            "maxPriorityFeePerGas":"0x1",
+            "accessList":[]
+        });
+        let (rpc, worker) = fixture_rpc(vec![
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(json!("0x1")),
+            FixtureResponse::Json(receipt),
+            FixtureResponse::Json(reported),
+        ]);
+        let runtime = EvmRuntime::new(Arc::new(rpc), 1, None);
+        let transaction = FrozenTransaction {
+            chain_id: 1,
+            sender: "0x4444444444444444444444444444444444444444".into(),
+            to: "0x5555555555555555555555555555555555555555".into(),
+            value: Quantity::zero(),
+            calldata: "0x".into(),
+            nonce: 0,
+            gas: 21_000,
+            max_fee_per_gas: Quantity::new("2").unwrap(),
+            max_priority_fee_per_gas: Quantity::new("1").unwrap(),
+            rollup_fee: None,
+        };
+        let submission = Submission {
+            kind: "ethereum".into(),
+            reference: tx_hash,
+            data: json!({}),
+        };
+
+        let error = runtime
+            .receipt(&submission, &transaction, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RECEIPT_TRANSACTION_MISMATCH");
+        worker.join().unwrap();
     }
 
     fn two_endpoint_rpc(
@@ -3168,6 +3391,36 @@ mod http_rpc_tests {
 #[cfg(test)]
 mod clipped_tip_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct ParallelFeeRpc {
+        entered: AtomicUsize,
+        both_entered: tokio::sync::Barrier,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    #[async_trait]
+    impl EvmRpc for ParallelFeeRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.calls.lock().unwrap().push((method.to_owned(), params));
+            let index = self.entered.fetch_add(1, Ordering::SeqCst);
+            if index < 2 {
+                self.both_entered.wait().await;
+            }
+            Ok(match method {
+                "eth_getBlockByNumber" => json!({"baseFeePerGas":"0x3b9aca00"}),
+                "eth_maxPriorityFeePerGas" => json!("0x2540be400"),
+                _ => {
+                    return Err(error(
+                        "SYNTHETIC_METHOD",
+                        "test",
+                        "Unexpected fee fixture RPC.",
+                    ));
+                }
+            })
+        }
+    }
+
     struct FeeRpc;
     #[async_trait]
     impl EvmRpc for FeeRpc {
@@ -3190,6 +3443,177 @@ mod clipped_tip_tests {
             })
         }
     }
+
+    #[tokio::test]
+    async fn fee_block_and_priority_reads_overlap_with_unchanged_rpc_envelopes() {
+        let rpc = Arc::new(ParallelFeeRpc {
+            entered: AtomicUsize::new(0),
+            both_entered: tokio::sync::Barrier::new(2),
+            calls: Mutex::new(Vec::new()),
+        });
+        let runtime = EvmRuntime::new(rpc.clone(), 1, None);
+        let (max, priority) = runtime.fees().await.unwrap();
+
+        assert_eq!(max, U256::from(12_000_000_000u64));
+        assert_eq!(priority, U256::from(10_000_000_000u64));
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().any(|(method, params)| {
+            method == "eth_getBlockByNumber" && params == &json!(["latest", false])
+        }));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "eth_maxPriorityFeePerGas" && params == &json!([])
+        }));
+    }
+
+    struct ParallelPrepareRpc {
+        preview_reads: tokio::sync::Barrier,
+        balance_reads: AtomicUsize,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+
+    #[async_trait]
+    impl EvmRpc for ParallelPrepareRpc {
+        async fn request(&self, method: &str, params: Value) -> Result<Value> {
+            self.calls.lock().unwrap().push((method.to_owned(), params));
+            match method {
+                "eth_chainId" => Ok(json!("0x1")),
+                "eth_getBalance" => {
+                    if self.balance_reads.fetch_add(1, Ordering::SeqCst) > 0 {
+                        self.preview_reads.wait().await;
+                    }
+                    Ok(json!("0xde0b6b3a7640000"))
+                }
+                "eth_call"
+                | "eth_estimateGas"
+                | "eth_getBlockByNumber"
+                | "eth_maxPriorityFeePerGas"
+                | "eth_getTransactionCount" => {
+                    self.preview_reads.wait().await;
+                    Ok(match method {
+                        "eth_call" => json!("0x"),
+                        "eth_estimateGas" => json!("0x5208"),
+                        "eth_getBlockByNumber" => json!({"baseFeePerGas":"0x3b9aca00"}),
+                        "eth_maxPriorityFeePerGas" => json!("0x2540be400"),
+                        "eth_getTransactionCount" => json!("0x0"),
+                        _ => unreachable!(),
+                    })
+                }
+                _ => Err(error(
+                    "SYNTHETIC_METHOD",
+                    "test",
+                    "Unexpected preview fixture RPC.",
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_simulation_estimate_fees_and_nonce_overlap_with_exact_calls() {
+        let rpc = Arc::new(ParallelPrepareRpc {
+            preview_reads: tokio::sync::Barrier::new(5),
+            balance_reads: AtomicUsize::new(0),
+            calls: Mutex::new(Vec::new()),
+        });
+        let runtime = EvmRuntime::new(rpc.clone(), 1, None);
+        let sender = address("0x1111111111111111111111111111111111111111").unwrap();
+        let to = address("0x2222222222222222222222222222222222222222").unwrap();
+        let calldata = Bytes::from_static(&[0x12, 0x34]);
+        let prepared = runtime
+            .prepare(
+                sender,
+                to,
+                U256::ZERO,
+                calldata,
+                U256::from(1_000_000_000_000_000u64),
+            )
+            .await
+            .unwrap();
+        runtime.revalidate(&prepared.transaction).await.unwrap();
+
+        let calls = rpc.calls.lock().unwrap();
+        let call = calls
+            .iter()
+            .find(|(method, _)| method == "eth_call")
+            .unwrap();
+        let expected = json!({
+            "from": lower_address(sender),
+            "to": lower_address(to),
+            "value": "0x0",
+            "data": "0x1234"
+        });
+        assert_eq!(call.1, json!([expected, "latest"]));
+        let estimate = calls
+            .iter()
+            .find(|(method, _)| method == "eth_estimateGas")
+            .unwrap();
+        assert_eq!(estimate.1, json!([expected]));
+        assert!(calls.iter().any(|(method, params)| {
+            method == "eth_getTransactionCount"
+                && params == &json!([lower_address(sender), "pending"])
+        }));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "eth_call")
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(method, _)| method == "eth_estimateGas")
+                .count(),
+            2
+        );
+    }
+
+    struct FailedPreviewRpc {
+        methods: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl EvmRpc for FailedPreviewRpc {
+        async fn request(&self, method: &str, _: Value) -> Result<Value> {
+            self.methods.lock().unwrap().push(method.to_owned());
+            match method {
+                "eth_chainId" => Ok(json!("0x1")),
+                "eth_call" => Err(error("SIMULATION_FAILED", "test", "Synthetic revert.")),
+                "eth_estimateGas" => Ok(json!("0x5208")),
+                "eth_getBlockByNumber" => Ok(json!({"baseFeePerGas":"0x3b9aca00"})),
+                "eth_maxPriorityFeePerGas" => Ok(json!("0x2540be400")),
+                "eth_getTransactionCount" => Ok(json!("0x0")),
+                _ => Err(error(
+                    "SYNTHETIC_METHOD",
+                    "test",
+                    "Unexpected failed-preview fixture RPC.",
+                )),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_preview_read_stops_before_later_balance_work() {
+        let rpc = Arc::new(FailedPreviewRpc {
+            methods: Mutex::new(Vec::new()),
+        });
+        let runtime = EvmRuntime::new(rpc.clone(), 1, None);
+        let failure = runtime
+            .prepare(
+                address("0x1111111111111111111111111111111111111111").unwrap(),
+                address("0x2222222222222222222222222222222222222222").unwrap(),
+                U256::ZERO,
+                Bytes::new(),
+                U256::from(1_000_000_000_000_000u64),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "SIMULATION_FAILED");
+        assert!(!rpc.methods.lock().unwrap().iter().any(|method| {
+            method == "eth_getBalance" || method == "eth_getL1Fee" || method == "eth_estimateL1Fee"
+        }));
+    }
+
     #[tokio::test]
     async fn clipped_quote_preserves_base_fee_room_and_frozen_bid_stays_strict() {
         let runtime = EvmRuntime::new(Arc::new(FeeRpc), 1, None);

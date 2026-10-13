@@ -73,6 +73,18 @@ pub trait ExchangeProfile: Send + Sync {
             "This exchange profile does not support named financial plan permissions.",
         ))
     }
+    /// Balance-independent plan admission. Protected read-only fee, permission,
+    /// route and metadata queries are allowed; no mutations, reservations or
+    /// checks requiring future funding. Warn explicitly about deferred checks.
+    async fn validate_plan_feasibility(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Vec<String>, FinError> {
+        Ok(vec![
+            "Exchange-specific feasibility checks are deferred until execution.".into(),
+        ])
+    }
     fn validate_boundary_candidate(
         &self,
         _spec: &fin_domain::boundaries::BoundarySpec,
@@ -310,6 +322,16 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         self.require_kind(operation, OperationKind::Write, "authorization")?;
         self.profile
             .prepare_plan_permission(operation, input, bounds)
+            .await
+    }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<Vec<String>, FinError> {
+        self.require_kind(operation, OperationKind::Write, "planning")?;
+        self.profile
+            .validate_plan_feasibility(operation, input)
             .await
     }
     fn validate_boundary_candidate(

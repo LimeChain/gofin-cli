@@ -1113,6 +1113,30 @@ impl Adapter for EthereumAdapter {
             "Use the ordinary exact-operation approval flow.",
         ))
     }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        if let Ok(Some(adapter)) = self.selected_market(&prepared.input) {
+            return adapter.preparation_reuse_window(prepared);
+        }
+        // These preparations already simulate the exact envelope and reserve
+        // finite principal, receipt and fee bounds. Submit retains a fresh
+        // pending-nonce check and the journal's signing/dispatch authority checks.
+        matches!(
+            prepared.operation.as_str(),
+            "wallet.transfer"
+                | "wallet.wrap"
+                | "wallet.unwrap"
+                | "wallet.approve"
+                | "uniswap.swap"
+                | "ramses.swap"
+                | "sushi.swap"
+                | "pancakeswap.swap"
+        )
+        .then_some(std::time::Duration::from_secs(30))
+    }
+
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation> {
         if let Some(a) = self.selected_market(&prepared.input)? {
             return a.revalidate(prepared).await;

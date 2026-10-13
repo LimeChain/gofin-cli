@@ -294,6 +294,11 @@ impl Ui {
                 }
             }
         }
+        if let Some(warnings) = review["feasibility_warnings"].as_array() {
+            for warning in warnings.iter().filter_map(Value::as_str) {
+                self.message_to(warning, "33", output)?;
+            }
+        }
         if let Some(revision) = review["replaces_revision_id"].as_str() {
             self.message_to(&format!("Revises: {revision}"), "33", output)?;
         }

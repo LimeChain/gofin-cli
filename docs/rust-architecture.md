@@ -225,9 +225,15 @@ Each operation owns typed request, prepared execution, and evidence structures. 
 
 An operation implements preparation, revalidation, submission, and reconciliation. Its definition also includes description, examples, input/output/error schemas, field semantics, authority requirements, read/write/configuration classification, and completion criteria.
 
-The engine owns the final adapter revalidation and checks its binding, valuation,
-policy and reservation before handing the complete immutable candidate to
-`submit_revalidated`. This in-process handoff is not serialized or restored from
+The engine owns final validation and checks binding, valuation, policy and
+reservation before handing the complete immutable candidate to `submit_revalidated`.
+An adapter can opt into `preparation_reuse_window`: reviewed EVM wallet and swap
+operations reuse initial preparation for at most 30 seconds measured from before
+preparation starts, provided all candidate/price deadlines remain valid. Both
+monotonic and wall-clock ages must fit. Delayed approval or preparation falls back
+to adapter revalidation; other adapters keep their original revalidation contract.
+Reuse never restores evidence from the journal or changes approved financial
+bounds. Aave risk paths retain final revalidation. This in-process handoff is not serialized or restored from
 the journal. Exchange, wallet and bridge submission reuse that evidence without
 another preparation or simulation; direct submissions and adapters without this
 contract retain their validating path. Candidate and price expiry remain local
@@ -388,9 +394,13 @@ including authority-only operations; optional amount conditions are conjunctive.
 Plan metadata is engine-owned, stripped before adapter calls and retained in the
 durable operation record and journal, preserving strict adapter binding parsers.
 
-Generic permission review validates structure without pretending to check live
-balances, permissions, markets or simulation. These checks remain deferred; it
-does not require future balances or freeze execution quotes. Each explicit attempt reuses the normal prepare/revalidate/submit path
+Generic exact permission review validates structure and invokes the adapter's
+balance-independent `validate_plan_feasibility` hook before approval. Protected
+read-only permission, route and fee queries are allowed; mutations, reservations
+and balance-dependent admission are not. Unsupported checks return explicit
+review warnings and remain mandatory at execution. Independent hook calls use
+bounded concurrency. Review does not require future balances or freeze execution
+quotes. Each explicit attempt uses the normal prepare/validate/submit path
 with distinct plan authority; no independently usable child grants exist. The
 journal checks the active revision, step eligibility, funding, cumulative caps,
 expiry, revocation and protected policy at dispatch. Typed verified effects and
@@ -402,8 +412,14 @@ predecessor credit and current balances. Reservations are counted once, and
 intermediate credits never replenish gross authority. Exact-input operations
 preserve ordinary conservative USD policy charges for
 non-cash exposure as well as cash movements. Revisions retain usage and
-started-step scope; only unstarted steps may be restructured. Restart never
-replays work. Expired or revoked plans can still reconcile submitted attempts.
+financially started-step scope. Terminal never-submitted zero-effect attempts
+can be repaired by a freshly approved revision. Completed steps retain their
+historical specification and permission instead of regenerating execution
+permission against changed adapter metadata. Named steps refresh at most two
+proved-unsubmitted transient failures within one invocation and active authority;
+durable logical-request linkage preserves idempotency of the latest candidate.
+Restart never replays work and releases unsubmitted bridge claims atomically with
+operation cancellation and reservations. Expired or revoked plans can still reconcile submitted attempts.
 Historical restoration runs remain separate recovery data.
 
 An operation definition may explicitly name string JSON pointers that Fin
@@ -461,7 +477,20 @@ identity and application-specific history still need verification before typed
 financial effects settle. A crash before receipt persistence leaves unknown
 authority; a matching amount/time alone cannot recover a lost transaction ID.
 
-The broker keeps one serialized mutation/settlement queue and bounded concurrent read requests. Snapshot observers run concurrently with a 10-second evidence deadline and report partial coverage. Required preparation/revalidation and external reads have 120-second deadlines; RPC reads share a 10-second budget across identity, retries and fallback. The financial submission future is never cancelled by an evidence timeout. Identify conflicts by physical account/signer and network. Later per-resource concurrency must preserve nonce control, reservations, and deduplication.
+Financial execution retains the engine's serialized queue for reservations,
+nonces and duplicate control. Read-only previews, stored status and revocation
+bypass the broker's broad mutation gate. A busy execution queue causes operation
+and plan status to return durable progress promptly; reconciliation runs when
+available and is bounded as observation, never as financial dispatch. Revocation
+and submission admission are ordered by the store's atomic authority/CAS checks;
+revocation cannot recall an already admitted submission. Snapshot observers run
+concurrently with a 10-second evidence deadline and report partial coverage.
+Preparation/revalidation, reconciliation observations and external reads have
+120-second deadlines; RPC reads share a 10-second budget across identity, retries
+and fallback. Independent EVM reads overlap within each phase, with original
+request tags and final pending-nonce checks retained. The financial submission
+future is never cancelled by an evidence timeout. Further per-resource execution
+concurrency must preserve nonce control, cumulative policy and deduplication.
 
 Version fingerprint encoding explicitly; do not hash incidental JSON ordering or observation timestamps. Migration must preserve existing request and submission identities, cost reservations, provenance, and unresolved work. Old records require a compatible reconciler or an explicit unresolved status, never automatic resubmission as a new request. Adapter upgrades must understand persisted evidence versions or refuse safely. Preserve supported legacy records through explicit, versioned migrations and verify interrupted-upgrade recovery.
 

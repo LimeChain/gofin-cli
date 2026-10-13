@@ -59,6 +59,7 @@ pub struct WorkflowRpc {
     pub approvals: AtomicUsize,
     pub reverse: bool,
     pub quote_calls: AtomicUsize,
+    pub advance_during_preparation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pub drift_during_revalidation: std::sync::atomic::AtomicBool,
     pub withdrawal_ready: std::sync::atomic::AtomicBool,
     pub swap_receipt_ready: std::sync::atomic::AtomicBool,
@@ -74,6 +75,7 @@ impl WorkflowRpc {
             approvals: AtomicUsize::new(0),
             reverse: false,
             quote_calls: AtomicUsize::new(0),
+            advance_during_preparation: Mutex::new(None),
             drift_during_revalidation: std::sync::atomic::AtomicBool::new(false),
             withdrawal_ready: std::sync::atomic::AtomicBool::new(false),
             swap_receipt_ready: std::sync::atomic::AtomicBool::new(true),
@@ -428,6 +430,9 @@ impl EvmRpc for WorkflowRpc {
                     )));
                 }
                 if to.eq_ignore_ascii_case(SWAP_ROUTER) && params[0].get("from").is_some() {
+                    if let Some(advance) = self.advance_during_preparation.lock().unwrap().take() {
+                        advance();
+                    }
                     if self.reverse {
                         return Ok(encoded(vec![
                             fin_evm::alloy::primitives::Bytes::from(

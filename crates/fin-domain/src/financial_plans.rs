@@ -398,6 +398,9 @@ pub struct FinancialPlanReview {
     pub remaining_costs: Vec<CostBound>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timing_warnings: Vec<FinError>,
+    /// Feasibility checks deferred until the step has actual execution state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feasibility_warnings: Vec<String>,
 }
 
 pub fn financial_plan_review_binding(
@@ -599,6 +602,10 @@ pub struct FinancialPlanAttemptLinkage {
     pub attempt_id: String,
     pub request_fingerprint: String,
     pub execution_binding_hash: String,
+    /// Original caller request ID shared by any automatically refreshed
+    /// candidates for this logical plan-step request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_request_id: Option<String>,
     pub submission_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,

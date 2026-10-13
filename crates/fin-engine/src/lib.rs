@@ -51,6 +51,54 @@ mod projected_provenance;
 mod projected_shares;
 use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
 
+/// In-process evidence age, never restored from a persisted preview. Both clocks
+/// are checked so clock rollback cannot extend a candidate's reuse window.
+struct PreparationStamp {
+    started: tokio::time::Instant,
+    observed_at: DateTime<Utc>,
+}
+impl PreparationStamp {
+    fn start(observed_at: DateTime<Utc>) -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            observed_at,
+        }
+    }
+    fn permits(
+        &self,
+        window: std::time::Duration,
+        now: DateTime<Utc>,
+        prepared: &PreparedOperation,
+    ) -> bool {
+        let age = now.signed_duration_since(self.observed_at);
+        self.started.elapsed() < window
+            && age.to_std().is_ok_and(|age| age < window)
+            && observed_within_reuse_window(&prepared.observed_at, now, window)
+            && prepared.valuation.as_ref().is_none_or(|valuation| {
+                observed_within_reuse_window(&valuation.observed_at, now, window)
+                    && valuation
+                        .prices
+                        .iter()
+                        .all(|price| observed_within_reuse_window(&price.observed_at, now, window))
+            })
+    }
+}
+
+fn observed_within_reuse_window(
+    observed_at: &str,
+    now: DateTime<Utc>,
+    window: std::time::Duration,
+) -> bool {
+    let Ok(observed_at) = DateTime::parse_from_rfc3339(observed_at) else {
+        return false;
+    };
+    let Ok(window) = chrono::Duration::from_std(window) else {
+        return false;
+    };
+    let age = now.signed_duration_since(observed_at.with_timezone(&Utc));
+    age >= chrono::Duration::zero() && age < window
+}
+
 const DEFAULT_LIMIT_MICROS: u64 = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
 fn legacy_movement_limit() -> String {
     fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
@@ -601,6 +649,16 @@ impl Engine {
                 )
             })?;
             for asset in required_assets {
+                if let Some(existing) = valuation.prices.iter().find(|price| price.asset == *asset)
+                    && validate_price_rows(
+                        std::slice::from_ref(existing),
+                        &BTreeSet::from([asset.clone()]),
+                        self.clock.now(),
+                    )
+                    .is_ok()
+                {
+                    continue;
+                }
                 let price = bounded_evidence(
                     &prepared.operation,
                     "pricing",
@@ -1506,7 +1564,7 @@ impl Engine {
         record: &mut OperationRecord,
         boundary: Option<BoundaryAuthorizationRecord>,
         plan: Option<FinancialPlanAuthorizationRecord>,
-        preprepared: Option<PreparedOperation>,
+        preprepared: Option<(PreparedOperation, PreparationStamp)>,
         route: ExecutionRoute,
     ) -> Result<OperationRecord> {
         let definition = adapter
@@ -1528,6 +1586,10 @@ impl Engine {
                 == Some(1)
         });
         let context = self.preparation_context(request.run_id.as_deref())?;
+        let (preprepared, preparation_stamp) = match preprepared {
+            Some((prepared, stamp)) => (Some(prepared), stamp),
+            None => (None, PreparationStamp::start(self.clock.now())),
+        };
         let mut prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
@@ -1743,23 +1805,36 @@ impl Engine {
 
         let adapter_candidate = strip_plan_metadata(&prepared);
         fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Revalidating);
-        let mut refreshed = bounded_evidence(
-            &request.operation,
-            "revalidation",
-            PREFLIGHT_TIMEOUT,
-            async {
-                match &route {
-                    ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
-                    ExecutionRoute::Configuration(_) => {
-                        adapter.revalidate_configuration(&adapter_candidate).await
+        let reuse_preparation = matches!(&route, ExecutionRoute::Financial)
+            && adapter
+                .preparation_reuse_window(&adapter_candidate)
+                .is_some_and(|window| {
+                    preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
+                })
+            && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
+        let mut refreshed = if reuse_preparation {
+            adapter_candidate.clone()
+        } else {
+            bounded_evidence(
+                &request.operation,
+                "revalidation",
+                PREFLIGHT_TIMEOUT,
+                async {
+                    match &route {
+                        ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
+                        ExecutionRoute::Configuration(_) => {
+                            adapter.revalidate_configuration(&adapter_candidate).await
+                        }
                     }
-                }
-            },
-        )
-        .await?;
+                },
+            )
+            .await?
+        };
         financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
-        self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
-            .await?;
+        if !reuse_preparation {
+            self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
+                .await?;
+        }
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
         if let Some(boundary) = &boundary {
             let marker = refreshed
@@ -2035,7 +2110,9 @@ impl Engine {
                 Status::Submitted | Status::Pending | Status::Unknown
             )
         {
-            let _guard = self.write_queue.lock().await;
+            let Ok(_guard) = self.write_queue.try_lock() else {
+                return Ok(record);
+            };
             self.reconcile_serial(id.to_owned()).await
         } else {
             Ok(record)
@@ -2141,14 +2218,29 @@ impl Engine {
             }
         }
         fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Verifying);
-        let reconciliation = match if definition.kind == OperationKind::Configuration
-            && definition.execution_actor == ExecutionActor::HumanInteractive
-        {
-            adapter.reconcile_configuration(&adapter_record).await
-        } else {
-            adapter.reconcile(&adapter_record).await
-        } {
-            Ok(reconciliation) => reconciliation,
+        let outcome = bounded_evidence(
+            &record.operation,
+            "reconciliation",
+            EXTERNAL_READ_TIMEOUT,
+            async {
+                let reconciliation = if definition.kind == OperationKind::Configuration
+                    && definition.execution_actor == ExecutionActor::HumanInteractive
+                {
+                    adapter.reconcile_configuration(&adapter_record).await
+                } else {
+                    adapter.reconcile(&adapter_record).await
+                }?;
+                let baselines = if reconciliation.status == Status::Completed {
+                    adapter.verified_position_baselines(&adapter_record).await?
+                } else {
+                    vec![]
+                };
+                Ok((reconciliation, baselines))
+            },
+        )
+        .await;
+        let (reconciliation, baselines) = match outcome {
+            Ok(evidence) => evidence,
             Err(error) => {
                 let mut retained = record;
                 if retained.error.is_none() || retained.submission.is_none() {
@@ -2158,11 +2250,6 @@ impl Engine {
                 self.update_record(&retained)?;
                 return Ok(retained);
             }
-        };
-        let baselines = if reconciliation.status == Status::Completed {
-            adapter.verified_position_baselines(&adapter_record).await?
-        } else {
-            vec![]
         };
         match self.apply_reconciliation_with_baselines(
             record.clone(),
@@ -11998,6 +12085,7 @@ mod configuration_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
+    mod evidence_reuse;
     mod final_validation;
     mod plan_recovery;
 

@@ -344,6 +344,23 @@ impl Adapter for EvmNetworkRouter {
             .preflight_return_route(operation, input, context)
             .await
     }
+    fn preparation_reuse_window(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        self.prepared(prepared)
+            .ok()?
+            .preparation_reuse_window(prepared)
+    }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> fin_domain::Result<Vec<String>> {
+        self.route(input)?
+            .validate_plan_feasibility(operation, input)
+            .await
+    }
     async fn revalidate(
         &self,
         prepared: &PreparedOperation,

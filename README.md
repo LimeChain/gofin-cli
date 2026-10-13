@@ -1028,7 +1028,18 @@ Older plans without a summary retain their existing prompt and binding.
 Plan review rejects required principal-spend totals that exceed the matching
 cumulative debit cap, using local exact arithmetic. Optional per-step ceilings
 may share a smaller aggregate budget. Review adds no live balance or simulation
-checks. Each execution still validates current state before dispatch.
+checks. Exact steps also run the adapter's balance-independent feasibility checks
+before approval, including supported fee, route and permission admission. Review
+returns `feasibility_warnings` for checks deferred until execution; a warning is
+not evidence those checks passed. Independent feasibility reads run in bounded
+batches. Each execution still validates current state before dispatch.
+
+Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
+transient freshness, nonce or read failures while existing consent remains active.
+Internal candidates retain separate durable identities linked to the caller's
+original request ID. Reusing that ID returns or reconciles the latest recorded
+candidate; it does not start another retry series. Scope and budget violations,
+expired consent, and uncertain submissions are not automatically retried.
 
 Candidate freshness and transport failures report whether the agent should
 prepare another candidate under active consent, renew expired authority, or
@@ -1036,7 +1047,13 @@ reconcile the original submission. Structured error details include
 `reauthorization_required`, `new_attempt_required` and `reconciliation_required`.
 A recorded failed attempt keeps its identity; a fresh candidate uses a new attempt
 ID. An uncertain submission keeps its original identity and reservation across
-restart. Fin never refreshes consent or replays the financial write automatically.
+restart. Fin never refreshes consent or replays an uncertain financial write.
+A new approved revision can repair a terminal, proved-unsubmitted zero-effect
+step. Completed steps retain their historical scope and consumption across
+adapter updates. Status returns stored progress promptly while another action
+runs; subsequent status checks reconcile when the execution queue is available.
+Revocation stops future submission admission without waiting for unrelated RPC
+work. An already admitted submission still requires reconciliation.
 
 The agent submits each step explicitly. Exact-input plans sequence the current
 operation registry, including transfers, withdrawals, deposits, orders, wallet

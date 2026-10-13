@@ -1551,6 +1551,24 @@ fn concurrent_read_request(request: &BrokerRequest) -> bool {
     ) || matches!(request, BrokerRequest::Read { operation, .. } if !matches!(operation.as_str(), "bridge.quotes" | "bridge.status" | "bridge.recovery"))
 }
 
+// These paths either collect read-only evidence or atomically update authority.
+// Financial writes still serialize in the engine; revocation races are ordered
+// against durable submission by the store's authority/CAS checks.
+fn independent_request(request: &BrokerRequest) -> bool {
+    matches!(
+        request,
+        BrokerRequest::Preview { .. }
+            | BrokerRequest::PreviewPlan { .. }
+            | BrokerRequest::PreviewPlanStep { .. }
+            | BrokerRequest::PreviewBoundary { .. }
+            | BrokerRequest::PreviewBoundaryAuthorization { .. }
+            | BrokerRequest::PlanStatus { .. }
+            | BrokerRequest::Status { .. }
+            | BrokerRequest::RevokePlan { .. }
+            | BrokerRequest::RevokeBoundary { .. }
+    )
+}
+
 pub struct BrokerRuntime {
     pub engine: Arc<Engine>,
     config: Arc<BrokerConfigV2>,
@@ -1848,9 +1866,10 @@ impl BrokerRuntime {
     }
 
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
-        // Read concurrency grants no execution authority. Reconciliation,
-        // grants, revocation, previews and submission remain globally ordered.
-        let _mutation_guard = if concurrent_read_request(&request) {
+        // Read/control concurrency grants no execution authority. Submission
+        // admission remains serialized; slow I/O cannot hide status or revocation.
+        let _mutation_guard = if concurrent_read_request(&request) || independent_request(&request)
+        {
             None
         } else {
             Some(self.mutation_gate.lock().await)
@@ -6788,7 +6807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queued_mutations_and_revocation_are_serialized_while_reads_continue() {
+    async fn status_and_revocation_bypass_queued_work_while_stop_still_drains() {
         let runtime = runtime();
         let held_dispatch = runtime.mutation_gate.lock().await;
         let mutators = [
@@ -6804,10 +6823,22 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(runtime.handle(BrokerRequest::Capabilities).await.ok);
-        assert!(tasks.iter().all(|task| !task.is_finished()));
+        let revoke = tokio::time::timeout(Duration::from_secs(1), tasks.remove(0))
+            .await
+            .expect("revocation must bypass unrelated queued work")
+            .unwrap();
+        assert!(!revoke.ok); // Missing grant is reported promptly.
+        assert!(!tasks[0].is_finished()); // Service stop still drains mutations.
+        let status = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.handle(BrokerRequest::PlanStatus {
+                plan_id: "missing".into(),
+            }),
+        )
+        .await
+        .expect("stored status must remain responsive");
+        assert!(!status.ok);
         drop(held_dispatch);
-        let revoke = tasks.remove(0).await.unwrap();
-        assert!(!revoke.ok); // Missing synthetic grant; no dispatch escaped the gate.
         assert!(tasks.remove(0).await.unwrap().ok);
     }
 

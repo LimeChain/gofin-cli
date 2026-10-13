@@ -1288,8 +1288,12 @@ async fn rehearse(pending_swap: bool, price_drift: bool) {
             run_id: None,
         };
         if id == "swap" && price_drift {
-            // Two quote reads prepare the immutable swap. Later quote/USD
-            // evidence improves by 0.5% / rises by 0.25% before dispatch.
+            // Age preparation beyond the 30-second reuse window, forcing
+            // final quote/USD refresh while the original candidate stays valid.
+            let preparation_clock = clock.clone();
+            *source.advance_during_preparation.lock().unwrap() =
+                Some(Box::new(move || preparation_clock.advance(31)));
+            // The refreshed evidence improves by 0.5% / rises by 0.25%.
             source.quote_calls.store(0, Ordering::SeqCst);
             source
                 .drift_during_revalidation
