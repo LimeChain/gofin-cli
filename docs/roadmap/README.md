@@ -2,11 +2,11 @@
 
 Updated 2026-10-13. Numbers identify requests, not implementation priority. Statuses reflect user updates; this backlog update does not independently verify delivery.
 
-First-release scope: **items 1–23, 32 and 33**. Next release: **items 24–28, 30, 31 and 34**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decision on 2026-10-11; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
+First-release scope: **items 1–15, 18–23, 32 and 33**. Next release: **items 16, 17, 24–28, 30, 31 and 34**. Item **29 (Across.to)** remains in the unscheduled backlog. Release assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged. Inclusion defines required release scope, not implementation or verification status.
 
-Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
+Completion is the number of items marked implemented divided by the total items in that release, with equal weight per item, rounded to the nearest whole percent. In-progress items do not count as complete. Update the percentages and counts whenever statuses or release assignments change.
 
-## First release — 52% complete (13/25 items)
+## First release — 57% complete (13/23 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
@@ -25,8 +25,6 @@ Completion is the number of items marked implemented divided by the total items 
 | 13 | [Solana wallet and transactions](integration-roadmap.md#13-solana-wallet-and-transactions) | In progress — user reported; foundation for Solana integrations |
 | 14 | [Solana Meteora support](integration-roadmap.md#14-solana-meteora-support) | Roadmap — scope to define |
 | 15 | [Solana Jupiter support](integration-roadmap.md#15-solana-jupiter-support) | In progress — user reported; interpreted from “Jupyter” |
-| 16 | [Solana Pump support](integration-roadmap.md#16-solana-pump-support) | Roadmap — product/action scope to define |
-| 17 | [Solana Backpack support](integration-roadmap.md#17-solana-backpack-support) | Roadmap — wallet/exchange scope to clarify |
 | 18 | [Robinhood Chain Ramses support](integration-roadmap.md#18-robinhood-chain-ramses-support) | Implemented — user reported; completed with item 5 |
 | 19 | [Base support](base-support.md) | Implemented — user reported |
 | 20 | [Solana Kamino support](integration-roadmap.md#20-solana-kamino-support) | Roadmap — first release; product/action scope to define |
@@ -36,10 +34,12 @@ Completion is the number of items marked implemented divided by the total items 
 | 32 | [SushiSwap and PancakeSwap swaps](sushiswap-pancakeswap-support.md) | Implemented — user reported; first release; extends completed item 5 |
 | 33 | [Action duration and completion estimates](action-duration-estimates.md) | Implemented — user reported; first release |
 
-## Next release — 0% complete (0/8 items)
+## Next release — 0% complete (0/10 items)
 
 | ID | Feature | Status |
 | --- | --- | --- |
+| 16 | [Solana Pump support](integration-roadmap.md#16-solana-pump-support) | Next release — deferred by user; product/action scope to define |
+| 17 | [Solana Backpack support](integration-roadmap.md#17-solana-backpack-support) | Next release — deferred by user; wallet/exchange scope to clarify |
 | 24 | [OKX support](integration-roadmap.md#24-okx-support) | Next release — deferred by user; scope to define |
 | 25 | [SEI support](integration-roadmap.md#25-sei-support) | Next release — available onboarded dapps and bridging |
 | 26 | [BSC support](integration-roadmap.md#26-bsc-support) | Next release — available onboarded dapps and bridging |

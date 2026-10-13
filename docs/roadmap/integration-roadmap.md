@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–23, 32 and 33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–22 below are part of that scope. Items 24–28, 30, 31 and 34 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decision on 2026-10-11; IDs are unchanged.
+The first release requires **backlog items 1–15, 18–23, 32 and 33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15 and 18–22 below are part of that scope. Items 16, 17, 24–28, 30, 31 and 34 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -41,9 +41,13 @@ Integrate Jupiter on Solana. “Jupyter” is interpreted as Jupiter based on th
 
 ## 16. Solana Pump support
 
+Status: Deferred to the next release by the user on 2026-10-13. No longer required for the first release; requested capability is retained.
+
 Integrate the requested Pump ecosystem on Solana. Clarify the intended Pump product(s) and actions, including whether the goal is trading/swapping, asset creation or other functionality. No token-launch capability is implicitly selected. Reuse item 13 for on-chain execution.
 
 ## 17. Solana Backpack support
+
+Status: Deferred to the next release by the user on 2026-10-13. No longer required for the first release; requested capability is retained.
 
 Support the requested Backpack integration. Clarify whether this means Backpack wallet connectivity, Backpack Exchange operations or both. Dependencies and credential requirements depend on that choice; do not assume an exchange integration is an on-chain Solana adapter.
 
