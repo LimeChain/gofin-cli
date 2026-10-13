@@ -102,6 +102,7 @@ fn plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic USDC funding and dev-wallet withdrawal".into(),
+        summary: None,
         steps: vec![
             FinancialPlanStepSpec {
                 action_deadline_seconds: None,
@@ -214,6 +215,7 @@ fn retry_transfer_plan() -> FinancialPlanSpec {
     FinancialPlanSpec {
         version: 1,
         name: "Synthetic retry after confirmed Binance signature rejection".into(),
+        summary: None,
         steps: vec![step],
         aggregate_bounds: FinancialPlanBounds {
             maximum_debits: vec![resource_amount(MAIN, "binance", "10")],

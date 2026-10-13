@@ -37,6 +37,18 @@ fn transfer() -> BridgeTransferRecord {
     }
 }
 
+fn bridge_operation(id: &str, transfer_id: &str, step_id: &str) -> Value {
+    json!({
+        "id":id,
+        "request_id":format!("SYNTHETIC-request-{id}"),
+        "fingerprint":format!("SYNTHETIC-fingerprint-{id}"),
+        "operation":"bridge.transfer",
+        "status":"awaiting_approval",
+        "submission":null,
+        "input":{"transferId":transfer_id,"stepId":step_id}
+    })
+}
+
 fn quote(revision: u32, order_id: &str) -> BridgeQuoteRevision {
     BridgeQuoteRevision {
         revision,
@@ -453,6 +465,197 @@ fn bridge_quote_refresh_and_step_link_are_append_only_and_restart_safe() {
     let reopened = Store::open(&path).unwrap();
     assert_eq!(reopened.bridge_transfer(&record.id).unwrap(), Some(record));
     assert_eq!(reopened.bridge_transfers().unwrap().len(), 1);
+}
+
+#[test]
+fn restart_releases_unsubmitted_bridge_claim_but_preserves_submitted_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("SYNTHETIC-bridge-recovery.sqlite");
+    {
+        let mut store = Store::open(&path).unwrap();
+
+        let mut retry_transfer = transfer();
+        retry_transfer.grant_id = None;
+        retry_transfer.id = "SYNTHETIC-retry-transfer".into();
+        store.save_bridge_transfer(&retry_transfer).unwrap();
+        let retry_operation = bridge_operation(
+            "SYNTHETIC-unsubmitted-operation",
+            &retry_transfer.id,
+            "SYNTHETIC-retry-step",
+        );
+        store
+            .create_request(
+                "SYNTHETIC-unsubmitted-operation",
+                "SYNTHETIC-request-SYNTHETIC-unsubmitted-operation",
+                "SYNTHETIC-fingerprint-SYNTHETIC-unsubmitted-operation",
+                "bridge.transfer",
+                None,
+                "awaiting_approval",
+                &retry_operation,
+                "t0",
+            )
+            .unwrap();
+        store
+            .link_bridge_step(&BridgeStepLink {
+                transfer_id: retry_transfer.id.clone(),
+                step_id: "SYNTHETIC-retry-step".into(),
+                kind: BridgeStepKind::Deposit,
+                depends_on: vec![],
+                operation_id: Some("SYNTHETIC-unsubmitted-operation".into()),
+                grant_id: None,
+                plan_authority: None,
+                state: BridgeStepState::Unsubmitted,
+            })
+            .unwrap();
+        store
+            .link_bridge_step(&BridgeStepLink {
+                transfer_id: retry_transfer.id.clone(),
+                step_id: "SYNTHETIC-retry-step".into(),
+                kind: BridgeStepKind::Deposit,
+                depends_on: vec![],
+                operation_id: Some("SYNTHETIC-unsubmitted-operation".into()),
+                grant_id: None,
+                plan_authority: None,
+                state: BridgeStepState::Submitted,
+            })
+            .unwrap();
+
+        let mut sent_transfer = transfer();
+        sent_transfer.grant_id = None;
+        sent_transfer.id = "SYNTHETIC-sent-transfer".into();
+        store.save_bridge_transfer(&sent_transfer).unwrap();
+        let sent_operation = bridge_operation(
+            "SYNTHETIC-submitted-operation",
+            &sent_transfer.id,
+            "SYNTHETIC-sent-step",
+        );
+        store
+            .create_request(
+                "SYNTHETIC-submitted-operation",
+                "SYNTHETIC-request-SYNTHETIC-submitted-operation",
+                "SYNTHETIC-fingerprint-SYNTHETIC-submitted-operation",
+                "bridge.transfer",
+                None,
+                "awaiting_approval",
+                &sent_operation,
+                "t0",
+            )
+            .unwrap();
+        store
+            .link_bridge_step(&BridgeStepLink {
+                transfer_id: sent_transfer.id.clone(),
+                step_id: "SYNTHETIC-sent-step".into(),
+                kind: BridgeStepKind::Deposit,
+                depends_on: vec![],
+                operation_id: Some("SYNTHETIC-submitted-operation".into()),
+                grant_id: None,
+                plan_authority: None,
+                state: BridgeStepState::Unsubmitted,
+            })
+            .unwrap();
+        store
+            .link_bridge_step(&BridgeStepLink {
+                transfer_id: sent_transfer.id.clone(),
+                step_id: "SYNTHETIC-sent-step".into(),
+                kind: BridgeStepKind::Deposit,
+                depends_on: vec![],
+                operation_id: Some("SYNTHETIC-submitted-operation".into()),
+                grant_id: None,
+                plan_authority: None,
+                state: BridgeStepState::Submitted,
+            })
+            .unwrap();
+        store
+            .persist_submission(
+                "SYNTHETIC-submitted-operation",
+                &SubmissionRow {
+                    kind: "SYNTHETIC".into(),
+                    reference: "SYNTHETIC-original-submission".into(),
+                    data: json!({}),
+                },
+                "t1",
+            )
+            .unwrap();
+    }
+
+    let mut reopened = Store::open(&path).unwrap();
+    let report = reopened.recover_interrupted().unwrap();
+    assert_eq!(
+        report.cancelled_before_submission,
+        vec!["SYNTHETIC-unsubmitted-operation"]
+    );
+    assert_eq!(
+        report.uncertain_submissions,
+        vec!["SYNTHETIC-submitted-operation"]
+    );
+    assert_eq!(
+        reopened
+            .bridge_transfer("SYNTHETIC-retry-transfer")
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .state,
+        BridgeStepState::Unsubmitted
+    );
+    assert_eq!(
+        reopened
+            .bridge_transfer("SYNTHETIC-retry-transfer")
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .operation_id,
+        None
+    );
+    assert_eq!(
+        reopened
+            .bridge_transfer("SYNTHETIC-sent-transfer")
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .operation_id
+            .as_deref(),
+        Some("SYNTHETIC-submitted-operation")
+    );
+
+    let retry_operation = bridge_operation(
+        "SYNTHETIC-retry-operation",
+        "SYNTHETIC-retry-transfer",
+        "SYNTHETIC-retry-step",
+    );
+    reopened
+        .create_request(
+            "SYNTHETIC-retry-operation",
+            "SYNTHETIC-request-SYNTHETIC-retry-operation",
+            "SYNTHETIC-fingerprint-SYNTHETIC-retry-operation",
+            "bridge.transfer",
+            None,
+            "awaiting_approval",
+            &retry_operation,
+            "t2",
+        )
+        .unwrap();
+    reopened
+        .link_bridge_step(&BridgeStepLink {
+            transfer_id: "SYNTHETIC-retry-transfer".into(),
+            step_id: "SYNTHETIC-retry-step".into(),
+            kind: BridgeStepKind::Deposit,
+            depends_on: vec![],
+            operation_id: Some("SYNTHETIC-retry-operation".into()),
+            grant_id: None,
+            plan_authority: None,
+            state: BridgeStepState::Submitted,
+        })
+        .unwrap();
+    assert_eq!(
+        reopened
+            .bridge_transfer("SYNTHETIC-retry-transfer")
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .operation_id
+            .as_deref(),
+        Some("SYNTHETIC-retry-operation")
+    );
 }
 
 #[test]

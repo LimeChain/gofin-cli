@@ -790,6 +790,7 @@ impl Harness {
         FinancialPlanSpec {
             version: fin_domain::financial_plans::FINANCIAL_PLAN_VERSION,
             name: "Modeled Base canonical lifecycle".into(),
+            summary: None,
             steps: inputs
                 .iter()
                 .enumerate()

@@ -2,12 +2,14 @@
 pub mod authority_expiry;
 pub mod boundaries;
 pub mod clock;
+pub mod execution_progress;
 pub mod execution_state;
 pub mod financial_plans;
 pub mod money;
 pub mod plan_timing;
 pub mod policy;
 pub mod price_freshness;
+pub mod submission_validation;
 pub mod unpriced;
 pub mod value_bounds;
 
@@ -21,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+pub use submission_validation::RevalidatedOperation;
 
 pub type Result<T> = std::result::Result<T, FinError>;
 /// Reviewed-adapter metadata in a prepared operation binding for one finite
@@ -1212,6 +1215,19 @@ pub trait Adapter: Send + Sync {
             "Use an operation with an explicitly supported plan permission scope.",
         ))
     }
+    /// Balance-independent admission before plan approval. Protected read-only
+    /// permission, fee, route and metadata queries are allowed; no mutations,
+    /// reservations or checks requiring future funding. Return explicit warnings
+    /// for deferred checks. Execution still validates mutable evidence.
+    async fn validate_plan_feasibility(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Vec<String>> {
+        Ok(vec![
+            "Adapter-specific feasibility checks are deferred until execution.".into(),
+        ])
+    }
     /// Independently validate a concrete candidate against the approved
     /// adapter-derived scope. Implementations must reject undeclared changes.
     fn validate_boundary_candidate(
@@ -1251,6 +1267,17 @@ pub trait Adapter: Send + Sync {
             "Do not begin the scoped run until every planned operation has a reviewed route proof.",
         ))
     }
+    /// Explicit opt-in to reuse initial preparation as final execution evidence.
+    /// The broker measures this window from before preparation, checks all
+    /// candidate/price deadlines, and serializes conflicting writes. Implementors
+    /// must perform exact final nonce/authority checks through their submit path.
+    /// None preserves the adapter's ordinary final revalidation contract.
+    fn preparation_reuse_window(
+        &self,
+        _prepared: &PreparedOperation,
+    ) -> Option<std::time::Duration> {
+        None
+    }
     async fn revalidate(&self, prepared: &PreparedOperation) -> Result<PreparedOperation>;
     /// Revalidate a candidate through the explicit human configuration route.
     async fn revalidate_configuration(
@@ -1269,6 +1296,25 @@ pub trait Adapter: Send + Sync {
         prepared: &PreparedOperation,
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission>;
+    /// Reuse the broker's final adapter revalidation. Integrations that do not
+    /// implement this contract keep their ordinary validating submission path.
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit(validated.prepared(), journal).await
+    }
+    async fn submit_configuration_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        self.submit_configuration(validated.prepared(), journal)
+            .await
+    }
     /// Submit only through the explicit human configuration lifecycle.
     async fn submit_configuration(
         &self,

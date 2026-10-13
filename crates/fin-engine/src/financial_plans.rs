@@ -8,6 +8,8 @@ use fin_domain::financial_plans::{
     FinancialPlanUsage,
 };
 
+const MAX_PLAN_CANDIDATE_REFRESHES: usize = 2;
+
 impl Engine {
     /// Prepare balance-independent adapter permissions and return the canonical
     /// review hash. Preview is read-only and never creates an approval request.
@@ -16,9 +18,20 @@ impl Engine {
         request: FinancialPlanAuthorizationRequest,
     ) -> Result<FinancialPlanReview> {
         self.validate_plan_request(&request)?;
-        let permissions = self.prepare_plan_permissions(&request.plan).await?;
-        validate_plan_permissions(&request.plan, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let completed_steps = prior
+            .as_ref()
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?
+            .map(completed_plan_step_ids)
+            .unwrap_or_default();
+        let permissions = self
+            .prepare_plan_permissions(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        let feasibility_warnings = self
+            .validate_plan_feasibility(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        validate_plan_permissions(&request.plan, &permissions)?;
         let (valid_for_seconds, timing_warnings) =
             self.resolve_plan_duration(&request, prior.as_ref())?;
         validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
@@ -31,12 +44,13 @@ impl Engine {
                 .store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
-            validate_revision_transition(
+            validate_revision_transition_with_completed(
                 prior.as_ref(),
                 &request.plan,
                 &permissions,
                 &carried_forward_usage,
                 &store,
+                &completed_steps,
             )?;
         }
         let review_hash = financial_plans::financial_plan_review_hash(
@@ -65,6 +79,7 @@ impl Engine {
             remaining_debits,
             remaining_costs,
             timing_warnings,
+            feasibility_warnings,
         })
     }
 
@@ -120,9 +135,19 @@ impl Engine {
             ));
         }
 
-        let permissions = self.prepare_plan_permissions(&request.plan).await?;
-        validate_plan_permissions(&request.plan, &permissions)?;
         let prior = self.plan_replacement(&request)?;
+        let completed_steps = prior
+            .as_ref()
+            .map(|record| self.build_plan_status(record, &record.revision))
+            .transpose()?
+            .map(completed_plan_step_ids)
+            .unwrap_or_default();
+        let permissions = self
+            .prepare_plan_permissions(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        self.validate_plan_feasibility(&request.plan, prior.as_ref(), &completed_steps)
+            .await?;
+        validate_plan_permissions(&request.plan, &permissions)?;
         let (valid_for_seconds, _timing_warnings) =
             self.resolve_plan_duration(&request, prior.as_ref())?;
         validate_plan_authorization_duration(valid_for_seconds, &permissions)?;
@@ -165,12 +190,13 @@ impl Engine {
                 .store
                 .lock()
                 .map_err(|_| internal("store lock poisoned"))?;
-            validate_revision_transition(
+            validate_revision_transition_with_completed(
                 prior.as_ref(),
                 &request.plan,
                 &permissions,
                 &carried_usage,
                 &store,
+                &completed_steps,
             )?;
         }
         let binding = financial_plans::financial_plan_approval_binding(
@@ -219,6 +245,9 @@ impl Engine {
                 ));
             }
         }
+        fin_domain::execution_progress::emit(
+            fin_domain::execution_progress::Stage::AwaitingApproval,
+        );
         let approval = match self.authorizer.authorize(&challenge).await {
             Ok(approval) => approval,
             Err(error) => {
@@ -319,7 +348,22 @@ impl Engine {
     }
 
     pub async fn financial_plan_status(&self, plan_id: &str) -> Result<FinancialPlanStatus> {
-        let _guard = self.write_queue.lock().await;
+        let Ok(_guard) = self.write_queue.try_lock() else {
+            // A running execution already owns reconciliation. Return durable
+            // state promptly; retry the snapshot if a settlement changes it.
+            for _ in 0..3 {
+                let record = self.load_financial_plan(plan_id)?;
+                let status = self.build_plan_status(&record, &record.revision)?;
+                if self.load_financial_plan(plan_id)? == record {
+                    return Ok(status);
+                }
+            }
+            return Err(plan_error(
+                "PLAN_STATUS_BUSY",
+                "Plan state changed while reading status.",
+                "Retry status; no new financial action is required.",
+            ));
+        };
         let mut record = self.load_financial_plan(plan_id)?;
         expire_plan_if_needed(self, &mut record)?;
         let mut unresolved_ids = Vec::new();
@@ -427,13 +471,15 @@ impl Engine {
             deadline.apply(&mut execution_input)?;
         }
         let context = self.preparation_context(None)?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(operation, &execution_input, &context),
         )
-        .await?;
+        .await
+        .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         if prepared.action_deadline.is_some() {
             return Err(internal("adapter supplied broker timing"));
         }
@@ -453,7 +499,8 @@ impl Engine {
                 .map_err(|_| internal("store lock poisoned"))?;
             validate_candidate_plan_caps(&record, step_id, &prepared, &store)?;
         }
-        validate_prepared(&prepared, operation, self.clock.now())?;
+        validate_prepared(&prepared, operation, self.clock.now())
+            .map_err(|error| self.plan_candidate_recovery(error, plan_id, None))?;
         Ok(prepared)
     }
 
@@ -466,8 +513,16 @@ impl Engine {
         request: OperationRequest,
     ) -> Result<OperationRecord> {
         let _guard = self.write_queue.lock().await;
-        self.execute_financial_plan_step_serial(plan_id, step_id, request, None)
-            .await
+        let logical_request_id = request.request_id.clone();
+        self.execute_financial_plan_step_serial(
+            plan_id,
+            step_id,
+            request,
+            None,
+            &logical_request_id,
+            0,
+        )
+        .await
     }
 
     pub async fn execute_financial_plan_step_replacing(
@@ -478,11 +533,14 @@ impl Engine {
         request: OperationRequest,
     ) -> Result<OperationRecord> {
         let _guard = self.write_queue.lock().await;
+        let logical_request_id = request.request_id.clone();
         self.execute_financial_plan_step_serial(
             plan_id,
             step_id,
             request,
             Some(previous_attempt_id),
+            &logical_request_id,
+            0,
         )
         .await
     }
@@ -493,6 +551,8 @@ impl Engine {
         step_id: &str,
         request: OperationRequest,
         replacement: Option<&str>,
+        logical_request_id: &str,
+        refresh_count: usize,
     ) -> Result<OperationRecord> {
         if request.request_id.trim().is_empty() {
             return Err(plan_error(
@@ -528,6 +588,30 @@ impl Engine {
             } else {
                 Ok(operation)
             };
+        }
+        if refresh_count == 0 {
+            let prior_plan = self.load_financial_plan(plan_id)?;
+            if let Some(linkage) = prior_plan.attempts.iter().rev().find(|attempt| {
+                attempt.logical_request_id.as_deref() == Some(logical_request_id)
+                    && attempt.step_id == step_id
+            }) {
+                if linkage.request_fingerprint != fingerprint {
+                    return Err(plan_error(
+                        "REQUEST_ID_CONFLICT",
+                        "This logical request ID already names different plan parameters.",
+                        "Inspect the original attempt and use a new ID only for a deliberate retry.",
+                    ));
+                }
+                let operation = self.load_record(&linkage.attempt_id)?;
+                return if matches!(
+                    operation.status,
+                    Status::Submitted | Status::Pending | Status::Unknown
+                ) {
+                    self.reconcile_serial(operation.id.clone()).await
+                } else {
+                    Ok(operation)
+                };
+            }
         }
         let mut plan = self.load_financial_plan(plan_id)?;
         // Keep the exact pre-preparation snapshot for the later store CAS. A
@@ -612,30 +696,72 @@ impl Engine {
                 .await;
         }
         let id = Uuid::new_v4().to_string();
+        let mut execution_request = request.clone();
+        execution_request.request_id = Uuid::new_v4().to_string();
+        let preparation_stamp = PreparationStamp::start(self.clock.now());
         let action_deadline =
             self.prepare_action_deadline(&*adapter, &plan.revision, step_id, &request.input)?;
         let mut execution_input = plan_attempt_input(&plan.revision, step_id, &request.input, &id)?;
         if let Some(deadline) = &action_deadline {
             deadline.apply(&mut execution_input)?;
         }
-        let mut execution_request = request.clone();
         execution_request.input = execution_input.clone();
         let context = self.preparation_context(None)?;
-        let mut prepared = bounded_evidence(
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
+        let preparation_result = bounded_evidence(
             &request.operation,
             "preflight",
             PREFLIGHT_TIMEOUT,
             adapter.prepare_with_context(&request.operation, &execution_input, &context),
         )
-        .await?;
+        .await;
+        let mut prepared = match preparation_result {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return self
+                    .retry_plan_preparation_error(
+                        error,
+                        plan_id,
+                        step_id,
+                        request,
+                        logical_request_id,
+                        refresh_count,
+                    )
+                    .await;
+            }
+        };
         if prepared.action_deadline.is_some() {
             return Err(internal("adapter supplied broker timing"));
         }
         prepared.action_deadline = action_deadline;
         let required_origins = self.cost_origin_assets(&prepared, None)?;
-        self.complete_cost_origin_prices(&mut prepared, &required_origins)
-            .await?;
-        validate_prepared(&prepared, &request.operation, self.clock.now())?;
+        if let Err(error) = self
+            .complete_cost_origin_prices(&mut prepared, &required_origins)
+            .await
+        {
+            return self
+                .retry_plan_preparation_error(
+                    error,
+                    plan_id,
+                    step_id,
+                    request,
+                    logical_request_id,
+                    refresh_count,
+                )
+                .await;
+        }
+        if let Err(error) = validate_prepared(&prepared, &request.operation, self.clock.now()) {
+            return self
+                .retry_plan_preparation_error(
+                    error,
+                    plan_id,
+                    step_id,
+                    request,
+                    logical_request_id,
+                    refresh_count,
+                )
+                .await;
+        }
         self.validate_plan_candidate(
             &*adapter,
             &plan.revision,
@@ -663,7 +789,7 @@ impl Engine {
         let timestamp = self.clock.now().to_rfc3339();
         let mut operation = OperationRecord {
             id: id.clone(),
-            request_id: request.request_id.clone(),
+            request_id: execution_request.request_id.clone(),
             fingerprint: fingerprint.clone(),
             fingerprint_version: 1,
             operation: request.operation.clone(),
@@ -694,6 +820,7 @@ impl Engine {
             attempt_id: id.clone(),
             request_fingerprint: fingerprint.clone(),
             execution_binding_hash,
+            logical_request_id: Some(logical_request_id.to_owned()),
             submission_id: None,
             result: None,
         });
@@ -750,7 +877,7 @@ impl Engine {
                     &previous.id,
                     &to_value(&previous)?,
                     &id,
-                    &request.request_id,
+                    &execution_request.request_id,
                     &fingerprint,
                     &request.operation,
                     &to_value(&operation)?,
@@ -771,7 +898,7 @@ impl Engine {
                         &to_value(&initial_plan)?,
                         &updated_plan,
                         &id,
-                        &request.request_id,
+                        &execution_request.request_id,
                         &fingerprint,
                         &request.operation,
                         &to_value(&operation)?,
@@ -792,7 +919,7 @@ impl Engine {
                         &to_value(&initial_plan)?,
                         &updated_plan,
                         &id,
-                        &request.request_id,
+                        &execution_request.request_id,
                         &fingerprint,
                         &request.operation,
                         &to_value(&operation)?,
@@ -812,20 +939,28 @@ impl Engine {
                 &mut operation,
                 None,
                 Some(plan.clone()),
-                Some(prepared),
+                Some((prepared, preparation_stamp)),
                 super::ExecutionRoute::Financial,
             )
             .await;
         match result {
             Ok(record) => Ok(record),
             Err(error) => {
+                let error = self.plan_candidate_recovery(error, plan_id, Some(&operation));
+                let error = if can_auto_refresh_plan_candidate(&error)
+                    && refresh_count >= MAX_PLAN_CANDIDATE_REFRESHES
+                {
+                    with_plan_refresh_details(error, refresh_count)
+                } else {
+                    error
+                };
                 if !operation.status.terminal() {
                     operation.status = if operation.submission.is_some() {
                         Status::Unknown
                     } else {
                         status_for_error(&error)
                     };
-                    operation.error = Some(error);
+                    operation.error = Some(error.clone());
                     operation.updated_at = self.clock.now().to_rfc3339();
                     if operation.status.terminal() {
                         self.commit_terminal(
@@ -839,9 +974,195 @@ impl Engine {
                         self.update_record(&operation)?;
                     }
                 }
+                let retry_candidate = can_auto_refresh_plan_candidate(&error)
+                    && operation.status.terminal()
+                    && operation.submission.is_none()
+                    && operation.dispatch_evidence.is_none()
+                    && operation.effects.is_none()
+                    && self
+                        .store
+                        .lock()
+                        .map_err(|_| internal("store lock poisoned"))?
+                        .submission(&operation.id)
+                        .map_err(map_store)?
+                        .is_none()
+                    && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
+                    && self.plan_authority_active(plan_id)?;
+                if retry_candidate {
+                    self.verify_persisted_unsubmitted_terminal(&operation)?;
+                    return Box::pin(self.execute_financial_plan_step_serial(
+                        plan_id,
+                        step_id,
+                        request_with_child_id(request),
+                        None,
+                        logical_request_id,
+                        refresh_count + 1,
+                    ))
+                    .await;
+                }
                 Ok(operation)
             }
         }
+    }
+
+    /// Explain candidate freshness/transport recovery using current authority.
+    /// This guidance never retries, renews or changes financial state.
+    fn plan_candidate_recovery(
+        &self,
+        mut error: FinError,
+        plan_id: &str,
+        attempt: Option<&OperationRecord>,
+    ) -> FinError {
+        if !matches!(
+            error.code.as_str(),
+            "PREVIEW_EXPIRED"
+                | "PREVIEW_CHANGED"
+                | "REQUEST_CHANGED"
+                | "PLAN_CANDIDATE_CHANGED"
+                | "BINDING_CHANGED"
+                | "NONCE_CHANGED"
+                | "STALE_VALUATION"
+                | "VALUE_BOUND_EXCEEDED"
+                | "SLIPPAGE_LIMIT"
+                | "EVIDENCE_TIMEOUT"
+                | "RPC_READ_TIMEOUT"
+                | "RPC_UNAVAILABLE"
+        ) {
+            return error;
+        }
+        let Ok(plan) = self.load_financial_plan(plan_id) else {
+            return error;
+        };
+        let at = self.clock.now();
+        let active = plan.revision.status == FinancialPlanAuthorizationStatus::Active
+            && parse_time(&plan.revision.expires_at).is_ok_and(|expiry| expiry > at);
+        let submitted = attempt.is_some_and(|attempt| {
+            attempt.submission.is_some() || attempt.dispatch_evidence.is_some()
+        });
+        let other_attempt = plan
+            .active_attempt_id
+            .as_deref()
+            .filter(|id| attempt.is_none_or(|attempt| attempt.id != *id));
+        let reconcile = submitted || other_attempt.is_some();
+        error.next_action = if reconcile {
+            "Inspect this plan's status and reconcile the original attempt. Do not create another financial submission or renew consent merely to verify its outcome."
+        } else if !active {
+            "Nothing was submitted. Review the remaining work and authorize a replacement using --replaces with the current revision ID before starting a new attempt."
+        } else if attempt.is_some() {
+            "Nothing was submitted. Prepare a fresh candidate under the same plan using a new attempt ID. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        } else {
+            "Nothing was submitted or recorded as an attempt. Retry preparation under the same plan; the request ID can be reused. Fresh Touch ID is unnecessary while the plan remains active and the candidate stays within its approved scope."
+        }
+        .into();
+        let mut details = error
+            .details
+            .as_deref()
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        details.extend(
+            json!({
+                "plan_id": plan_id,
+                "revision_id": plan.revision.revision_id,
+                "observed_at": at.to_rfc3339(),
+                "attempt_id": other_attempt.or_else(|| attempt.map(|attempt| attempt.id.as_str())),
+                "reconciliation_required": reconcile,
+                "reauthorization_required": !reconcile && !active,
+                "new_attempt_required": !reconcile && attempt.is_some(),
+                "submission_recorded": submitted,
+            })
+            .as_object()
+            .expect("recovery details are an object")
+            .clone(),
+        );
+        error.details = Some(Box::new(Value::Object(details)));
+        error
+    }
+
+    fn plan_authority_active(&self, plan_id: &str) -> Result<bool> {
+        let plan = self.load_financial_plan(plan_id)?;
+        Ok(
+            plan.revision.status == FinancialPlanAuthorizationStatus::Active
+                && parse_time(&plan.revision.expires_at)? > self.clock.now(),
+        )
+    }
+
+    async fn retry_plan_preparation_error(
+        &self,
+        error: FinError,
+        plan_id: &str,
+        step_id: &str,
+        request: OperationRequest,
+        logical_request_id: &str,
+        refresh_count: usize,
+    ) -> Result<OperationRecord> {
+        let error = self.plan_candidate_recovery(error, plan_id, None);
+        if can_auto_refresh_plan_candidate(&error)
+            && refresh_count < MAX_PLAN_CANDIDATE_REFRESHES
+            && self.plan_authority_active(plan_id)?
+        {
+            return Box::pin(self.execute_financial_plan_step_serial(
+                plan_id,
+                step_id,
+                request_with_child_id(request),
+                None,
+                logical_request_id,
+                refresh_count + 1,
+            ))
+            .await;
+        }
+        Err(with_plan_refresh_details(error, refresh_count))
+    }
+
+    fn verify_persisted_unsubmitted_terminal(&self, operation: &OperationRecord) -> Result<()> {
+        if !operation.status.terminal()
+            || operation.submission.is_some()
+            || operation.dispatch_evidence.is_some()
+            || operation.effects.is_some()
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "The failed candidate has evidence that prevents automatic refresh.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| internal("store lock poisoned"))?;
+        if store
+            .submission(&operation.id)
+            .map_err(map_store)?
+            .is_some()
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "A durable submission identity exists for this candidate.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        let persisted = store
+            .get_record(&operation.id)
+            .map_err(map_store)?
+            .ok_or_else(|| internal("terminal candidate record disappeared"))?;
+        if persisted != to_value(operation)?
+            || persisted
+                .get("submission")
+                .is_some_and(|value| !value.is_null())
+            || persisted
+                .get("dispatch_evidence")
+                .is_some_and(|value| !value.is_null())
+            || persisted
+                .get("effects")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(plan_error(
+                "PLAN_CANDIDATE_NOT_RETRYABLE",
+                "The durable candidate record does not prove a clean pre-submission failure.",
+                "Reconcile the original attempt before continuing.",
+            ));
+        }
+        Ok(())
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -948,6 +1269,7 @@ impl Engine {
                 "definition_hash":exact.definition_hash,
                 "connections_hash":exact.connections_hash,
             }))?,
+            logical_request_id: None,
             submission_id: None,
             result: None,
         });
@@ -1238,12 +1560,106 @@ impl Engine {
         })
     }
 
+    /// Admission is independent of future balances and precedes native approval.
+    /// A bounded batch overlaps independent venue reads without changing step order.
+    async fn validate_plan_feasibility(
+        &self,
+        spec: &financial_plans::FinancialPlanSpec,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+        completed_steps: &[String],
+    ) -> Result<Vec<String>> {
+        let mut pending = Vec::new();
+        for step in &spec.steps {
+            if completed_steps
+                .iter()
+                .any(|completed| completed == &step.step_id)
+                && prior.is_some_and(|p| p.revision.spec.steps.iter().any(|old| old == step))
+            {
+                continue;
+            }
+            let (adapter, kind) = self.resolve(&step.operation)?;
+            // Adapter permission preparation already validates its own scope.
+            if kind != OperationKind::Write || step.permitted_variations["mode"] != "exact" {
+                continue;
+            }
+            pending.push((
+                step.step_id.clone(),
+                step.operation.clone(),
+                step.input.clone(),
+                adapter,
+            ));
+        }
+        let mut warnings = Vec::new();
+        for chunk in pending.chunks(4) {
+            let mut tasks = tokio::task::JoinSet::new();
+            for (index, (step_id, operation, input, adapter)) in chunk.iter().cloned().enumerate() {
+                tasks.spawn(async move {
+                    let result = bounded_evidence(
+                        &operation,
+                        "plan_feasibility",
+                        PREFLIGHT_TIMEOUT,
+                        adapter.validate_plan_feasibility(&operation, &input),
+                    )
+                    .await
+                    .map_err(|mut error| {
+                        let mut details = error
+                            .details
+                            .as_deref()
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        details.insert("step_id".into(), json!(step_id));
+                        details.insert("operation".into(), json!(operation));
+                        details.insert("before_plan_approval".into(), json!(true));
+                        error.details = Some(Box::new(Value::Object(details)));
+                        error
+                    })?;
+                    Ok::<_, FinError>((
+                        index,
+                        result
+                            .into_iter()
+                            .map(|warning| format!("{step_id}: {warning}"))
+                            .collect::<Vec<_>>(),
+                    ))
+                });
+            }
+            let mut rows = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                rows.push(result.map_err(|_| internal("plan feasibility task failed"))??);
+            }
+            rows.sort_by_key(|(index, _)| *index);
+            warnings.extend(rows.into_iter().flat_map(|(_, warnings)| warnings));
+        }
+        Ok(warnings)
+    }
+
     async fn prepare_plan_permissions(
         &self,
         spec: &financial_plans::FinancialPlanSpec,
+        prior: Option<&FinancialPlanAuthorizationRecord>,
+        completed_steps: &[String],
     ) -> Result<Vec<FinancialPlanStepPermission>> {
         let mut permissions = Vec::new();
         for step in &spec.steps {
+            // Completed steps are archival history. Reusing their approved
+            // permission keeps an adapter metadata update from invalidating a
+            // valid suffix-only revision.
+            if let Some(prior) = prior
+                && prior.revision.spec.steps.iter().any(|old| {
+                    old == step
+                        && completed_steps
+                            .iter()
+                            .any(|completed| completed == &step.step_id)
+                })
+                && let Some(permission) = prior
+                    .revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == step.step_id)
+            {
+                permissions.push(permission.clone());
+                continue;
+            }
             let (adapter, kind) = self.resolve(&step.operation)?;
             let definition = adapter
                 .definitions()
@@ -1934,6 +2350,37 @@ fn validate_exact_plan_identity(
         ));
     }
     Ok(())
+}
+
+fn can_auto_refresh_plan_candidate(error: &FinError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "PREVIEW_EXPIRED"
+            | "STALE_VALUATION"
+            | "NONCE_CHANGED"
+            | "EVIDENCE_TIMEOUT"
+            | "RPC_READ_TIMEOUT"
+            | "RPC_UNAVAILABLE"
+    )
+}
+
+fn with_plan_refresh_details(mut error: FinError, refresh_count: usize) -> FinError {
+    let mut details = error
+        .details
+        .as_deref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    details.insert("refresh_count".into(), json!(refresh_count));
+    details.insert("refresh_limit".into(), json!(MAX_PLAN_CANDIDATE_REFRESHES));
+    details.insert("refresh_exhausted".into(), json!(true));
+    error.details = Some(Box::new(Value::Object(details)));
+    error
+}
+
+fn request_with_child_id(mut request: OperationRequest) -> OperationRequest {
+    request.request_id = Uuid::new_v4().to_string();
+    request
 }
 
 fn select_next_eligible_step(steps: &[FinancialPlanStepProgress]) -> Option<String> {
@@ -2775,6 +3222,39 @@ fn validate_aggregate_permission_bounds(
     spec: &financial_plans::FinancialPlanSpec,
     permissions: &[FinancialPlanStepPermission],
 ) -> Result<()> {
+    // Completion targets are required gross spending, unlike optional step
+    // ceilings that may deliberately share a smaller aggregate allowance.
+    // Catch impossible plans with exact arithmetic before asking for approval.
+    let mut required = BTreeMap::<(ResourceId, fin_domain::AssetId), BigUint>::new();
+    for target in spec
+        .steps
+        .iter()
+        .filter_map(|step| step.completion.principal_spend.as_ref())
+    {
+        *required
+            .entry((target.resource.clone(), target.amount.asset.clone()))
+            .or_default() += target.amount.atoms.integer();
+    }
+    for ((resource, asset), amount) in required {
+        let cap = spec
+            .aggregate_bounds
+            .maximum_debits
+            .iter()
+            .find(|cap| cap.resource == resource && cap.amount.asset == asset);
+        if cap.is_none_or(|cap| amount > cap.amount.atoms.integer()) {
+            return Err(plan_error(
+                "PLAN_COMPLETION_OUTSIDE_AGGREGATE",
+                "Required principal-spend targets exceed the plan's cumulative debit cap.",
+                "Reduce the completion targets or review a sufficient aggregate cap before authorization.",
+            )
+            .with_details(json!({
+                "resource": resource,
+                "asset": asset,
+                "required_atoms": amount.to_string(),
+                "maximum_atoms": cap.map(|cap| &cap.amount.atoms),
+            })));
+        }
+    }
     for permission in permissions {
         for item in permission_debits(permission) {
             if !spec
@@ -4190,12 +4670,24 @@ fn collect_amount(
     entry.2 += amount;
 }
 
+#[cfg(test)]
 fn validate_revision_transition(
     prior: Option<&FinancialPlanAuthorizationRecord>,
     next: &financial_plans::FinancialPlanSpec,
     next_permissions: &[FinancialPlanStepPermission],
     usage: &FinancialPlanUsage,
     store: &Store,
+) -> Result<()> {
+    validate_revision_transition_with_completed(prior, next, next_permissions, usage, store, &[])
+}
+
+fn validate_revision_transition_with_completed(
+    prior: Option<&FinancialPlanAuthorizationRecord>,
+    next: &financial_plans::FinancialPlanSpec,
+    next_permissions: &[FinancialPlanStepPermission],
+    usage: &FinancialPlanUsage,
+    store: &Store,
+    completed_steps: &[String],
 ) -> Result<()> {
     let Some(prior) = prior else {
         return Ok(());
@@ -4219,7 +4711,10 @@ fn validate_revision_transition(
             prior
                 .attempts
                 .iter()
-                .any(|attempt| attempt.step_id == step.step_id)
+                .any(|attempt| {
+                    attempt.step_id == step.step_id
+                        && !repairable_zero_effect_attempt(prior, attempt, store)
+                })
                 .then_some(index)
         })
         .collect::<Vec<_>>();
@@ -4234,6 +4729,64 @@ fn validate_revision_transition(
         for index in 0..=last_started {
             let old = &prior.revision.spec.steps[index];
             let new = &next.steps[index];
+            let step_attempts = prior
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.step_id == old.step_id)
+                .collect::<Vec<_>>();
+            if !step_attempts.is_empty()
+                && step_attempts
+                    .iter()
+                    .all(|attempt| repairable_zero_effect_attempt(prior, attempt, store))
+            {
+                if old.step_id != new.step_id
+                    || old.operation != new.operation
+                    || old.completion != new.completion
+                    || old.funding_dependencies != new.funding_dependencies
+                {
+                    return Err(plan_error(
+                        "PLAN_REVISION_HISTORY_CONFLICT",
+                        "A failed zero-effect attempt can change its input or action window while preserving its financial identity and accounting declarations.",
+                        "Keep the step operation, completion conditions, and funding dependencies unchanged.",
+                    ));
+                }
+                continue;
+            }
+            if completed_steps
+                .iter()
+                .any(|step_id| step_id == &old.step_id)
+            {
+                let old_permission = prior
+                    .revision
+                    .permissions
+                    .iter()
+                    .find(|permission| permission.step_id == old.step_id)
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_PERMISSION_MISSING",
+                            "The prior revision has incomplete permission history.",
+                            "Restore the complete prior plan revision before replacing it.",
+                        )
+                    })?;
+                let new_permission = next_permissions
+                    .iter()
+                    .find(|permission| permission.step_id == old.step_id)
+                    .ok_or_else(|| {
+                        plan_error(
+                            "PLAN_PERMISSION_MISSING",
+                            "A completed step has no replacement permission.",
+                            "Keep every completed step unchanged in the replacement revision.",
+                        )
+                    })?;
+                if old != new || old_permission != new_permission {
+                    return Err(plan_error(
+                        "PLAN_REVISION_HISTORY_CONFLICT",
+                        "A revision must preserve the recorded specification and permission for each completed step.",
+                        "Keep completed plan steps unchanged and revise only the remaining suffix.",
+                    ));
+                }
+                continue;
+            }
             if old.step_id != new.step_id
                 || old.operation != new.operation
                 || old.completion != new.completion
@@ -4371,6 +4924,56 @@ fn validate_revision_transition(
         }
     }
     Ok(())
+}
+
+fn completed_plan_step_ids(status: FinancialPlanStatus) -> Vec<String> {
+    status
+        .steps
+        .into_iter()
+        .filter(|step| step.state == FinancialPlanStepProgressState::Completed)
+        .map(|step| step.step_id)
+        .collect()
+}
+
+fn repairable_zero_effect_attempt(
+    prior: &FinancialPlanAuthorizationRecord,
+    attempt: &FinancialPlanAttemptLinkage,
+    store: &Store,
+) -> bool {
+    if attempt.submission_id.is_some() || !matches!(store.submission(&attempt.attempt_id), Ok(None))
+    {
+        return false;
+    }
+    let Some(operation) = store
+        .get_record(&attempt.attempt_id)
+        .ok()
+        .flatten()
+        .and_then(|value| from_value::<OperationRecord>(value).ok())
+    else {
+        return false;
+    };
+    repairable_zero_effect_record(prior, attempt, &operation, false)
+}
+
+fn repairable_zero_effect_record(
+    prior: &FinancialPlanAuthorizationRecord,
+    attempt: &FinancialPlanAttemptLinkage,
+    operation: &OperationRecord,
+    durable_submission_exists: bool,
+) -> bool {
+    !durable_submission_exists
+        && attempt.submission_id.is_none()
+        && matches!(
+            operation.status,
+            Status::Failed | Status::Expired | Status::Cancelled | Status::Rejected
+        )
+        && operation.submission.is_none()
+        && operation.dispatch_evidence.is_none()
+        && operation
+            .effects
+            .as_ref()
+            .is_none_or(|effects| effects.effects.is_empty())
+        && prior.active_attempt_id.as_deref() != Some(attempt.attempt_id.as_str())
 }
 
 fn validate_cumulative_revision_scopes(
@@ -4632,6 +5235,8 @@ mod tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    include!("plan_revision_repair_tests.rs");
+
     fn asset(reference: &str) -> AssetId {
         AssetId {
             network: "synthetic".into(),
@@ -4797,6 +5402,7 @@ mod tests {
             plan: financial_plans::FinancialPlanSpec {
                 version: financial_plans::FINANCIAL_PLAN_VERSION,
                 name: "Generic exact read".into(),
+                summary: None,
                 steps: vec![financial_plans::FinancialPlanStepSpec {
                     action_deadline_seconds: None,
                     step_id: "read-account".into(),
@@ -6309,10 +6915,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn required_completion_spend_must_fit_aggregate_without_summing_optional_caps() {
+        let original = prior_record();
+        for (steps, target, aggregate, succeeds) in [
+            (1, "20", "19", false),
+            (2, "20", "30", false),
+            (2, "20", "40", true),
+            (2, "10", "20", true),
+        ] {
+            let mut spec = original.revision.spec.clone();
+            spec.steps.clear();
+            spec.aggregate_bounds.maximum_debits = vec![resource_amount("acct", "USDT", aggregate)];
+            let mut permissions = Vec::new();
+            for index in 0..steps {
+                let mut step = step_spec();
+                step.step_id = format!("step-{index}");
+                step.completion.principal_spend = Some(resource_amount("acct", "USDT", target));
+                let mut permitted = permission(json!({}), json!({}), "100");
+                permitted.step_id = step.step_id.clone();
+                spec.steps.push(step);
+                permissions.push(permitted);
+            }
+            let result = validate_plan_permissions(&spec, &permissions);
+            if succeeds {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "PLAN_COMPLETION_OUTSIDE_AGGREGATE");
+                assert_eq!(error.details.unwrap()["maximum_atoms"], aggregate);
+            }
+        }
+    }
+
+    #[test]
+    fn required_completion_spend_keeps_exact_resource_and_asset_identities_separate() {
+        let original = prior_record();
+        let mut spec = original.revision.spec.clone();
+        spec.steps.clear();
+        spec.aggregate_bounds.maximum_debits.clear();
+        let mut permissions = Vec::new();
+        for (index, (resource, token)) in [("acct", "USDT"), ("other", "USDT"), ("acct", "ETH")]
+            .into_iter()
+            .enumerate()
+        {
+            let amount = resource_amount(resource, token, "20");
+            let mut step = step_spec();
+            step.step_id = format!("step-{index}");
+            step.completion.principal_spend = Some(amount.clone());
+            let mut permitted = permission(json!({}), json!({}), "100");
+            permitted.step_id = step.step_id.clone();
+            permitted.permission.as_mut().unwrap().spec.maximum_debits = vec![amount.clone()];
+            spec.aggregate_bounds.maximum_debits.push(amount);
+            spec.steps.push(step);
+            permissions.push(permitted);
+        }
+        validate_plan_permissions(&spec, &permissions).unwrap();
+    }
+
     fn prior_record() -> FinancialPlanAuthorizationRecord {
         let spec = financial_plans::FinancialPlanSpec {
             version: 1,
             name: "Plan".into(),
+            summary: None,
             steps: vec![step_spec()],
             aggregate_bounds: financial_plans::FinancialPlanBounds {
                 maximum_debits: vec![resource_amount("acct", "USDT", "30")],
@@ -6358,6 +7023,7 @@ mod tests {
                 execution_binding_hash: "hash".into(),
                 submission_id: None,
                 result: None,
+                logical_request_id: None,
             }],
             active_attempt_id: None,
         }

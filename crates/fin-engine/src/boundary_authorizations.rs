@@ -14,6 +14,7 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             &request.operation,
             "preflight",
@@ -182,6 +183,7 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             &request.operation,
             "preflight",
@@ -361,6 +363,9 @@ impl Engine {
                 .unwrap_or_else(|| "interrupted".into());
             return Err(boundary_request_state_error(&status));
         }
+        fin_domain::execution_progress::emit(
+            fin_domain::execution_progress::Stage::AwaitingApproval,
+        );
         let approval = match self.authorizer.authorize(&challenge).await {
             Ok(approval) => approval,
             Err(error) => {
@@ -615,6 +620,7 @@ impl Engine {
                 "Boundary authorization is available only for financial writes.",
             ));
         }
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut prepared = bounded_evidence(
             operation,
             "preflight",

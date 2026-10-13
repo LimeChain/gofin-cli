@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use fin_domain::{
     Adapter, ConnectionMetadata, Definition, FinError, OperationKind, OperationRecord,
     PreparationContext, PreparedOperation, Reconciliation, ReturnRouteContext, ReturnRouteProof,
-    StateSnapshot, Status, Submission, SubmissionJournal,
+    RevalidatedOperation, StateSnapshot, Status, Submission, SubmissionJournal,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -72,6 +72,18 @@ pub trait ExchangeProfile: Send + Sync {
             "authorization",
             "This exchange profile does not support named financial plan permissions.",
         ))
+    }
+    /// Balance-independent plan admission. Protected read-only fee, permission,
+    /// route and metadata queries are allowed; no mutations, reservations or
+    /// checks requiring future funding. Warn explicitly about deferred checks.
+    async fn validate_plan_feasibility(
+        &self,
+        _operation: &str,
+        _input: &Value,
+    ) -> Result<Vec<String>, FinError> {
+        Ok(vec![
+            "Exchange-specific feasibility checks are deferred until execution.".into(),
+        ])
     }
     fn validate_boundary_candidate(
         &self,
@@ -312,6 +324,16 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
             .prepare_plan_permission(operation, input, bounds)
             .await
     }
+    async fn validate_plan_feasibility(
+        &self,
+        operation: &str,
+        input: &Value,
+    ) -> Result<Vec<String>, FinError> {
+        self.require_kind(operation, OperationKind::Write, "planning")?;
+        self.profile
+            .validate_plan_feasibility(operation, input)
+            .await
+    }
     fn validate_boundary_candidate(
         &self,
         spec: &fin_domain::boundaries::BoundarySpec,
@@ -480,8 +502,22 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
         journal: Arc<dyn SubmissionJournal>,
     ) -> Result<Submission, FinError> {
         let current = self.revalidate(prepared).await?;
-        journal.assert_candidate(&current)?;
-        let plan = self.profile.plan_submission(&current).await?;
+        let validated = RevalidatedOperation::after_revalidation(
+            current,
+            Arc::new(fin_domain::clock::SystemClock),
+        )?;
+        self.submit_revalidated(&validated, journal).await
+    }
+    async fn submit_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        let current = validated.prepared();
+        self.require_kind(&current.operation, OperationKind::Write, "submission")?;
+        validated.assert_fresh()?;
+        journal.assert_candidate(current)?;
+        let plan = self.profile.plan_submission(current).await?;
         if plan.submission.kind != self.profile.submission_kind()
             || plan.submission.reference.is_empty()
         {
@@ -491,6 +527,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
                 "The exchange profile did not produce a durable submission identity.",
             ));
         }
+        validated.assert_fresh()?;
         journal.assert_authorized()?;
         journal.persist_submission(&plan.submission)?;
         // No retries here: any response loss leaves this exact persisted identity
@@ -507,8 +544,23 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
     ) -> Result<Submission, FinError> {
         self.require_configuration(&prepared.operation, "configuration")?;
         let current = self.revalidate_configuration(prepared).await?;
-        journal.assert_candidate(&current)?;
-        let plan = self.profile.plan_submission(&current).await?;
+        let validated = RevalidatedOperation::after_revalidation(
+            current,
+            Arc::new(fin_domain::clock::SystemClock),
+        )?;
+        self.submit_configuration_revalidated(&validated, journal)
+            .await
+    }
+    async fn submit_configuration_revalidated(
+        &self,
+        validated: &RevalidatedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission, FinError> {
+        let current = validated.prepared();
+        self.require_configuration(&current.operation, "configuration")?;
+        validated.assert_fresh()?;
+        journal.assert_candidate(current)?;
+        let plan = self.profile.plan_submission(current).await?;
         if plan.submission.kind != self.profile.submission_kind()
             || plan.submission.reference.is_empty()
         {
@@ -518,6 +570,7 @@ impl<P: ExchangeProfile> Adapter for ExchangeAdapter<P> {
                 "The exchange profile did not produce a durable configuration submission identity.",
             ));
         }
+        validated.assert_fresh()?;
         journal.assert_authorized()?;
         journal.persist_submission(&plan.submission)?;
         let response = self.profile.dispatch(&plan.request, journal).await?;
@@ -787,6 +840,31 @@ mod tests {
         assert_eq!(result.reference, "legacy-request-id");
         assert_eq!(result.data["amount"], "0.000000000000000001");
         assert_eq!(&*journal.persisted.lock().unwrap(), &[result]);
+    }
+    #[tokio::test]
+    async fn revalidated_handoff_refreshes_once_and_preserves_dispatch_gates() {
+        for (reject, fail_persist) in [(false, false), (true, false), (false, true)] {
+            let (adapter, journal) = fixture(false, reject, fail_persist);
+            let fresh = adapter.revalidate(&preview()).await.unwrap();
+            let validated = RevalidatedOperation::after_revalidation(
+                fresh,
+                Arc::new(fin_domain::clock::SystemClock),
+            )
+            .unwrap();
+            let result = adapter
+                .submit_revalidated(&validated, journal.clone())
+                .await;
+            let events = journal.events.lock().unwrap();
+            assert_eq!(events.iter().filter(|e| **e == "prepare").count(), 1);
+            assert_eq!(events.contains(&"dispatch"), !reject && !fail_persist);
+            assert_eq!(result.is_ok(), !reject && !fail_persist);
+            if result.is_ok() {
+                assert!(
+                    events.iter().position(|e| *e == "persist")
+                        < events.iter().position(|e| *e == "dispatch")
+                );
+            }
+        }
     }
     #[tokio::test]
     async fn approval_and_journal_failures_never_dispatch() {

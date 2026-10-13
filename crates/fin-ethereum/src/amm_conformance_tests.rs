@@ -303,7 +303,9 @@ async fn engine_boundary_authorizes_only_the_reviewed_swap_variations_and_revoke
 
     let mut long_deadline = accepted.clone();
     long_deadline["request_id"] = json!("SYNTHETIC-deadline-over-cap");
-    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 601);
+    // Leave ample distance from the ten-minute boundary: crossing a wall-clock
+    // second during preparation must not change which guard this test exercises.
+    long_deadline["deadline"] = json!(chrono::Utc::now().timestamp() as u64 + 1200);
     expect_boundary_rejection(
         &engine,
         &authorization.id,
@@ -359,6 +361,7 @@ async fn engine_plan_authorizes_adapter_reviewed_swap_variations() -> Result<()>
     let plan = FinancialPlanSpec {
         version: 1,
         name: "SYNTHETIC bounded AMM conformance".into(),
+        summary: None,
         steps: vec![FinancialPlanStepSpec {
             action_deadline_seconds: None,
             step_id: "swap".into(),
@@ -546,6 +549,50 @@ async fn uncertain_dispatch_is_deduplicated_across_restart() -> Result<()> {
 }
 
 struct RepublishingPrices(AtomicU64);
+
+#[tokio::test]
+async fn swap_usd_buffer_is_reserved_under_personal_limits_before_approval() -> Result<()> {
+    for (movement, allocation, expected) in [
+        ("3020000", "100000000", "MOVEMENT_LIMIT"),
+        ("100000000", "3020000", "ALLOCATION_LIMIT"),
+    ] {
+        let rpc = Arc::new(Fixture::new());
+        *rpc.allowance.lock().unwrap() = crate::exact("0.01", 18)?;
+        let adapter = Arc::new(adapter(rpc.clone()));
+        let approvals = Arc::new(AtomicUsize::new(0));
+        let engine = Engine::new(
+            Store::in_memory().unwrap(),
+            vec![adapter],
+            Arc::new(CountingApproval(approvals.clone())),
+            EngineOptions {
+                max_movement_and_cost_usd_micros: movement.into(),
+                max_run_allocation_usd_micros: allocation.into(),
+                ..EngineOptions::default()
+            },
+        )?;
+        let result = engine
+            .execute(OperationRequest {
+                request_id: "SYNTHETIC-buffer-policy".into(),
+                operation: "uniswap.swap".into(),
+                input: candidate(),
+                run_id: None,
+            })
+            .await?;
+        assert_eq!(result.status, fin_domain::Status::Failed);
+        assert_eq!(result.error.unwrap().code, expected);
+        assert_eq!(approvals.load(Ordering::SeqCst), 0);
+        assert!(result.submission.is_none());
+        assert!(
+            !rpc.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|method| method == "eth_sendRawTransaction")
+        );
+    }
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl WalletValuation for RepublishingPrices {
     async fn quote_usd(&self, asset: &AssetId, units: Quantity) -> Result<(Quantity, String)> {
@@ -707,6 +754,7 @@ fn relative_swap_request(
         plan: FinancialPlanSpec {
             version: 1,
             name: "Synthetic future swap with long parent".into(),
+            summary: None,
             steps: vec![FinancialPlanStepSpec {
                 step_id: "swap".into(),
                 operation: "uniswap.swap".into(),

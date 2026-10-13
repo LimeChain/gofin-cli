@@ -495,9 +495,20 @@ impl EthereumAdapter {
             "ZERO_ADDRESS",
             "Token identity must be a deployed nonzero address.",
         )?;
-        self.runtime.code_at(a, block).await?;
-        let decimals = self.runtime.call(a, &Erc20::decimalsCall {}, block).await?;
+        let (_, decimals, symbol) = tokio::try_join!(
+            self.runtime.code_at(a, block),
+            self.runtime.call(a, &Erc20::decimalsCall {}, block),
+            self.token_symbol(a, block),
+        )?;
         pow10(decimals)?;
+        Ok(Token {
+            reference: lower_address(a),
+            decimals,
+            symbol,
+        })
+    }
+
+    async fn token_symbol(&self, a: Address, block: Option<u64>) -> Result<String> {
         let symbol = match self.runtime.call(a, &Erc20::symbolCall {}, block).await {
             Ok(s) => s,
             Err(_) => {
@@ -522,11 +533,7 @@ impl EthereumAdapter {
             "TOKEN_METADATA_INVALID",
             "Token symbol is not a valid bounded display label.",
         )?;
-        Ok(Token {
-            reference: lower_address(a),
-            decimals,
-            symbol,
-        })
+        Ok(symbol)
     }
     pub(crate) async fn balance_of(
         &self,
@@ -924,10 +931,25 @@ impl EthereumAdapter {
     ) -> Result<(Quantity, String, String)> {
         self.runtime.assert_chain().await?;
         let token = self.token(reference, None).await?;
+        self.quote_verified_asset_usd_observed(&token.asset(self), units)
+            .await
+    }
+
+    /// Internal preparation already verified this exact asset on this chain.
+    /// Reuse that identity within the phase; prices and timestamps stay fresh.
+    pub(crate) async fn quote_verified_asset_usd_observed(
+        &self,
+        asset: &AssetId,
+        units: Quantity,
+    ) -> Result<(Quantity, String, String)> {
+        require(
+            asset.network == format!("ethereum:{}", self.config.chain_id),
+            "CHAIN_MISMATCH",
+            "Valuation asset belongs to another chain.",
+        )?;
         if let Some(provider) = &self.wallet_valuation {
-            let (value, source, observed_at) = provider
-                .quote_observation(&token.asset(self), units.clone())
-                .await?;
+            let (value, source, observed_at) =
+                provider.quote_observation(asset, units.clone()).await?;
             require(
                 !source.trim().is_empty() && (units.is_zero() || !value.is_zero()),
                 "VALUATION_UNAVAILABLE",
@@ -954,7 +976,7 @@ impl EthereumAdapter {
             "VALUATION_UNAVAILABLE",
             "No trusted wallet valuation provider is configured on this network.",
         )?;
-        let (value, source) = self.quote_protocol_usd(reference, units).await?;
+        let (value, source) = self.quote_protocol_usd(&asset.reference, units).await?;
         Ok((value, source, self.clock.now().to_rfc3339()))
     }
     // Aave collateral/debt risk uses the protocol's own oracle. The same helper
@@ -1144,8 +1166,7 @@ impl EthereumAdapter {
             "V4_POOL_UNEXPECTED",
             "V3 venues do not accept a v4 pool key.",
         )?;
-        let ti = self.token(input, block).await?;
-        let to = self.token(output, block).await?;
+        let (ti, to) = tokio::try_join!(self.token(input, block), self.token(output, block))?;
         require(
             ti.reference != to.reference,
             "SWAP_ASSET_INVALID",
@@ -1190,12 +1211,10 @@ impl EthereumAdapter {
             "SWAP_ASSET_INVALID",
             "The v3 route resolves to the same pool currency.",
         )?;
-        self.runtime
-            .code_at(address(profile.factory)?, block)
-            .await?;
-        self.runtime
-            .code_at(address(profile.quoter)?, block)
-            .await?;
+        tokio::try_join!(
+            self.runtime.code_at(address(profile.factory)?, block),
+            self.runtime.code_at(address(profile.quoter)?, block),
+        )?;
         if profile.factory_lookup == super::uniswap::profile::FactoryLookup::TickSpacingI24 {
             let expected_deployer = profile.pool_deployer.expect("Ramses deployer");
             self.runtime
@@ -1303,26 +1322,14 @@ impl EthereumAdapter {
             }
             self.runtime.code_at(pool, block).await?;
             let (pool_token0, pool_token1, slot, actual_fee) = if profile.dex_id == "ramses" {
-                let token0 = self
-                    .runtime
-                    .call(pool, &RamsesPool::token0Call {}, block)
-                    .await?;
-                let token1 = self
-                    .runtime
-                    .call(pool, &RamsesPool::token1Call {}, block)
-                    .await?;
-                let slot = self
-                    .runtime
-                    .call(pool, &RamsesPool::slot0Call {}, block)
-                    .await?;
-                let dynamic_fee = self
-                    .runtime
-                    .call(pool, &RamsesPool::feeCall {}, block)
-                    .await?;
-                let observed_spacing = self
-                    .runtime
-                    .call(pool, &RamsesPool::tickSpacingCall {}, block)
-                    .await?;
+                let (token0, token1, slot, dynamic_fee, observed_spacing) = tokio::try_join!(
+                    self.runtime.call(pool, &RamsesPool::token0Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::token1Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::slot0Call {}, block),
+                    self.runtime.call(pool, &RamsesPool::feeCall {}, block),
+                    self.runtime
+                        .call(pool, &RamsesPool::tickSpacingCall {}, block),
+                )?;
                 require(
                     observed_spacing
                         == fin_evm::alloy::primitives::aliases::I24::try_from(i64::from(fee))
@@ -1332,28 +1339,26 @@ impl EthereumAdapter {
                 )?;
                 (token0, token1, slot.sqrtPriceX96, dynamic_fee.to::<u32>())
             } else {
-                let token0 = self
-                    .runtime
-                    .call(pool, &UniswapPool::token0Call {}, block)
-                    .await?;
-                let token1 = self
-                    .runtime
-                    .call(pool, &UniswapPool::token1Call {}, block)
-                    .await?;
-                let sqrt_price = match profile.pool_abi {
-                    V3PoolAbi::UniswapV3 => {
-                        self.runtime
-                            .call(pool, &UniswapPool::slot0Call {}, block)
-                            .await?
-                            .sqrtPriceX96
-                    }
-                    V3PoolAbi::PancakeV3 => {
-                        self.runtime
-                            .call(pool, &PancakePool::slot0Call {}, block)
-                            .await?
-                            .sqrtPriceX96
-                    }
-                };
+                let (token0, token1, sqrt_price) = tokio::try_join!(
+                    self.runtime.call(pool, &UniswapPool::token0Call {}, block),
+                    self.runtime.call(pool, &UniswapPool::token1Call {}, block),
+                    async {
+                        Ok::<_, FinError>(match profile.pool_abi {
+                            V3PoolAbi::UniswapV3 => {
+                                self.runtime
+                                    .call(pool, &UniswapPool::slot0Call {}, block)
+                                    .await?
+                                    .sqrtPriceX96
+                            }
+                            V3PoolAbi::PancakeV3 => {
+                                self.runtime
+                                    .call(pool, &PancakePool::slot0Call {}, block)
+                                    .await?
+                                    .sqrtPriceX96
+                            }
+                        })
+                    },
+                )?;
                 if super::uniswap::profile::additional_dex(profile.dex_id).is_some() {
                     let factory = self
                         .runtime
@@ -1492,8 +1497,7 @@ impl EthereumAdapter {
         key: &super::V4PoolKey,
         block: Option<u64>,
     ) -> Result<SwapQuote> {
-        let ti = self.token(input, block).await?;
-        let to = self.token(output, block).await?;
+        let (ti, to) = tokio::try_join!(self.token(input, block), self.token(output, block))?;
         require(
             ti.reference != to.reference,
             "SWAP_ASSET_INVALID",

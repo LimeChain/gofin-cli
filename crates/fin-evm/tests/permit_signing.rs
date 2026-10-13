@@ -272,6 +272,96 @@ impl EvmRpc for MaterializeRpc {
     }
 }
 
+struct CountingMaterializeRpc {
+    calls: Mutex<Vec<String>>,
+    fail_simulation: bool,
+}
+#[async_trait]
+impl EvmRpc for CountingMaterializeRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.calls.lock().unwrap().push(method.into());
+        if method == "eth_call" && self.fail_simulation {
+            return Err(FinError::validation(
+                "Synthetic materialized simulation failed.",
+            ));
+        }
+        if method == "eth_sendRawTransaction" {
+            let bytes = rpc_bytes(&params[0])?;
+            return Ok(json!(format!("{:#x}", alloy::primitives::keccak256(bytes))));
+        }
+        MaterializeRpc.request(method, params).await
+    }
+}
+
+#[tokio::test]
+async fn revalidated_permit_submission_simulates_signed_calldata_once_and_blocks_failed_simulation()
+{
+    for fail_simulation in [false, true] {
+        let signer = Arc::new(ForwardingSigner {
+            inner: LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY).unwrap(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner = signer.inner.address();
+        let rpc = Arc::new(CountingMaterializeRpc {
+            calls: Mutex::new(vec![]),
+            fail_simulation,
+        });
+        let runtime = EvmRuntime::new(rpc.clone(), 1, Some(signer.clone()));
+        let mut calldata = vec![0x12, 0x34, 0x56, 0x78];
+        calldata.extend_from_slice(&[0; 65]);
+        let template = runtime
+            .prepare_permit_template(
+                unsigned_permit_tx(owner, Bytes::from(calldata)),
+                4,
+                AuthorizedPermit::Eip2612(eip_permit(lower_address(owner))),
+            )
+            .await
+            .unwrap();
+        let candidate = fin_domain::PreparedOperation {
+            operation: "synthetic.permit.swap".into(),
+            input: json!({}),
+            binding: json!({"transaction":template.transaction(), "permit_template":template}),
+            summary: "Isolated synthetic permit".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: fin_domain::now(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            valuation: None,
+            intent: fin_domain::FinancialIntent::default(),
+            operation_version: 1,
+            action_deadline: None,
+        };
+        let validated = fin_domain::RevalidatedOperation::after_revalidation(
+            candidate,
+            Arc::new(fin_domain::clock::SystemClock),
+        )
+        .unwrap();
+        let journal = journal(true);
+        let result = runtime
+            .submit_permit_template_revalidated(&template, json!({}), journal.clone(), &validated)
+            .await;
+        assert_eq!(result.is_ok(), !fail_simulation);
+        let calls = rpc.calls.lock().unwrap();
+        assert_eq!(calls.iter().filter(|m| *m == "eth_call").count(), 1);
+        assert_eq!(
+            calls.iter().filter(|m| *m == "eth_estimateGas").count(),
+            usize::from(!fail_simulation)
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|m| *m == "eth_sendRawTransaction")
+                .count(),
+            usize::from(!fail_simulation)
+        );
+        assert_eq!(signer.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            journal.writes.lock().unwrap().len(),
+            usize::from(!fail_simulation)
+        );
+    }
+}
+
 #[tokio::test]
 async fn serialized_template_materializes_once_into_a_revalidated_concrete_call() {
     let owner = LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY).unwrap();

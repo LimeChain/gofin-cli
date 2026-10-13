@@ -51,6 +51,54 @@ mod projected_provenance;
 mod projected_shares;
 use financial_plans::{permission_for_step, plan_error, validate_candidate_plan_caps};
 
+/// In-process evidence age, never restored from a persisted preview. Both clocks
+/// are checked so clock rollback cannot extend a candidate's reuse window.
+struct PreparationStamp {
+    started: tokio::time::Instant,
+    observed_at: DateTime<Utc>,
+}
+impl PreparationStamp {
+    fn start(observed_at: DateTime<Utc>) -> Self {
+        Self {
+            started: tokio::time::Instant::now(),
+            observed_at,
+        }
+    }
+    fn permits(
+        &self,
+        window: std::time::Duration,
+        now: DateTime<Utc>,
+        prepared: &PreparedOperation,
+    ) -> bool {
+        let age = now.signed_duration_since(self.observed_at);
+        self.started.elapsed() < window
+            && age.to_std().is_ok_and(|age| age < window)
+            && observed_within_reuse_window(&prepared.observed_at, now, window)
+            && prepared.valuation.as_ref().is_none_or(|valuation| {
+                observed_within_reuse_window(&valuation.observed_at, now, window)
+                    && valuation
+                        .prices
+                        .iter()
+                        .all(|price| observed_within_reuse_window(&price.observed_at, now, window))
+            })
+    }
+}
+
+fn observed_within_reuse_window(
+    observed_at: &str,
+    now: DateTime<Utc>,
+    window: std::time::Duration,
+) -> bool {
+    let Ok(observed_at) = DateTime::parse_from_rfc3339(observed_at) else {
+        return false;
+    };
+    let Ok(window) = chrono::Duration::from_std(window) else {
+        return false;
+    };
+    let age = now.signed_duration_since(observed_at.with_timezone(&Utc));
+    age >= chrono::Duration::zero() && age < window
+}
+
 const DEFAULT_LIMIT_MICROS: u64 = fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS;
 fn legacy_movement_limit() -> String {
     fin_domain::policy::DEFAULT_POLICY_LIMIT_USD_MICROS.to_string()
@@ -493,6 +541,7 @@ impl Engine {
             ));
         }
         let context = self.preparation_context(run_id)?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Preparing);
         let mut preview = bounded_evidence(
             operation,
             "preflight",
@@ -600,6 +649,16 @@ impl Engine {
                 )
             })?;
             for asset in required_assets {
+                if let Some(existing) = valuation.prices.iter().find(|price| price.asset == *asset)
+                    && validate_price_rows(
+                        std::slice::from_ref(existing),
+                        &BTreeSet::from([asset.clone()]),
+                        self.clock.now(),
+                    )
+                    .is_ok()
+                {
+                    continue;
+                }
                 let price = bounded_evidence(
                     &prepared.operation,
                     "pricing",
@@ -1505,7 +1564,7 @@ impl Engine {
         record: &mut OperationRecord,
         boundary: Option<BoundaryAuthorizationRecord>,
         plan: Option<FinancialPlanAuthorizationRecord>,
-        preprepared: Option<PreparedOperation>,
+        preprepared: Option<(PreparedOperation, PreparationStamp)>,
         route: ExecutionRoute,
     ) -> Result<OperationRecord> {
         let definition = adapter
@@ -1527,10 +1586,17 @@ impl Engine {
                 == Some(1)
         });
         let context = self.preparation_context(request.run_id.as_deref())?;
+        let (preprepared, preparation_stamp) = match preprepared {
+            Some((prepared, stamp)) => (Some(prepared), stamp),
+            None => (None, PreparationStamp::start(self.clock.now())),
+        };
         let mut prepared = match preprepared {
             Some(prepared) => prepared,
             None => match &route {
                 ExecutionRoute::Financial => {
+                    fin_domain::execution_progress::emit(
+                        fin_domain::execution_progress::Stage::Preparing,
+                    );
                     bounded_evidence(
                         &request.operation,
                         "preflight",
@@ -1721,6 +1787,9 @@ impl Engine {
                 nonce: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
                 expires_at: challenge_expiry.to_rfc3339(),
             };
+            fin_domain::execution_progress::emit(
+                fin_domain::execution_progress::Stage::AwaitingApproval,
+            );
             let audit = match &route {
                 ExecutionRoute::Financial => self.authorizer.authorize(&challenge).await?,
                 ExecutionRoute::Configuration(authorizer) => {
@@ -1735,23 +1804,37 @@ impl Engine {
         self.update_record(record)?;
 
         let adapter_candidate = strip_plan_metadata(&prepared);
-        let mut refreshed = bounded_evidence(
-            &request.operation,
-            "revalidation",
-            PREFLIGHT_TIMEOUT,
-            async {
-                match &route {
-                    ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
-                    ExecutionRoute::Configuration(_) => {
-                        adapter.revalidate_configuration(&adapter_candidate).await
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Revalidating);
+        let reuse_preparation = matches!(&route, ExecutionRoute::Financial)
+            && adapter
+                .preparation_reuse_window(&adapter_candidate)
+                .is_some_and(|window| {
+                    preparation_stamp.permits(window, self.clock.now(), &adapter_candidate)
+                })
+            && validate_prepared(&adapter_candidate, &request.operation, self.clock.now()).is_ok();
+        let mut refreshed = if reuse_preparation {
+            adapter_candidate.clone()
+        } else {
+            bounded_evidence(
+                &request.operation,
+                "revalidation",
+                PREFLIGHT_TIMEOUT,
+                async {
+                    match &route {
+                        ExecutionRoute::Financial => adapter.revalidate(&adapter_candidate).await,
+                        ExecutionRoute::Configuration(_) => {
+                            adapter.revalidate_configuration(&adapter_candidate).await
+                        }
                     }
-                }
-            },
-        )
-        .await?;
+                },
+            )
+            .await?
+        };
         financial_plans::carry_action_deadline(&prepared, &mut refreshed)?;
-        self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
-            .await?;
+        if !reuse_preparation {
+            self.complete_cost_origin_prices(&mut refreshed, &required_cost_origins)
+                .await?;
+        }
         validate_prepared(&refreshed, &request.operation, self.clock.now())?;
         if let Some(boundary) = &boundary {
             let marker = refreshed
@@ -1971,15 +2054,20 @@ impl Engine {
             record: Mutex::new(record.clone()),
         });
         let adapter_submission_candidate = strip_plan_metadata(&refreshed);
+        let validated = fin_domain::RevalidatedOperation::after_revalidation(
+            adapter_submission_candidate,
+            self.clock.clone(),
+        )?;
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Submitting);
         let submission = match &route {
             ExecutionRoute::Financial => {
                 adapter
-                    .submit(&adapter_submission_candidate, journal.clone())
+                    .submit_revalidated(&validated, journal.clone())
                     .await
             }
             ExecutionRoute::Configuration(_) => {
                 adapter
-                    .submit_configuration(&adapter_submission_candidate, journal.clone())
+                    .submit_configuration_revalidated(&validated, journal.clone())
                     .await
             }
         };
@@ -2022,7 +2110,9 @@ impl Engine {
                 Status::Submitted | Status::Pending | Status::Unknown
             )
         {
-            let _guard = self.write_queue.lock().await;
+            let Ok(_guard) = self.write_queue.try_lock() else {
+                return Ok(record);
+            };
             self.reconcile_serial(id.to_owned()).await
         } else {
             Ok(record)
@@ -2127,14 +2217,30 @@ impl Engine {
                 adapter_record.input = execution_input;
             }
         }
-        let reconciliation = match if definition.kind == OperationKind::Configuration
-            && definition.execution_actor == ExecutionActor::HumanInteractive
-        {
-            adapter.reconcile_configuration(&adapter_record).await
-        } else {
-            adapter.reconcile(&adapter_record).await
-        } {
-            Ok(reconciliation) => reconciliation,
+        fin_domain::execution_progress::emit(fin_domain::execution_progress::Stage::Verifying);
+        let outcome = bounded_evidence(
+            &record.operation,
+            "reconciliation",
+            EXTERNAL_READ_TIMEOUT,
+            async {
+                let reconciliation = if definition.kind == OperationKind::Configuration
+                    && definition.execution_actor == ExecutionActor::HumanInteractive
+                {
+                    adapter.reconcile_configuration(&adapter_record).await
+                } else {
+                    adapter.reconcile(&adapter_record).await
+                }?;
+                let baselines = if reconciliation.status == Status::Completed {
+                    adapter.verified_position_baselines(&adapter_record).await?
+                } else {
+                    vec![]
+                };
+                Ok((reconciliation, baselines))
+            },
+        )
+        .await;
+        let (reconciliation, baselines) = match outcome {
+            Ok(evidence) => evidence,
             Err(error) => {
                 let mut retained = record;
                 if retained.error.is_none() || retained.submission.is_none() {
@@ -2144,11 +2250,6 @@ impl Engine {
                 self.update_record(&retained)?;
                 return Ok(retained);
             }
-        };
-        let baselines = if reconciliation.status == Status::Completed {
-            adapter.verified_position_baselines(&adapter_record).await?
-        } else {
-            vec![]
         };
         match self.apply_reconciliation_with_baselines(
             record.clone(),
@@ -4350,6 +4451,19 @@ struct OperationSubmissionJournal {
 
 impl SubmissionJournal for OperationSubmissionJournal {
     fn assert_authorized(&self) -> Result<()> {
+        // Local freshness checks also cover time spent waiting for an adapter's
+        // transport queue or signer after the single final revalidation.
+        {
+            let record = self
+                .record
+                .lock()
+                .map_err(|_| internal("journal record lock poisoned"))?;
+            let prepared = record
+                .preview
+                .as_ref()
+                .ok_or_else(|| internal("submission preview missing"))?;
+            validate_prepared(prepared, &record.operation, self.clock.now())?;
+        }
         ensure_audit_binding(&self.approval, &self.expected_binding_hash)?;
         if let (Some(id), Some(snapshot)) = (&self.financial_plan_id, &self.financial_plan_snapshot)
         {
@@ -11186,12 +11300,15 @@ fn validate_price_observation(
     if fin_domain::price_freshness::is_fresh(value, source, instant) {
         Ok(())
     } else {
-        Err(FinError::new(
+        let mut error = FinError::new(
             code,
             "valuation",
             "Price evidence has expired or contains invalid leg timestamps.",
             "Obtain fresh prices for the specific expired leg.",
-        ))
+        );
+        error.details =
+            fin_domain::price_freshness::failure_details(value, source, instant).map(Box::new);
+        Err(error)
     }
 }
 
@@ -11968,6 +12085,10 @@ mod configuration_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
+    mod evidence_reuse;
+    mod final_validation;
+    mod plan_recovery;
+
     use super::*;
     use async_trait::async_trait;
     use fin_domain::{
@@ -14288,6 +14409,72 @@ mod tests {
         assert_eq!(adapter.inner.submissions.load(Ordering::SeqCst), 0);
         assert_eq!(authorizer.challenges.lock().unwrap().len(), 1);
     }
+    #[tokio::test]
+    async fn execution_stages_follow_real_approval_and_stop_on_cancellation() {
+        use fin_domain::execution_progress::{self, Stage};
+        struct CancelApproval;
+        #[async_trait]
+        impl Authorizer for CancelApproval {
+            async fn authorize(&self, _: &AuthorizationChallenge) -> Result<ApprovalAudit> {
+                Err(FinError::new(
+                    "AUTHORIZATION_CANCELLED",
+                    "approval",
+                    "Cancelled",
+                    "Review before retrying.",
+                ))
+            }
+        }
+        for cancelled in [false, true] {
+            let adapter = Arc::new(SyntheticAdapter::new());
+            let authorizer: Arc<dyn Authorizer> = if cancelled {
+                Arc::new(CancelApproval)
+            } else {
+                Arc::new(SyntheticAuthorizer)
+            };
+            let engine = Engine::new(
+                Store::in_memory().unwrap(),
+                vec![adapter.clone()],
+                authorizer,
+                EngineOptions::default(),
+            )
+            .unwrap();
+            let (tx, mut rx) = execution_progress::channel();
+            let record = execution_progress::observe(
+                tx,
+                engine.execute(OperationRequest {
+                    request_id: "synthetic-progress".into(),
+                    operation: "synthetic.transfer".into(),
+                    input: json!({"amount":"1"}),
+                    run_id: None,
+                }),
+            )
+            .await
+            .unwrap();
+            let mut stages = vec![];
+            while let Some(stage) = rx.recv().await {
+                stages.push(stage);
+            }
+            if cancelled {
+                assert_eq!(stages, vec![Stage::Preparing, Stage::AwaitingApproval]);
+                assert!(record.submission.is_none());
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(
+                    stages,
+                    vec![
+                        Stage::Preparing,
+                        Stage::AwaitingApproval,
+                        Stage::Revalidating,
+                        Stage::Submitting,
+                        Stage::Verifying
+                    ]
+                );
+                assert_eq!(record.status, Status::Pending);
+                assert_eq!(adapter.submissions.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
     fn synthetic_engine(path: &std::path::Path, adapter: Arc<dyn Adapter>) -> Engine {
         Engine::new(
             Store::open(path).unwrap(),
@@ -15184,6 +15371,19 @@ mod tests {
             .unwrap();
         assert_eq!(restored.origin, origin);
         assert_eq!(restored.atoms, "99500000");
+    }
+
+    #[test]
+    fn expired_price_error_reports_original_evidence_age() {
+        let at = Utc::now();
+        let observed = (at - chrono::Duration::seconds(121)).to_rfc3339();
+        let error =
+            validate_price_observation(&observed, "synthetic", at, "STALE_VALUATION").unwrap_err();
+        assert_eq!(error.code, "STALE_VALUATION");
+        let details = error.details.unwrap();
+        assert_eq!(details["observed_at"], observed);
+        assert_eq!(details["evidence"][0]["age_ms"], 121000);
+        assert_eq!(details["evidence"][0]["maximum_age_ms"], 120000);
     }
 
     #[tokio::test]

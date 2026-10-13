@@ -56,16 +56,52 @@ fn usd(value: &Quantity) -> String {
 }
 
 pub fn bind(prepared: &mut PreparedOperation) {
+    bind_with_margin(prepared, None);
+}
+
+/// Reserve a finite 1% USD price buffer before approval/attempt binding.
+/// This changes accounting ceilings, never asset amounts, fee units or prices.
+/// Existing bound records retain their original ceilings through `carry_at`.
+pub fn bind_with_price_buffer(prepared: &mut PreparedOperation) -> Result<()> {
+    let Some(value) = prepared.valuation.as_ref() else {
+        return Ok(());
+    };
+    let ceiling = |amount: &Quantity| {
+        // Round upward once, to a full cent. Reject unrepresentable ceilings
+        // before mutating the candidate; zero receives no extra allowance.
+        let cent = BigUint::from(10_000u32);
+        let divisor = &cent * 100u32;
+        let rounded = ((amount.integer() * 101u32 + &divisor - 1u32) / divisor) * cent;
+        Quantity::new(rounded.to_string())
+    };
+    let ceilings = [
+        ceiling(&value.movement_usd_micros)?,
+        ceiling(&value.maximum_fee_usd_micros)?,
+        ceiling(&value.additional_allocation_usd_micros)?,
+    ];
+    bind_with_margin(prepared, Some(ceilings));
+    Ok(())
+}
+
+fn bind_with_margin(prepared: &mut PreparedOperation, buffered: Option<[Quantity; 3]>) {
     let (Some(value), Some(binding)) = (
         prepared.valuation.as_mut(),
         prepared.binding.as_object_mut(),
     ) else {
         return;
     };
+    let price_buffer = buffered.is_some();
+    let [movement, fee, allocation] = buffered.unwrap_or_else(|| {
+        [
+            cents_up(&value.movement_usd_micros),
+            cents_up(&value.maximum_fee_usd_micros),
+            cents_up(&value.additional_allocation_usd_micros),
+        ]
+    });
     let bounds = Ceiling {
-        movement_usd_micros: cents_up(&value.movement_usd_micros),
-        maximum_fee_usd_micros: cents_up(&value.maximum_fee_usd_micros),
-        additional_allocation_usd_micros: cents_up(&value.additional_allocation_usd_micros),
+        movement_usd_micros: movement,
+        maximum_fee_usd_micros: fee,
+        additional_allocation_usd_micros: allocation,
         prices: value
             .prices
             .iter()
@@ -81,6 +117,9 @@ pub fn bind(prepared: &mut PreparedOperation) {
         usd(&bounds.movement_usd_micros),
         usd(&bounds.maximum_fee_usd_micros)
     ));
+    if price_buffer {
+        prepared.summary.push_str(" USD ceilings include a 1% pricing buffer, rounded up to cents; asset and network-fee limits are unchanged.");
+    }
     value.movement_usd_micros = bounds.movement_usd_micros.clone();
     value.maximum_fee_usd_micros = bounds.maximum_fee_usd_micros.clone();
     value.additional_allocation_usd_micros = bounds.additional_allocation_usd_micros.clone();
@@ -110,12 +149,31 @@ fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -
     };
     let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
     let value = prepared.valuation.as_ref().ok_or_else(invalid)?;
-    if value.movement_usd_micros.integer() > bounds.movement_usd_micros.integer()
-        || value.maximum_fee_usd_micros.integer() > bounds.maximum_fee_usd_micros.integer()
-        || value.additional_allocation_usd_micros.integer()
-            > bounds.additional_allocation_usd_micros.integer()
-        || bounds.prices.is_empty()
-    {
+    for (field, actual, maximum) in [
+        (
+            "movement_usd_micros",
+            &value.movement_usd_micros,
+            &bounds.movement_usd_micros,
+        ),
+        (
+            "maximum_fee_usd_micros",
+            &value.maximum_fee_usd_micros,
+            &bounds.maximum_fee_usd_micros,
+        ),
+        (
+            "additional_allocation_usd_micros",
+            &value.additional_allocation_usd_micros,
+            &bounds.additional_allocation_usd_micros,
+        ),
+    ] {
+        if actual.integer() > maximum.integer() {
+            return Err(invalid().with_details(serde_json::json!({
+                "reason":"usd_ceiling_exceeded", "field":field,
+                "observed_usd_micros":actual, "maximum_usd_micros":maximum
+            })));
+        }
+    }
+    if bounds.prices.is_empty() {
         return Err(invalid());
     }
     for expected in &bounds.prices {
@@ -141,16 +199,25 @@ fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -
         }
     }
     for price in value.prices.iter().filter(|_| fresh) {
-        if !crate::price_freshness::is_fresh(&price.observed_at, &price.source, at)
-            || price.source.is_empty()
-            || (price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_estimate(price))
-        {
+        let failure =
+            crate::price_freshness::failure_details(&price.observed_at, &price.source, at);
+        let invalid_price =
+            price.usd_micros_per_unit.is_zero() && !crate::unpriced::is_estimate(price);
+        if failure.is_some() || price.source.is_empty() || invalid_price {
+            let mut details = failure.unwrap_or_else(|| serde_json::json!({
+                "reason": if price.source.is_empty() { "missing_price_source" } else { "zero_price" },
+                "observed_at": price.observed_at,
+                "checked_at": at.to_rfc3339(),
+            }));
+            details["asset"] = serde_json::json!(price.asset);
+            details["source"] = serde_json::json!(price.source);
             return Err(FinError::new(
                 "STALE_VALUATION",
                 "valuation",
                 "USD pricing evidence is invalid or expired.",
                 "Obtain fresh pricing and a new preview before approval.",
-            ));
+            )
+            .with_details(details));
         }
     }
     Ok(())
@@ -230,6 +297,83 @@ mod tests {
     }
 
     #[test]
+    fn buffered_ceilings_reserve_drift_without_changing_quantities_prices_or_legacy_caps() {
+        let mut approved = fixture("25329948");
+        let original = approved.clone();
+        bind_with_price_buffer(&mut approved).unwrap();
+        assert_eq!(approved.binding[KEY]["movement_usd_micros"], "25590000");
+        assert_eq!(
+            approved
+                .valuation
+                .as_ref()
+                .unwrap()
+                .movement_usd_micros
+                .as_str(),
+            "25590000"
+        );
+        assert_eq!(approved.intent, original.intent);
+        assert_eq!(approved.input, original.input);
+        assert_eq!(
+            approved.valuation.as_ref().unwrap().prices,
+            original.valuation.as_ref().unwrap().prices
+        );
+        assert!(approved.summary.contains("1% pricing buffer"));
+        let hash = binding_hash(&authorization_binding(&approved)).unwrap();
+        for current in ["25330001", "25583248", "25590000"] {
+            let mut refreshed = fixture(current);
+            carry(&approved, &mut refreshed).unwrap();
+            assert_eq!(
+                binding_hash(&authorization_binding(&refreshed)).unwrap(),
+                hash
+            );
+            assert_eq!(
+                refreshed
+                    .valuation
+                    .as_ref()
+                    .unwrap()
+                    .movement_usd_micros
+                    .as_str(),
+                "25590000"
+            );
+            assert_eq!(
+                refreshed.valuation.as_ref().unwrap().prices[0]
+                    .usd_micros_per_unit
+                    .as_str(),
+                current
+            );
+        }
+        let error = carry(&approved, &mut fixture("25590001")).unwrap_err();
+        assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
+        assert_eq!(error.details.unwrap()["field"], "movement_usd_micros");
+        for invalid in ["stale", "identity"] {
+            let mut refreshed = fixture("25330001");
+            let price = &mut refreshed.valuation.as_mut().unwrap().prices[0];
+            if invalid == "stale" {
+                price.observed_at = "2000-01-01T00:00:00Z".into();
+            } else {
+                price.asset.reference = "SYNTHETIC-OTHER".into();
+            }
+            assert!(carry(&approved, &mut refreshed).is_err(), "{invalid}");
+        }
+        let mut legacy = fixture("25329948");
+        bind(&mut legacy);
+        assert_eq!(legacy.binding[KEY]["movement_usd_micros"], "25330000");
+        assert!(carry(&legacy, &mut fixture("25330001")).is_err());
+        let mut zero = fixture("0");
+        bind_with_price_buffer(&mut zero).unwrap();
+        assert_eq!(zero.binding[KEY]["movement_usd_micros"], "0");
+        assert_eq!(zero.binding[KEY]["additional_allocation_usd_micros"], "0");
+    }
+
+    #[test]
+    fn unrepresentable_buffer_rejects_without_mutating_candidate() {
+        let mut prepared = fixture(&"9".repeat(256));
+        let before = serde_json::to_value(&prepared).unwrap();
+        assert!(bind_with_price_buffer(&mut prepared).is_err());
+        assert_eq!(serde_json::to_value(&prepared).unwrap(), before);
+    }
+
+    #[test]
     fn refreshed_evidence_within_explicit_ceiling_keeps_binding_and_reservation() {
         let mut approved = fixture("1000001");
         bind(&mut approved);
@@ -278,6 +422,34 @@ mod tests {
         assert_ne!(
             hash,
             binding_hash(&authorization_binding(&refreshed)).unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_valuation_identifies_the_expired_asset_in_multi_asset_evidence() {
+        let now = DateTime::parse_from_rfc3339("2026-01-01T00:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut prepared = fixture("1000000");
+        let prices = &mut prepared.valuation.as_mut().unwrap().prices;
+        prices[0].observed_at = now.to_rfc3339();
+        let mut stale = prices[0].clone();
+        stale.asset.reference = "native".into();
+        stale.observed_at = (now - Duration::seconds(121)).to_rfc3339();
+        let stale_asset = stale.asset.clone();
+        prices.push(stale);
+        bind(&mut prepared);
+        let error = validate_at(&prepared, now).unwrap_err();
+        assert_eq!(error.code, "STALE_VALUATION");
+        let details = error.details.unwrap();
+        assert_eq!(details["asset"], json!(stale_asset));
+        assert_eq!(details["checked_at"], now.to_rfc3339());
+        assert_eq!(details["evidence"][0]["age_ms"], 121_000);
+        assert_eq!(details["evidence"][0]["maximum_age_ms"], 120_000);
+        assert_eq!(
+            prepared.valuation.as_ref().unwrap().prices[1].observed_at,
+            (now - Duration::seconds(121)).to_rfc3339(),
+            "diagnostics must not restamp evidence"
         );
     }
 

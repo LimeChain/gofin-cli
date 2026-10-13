@@ -1794,9 +1794,10 @@ impl Store {
                     record["error"] = json!({
                         "code": "INTERRUPTED_APPROVAL",
                         "stage": "approval",
-                        "message": "Approval was interrupted before submission.",
-                        "next_action": "Inspect this operation; any new write requires fresh approval."
+                        "message": "The operation was interrupted before submission. Nothing was submitted.",
+                        "next_action": "Use a new request ID for a deliberate retry. An active named plan can cover an in-scope retry without fresh Touch ID; standalone writes require fresh approval."
                     });
+                    release_unsubmitted_bridge_claim_tx(&tx, &id, &record)?;
                     tx.execute(
                         "UPDATE operations SET status='cancelled', record_json=?1 WHERE id=?2",
                         params![record.to_string(), id],
@@ -1842,11 +1843,6 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         commit_settlement_tx(&tx, settlement, timestamp)?;
-        release_unsubmitted_bridge_claim_tx(
-            &tx,
-            &settlement.operation_id,
-            &settlement.terminal_record,
-        )?;
         tx.commit()?;
         Ok(())
     }
@@ -2086,11 +2082,6 @@ impl Store {
             return Err(StoreError::ConcurrentReservation);
         }
         commit_settlement_tx(&tx, settlement, timestamp)?;
-        release_unsubmitted_bridge_claim_tx(
-            &tx,
-            &settlement.operation_id,
-            &settlement.terminal_record,
-        )?;
         tx.execute(
             "UPDATE boundary_authorizations SET record_json=?1, updated_at=?2 WHERE id=?3",
             params![
@@ -5879,6 +5870,7 @@ fn commit_settlement_tx(
         "DELETE FROM reservations WHERE operation_id=?1",
         [&settlement.operation_id],
     )?;
+    release_unsubmitted_bridge_claim_tx(tx, &settlement.operation_id, &settlement.terminal_record)?;
     if let (Some(run_id), Some(run)) = (&settlement.run_id, &settlement.run_record) {
         let run_status = json_string(run, "status").unwrap_or("active");
         tx.execute(
@@ -8572,6 +8564,12 @@ mod tests {
         );
         assert_eq!(store.reservation_count("pre").unwrap(), 0);
         assert_eq!(store.reservation_count("sent").unwrap(), 1);
+        assert!(
+            store.get_record("pre").unwrap().unwrap()["error"]["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("without fresh Touch ID")
+        );
         assert_eq!(
             store.submission("sent").unwrap().unwrap().reference,
             "0xsynthetic-original"

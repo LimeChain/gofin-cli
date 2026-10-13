@@ -98,6 +98,134 @@ struct Rpc {
     balance: U256,
     simulation_failure: bool,
 }
+
+struct CountedRpc {
+    inner: Rpc,
+    calls: Mutex<Vec<String>>,
+}
+#[async_trait]
+impl EvmRpc for CountedRpc {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.calls.lock().unwrap().push(method.into());
+        self.inner.request(method, params).await
+    }
+}
+fn validated_transaction(tx: &FrozenTransaction) -> fin_domain::RevalidatedOperation {
+    fin_domain::RevalidatedOperation::after_revalidation(
+        fin_domain::PreparedOperation {
+            operation: "synthetic.transfer".into(),
+            input: json!({}),
+            binding: json!({"transaction":tx}),
+            summary: "Isolated synthetic transfer".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: fin_domain::now(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            valuation: None,
+            intent: fin_domain::FinancialIntent::default(),
+            operation_version: 1,
+            action_deadline: None,
+        },
+        Arc::new(fin_domain::clock::SystemClock),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn validated_submission_reuses_simulation_and_preserves_original_uncertain_identity() {
+    let events = Arc::new(Mutex::new(vec![]));
+    let mut fixture = rpc(events.clone());
+    fixture.lost = true;
+    let rpc = Arc::new(CountedRpc {
+        inner: fixture,
+        calls: Mutex::new(vec![]),
+    });
+    let runtime = EvmRuntime::new(
+        rpc.clone(),
+        1,
+        Some(Arc::new(
+            LocalEnvelopeSigner::from_private_key(SYNTHETIC_KEY).unwrap(),
+        )),
+    );
+    let journal = Arc::new(Journal {
+        saved: Mutex::new(None),
+        events: events.clone(),
+        authorized: true,
+        fail_persist: false,
+    });
+    let tx = frozen();
+    runtime.revalidate(&tx).await.unwrap();
+    let validated = validated_transaction(&tx);
+    assert_eq!(
+        runtime
+            .submit_revalidated(&tx, json!({}), journal.clone(), &validated)
+            .await
+            .unwrap_err()
+            .code,
+        "RPC_UNAVAILABLE"
+    );
+    let calls = rpc.calls.lock().unwrap();
+    assert_eq!(calls.iter().filter(|s| *s == "eth_call").count(), 1);
+    assert_eq!(calls.iter().filter(|s| *s == "eth_estimateGas").count(), 1);
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|s| *s == "eth_getTransactionCount")
+            .count(),
+        2
+    );
+    assert_eq!(&*events.lock().unwrap(), &["persist", "send"]);
+    let saved = journal.saved.lock().unwrap().clone().unwrap();
+    assert_eq!(saved.data["transaction"], json!(tx));
+}
+
+#[tokio::test]
+async fn validated_submission_rejects_changed_envelope_nonce_authority_and_journal_failure() {
+    for scenario in ["binding", "nonce", "authority", "persist"] {
+        let events = Arc::new(Mutex::new(vec![]));
+        let mut fixture = rpc(events.clone());
+        if scenario == "nonce" {
+            fixture.nonce += 1;
+        }
+        let runtime = EvmRuntime::new(
+            Arc::new(fixture),
+            1,
+            Some(Arc::new(AlteringSigner {
+                mutation: None,
+                events: events.clone(),
+            })),
+        );
+        let original = frozen();
+        let validated = validated_transaction(&original);
+        let mut tx = original;
+        if scenario == "binding" {
+            tx.value = Quantity::from_u64(9);
+        }
+        let journal = Arc::new(Journal {
+            saved: Mutex::new(None),
+            events: events.clone(),
+            authorized: scenario != "authority",
+            fail_persist: scenario == "persist",
+        });
+        assert!(
+            runtime
+                .submit_revalidated(&tx, json!({}), journal.clone(), &validated)
+                .await
+                .is_err(),
+            "{scenario}"
+        );
+        assert!(journal.saved.lock().unwrap().is_none(), "{scenario}");
+        assert!(
+            !events.lock().unwrap().contains(&"send".into()),
+            "{scenario}"
+        );
+        assert_eq!(
+            events.lock().unwrap().contains(&"sign".into()),
+            scenario == "persist",
+            "{scenario}"
+        );
+    }
+}
 #[async_trait]
 impl EvmRpc for Rpc {
     async fn request(&self, method: &str, _: Value) -> Result<Value> {

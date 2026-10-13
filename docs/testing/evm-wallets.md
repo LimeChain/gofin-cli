@@ -55,8 +55,16 @@ uses the same defaults, as do read-only bridge observers without an injected
 transport. Custom RPC settings are not yet exposed through the public CLI.
 
 Reads try eligible endpoints in configured order within one 10-second deadline,
-including identity, capability and evidence checks. Each endpoint has up to two
-retries (100/250 ms); a positive `Retry-After` advances immediately. Rate limits
+including identity, capability and evidence checks. Retries stay within each
+endpoint's share of the remaining time. With two eligible endpoints, a
+slow primary gets roughly five seconds before the backup uses the remaining
+budget; an earlier failure leaves more time for the backup. The deadline applies
+to each RPC read, not the whole user command. Once the full budget expires, Fin
+returns `RPC_READ_TIMEOUT` without starting another provider attempt or resetting
+the clock. A submitted transaction remains unresolved until its original
+identity can be reconciled; timeout does not establish transaction failure.
+Each endpoint has up to two retries (100/250 ms); a positive `Retry-After`
+advances immediately. Rate limits
 cool down reads for 30 seconds by default; valid seconds or HTTP dates override
 this up to 24 hours. The primary becomes eligible again after expiry. Wrong
 chain identity and contract reverts fail closed. Broadcasts have no read

@@ -628,7 +628,7 @@ impl BinanceEthereumDepositAdapter {
             ],
             coverage: "Synthetic broker-composite transport and canonical fake-EVM proof; live funding capabilities and acceptance remain separately reported.".into(),
             completion: "Original transaction identity is canonical and finalized, and exactly one usable matching Binance credit plus the corresponding free-balance increase is observed.".into(),
-            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.","approval":"Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","coin":"Binance asset identity; never resolved from an EVM ticker","network":"explicit Binance network code matched to current metadata and a configured Fin EVM chain","token":"native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata","amount":"exact finite amount; amount=all is unsupported","completion":"chain submission alone is insufficient; matching usable deposit history and balance delta are required","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.","broker_generated_attempt_input_fields":["/requestId"]}),
+            semantics: json!({"legacyDefaults":"Omitted coin/network select ETH on Ethereum mainnet; omitted chainId resolves the reviewed Binance network mapping. ERC20 token contract must be explicit.","accounts":"Main or subaccount using its own credential; no master required. Parent-authorized hierarchy reads remain optional.","sourceCoverage":"Configured Fin EVM chains with an explicit reviewed Binance network mapping; other source chains, memo/tag routes and non-unit denominations are unavailable.","approval":"Fresh Touch ID binds source wallet, destination account, chain, asset, deposit address, amount, gas envelope and displayed USD ceilings. Fresh quote evidence may vary within those ceilings.","recovery":"Reconcile the original operation after response loss, delayed credit or restart; do not resend under a new request ID.","recipient":"fixed from the authenticated account's current Binance deposit-address endpoint","coin":"Binance asset identity; never resolved from an EVM ticker","network":"explicit Binance network code matched to current metadata and a configured Fin EVM chain","token":"native or exact ERC20 contract; contract and decimals are checked against both Binance and chain metadata","amount":"exact finite amount; amount=all is unsupported","completion":"chain submission alone is insufficient; matching deposit history with status 1 or 6, clear travel-rule status and exact free-balance delta are required; status 6 may retain a Binance withdrawal hold","venueAssetDecimals":36,"maxFeeEth":"Maximum total chain-native fee in ETH. The wallet transfer reserves 20% gas-unit and up to 50% fee-quote headroom, including priority fees, within this cap before approval; routine gas changes within the frozen envelope are accepted.","broker_generated_attempt_input_fields":["/requestId"]}),
         }
     }
 
@@ -737,7 +737,7 @@ impl BinanceEthereumDepositAdapter {
             binding: serde_json::to_value(binding).map_err(|_| internal_error())?,
             summary,
             checks: vec![Check { name:"venue_deposit_enabled".into(), status:CheckStatus::Passed, detail:format!("Binance metadata confirms {coin} deposits are enabled on {network} and supplies an exact minimum.") }, Check { name:"asset_identity".into(), status:CheckStatus::Passed, detail:format!("Coin {coin} is bound to exact EVM asset {} with {} decimals; denomination and memo requirements are supported.", source_asset.reference, source_asset.decimals) }, Check { name:"evm_transfer_preview".into(), status:CheckStatus::Passed, detail:"Ordinary wallet.transfer froze the exact finite value, source wallet, recipient, chain and fee cap.".into() }],
-            warnings: vec!["A successful Ethereum transaction does not complete this operation until Binance records one usable credited deposit.".into()],
+            warnings: vec!["A successful Ethereum transaction does not complete this operation until Binance records the exact deposit credit and matching free-balance increase.".into()],
             observed_at: inner_preview.observed_at.clone(),
             expires_at: inner_preview.expires_at.clone(),
             valuation: inner_preview.valuation.clone(),
@@ -1101,9 +1101,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
             ));
         }
         let row = &records[0];
-        if row["creditState"] != "credited"
-            || row["status"].as_u64() != Some(1)
-            || row["coin"] != coin
+        if row["coin"] != coin
             || row["network"] != binding.target.network
             || !row["address"]
                 .as_str()
@@ -1116,6 +1114,14 @@ impl Adapter for BinanceEthereumDepositAdapter {
         {
             return Ok(unknown(
                 json!({"chain":chain.evidence,"venueRow":row,"reason":"Deposit row is not one exact usable credit for the original transaction and target."}),
+            ));
+        }
+        // Status 6 confirms deposit credit but can retain a Binance withdrawal
+        // hold. Settlement still requires the exact canonical transfer and the
+        // matching free-balance increase below; status alone is not proof.
+        if row["credited"] != true || !matches!(row["status"].as_u64(), Some(1 | 6)) {
+            return Ok(unknown(
+                json!({"chain":chain.evidence,"venueRow":row,"reason":"Deposit row does not confirm credit with clear travel-rule status for the original transaction and target."}),
             ));
         }
         let credit = row["amount"].as_str().ok_or_else(internal_error)?;
@@ -1216,7 +1222,7 @@ impl Adapter for BinanceEthereumDepositAdapter {
             ));
         }
         verified.effects = effects;
-        verified.evidence = json!({"method":"evm-canonical-and-binance-usable-deposit-v2","chain":chain.evidence,"venueHistory":history,"venueBalance":{"before":binding.source_free_before,"after":after,"delta":credit},"targetEvidenceDigest":binding.target.evidence_digest,"coin":coin,"network":binding.target.network,"asset":expected_asset,"originalSubmission":submission});
+        verified.evidence = json!({"method":"evm-canonical-and-binance-usable-deposit-v2","withdrawal_locked":row["withdrawalLocked"] == true,"chain":chain.evidence,"venueHistory":history,"venueBalance":{"before":binding.source_free_before,"after":after,"delta":credit},"targetEvidenceDigest":binding.target.evidence_digest,"coin":coin,"network":binding.target.network,"asset":expected_asset,"originalSubmission":submission});
         verified.observed_at = now();
         verified.proof_digest = verified_effect_digest(&verified)?;
         Ok(Reconciliation {

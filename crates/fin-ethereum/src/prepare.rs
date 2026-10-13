@@ -20,11 +20,13 @@ fn swap_validation_error(err: FinError, request: &fin_amm::AmmSwapRequest) -> Fi
             "Quoted price impact is {observed} bps, above the approved maximum of {approved} bps."
         )).with_details(json!({"observed_price_impact_bps":observed,"maximum_price_impact_bps":approved}));
     }
-    error(
+    let mut translated = error(
         "SLIPPAGE_LIMIT",
         "validation",
         "Minimum output is below the approved fresh quote floor or above its attainable output.",
-    )
+    );
+    translated.details = err.details;
+    translated
 }
 
 fn quote_native_output(binding: &Binding) -> bool {
@@ -42,104 +44,6 @@ fn require_eoa_permit_signer(code: &[u8]) -> Result<()> {
     )
 }
 
-/// Adapts the reviewed Uniswap protocol kernel to Fin's shared AMM contract.
-/// `prepare_swap` validates the shared route/floor bounds before delegating to
-/// the normal protected transaction preparation path.
-struct UniswapAmm<'a> {
-    adapter: &'a EthereumAdapter,
-    owner: Address,
-    input: Value,
-    request: request::Request,
-    original: Option<Binding>,
-    context: PreparationContext,
-    resource: ResourceId,
-    token_in: reads::Token,
-    input_units: U256,
-    maximum_fee: Quantity,
-    operation: String,
-}
-
-#[async_trait::async_trait]
-impl fin_amm::AmmDex for UniswapAmm<'_> {
-    async fn quote(&self, request: fin_amm::AmmQuoteRequest) -> Result<fin_amm::AmmQuote> {
-        require(
-            request.resource == self.resource
-                && request.input.asset == self.token_in.asset(self.adapter)
-                && request.input.atoms == quantity(self.input_units)
-                && request.output_asset
-                    == self
-                        .adapter
-                        .token(self.request.token_out.as_deref().expect("schema"), None)
-                        .await?
-                        .asset(self.adapter),
-            "AMM_RESOURCE_MISMATCH",
-            "Generic quote request differs from the selected wallet or exact route assets.",
-        )?;
-        let mut quote = self
-            .adapter
-            .quote_protocol(reads::ProtocolQuoteRequest {
-                dex: super::uniswap::profile::operation_dex(&self.operation)?,
-                input: &self.token_in.reference,
-                output: self.request.token_out.as_deref().expect("schema"),
-                amount: &quantity(self.input_units).to_decimal(self.token_in.decimals),
-                fee_tier: self.request.fee_tier,
-                tick_spacing: self.request.tick_spacing,
-                protocol: self.request.protocol.as_deref(),
-                v4_key: self.request.v4_pool_key.as_ref(),
-                block: None,
-            })
-            .await?;
-        let permission = self
-            .adapter
-            .swap_permission_requirement(self.owner, &quote)
-            .await?;
-        quote.permission_requirement = Some(permission.clone());
-        let generic = super::uniswap::as_amm_quote(
-            self.adapter,
-            self.resource.clone(),
-            &quote,
-            self.maximum_fee.clone(),
-            permission,
-        )?;
-        if let Some(route) = request.route {
-            require(
-                route == generic.route,
-                "AMM_ROUTE_MISMATCH",
-                "Requested generic route differs from the reviewed Uniswap pool.",
-            )?;
-        }
-        Ok(generic)
-    }
-
-    async fn prepare_swap(&self, request: fin_amm::AmmSwapRequest) -> Result<PreparedOperation> {
-        fin_amm::validate_swap(&request, self.adapter.clock.now())
-            .map_err(|err| swap_validation_error(err, &request))?;
-        require(
-            request.resource == self.resource
-                && request.approved_resource == self.resource
-                && request.quote.input.atoms == quantity(self.input_units)
-                && request.quote.route.version == self.request.protocol.as_deref().unwrap_or("v3"),
-            "AMM_BOUND_EXCEEDED",
-            "Shared swap request differs from the exact protected Uniswap request.",
-        )?;
-        let prepared = self
-            .adapter
-            .prepare_operation_inner(
-                &self.operation,
-                &self.input,
-                self.original.as_ref(),
-                &self.context,
-            )
-            .await?;
-        require(
-            prepared.binding["units"] == json!(quantity(self.input_units)),
-            "BINDING_CHANGED",
-            "Exact input balance changed between generic AMM validation and protected preparation.",
-        )?;
-        Ok(prepared)
-    }
-}
-
 impl EthereumAdapter {
     pub(crate) async fn prepare_operation(
         &self,
@@ -152,92 +56,11 @@ impl EthereumAdapter {
         if operation == "wallet.permit2.approve" {
             return self.prepare_permit2_approval(input, None, context).await;
         }
-        if !matches!(
-            operation,
-            "uniswap.swap" | "ramses.swap" | "sushi.swap" | "pancakeswap.swap"
-        ) {
-            return self
-                .prepare_operation_inner(operation, input, original, context)
-                .await;
-        }
-        let request = request::parse(operation, input)?;
-        let wallet = self.resolve(&request, true)?;
-        let wallet_address = address(&wallet.address)?;
-        let token_in = self
-            .token(request.token_in.as_deref().expect("schema"), None)
-            .await?;
-        let token_out = self
-            .token(request.token_out.as_deref().expect("schema"), None)
-            .await?;
-        let input_cap = if request.amount.as_deref() == Some("all") {
-            exact(
-                request.max_amount.as_deref().expect("schema"),
-                token_in.decimals,
-            )?
-        } else {
-            exact(
-                request.amount.as_deref().expect("schema"),
-                token_in.decimals,
-            )?
-        };
-        let amount = if request.amount.as_deref() == Some("all") {
-            self.balance_of(&token_in, wallet_address, None)
-                .await?
-                .min(input_cap)
-        } else {
-            input_cap
-        };
-        let maximum_fee = exact(request.max_fee_eth.as_deref().expect("schema"), 18)?;
-        let resource = resource(self.config.chain_id, wallet_address);
-        let quote_backend = UniswapAmm {
-            adapter: self,
-            owner: wallet_address,
-            input: input.clone(),
-            request: request.clone(),
-            original: original.cloned(),
-            context: context.clone(),
-            resource: resource.clone(),
-            token_in: token_in.clone(),
-            input_units: amount,
-            maximum_fee: quantity(maximum_fee),
-            operation: operation.to_owned(),
-        };
-        let quote = fin_amm::AmmDex::quote(
-            &quote_backend,
-            fin_amm::AmmQuoteRequest {
-                resource: resource.clone(),
-                input: Amount {
-                    asset: token_in.asset(self),
-                    atoms: quantity(amount),
-                },
-                output_asset: token_out.asset(self),
-                route: None,
-            },
-        )
-        .await?;
-        let amm_request = fin_amm::AmmSwapRequest {
-            resource: resource.clone(),
-            approved_resource: resource,
-            approved_route: quote.route.clone(),
-            quote,
-            selected_slippage_bps: request.slippage_bps.expect("schema"),
-            approved_slippage_bps: request.slippage_bps.expect("schema"),
-            rate_floor: None,
-            absolute_minimum_output: Some(quantity(exact(
-                request.min_output.as_deref().expect("schema"),
-                token_out.decimals,
-            )?)),
-            input_cap: Amount {
-                asset: token_in.asset(self),
-                atoms: quantity(input_cap),
-            },
-            fee_cap: Amount {
-                asset: self.native_asset(),
-                atoms: quantity(maximum_fee),
-            },
-            maximum_price_impact_bps: request.max_price_impact_bps.unwrap_or(10_000),
-        };
-        fin_amm::AmmDex::prepare_swap(&quote_backend, amm_request).await
+        // The protocol preparation path already validates the shared AMM
+        // request against its pinned quote. Do not obtain a second quote in a
+        // wrapper before repeating the same checks here.
+        self.prepare_operation_inner(operation, input, original, context)
+            .await
     }
 
     async fn prepare_operation_inner(
@@ -371,7 +194,8 @@ impl EthereumAdapter {
                 .and_then(|binding| binding.boundary_authorization.clone()),
             financial_plan: original.and_then(|binding| binding.financial_plan.clone()),
         };
-        let mut warnings=vec!["Every financial write requires a fresh human authorization. An uncertain hash is reconciled without resubmission.".into()];
+        let mut warnings =
+            vec!["An uncertain transaction must be reconciled without resubmission.".into()];
         let mut shared_swap: Option<fin_amm::AmmSwapRequest> = None;
         let mut swap_output_symbol: Option<String> = None;
         let mut swap_permission: Option<String> = None;
@@ -590,21 +414,33 @@ impl EthereumAdapter {
                 } else {
                     None
                 };
-                let minimum = if let Some(original) = original {
-                    let approved_minimum =
-                        u256(original.minimum_output.as_ref().ok_or_else(|| {
+                // Slippage is measured from the quote that fixed this exact
+                // transaction. A better live quote must not raise its encoded
+                // minimum; a worse quote must still cover that same minimum.
+                let reference_output = original
+                    .map(|binding| {
+                        binding.quote_output.as_ref().ok_or_else(|| {
                             error(
                                 "BINDING_INVALID",
                                 "validation",
-                                "Approved swap minimum output is missing.",
+                                "Approved swap quote output is missing.",
                             )
-                        })?)?;
-                    require(
-                        approved_minimum >= fresh_minimum && approved_minimum <= quote_output,
-                        "SLIPPAGE_LIMIT",
-                        "The fresh quote no longer supports the approved minimum output; create a fresh preview.",
-                    )?;
-                    approved_minimum
+                        })
+                    })
+                    .transpose()?
+                    .map(u256)
+                    .transpose()?
+                    .unwrap_or(quote_output);
+                let floor = mul(reference_output, U256::from(10000 - selected_slippage))?
+                    / U256::from(10000);
+                let minimum = if let Some(original) = original {
+                    u256(original.minimum_output.as_ref().ok_or_else(|| {
+                        error(
+                            "BINDING_INVALID",
+                            "validation",
+                            "Approved swap minimum output is missing.",
+                        )
+                    })?)?
                 } else {
                     fresh_minimum
                 };
@@ -613,15 +449,18 @@ impl EthereumAdapter {
                     "PRICE_IMPACT_LIMIT",
                     "Quoted spot price impact exceeds the explicit maximum.",
                 )?;
-                let floor = mul(
-                    quote_output,
-                    U256::from(10000 - r.slippage_bps.expect("schema")),
-                )? / U256::from(10000);
-                require(
-                    minimum > U256::ZERO && minimum >= floor && minimum <= quote_output,
-                    "SLIPPAGE_LIMIT",
-                    "Minimum output must respect the quoted slippage floor and remain achievable.",
-                )?;
+                if minimum == U256::ZERO
+                    || minimum < floor
+                    || minimum < absolute_minimum
+                    || minimum > quote_output
+                {
+                    return Err(error("SLIPPAGE_LIMIT", "validation",
+                        "The quote must cover the fixed minimum output, including the original slippage and explicit receipt floors.")
+                        .with_details(json!({"reason":if minimum > quote_output { "minimum_output_unattainable" } else { "approved_floor_violated" },
+                            "minimum_output_atoms":minimum.to_string(), "quote_output_atoms":quote_output.to_string(),
+                            "slippage_reference_output_atoms":reference_output.to_string(), "slippage_floor_atoms":floor.to_string(),
+                            "explicit_minimum_output_atoms":absolute_minimum.to_string()})));
+                }
                 let deadline = r.deadline.expect("schema");
                 let current = self.clock.now().timestamp() as u64;
                 require(
@@ -1873,28 +1712,42 @@ impl EthereumAdapter {
         // Derive all USD scalars from the same attributable final unit rows.
         // Separate amount quotes can expire or change during preparation;
         // old quote timestamps are never restamped or silently discarded.
-        let mut price_observations = Vec::new();
-        let mut prices = Vec::new();
-        for asset in [&principal_asset, &self.native_asset()]
-            .into_iter()
-            .chain(b.output.as_ref())
-        {
-            if prices.iter().any(|p: &AssetPrice| p.asset == *asset) {
-                continue;
-            }
+        let native_asset = self.native_asset();
+        let price = |asset: Option<AssetId>| async move {
+            let Some(asset) = asset else {
+                return Ok::<_, FinError>(None);
+            };
             let unit = quantity(pow10(asset.decimals)?);
             let (usd, source, observed_at) = self
-                .quote_usd_observed(&asset.reference, unit.clone())
+                .quote_verified_asset_usd_observed(&asset, unit.clone())
                 .await?;
-            price_observations.push(observed_at.clone());
-            prices.push(AssetPrice {
+            Ok(Some(AssetPrice {
                 asset: asset.clone(),
                 usd_micros_per_unit: usd,
                 unit_atoms: unit,
                 observed_at,
                 source,
-            });
-        }
+            }))
+        };
+        // At most three independent assets; no unbounded fan-out or cross-phase cache.
+        let (principal_price, gas_price, output_price) = tokio::try_join!(
+            price(Some(principal_asset.clone())),
+            price((native_asset != principal_asset).then_some(native_asset.clone())),
+            price(
+                b.output
+                    .as_ref()
+                    .filter(|asset| **asset != principal_asset && **asset != native_asset)
+                    .cloned()
+            ),
+        )?;
+        let prices: Vec<_> = [principal_price, gas_price, output_price]
+            .into_iter()
+            .flatten()
+            .collect();
+        let price_observations: Vec<_> = prices
+            .iter()
+            .map(|price| price.observed_at.clone())
+            .collect();
         let observed = self.clock.now().to_rfc3339();
         let usd_from_row = |asset: &AssetId, units: Quantity| -> Result<Quantity> {
             let row = prices
@@ -1974,6 +1827,13 @@ impl EthereumAdapter {
             // the finite gas reservation remain adapter-owned.
             let generic = fin_amm::prepared_operation(&shared, self.clock.now())?;
             intent.expected = generic.intent.expected;
+            // The fresh shared quote validates route/impact/receipt feasibility;
+            // the immutable transaction still owns its original encoded floor.
+            for effect in &mut intent.expected {
+                if let EffectConstraint::Conversion { minimum_output, .. } = effect {
+                    *minimum_output = b.minimum_output.clone().expect("swap minimum");
+                }
+            }
             // Generic conversion intent does not own protocol authority
             // transitions. Preserve the exact finite permit consumed by this
             // swap as a separate expected effect.
@@ -2231,7 +2091,12 @@ mod validation_error_tests {
             } else {
                 adapter.prepare("uniswap.swap", &input).await
             };
-            assert_eq!(result.unwrap_err().code, "SLIPPAGE_LIMIT");
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "SLIPPAGE_LIMIT");
+            let details = error.details.unwrap();
+            assert_eq!(details["reason"], "minimum_output_unattainable");
+            assert_eq!(details["minimum_output_atoms"], "3010000");
+            assert_eq!(details["quote_output_atoms"], "3000000");
         }
         assert_eq!(rpc.nonce.load(Ordering::SeqCst), 0);
         assert!(

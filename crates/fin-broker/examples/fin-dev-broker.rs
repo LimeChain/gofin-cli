@@ -148,6 +148,8 @@ struct DevRequest {
     build_id: String,
     mode: String,
     request: BrokerRequest,
+    #[serde(default)]
+    progress: bool,
 }
 
 #[derive(Serialize)]
@@ -1050,7 +1052,12 @@ async fn serve_peer(
                 "Use the CLI built for this development environment.",
             ))
         } else {
-            handle_request(&runtime, request.request).await
+            fin_protocol::progress::observe(
+                reader.get_mut(),
+                request.progress,
+                handle_request(&runtime, request.request),
+            )
+            .await
         };
     if is_capabilities
         && response.ok

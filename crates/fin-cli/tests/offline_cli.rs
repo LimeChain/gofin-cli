@@ -1305,3 +1305,39 @@ fn skill_human_and_machine_output_on_disposable_ttys() {
         }
     }
 }
+
+#[test]
+fn streaming_is_opt_in_and_wraps_success_errors_help_and_human_handoffs() {
+    let legacy = run(&["capabilities", "--json"]);
+    let legacy: Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    let streamed = run(&["capabilities", "--json", "--stream", "--verbose"]);
+    assert!(streamed.status.success());
+    assert!(streamed.stderr.is_empty());
+    let event: Value = serde_json::from_slice(&streamed.stdout).unwrap();
+    assert_eq!(event["type"], "result");
+    assert_eq!(event["result"], legacy);
+    assert_eq!(event["context"]["command"], "capabilities");
+    for args in [
+        vec!["--json", "--stream", "--help"],
+        vec!["--json", "--stream", "--version"],
+    ] {
+        let output = run(&args);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let event: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(event["type"], "result");
+    }
+    for args in [
+        vec!["--json", "--stream", "nonsense"],
+        vec!["--json", "--stream", "setup"],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let event: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(event["type"], "error");
+        assert!(event["error"]["next_action"].is_string());
+        assert!(!output.stdout.contains(&0x1b));
+    }
+    assert!(!run(&["capabilities", "--stream"]).status.success());
+}

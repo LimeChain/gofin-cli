@@ -39,8 +39,8 @@ fin_evm::alloy::sol! {
     interface RouterInfo { function WETH9() external view returns(address); }
     interface PoolInfo { function token0() external view returns(address); function token1() external view returns(address); function slot0() external view returns(uint160,int24,uint16,uint16,uint16,uint8,bool); event Swap(address indexed sender,address indexed recipient,int256 amount0,int256 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick); }
     interface Quoter { struct Params{address tokenIn;address tokenOut;uint256 amountIn;uint24 fee;uint160 sqrtPriceLimitX96;} function quoteExactInputSingle(Params p) external returns(uint256,uint160,uint32,uint256); }
-    interface Weth { event Deposit(address indexed dst,uint256 wad); }
-    interface Token { event Transfer(address indexed from,address indexed to,uint256 value); }
+    interface Weth { event Deposit(address indexed dst,uint256 wad); event Withdrawal(address indexed src,uint256 wad); }
+    interface Token { function approve(address spender,uint256 amount) external returns(bool); event Transfer(address indexed from,address indexed to,uint256 value); event Approval(address indexed owner,address indexed spender,uint256 value); }
 }
 fn addr(value: &str) -> Address {
     value.parse().unwrap()
@@ -56,6 +56,11 @@ pub struct WorkflowRpc {
     pub inner: Arc<Rpc>,
     pub clock: Arc<dyn Clock>,
     pub swaps: AtomicUsize,
+    pub approvals: AtomicUsize,
+    pub reverse: bool,
+    pub quote_calls: AtomicUsize,
+    pub advance_during_preparation: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pub drift_during_revalidation: std::sync::atomic::AtomicBool,
     pub withdrawal_ready: std::sync::atomic::AtomicBool,
     pub swap_receipt_ready: std::sync::atomic::AtomicBool,
     swap_included_at: Mutex<Option<i64>>,
@@ -67,10 +72,21 @@ impl WorkflowRpc {
             inner,
             clock,
             swaps: AtomicUsize::new(0),
+            approvals: AtomicUsize::new(0),
+            reverse: false,
+            quote_calls: AtomicUsize::new(0),
+            advance_during_preparation: Mutex::new(None),
+            drift_during_revalidation: std::sync::atomic::AtomicBool::new(false),
             withdrawal_ready: std::sync::atomic::AtomicBool::new(false),
             swap_receipt_ready: std::sync::atomic::AtomicBool::new(true),
             swap_included_at: Mutex::new(None),
             transactions: Mutex::new(BTreeMap::new()),
+        }
+    }
+    pub fn reverse(inner: Arc<Rpc>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            reverse: true,
+            ..Self::new(inner, clock)
         }
     }
     pub async fn runtime_balance(&self) -> U256 {
@@ -82,8 +98,128 @@ impl WorkflowRpc {
         )
         .unwrap()
     }
+    fn submit_reverse(&self, tx: &TxEnvelope, raw: &[u8]) -> Result<Value> {
+        let hash = format!("{:#x}", keccak256(raw));
+        let owner = addr(&self.inner.wallet);
+        let input = U256::from(25_900_000u64);
+        let output = U256::from(12_950_000_000_000_000u64);
+        assert_eq!(tx.chain_id(), Some(42161));
+        assert_eq!(tx.value(), U256::ZERO);
+        let (block, gas, logs) = if tx.to() == Some(addr(super::fixture::ARB_USDC)) {
+            let call = Token::approveCall::abi_decode(tx.input()).unwrap();
+            assert_eq!(call.spender, addr(SWAP_ROUTER));
+            assert_eq!(
+                call.amount, input,
+                "permission is finite and equals the net payout"
+            );
+            assert_eq!(self.approvals.fetch_add(1, Ordering::SeqCst), 0);
+            (
+                100,
+                40_000,
+                vec![event(
+                    super::fixture::ARB_USDC,
+                    Token::Approval {
+                        owner,
+                        spender: addr(SWAP_ROUTER),
+                        value: input,
+                    },
+                    &hash,
+                    100,
+                    0,
+                )],
+            )
+        } else {
+            assert_eq!(tx.to(), Some(addr(SWAP_ROUTER)));
+            assert_eq!(self.swaps.fetch_add(1, Ordering::SeqCst), 0);
+            assert_eq!(self.approvals.load(Ordering::SeqCst), 1);
+            assert!(self.withdrawal_ready.load(Ordering::SeqCst));
+            *self.swap_included_at.lock().unwrap() = Some(self.clock.now().timestamp());
+            (
+                101,
+                100_000,
+                vec![
+                    event(
+                        POOL,
+                        PoolInfo::Swap {
+                            sender: addr(SWAP_ROUTER),
+                            recipient: addr(SWAP_ROUTER),
+                            amount0: fin_evm::alloy::primitives::I256::from_raw(input),
+                            amount1: -fin_evm::alloy::primitives::I256::from_raw(output),
+                            sqrtPriceX96: U160::ZERO,
+                            liquidity: 1,
+                            tick: I24::ZERO,
+                        },
+                        &hash,
+                        101,
+                        0,
+                    ),
+                    event(
+                        super::fixture::ARB_USDC,
+                        Token::Transfer {
+                            from: owner,
+                            to: addr(POOL),
+                            value: input,
+                        },
+                        &hash,
+                        101,
+                        1,
+                    ),
+                    event(
+                        WETH,
+                        Token::Transfer {
+                            from: addr(POOL),
+                            to: addr(SWAP_ROUTER),
+                            value: output,
+                        },
+                        &hash,
+                        101,
+                        2,
+                    ),
+                    event(
+                        WETH,
+                        Weth::Withdrawal {
+                            src: addr(SWAP_ROUTER),
+                            wad: output,
+                        },
+                        &hash,
+                        101,
+                        3,
+                    ),
+                ],
+            )
+        };
+        let transaction = json!({"hash":hash,"from":self.inner.wallet,"to":tx.to(),"nonce":format!("{:#x}",tx.nonce()),"chainId":"0xa4b1","type":"0x2","gas":format!("{:#x}",tx.gas_limit()),"value":"0x0","input":format!("0x{}",hex::encode(tx.input())),"maxFeePerGas":format!("{:#x}",tx.max_fee_per_gas()),"maxPriorityFeePerGas":format!("{:#x}",tx.max_priority_fee_per_gas().unwrap()),"accessList":[],"blockNumber":format!("{block:#x}"),"blockHash":BLOCK_HASH});
+        let receipt = json!({"transactionHash":hash,"blockHash":BLOCK_HASH,"blockNumber":format!("{block:#x}"),"status":"0x1","gasUsed":format!("{gas:#x}"),"effectiveGasPrice":"0x1","logs":logs});
+        self.transactions
+            .lock()
+            .unwrap()
+            .insert(hash.clone(), (transaction, receipt));
+        Ok(json!(hash))
+    }
     fn withdrawal(&self) -> (Value, Value) {
         let hash = withdrawal_hash();
+        if self.reverse {
+            let amount = U256::from(25_900_000u64);
+            let calldata = format!(
+                "0xa9059cbb{:064x}{amount:064x}",
+                U256::from_be_slice(addr(&self.inner.wallet).as_slice())
+            );
+            let log = event(
+                super::fixture::ARB_USDC,
+                Token::Transfer {
+                    from: addr("0x0000000000000000000000000000000000000003"),
+                    to: addr(&self.inner.wallet),
+                    value: amount,
+                },
+                &hash,
+                99,
+                0,
+            );
+            return (
+                json!({"hash":hash,"from":"0x0000000000000000000000000000000000000003","to":super::fixture::ARB_USDC,"nonce":"0x0","chainId":"0xa4b1","type":"0x2","gas":"0x11170","value":"0x0","input":calldata,"maxFeePerGas":"0x3b9aca00","maxPriorityFeePerGas":"0x3b9aca00","accessList":[],"blockNumber":"0x63","blockHash":BLOCK_HASH}),
+                json!({"transactionHash":hash,"blockHash":BLOCK_HASH,"blockNumber":"0x63","status":"0x1","gasUsed":"0x11170","effectiveGasPrice":"0x1","logs":[log]}),
+            );
+        }
         (
             json!({"hash":hash,"from":"0x0000000000000000000000000000000000000003","to":self.inner.wallet,"nonce":"0x0","chainId":"0x1","type":"0x2","gas":"0x5208","value":"0x1550f7dca70000","input":"0x","maxFeePerGas":"0x3b9aca00","maxPriorityFeePerGas":"0x3b9aca00","accessList":[],"blockNumber":"0x63","blockHash":BLOCK_HASH}),
             json!({"transactionHash":hash,"blockHash":BLOCK_HASH,"blockNumber":"0x63","status":"0x1","gasUsed":"0x5208","effectiveGasPrice":"0x1","logs":[]}),
@@ -91,6 +227,21 @@ impl WorkflowRpc {
     }
     fn native_balance(&self, block: Option<u64>) -> U256 {
         let baseline = U256::from(100_000_000_000_000_000u64); // existing gas, not plan proceeds
+        if self.reverse {
+            let approval_fee =
+                if self.approvals.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 100) {
+                    U256::from(40_000u64)
+                } else {
+                    U256::ZERO
+                };
+            let swap_credit =
+                if self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101) {
+                    U256::from(12_950_000_000_000_000u64) - U256::from(100_000u64)
+                } else {
+                    U256::ZERO
+                };
+            return baseline - approval_fee + swap_credit;
+        }
         let credit =
             if self.withdrawal_ready.load(Ordering::SeqCst) && block.is_none_or(|b| b >= 99) {
                 U256::from(6_000_000_000_000_000u64)
@@ -127,7 +278,9 @@ impl EvmRpc for WorkflowRpc {
             "eth_getTransactionCount" => {
                 return Ok(json!(format!(
                     "{:#x}",
-                    self.swaps.load(Ordering::SeqCst) + self.inner.broadcasts()
+                    self.swaps.load(Ordering::SeqCst)
+                        + self.inner.broadcasts()
+                        + self.approvals.load(Ordering::SeqCst)
                 )));
             }
             "eth_getBalance" => {
@@ -194,6 +347,35 @@ impl EvmRpc for WorkflowRpc {
                 let data = fin_evm::rpc_bytes(&params[0]["data"])?;
                 let selector = data.get(..4).unwrap_or(&[]);
                 let to = params[0]["to"].as_str().unwrap_or("");
+                if self.reverse && to.eq_ignore_ascii_case(super::fixture::ARB_USDC) {
+                    let block = params
+                        .get(1)
+                        .and_then(Value::as_str)
+                        .filter(|s| s.starts_with("0x"))
+                        .and_then(|s| u64::from_str_radix(&s[2..], 16).ok());
+                    if selector == [0x70, 0xa0, 0x82, 0x31] {
+                        let funded = self.withdrawal_ready.load(Ordering::SeqCst)
+                            && block.is_none_or(|b| b >= 99);
+                        let spent =
+                            self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101);
+                        return Ok(encoded(if funded && !spent {
+                            U256::from(25_900_000u64)
+                        } else {
+                            U256::ZERO
+                        }));
+                    }
+                    if selector == [0xdd, 0x62, 0xed, 0x3e] {
+                        let approved = self.approvals.load(Ordering::SeqCst) > 0
+                            && block.is_none_or(|b| b >= 100);
+                        let spent =
+                            self.swaps.load(Ordering::SeqCst) > 0 && block.is_none_or(|b| b >= 101);
+                        return Ok(encoded(if approved && !spent {
+                            U256::from(25_900_000u64)
+                        } else {
+                            U256::ZERO
+                        }));
+                    }
+                }
                 if selector == Metadata::symbolCall::SELECTOR {
                     return Ok(encoded(if to.eq_ignore_ascii_case(WETH) {
                         "WETH".to_owned()
@@ -211,7 +393,11 @@ impl EvmRpc for WorkflowRpc {
                     return Ok(encoded(addr(WETH)));
                 }
                 if selector == PoolInfo::token0Call::SELECTOR {
-                    return Ok(encoded(addr(ETH_USDC)));
+                    return Ok(encoded(addr(if self.reverse {
+                        super::fixture::ARB_USDC
+                    } else {
+                        ETH_USDC
+                    })));
                 }
                 if selector == PoolInfo::token1Call::SELECTOR {
                     return Ok(encoded(addr(WETH)));
@@ -228,21 +414,47 @@ impl EvmRpc for WorkflowRpc {
                     )));
                 }
                 if selector == Quoter::quoteExactInputSingleCall::SELECTOR {
+                    let call = self.quote_calls.fetch_add(1, Ordering::SeqCst);
+                    let output = if self.reverse {
+                        12_950_000_000_000_000u64
+                    } else if self.drift_during_revalidation.load(Ordering::SeqCst) && call >= 1 {
+                        10_050_000u64
+                    } else {
+                        10_000_000u64
+                    };
                     return Ok(encoded((
-                        U256::from(10_000_000u64),
+                        U256::from(output),
                         U160::ZERO,
                         0u32,
                         U256::from(100_000u64),
                     )));
                 }
                 if to.eq_ignore_ascii_case(SWAP_ROUTER) && params[0].get("from").is_some() {
-                    return Ok(encoded(U256::from(10_000_000u64)));
+                    if let Some(advance) = self.advance_during_preparation.lock().unwrap().take() {
+                        advance();
+                    }
+                    if self.reverse {
+                        return Ok(encoded(vec![
+                            fin_evm::alloy::primitives::Bytes::from(
+                                U256::from(12_950_000_000_000_000u64).abi_encode(),
+                            ),
+                            fin_evm::alloy::primitives::Bytes::new(),
+                        ]));
+                    }
+                    return Ok(encoded(U256::from(if self.reverse {
+                        12_950_000_000_000_000u64
+                    } else {
+                        10_000_000u64
+                    })));
                 }
             }
             "eth_sendRawTransaction" => {
                 let raw = fin_evm::rpc_bytes(&params[0])?;
                 let tx = TxEnvelope::decode_2718(&mut raw.as_ref())
                     .map_err(|_| FinError::validation("Invalid isolated transaction."))?;
+                if self.reverse {
+                    return self.submit_reverse(&tx, &raw);
+                }
                 if tx.to() == Some(addr(SWAP_ROUTER)) {
                     assert_eq!(
                         self.swaps.load(Ordering::SeqCst),

@@ -322,6 +322,13 @@ not just serialization after an interactive command has finished.
   it. Warnings and recovery guidance belong in defined structured fields.
   Ordinary machine-mode runs should not emit unstructured chatter on stderr;
   stderr is reserved for failures that prevent emitting the documented result.
+- Opt-in `--json --stream` emits NDJSON progress and one terminal result/error
+  event. The existing `--json` single-value contract stays unchanged. Progress
+  carries public request/operation context and actual broker stages (plus local
+  `connecting`); it is best effort and never controls execution. Slow or closed
+  output cannot cancel/replay a financial action. A terminal result may still
+  report pending financial work; reconcile the original identity. Discover the
+  event schemas in `machine_contract.streaming`.
 - Use stable schemas, error codes, status meanings, exit codes, and resource or
   operation references. Include argument/validation failures, missing setup,
   authorization refusal, cancellation, timeout, and uncertain submission in
@@ -388,6 +395,17 @@ contracts and chain IDs remain in the structured approval binding and verbose
 review. Exceptionally long summaries explicitly refer to the full terminal
 review rather than silently cutting off an amount or fee. Native dialog layout
 still needs human verification on the target Mac.
+
+Named plans may add one caller-authored `summary` sentence that complements
+their intent-led name. Terminal review and Touch ID show both in full, followed
+by the native step count and consent duration. Names retain their 80-character
+limit; when a summary is present, name and summary together are limited to 140
+Unicode characters. Empty, untrimmed, multiline, control/bidirectional text and
+overlong pairs fail validation before approval. The complete plan, including
+this display text, is bound to the review and approval; financial authority
+comes from its structured scopes. Omitted summaries preserve existing records
+and prompt behavior. The agent explains inputs, outcomes and material limits in
+the two complementary sentences; the broker does not infer financial prose.
 
 Setup automatically configures persistent completion from the same Clap command
 definitions as help. It reads the configured human account's login shell and home
