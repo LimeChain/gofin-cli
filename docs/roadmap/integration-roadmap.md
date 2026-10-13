@@ -2,7 +2,7 @@
 
 Captured from the user's requests starting on 2026-10-09. Entries are roadmap requests unless an explicit status update records reported completion; completion reports do not independently establish verification. IDs continue the [backlog](README.md); numbering does not assign priority. Detailed stories and acceptance cases will be defined when an item is selected.
 
-The first release requires **backlog items 1–15, 18–23, 32 and 33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15 and 18–22 below are part of that scope. Items 16, 17, 24–28, 30, 31 and 34 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged.
+The first release requires **backlog items 1–15, 18–20, 22, 23, 32 and 33**, including item 23 ([release preparedness](release-preparedness.md)). Integration entries 11–15, 18–20 and 22 below are part of that scope. Items 16, 17, 21, 24–28, 30, 31 and 34–36 are assigned to the next release; item 29 (Across.to) remains unscheduled. Assignments reflect the user’s decisions through 2026-10-13; IDs are unchanged.
 
 ## Shared scoping rules
 
@@ -61,13 +61,17 @@ The original request was to integrate Ramses on Robinhood Chain using existing w
 
 Status: Implemented, reported complete by the user on 2026-10-10. The requested scope covers wallets, available onboarded dapps, bridging, deposits and withdrawals. Implementation and verification evidence were not independently reviewed in this roadmap update; current repository documentation governs delivered coverage. See the [detailed Base record](base-support.md).
 
-## 20. Solana Kamino support
+## 20. Solana Kamino lending and borrowing
 
-Integrate Kamino on Solana for the first release. Review the existing product concept's Kamino lending scope and agree the precise supported products and actions before implementation. Reuse item 13's wallet/transaction foundation and shared plan authorization, while preserving protocol-specific position and financial meanings.
+Status: Required for the first release. Scope split by the user on 2026-10-13; vaults are tracked separately in [item 35](#35-solana-kamino-vaults) for the next release.
+
+Support Kamino lending and borrowing on Solana: market and position reads, supply, withdrawal, borrowing, repayment and collateral management. Define supported markets/assets and preserve interest, debt and liquidation-risk semantics. Reuse item 13's wallet/transaction foundation and shared plan authorization. Vaults and automated leveraged strategies are outside this first-release item; any leveraged strategy scope requires separate agreement.
 
 ## 21. Solana Phoenix support
 
-Integrate Phoenix on Solana for the first release. Define the intended products, markets and supported read/trading/account actions during scoping, with explicit execution and recovery semantics. Reuse item 13's wallet/transaction foundation and shared plan authorization where applicable.
+Status: Deferred to the next release by the user on 2026-10-13.
+
+Integrate Phoenix on Solana for the next release. Distinguish the intended legacy Solana spot integration from newer Phoenix products before implementation. Define the intended products, markets and supported read/trading/account actions during scoping, with explicit execution and recovery semantics. Reuse item 13's wallet/transaction foundation and shared plan authorization where applicable.
 
 ## 22. At least two bridges to Solana
 
@@ -124,3 +128,16 @@ During scoping, agree whether Fin should connect existing smart wallets, create 
 Preserve Fin's protected signer and plan/authorization boundaries. Distinguish the controlling signer from the smart-account address and its assets; bind the actual account, calls, recipients, permissions and fees to approved intent. Any ownership, module, recovery or delegated-permission changes require explicit scope and appropriate independent authorization rather than being inferred from an ordinary financial plan.
 
 Reuse shared discovery, financial effects and durable recovery contracts while implementing wallet-specific simulation, submission identities and receipt interpretation. Verify actual execution outcomes, duplicate prevention and restart recovery; acceptance or inclusion of an outer transaction/request alone must not establish success of its inner actions. Detailed implementation and test coverage will be agreed when this item is selected.
+
+
+## 35. Solana Kamino vaults
+
+Status: Requested for the next release on 2026-10-13, split from [item 20](#20-solana-kamino-lending-and-borrowing).
+
+Support Kamino vaults on Solana. Define the intended vault products and supported assets during scoping, including vault discovery, position reads, deposits and withdrawals, with applicable fee/reward handling. Preserve vault-share valuation and withdrawal semantics, and verify actual receipt and position changes. Reuse item 13's wallet/transaction foundation and shared plan authorization. Automated leverage is not implicitly included; agree any such scope separately.
+
+## 36. Morpho support
+
+Status: Requested for the next release on 2026-10-13.
+
+Integrate Morpho through Fin. Define supported networks, official deployments, markets and products, including whether the initial scope covers lending/borrowing, vaults or both. Use shared discovery, protected credentials, plan authorization, typed financial effects and durable recovery. Agree precise actions and acceptance coverage during scoping; this roadmap entry does not claim any route, deployment or capability is already verified.
