@@ -65,6 +65,7 @@ struct DevRequest<'a> {
     mode: &'a str,
     request: BrokerRequest,
     progress: bool,
+    cancel_on_disconnect: bool,
 }
 
 #[derive(Deserialize)]
@@ -134,6 +135,7 @@ impl Transport for DevelopmentTransport {
         verify_peer(&stream)?;
         let mut reader = BufReader::new(stream);
         let response_timeout = production_cli::broker_response_timeout(&request);
+        let cancel_on_disconnect = request.may_use_rpc_reads();
         let financial_dispatch = matches!(
             &request,
             BrokerRequest::Execute { .. }
@@ -172,16 +174,27 @@ impl Transport for DevelopmentTransport {
                 mode: self.mode.as_str(),
                 request,
                 progress: fin_domain::execution_progress::enabled(),
+                cancel_on_disconnect,
             },
         )
         .await
         .map_err(|_| uncertain())?;
-        let response: DevResponse = tokio::time::timeout(response_timeout, async {
+        let mut deadline = Some(tokio::time::Instant::now() + response_timeout);
+        let response = async {
             for _ in 0..64 {
                 let response =
-                    read_bounded_line(&mut reader, MAX_RESPONSE_FRAME_BYTES, response_timeout)
+                    read_bounded_line_until(&mut reader, MAX_RESPONSE_FRAME_BYTES, deadline)
                         .await
                         .map_err(|_| uncertain())?;
+                if let Ok(frame) =
+                    serde_json::from_slice::<fin_protocol::progress::RpcReadFrame>(&response)
+                {
+                    if !frame.rpc_read || !cancel_on_disconnect {
+                        return Err(identity_error());
+                    }
+                    deadline = None;
+                    continue;
+                }
                 if let Ok(frame) =
                     serde_json::from_slice::<fin_protocol::progress::ProgressFrame>(&response)
                 {
@@ -191,9 +204,8 @@ impl Transport for DevelopmentTransport {
                 return serde_json::from_slice(&response).map_err(|_| identity_error());
             }
             Err(identity_error())
-        })
-        .await
-        .map_err(|_| uncertain())??;
+        };
+        let response: DevResponse = response.await?;
         if !response_matches(&response, &self.identity, &self.build_id, self.mode) {
             return Err(identity_error());
         }
@@ -221,12 +233,24 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     max: usize,
     timeout: Duration,
 ) -> Result<Vec<u8>, FinError> {
+    read_bounded_line_until(reader, max, Some(tokio::time::Instant::now() + timeout)).await
+}
+
+async fn read_bounded_line_until<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Vec<u8>, FinError> {
     let mut limited = reader.take((max + 1) as u64);
     let mut bytes = Vec::with_capacity(128);
-    let read = tokio::time::timeout(timeout, limited.read_until(b'\n', &mut bytes))
-        .await
-        .map_err(|_| unavailable())?
-        .map_err(|_| unavailable())?;
+    let read = limited.read_until(b'\n', &mut bytes);
+    let read = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, read)
+            .await
+            .map_err(|_| unavailable())?,
+        None => read.await,
+    }
+    .map_err(|_| unavailable())?;
     if read == 0 || bytes.len() > max || bytes.last() != Some(&b'\n') {
         return Err(identity_error());
     }
@@ -433,6 +457,123 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_development_hello_still_has_a_bounded_identity_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("broker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            read_bounded_line(&mut reader, 4096, Duration::from_secs(3))
+                .await
+                .unwrap();
+            requested.send(()).unwrap();
+            released.await.unwrap();
+        });
+        let transport = DevelopmentTransport {
+            socket,
+            identity: "synthetic".into(),
+            build_id: "test-build".into(),
+            mode: DevelopmentMode::Synthetic,
+            financial_dispatch_started: Arc::new(AtomicBool::new(false)),
+        };
+        let read = tokio::spawn(async move { transport.call(BrokerRequest::Snapshot).await });
+        request_received.await.unwrap();
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert_eq!(
+            read.await.unwrap().unwrap_err().code,
+            "DEVELOPMENT_IDENTITY_MISMATCH"
+        );
+        release.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verified_development_read_waits_past_the_old_response_deadline() {
+        use fin_domain::execution_progress::{self, Stage};
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("broker.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (requested, request_received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(stream);
+            let hello: Value = serde_json::from_slice(
+                &read_bounded_line(&mut reader, 4096, Duration::from_secs(3))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(hello["kind"], "hello");
+            assert_eq!(hello["identity"], "synthetic");
+            assert_eq!(hello["build_id"], "test-build");
+            assert_eq!(hello["mode"], "synthetic");
+            reader.get_mut().write_all(
+                b"{\"kind\":\"hello\",\"identity\":\"synthetic\",\"build_id\":\"test-build\",\"mode\":\"synthetic\"}\n",
+            ).await.unwrap();
+            let request: Value = serde_json::from_slice(
+                &read_bounded_line(&mut reader, 4096, Duration::from_secs(3))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(request["request"]["method"], "read");
+            assert_eq!(request["request"]["operation"], "wallet.balances");
+            assert_eq!(request["identity"], "synthetic");
+            assert_eq!(request["cancel_on_disconnect"], true);
+            assert_eq!(request["progress"], true);
+            reader
+                .get_mut()
+                .write_all(b"{\"rpc_read\":true}\n{\"progress\":\"preparing\"}\n")
+                .await
+                .unwrap();
+            requested.send(()).unwrap();
+            released.await.unwrap();
+            reader.get_mut().write_all(
+                b"{\"identity\":\"synthetic\",\"build_id\":\"test-build\",\"mode\":\"synthetic\",\"response\":{\"ok\":true,\"result\":{\"amount\":\"2.5\"}}}\n",
+            ).await.unwrap();
+        });
+        let financial_dispatch_started = Arc::new(AtomicBool::new(false));
+        let transport = DevelopmentTransport {
+            socket,
+            identity: "synthetic".into(),
+            build_id: "test-build".into(),
+            mode: DevelopmentMode::Synthetic,
+            financial_dispatch_started: financial_dispatch_started.clone(),
+        };
+        let (stages, mut progress) = execution_progress::channel();
+        let read = tokio::spawn(async move {
+            execution_progress::observe(
+                stages,
+                transport.call(BrokerRequest::Read {
+                    operation: "wallet.balances".into(),
+                    input: serde_json::json!({"wallet":"synthetic"}),
+                }),
+            )
+            .await
+        });
+        request_received.await.unwrap();
+        assert_eq!(progress.recv().await, Some(Stage::Preparing));
+        tokio::time::advance(Duration::from_secs(181)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !read.is_finished(),
+            "verified read responses have no deadline"
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            read.await.unwrap().unwrap(),
+            serde_json::json!({"amount":"2.5"})
+        );
+        assert!(!financial_dispatch_started.load(Ordering::SeqCst));
+        assert_eq!(progress.recv().await, None);
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn coalesced_progress_lines_retain_every_frame() {
         let mut reader = tokio::io::BufReader::new(
@@ -509,6 +650,7 @@ mod tests {
             mode: "live",
             request: BrokerRequest::Capabilities,
             progress: false,
+            cancel_on_disconnect: false,
         })
         .unwrap();
         assert_eq!(request_json["mode"], "live");

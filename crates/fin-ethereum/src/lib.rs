@@ -1019,6 +1019,26 @@ impl Adapter for EthereumAdapter {
     fn diagnostics(&self) -> Value {
         self.runtime.rpc.diagnostics()
     }
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation == "fin.snapshot" {
+            let Ok(scope) = serde_json::from_value::<fin_domain::SnapshotScope>(input.clone())
+            else {
+                return false;
+            };
+            return scope.matches_network(&format!("ethereum:{}", self.config.chain_id))
+                && (scope.resources.is_empty()
+                    || self.wallets.iter().any(|wallet| {
+                        scope.matches_resource(&ResourceId(format!(
+                            "ethereum:{}:{}",
+                            self.config.chain_id,
+                            wallet.address.to_ascii_lowercase()
+                        )))
+                    }));
+        }
+        self.definitions()
+            .iter()
+            .any(|definition| definition.name == operation)
+    }
     async fn snapshot(&self) -> Result<StateSnapshot> {
         self.read_snapshot().await
     }

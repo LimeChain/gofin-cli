@@ -3448,6 +3448,12 @@ fn settlement_policy_from_rules(
 
 #[async_trait]
 impl Adapter for BridgeAdapter {
+    fn uses_rpc_reads(&self, operation: &str, _input: &Value) -> bool {
+        matches!(
+            operation,
+            "bridge.quotes" | "bridge.status" | "bridge.recovery" | "bridge.transfer"
+        )
+    }
     fn plan_step_allowance(
         &self,
         operation: &str,

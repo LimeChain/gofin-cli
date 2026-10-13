@@ -802,6 +802,9 @@ impl KrakenEvmDepositAdapter {
 }
 #[async_trait]
 impl Adapter for KrakenEvmDepositAdapter {
+    fn uses_rpc_reads(&self, operation: &str, _input: &Value) -> bool {
+        operation == "kraken.deposit"
+    }
     fn definitions(&self) -> Vec<Definition> {
         vec![deposit_definition()]
     }

@@ -225,6 +225,21 @@ impl EvmNetworkRouter {
 }
 #[async_trait]
 impl Adapter for EvmNetworkRouter {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation == "fin.snapshot" {
+            let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+                return false;
+            };
+            return self.adapters.iter().any(|(&chain, adapter)| {
+                let local = self.network_scope(chain, &scope);
+                scope.matches_network(&format!("ethereum:{chain}"))
+                    && (scope.resources.is_empty() || !local.resources.is_empty())
+                    && adapter.uses_rpc_reads(operation, &serde_json::to_value(local).unwrap())
+            });
+        }
+        self.route(input)
+            .is_ok_and(|adapter| adapter.uses_rpc_reads(operation, input))
+    }
     fn definitions(&self) -> Vec<Definition> {
         let mut definitions = BTreeMap::new();
         for adapter in self.adapters.values() {

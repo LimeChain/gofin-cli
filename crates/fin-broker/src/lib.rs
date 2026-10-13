@@ -42,7 +42,7 @@ use fin_engine::{Engine, EngineOptions};
 use fin_engine::{RunAllocation, RunPlan, RunResult};
 #[cfg(test)]
 use fin_protocol::RunBeginRequest;
-use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_with_progress};
+use fin_protocol::{BrokerRequest, BrokerResponse, encode_response, read_request_envelope};
 use fin_store::Store;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,8 @@ const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const BINANCE_ACCOUNT_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+const CONFIGURATION_PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+const NON_RPC_OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
@@ -1993,6 +1995,48 @@ impl BrokerRuntime {
         &self.config
     }
 
+    /// Resolve RPC observation scope from registered adapters and the journal.
+    /// Wire opt-ins alone never change execution authority or response budgets.
+    pub fn request_uses_rpc_reads(&self, request: &BrokerRequest) -> bool {
+        use BrokerRequest as R;
+        let scope = match request {
+            R::Read { operation, input } | R::ReadArtifact { operation, input } => {
+                self.engine.rpc_read_scope(operation, input)
+            }
+            R::Snapshot => self.engine.rpc_read_scope("fin.snapshot", &json!({})),
+            R::Status { id } => self.engine.status_rpc_read_scope(id),
+            R::PlanStatus { plan_id } => self.engine.financial_plan_rpc_read_scope(plan_id),
+            R::BoundaryStatus { id } => self.engine.boundary_rpc_read_scope(id),
+            _ => return false,
+        };
+        // Invalid identifiers/inputs still reach the usual request validation.
+        scope.unwrap_or(false)
+    }
+
+    /// Legacy clients may half-close normally and cannot signal cancellation.
+    /// Preserve their bounded observation path; only negotiated clients can
+    /// wait indefinitely while releasing work on disconnect.
+    pub fn handle_client_request(
+        &self,
+        request: BrokerRequest,
+        negotiated_rpc_read: bool,
+    ) -> impl std::future::Future<Output = BrokerResponse> {
+        let legacy_rpc_read = !negotiated_rpc_read && self.request_uses_rpc_reads(&request);
+        let work = Box::pin(self.handle(request));
+        async move {
+            if legacy_rpc_read {
+                tokio::time::timeout(BROKER_READ_TIMEOUT, work).await.unwrap_or_else(|_| {
+                    BrokerResponse::failure(error(
+                        "BROKER_READ_TIMEOUT", "read", "The read exceeded its bounded deadline.",
+                        "Retry with the updated Fin CLI to wait for RPC evidence with cancellation support.",
+                    ))
+                })
+            } else {
+                work.await
+            }
+        }
+    }
+
     pub async fn handle(&self, request: BrokerRequest) -> BrokerResponse {
         // Read/control concurrency grants no execution authority. Submission
         // admission remains serialized; slow I/O cannot hide status or revocation.
@@ -2002,7 +2046,8 @@ impl BrokerRuntime {
         } else {
             Some(self.mutation_gate.lock().await)
         };
-        let result = if concurrent_read_request(&request) {
+        let result = if concurrent_read_request(&request) && !self.request_uses_rpc_reads(&request)
+        {
             tokio::time::timeout(BROKER_READ_TIMEOUT, self.handle_result(request))
                 .await
                 .unwrap_or_else(|_| Err(error(
@@ -2210,7 +2255,7 @@ impl BrokerRuntime {
                         )
                     })?;
                 let prepared = tokio::time::timeout(
-                    OBSERVER_READ_TIMEOUT, configure::preview(&profile, &operation, &input)
+                    CONFIGURATION_PREVIEW_TIMEOUT, configure::preview(&profile, &operation, &input)
                 ).await.map_err(|_| FinError::new(
                     "CONFIGURATION_PREVIEW_TIMEOUT", "configuration",
                     "The configuration permission check exceeded its deadline; no change was submitted.",
@@ -2925,18 +2970,31 @@ impl CompositeObserver {
         }
         let slots = Arc::new(Semaphore::new(MAX_READ_OBSERVERS));
         let mut observers = JoinSet::new();
+        let scope_input = serde_json::to_value(scope).map_err(|_| internal_error())?;
         for (index, adapter) in selected.into_iter().enumerate() {
+            let rpc_read = adapter.uses_rpc_reads("fin.snapshot", &scope_input);
             let scope = scope.clone();
             let slots = slots.clone();
             observers.spawn(async move {
                 let label = observer_label(adapter.as_ref(), &scope);
-                // Limit simultaneous observers without cutting off a slow read.
+                // RPC observers can wait until cancellation. Other integrations
+                // keep the original deadline, including time queued for a slot.
                 // Dropping this JoinSet cancels running and queued observers.
-                let _slot = slots
-                    .acquire_owned()
-                    .await
-                    .expect("observer slots stay open");
-                let result = adapter.snapshot_scoped(&scope).await;
+                let observation = async {
+                    let _slot = slots
+                        .acquire_owned()
+                        .await
+                        .expect("observer slots stay open");
+                    adapter.snapshot_scoped(&scope).await
+                };
+                let result = if rpc_read {
+                    observation.await
+                } else {
+                    tokio::time::timeout(NON_RPC_OBSERVER_READ_TIMEOUT, observation)
+                        .await.unwrap_or_else(|_| Err(error("OBSERVER_READ_TIMEOUT", "snapshot",
+                            "The selected snapshot observer exceeded its read deadline.",
+                            "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.")))
+                };
                 (index, label, result)
             });
         }
@@ -3042,6 +3100,23 @@ impl CompositeObserver {
 
 #[async_trait]
 impl Adapter for CompositeObserver {
+    fn uses_rpc_reads(&self, operation: &str, input: &Value) -> bool {
+        if operation != "fin.snapshot" {
+            return false;
+        }
+        let Ok(scope) = serde_json::from_value::<SnapshotScope>(input.clone()) else {
+            return false;
+        };
+        self.adapters.iter().any(|adapter| {
+            (scope.is_full()
+                || adapter.snapshot_is_global()
+                || adapter
+                    .snapshot_identities()
+                    .iter()
+                    .any(|connection| snapshot_connection_matches(&scope, connection)))
+                && adapter.uses_rpc_reads(operation, input)
+        })
+    }
     fn definitions(&self) -> Vec<Definition> {
         vec![snapshot_definition()]
     }
@@ -3602,9 +3677,9 @@ async fn serve_connection_with_timeouts(
             "Connect from the enrolled human account.",
         ));
     }
-    let (request, progress) = {
+    let envelope = {
         let mut reader = BufReader::new(&mut stream);
-        tokio::time::timeout(timeouts.frame_read, read_request_with_progress(&mut reader))
+        tokio::time::timeout(timeouts.frame_read, read_request_envelope(&mut reader))
             .await
             .map_err(|_| {
                 error(
@@ -3674,8 +3749,18 @@ async fn serve_connection_with_timeouts(
     // Keep this runtime revision pinned throughout dispatch. A reload waits for
     // active reads/writes and swaps only after protected composition succeeds.
     let runtime = shared_runtime.read().await;
-    let response =
-        fin_protocol::progress::observe(&mut stream, progress, runtime.handle(request)).await;
+    let cancellable_read =
+        envelope.cancellable_read() && runtime.request_uses_rpc_reads(&envelope.request);
+    let Some(response) = fin_protocol::progress::observe_request(
+        &mut stream,
+        envelope.progress,
+        cancellable_read,
+        runtime.handle_client_request(envelope.request, cancellable_read),
+    )
+    .await
+    else {
+        return Ok(());
+    };
     write_ipc_response(&mut stream, &response, timeouts.response_write).await?;
     Ok(())
 }

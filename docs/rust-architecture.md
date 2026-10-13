@@ -108,11 +108,14 @@ or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
 before a winner fails the read closed. RPC reads have no overall or per-endpoint
 deadline and no HTTP total-response timeout. Further providers start when a
 failed or missing attempt releases a slot; a stalled pair waits for a response
-or caller cancellation. Snapshot aggregation has no separate elapsed-time cutoff;
-the broker's 120-second outer read limit and command/evidence deadlines can still
-cancel the caller's read. Typed state reads resolve one canonical hash
-and retain it across racing header lookups, provider changes and shared-cache
-eviction. The bounded cache is not the authority for an in-flight request.
+or caller cancellation. RPC snapshot aggregation has no separate elapsed-time
+cutoff; non-RPC composite observers retain their existing deadline.
+Negotiated RPC read commands, including snapshots whose selected scope
+uses RPC, have no broker, engine or client response deadline. Other integrations
+and local service requests retain their existing waits. Typed state reads resolve
+one canonical hash and retain it across racing header lookups, provider changes
+and shared-cache eviction. The bounded cache is not the authority for an
+in-flight request.
 Adapters continue to interpret original-envelope, receipt, financial effects and
 finality evidence. Minimum-height constraints exclude lagging responses without
 weakening those adapter-owned requirements. `doctor` reads allowlisted snapshots
@@ -283,6 +286,17 @@ UI observations only, never authority or completion evidence. Delivery runs
 independently of execution: a disconnected or backpressured observer cannot
 cancel, delay indefinitely or repeat dispatch. Legacy and machine clients retain
 one final response, with unchanged operation records and error contracts.
+
+RPC read clients separately opt into cancellation on disconnect and keep their
+socket's write side open until completion. The broker resolves the selected
+adapter, snapshot scope or original journal identity before confirming an RPC
+wait; a client-provided flag cannot remove a financial execution deadline.
+The client consumes this confirmation as an internal transport frame, preserving
+human progress and the final JSON result. A disconnected negotiated read drops
+its work and releases service/configuration guards. Legacy clients keep their
+bounded observation deadline because a write-half close cannot distinguish
+completion of their request frame from cancellation. Legacy half-closed clients
+and financial dispatch retain the existing independent observer behavior.
 
 AMM preparation obtains one pinned protocol quote and uses it for shared bound
 validation and transaction construction. Final revalidation obtains its own fresh
@@ -519,20 +533,26 @@ Financial execution retains the engine's serialized queue for reservations,
 nonces and duplicate control. Read-only previews, stored status and revocation
 bypass the broker's broad mutation gate. A busy execution queue causes operation
 and plan status to return durable progress promptly; reconciliation runs when
-available and is bounded as observation, never as financial dispatch. Revocation
-and submission admission are ordered by the store's atomic authority/CAS checks;
+available and observes the original submission, never repeating dispatch.
+Revocation and submission admission are ordered by the store's atomic authority/CAS checks;
 revocation cannot recall an already admitted submission. The composite snapshot
-observer and EVM network router each admit at most four readers concurrently,
-without the former 10- and 8-second snapshot cutoffs. They wait for all selected
-readers to finish or for caller cancellation, preserve stable result ordering and
-abort their child tasks when dropped. An observer error, incomplete adapter
-evidence or unmatched scope selector can still produce partial coverage; elapsed
-time alone no longer produces a partial result at these aggregation layers.
-The broker's outer read request retains its 120-second deadline.
-Preparation/revalidation, reconciliation observations and external reads have
-120-second deadlines. Binance's independent account-identity check retains its
-10-second bound. The RPC transport itself imposes no overall, per-endpoint or HTTP
-total-response timeout on reads; these higher-layer deadlines remain in force.
+observer and EVM network router each admit at most four readers concurrently.
+The EVM router omits its former 8-second cutoff; composite aggregation omits its
+10-second observer cutoff only for selected RPC readers. Non-RPC observers keep
+their existing deadline, including time queued for a slot. RPC readers wait until
+completion or caller cancellation. Both layers preserve stable result ordering
+and abort their child tasks when dropped. Errors, incomplete evidence, unmatched
+scope or a non-RPC observer timeout can still produce partial coverage.
+The broker and engine omit their 120-second read deadlines only when the resolved
+adapter and selected scope use RPC. The authenticated RPC-wait confirmation also
+removes the client's response deadline; without confirmation the existing
+response budget remains. Explicit RPC status/recovery observations can likewise
+wait until caller cancellation. Non-RPC reads and reconciliation retain their
+existing limits. Preparation/revalidation, pricing and reconciliation performed
+inside financial execution retain 120-second evidence deadlines. Binance's
+independent account-identity check keeps its 10-second bound. Public indexer,
+pricing and bridge-provider HTTP limits, local connection/frame/configuration
+limits and all approval/quote expiry checks remain independent safeguards.
 Independent EVM reads overlap within each phase, with original request tags and
 final pending-nonce checks retained. The financial submission
 future is never cancelled by an evidence timeout. Further per-resource execution

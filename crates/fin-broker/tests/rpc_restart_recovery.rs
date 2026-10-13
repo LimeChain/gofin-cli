@@ -470,7 +470,19 @@ impl Client {
                 let input: Value = serde_json::from_str(&line).unwrap();
                 let request: BrokerRequest =
                     serde_json::from_value(input["request"].clone()).unwrap();
-                let response = broker.handle(request).await;
+                let cancellable = input["cancel_on_disconnect"].as_bool().unwrap_or(false)
+                    && request.may_use_rpc_reads()
+                    && broker.request_uses_rpc_reads(&request);
+                let Some(response) = fin_protocol::progress::observe_request(
+                    reader.get_mut(),
+                    input["progress"].as_bool().unwrap_or(false),
+                    cancellable,
+                    broker.handle_client_request(request, cancellable),
+                )
+                .await
+                else {
+                    continue;
+                };
                 let reply = json!({"identity":hello["identity"],"build_id":hello["build_id"],"mode":"synthetic","response":response});
                 reader
                     .get_mut()
@@ -487,7 +499,9 @@ impl Client {
     }
     async fn call(&self, request: BrokerRequest) -> Value {
         let Ok(binary) = std::env::var("FIN_RPC_RECOVERY_CLI") else {
-            let response = self.runtime.handle(request).await;
+            // Latest runtime composition has large financial futures. Keep
+            // the fixture's direct-call path on the heap, as the IPC path does.
+            let response = Box::pin(self.runtime.handle(request)).await;
             assert!(response.ok, "{:?}", response.error);
             return response.result.unwrap();
         };

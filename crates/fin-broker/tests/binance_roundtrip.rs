@@ -3265,6 +3265,7 @@ async fn streamed_deposit_request(
             .unwrap();
     });
     let mut frame = serde_json::to_vec(&fin_protocol::progress::RequestEnvelope {
+        cancel_on_disconnect: false,
         request,
         progress: true,
     })

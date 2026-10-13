@@ -354,6 +354,20 @@ impl Engine {
         self.build_plan_status(&record, &revision)
     }
 
+    /// Inspect protected plan bindings without observing chains or granting authority.
+    pub fn financial_plan_rpc_read_scope(&self, plan_id: &str) -> Result<bool> {
+        let record = self.load_financial_plan(plan_id)?;
+        // Only unresolved submissions collect RPC proof; a future wallet step
+        // alone must not remove a status command's existing response budget.
+        // An earlier revision can still own an unresolved original submission.
+        for attempt in &record.attempts {
+            if self.status_rpc_read_scope(&attempt.attempt_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn financial_plan_status(&self, plan_id: &str) -> Result<FinancialPlanStatus> {
         let Ok(_guard) = self.write_queue.try_lock() else {
             // A running execution already owns reconciliation. Return durable
@@ -384,7 +398,7 @@ impl Engine {
             }
         }
         for attempt_id in unresolved_ids {
-            let _ = self.reconcile_serial(attempt_id).await?;
+            let _ = self.reconcile_observation_serial(attempt_id).await?;
         }
         record = self.load_financial_plan(plan_id)?;
         self.build_plan_status(&record, &record.revision.clone())
