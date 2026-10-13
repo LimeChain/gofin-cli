@@ -1474,7 +1474,11 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
             let route = format!(
                 "{} → {}",
                 bridge_chain_name(quote["intent"]["source"]["chain_id"].as_u64()?),
-                bridge_chain_name(quote["intent"]["destination_chain_id"].as_u64()?)
+                if quote["minimum_receipt"]["asset"]["network"] == "solana:mainnet-beta" {
+                    "Solana"
+                } else {
+                    bridge_chain_name(quote["intent"]["destination_chain_id"].as_u64()?)
+                }
             );
             let provider = bridge_provider_name(
                 quote["provider"].as_str(),
@@ -1601,7 +1605,7 @@ fn render_bridge_result(command: &str, value: &Value) -> Option<String> {
                             "Attestation verified; explicitly submit the destination mint under current authority."
                         }
                         "destination_gas_required" => {
-                            "Destination ETH gas is required before minting."
+                            "Fund the destination wallet’s transaction fees before minting."
                         }
                         "attestation_expired" => {
                             "The attestation expired; recover the same burn before preparing a mint."
@@ -1723,6 +1727,11 @@ fn display_amount(amount: &Value) -> Option<String> {
         {
             "USDC"
         }
+        ("ethereum:8453", address)
+            if address.eq_ignore_ascii_case("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913") =>
+        {
+            "USDC"
+        }
         ("ethereum:4663", address)
             if address.eq_ignore_ascii_case("0x5fc5360d0400a0fd4f2af552add042d716f1d168") =>
         {
@@ -1737,6 +1746,7 @@ fn bridge_chain_name(chain_id: u64) -> &'static str {
     match chain_id {
         1 => "Ethereum",
         42161 => "Arbitrum",
+        8453 => "Base",
         4663 => "Robinhood Chain",
         _ => "EVM",
     }
@@ -1746,11 +1756,11 @@ fn bridge_provider_name(
     provider: Option<&str>,
     destination_chain_id: Option<u64>,
 ) -> Option<&'static str> {
-    match (provider?, destination_chain_id?) {
+    match (provider?, destination_chain_id) {
         ("relay", _) => Some("Relay"),
         ("cctp", _) => Some("Circle CCTP V2"),
-        ("arbitrum_canonical", 42161) => Some("Canonical Inbox"),
-        ("arbitrum_canonical", 4663) => Some("Canonical Inbox"),
+        ("arbitrum_canonical", Some(42161)) => Some("Canonical Inbox"),
+        ("arbitrum_canonical", Some(4663)) => Some("Canonical Inbox"),
         _ => None,
     }
 }
@@ -3068,6 +3078,26 @@ mod tests {
     }
 
     #[test]
+    fn cctp_cross_vm_quote_names_both_networks_and_usdc_without_changing_json() {
+        let quote = json!({"transfers":[{"transfer_id":"synthetic-cctp-solana", "quote":{
+            "provider":"cctp",
+            "gross_debit":{"asset":{"network":"ethereum:8453","reference":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913","decimals":6},"atoms":"10000000"},
+            "minimum_receipt":{"asset":{"network":"solana:mainnet-beta","reference":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","decimals":6},"atoms":"9990000"},
+            "intent":{"source":{"chain_id":8453},"destination_chain_id":null}
+        }}]});
+        let original = quote.clone();
+        let text = render_human("read", &quote, false);
+        assert!(
+            text.contains("Base → Solana via Circle CCTP V2: 10 USDC; receive at least 9.99 USDC.")
+        );
+        assert_eq!(quote, original);
+        assert_eq!(
+            bridge_provider_name(Some("cctp"), None),
+            Some("Circle CCTP V2")
+        );
+    }
+
+    #[test]
     fn cctp_burn_and_waiting_states_do_not_claim_destination_completion() {
         let burn = json!({"operation":"bridge.transfer","input":{"transferId":"cctp-id","stepKind":"deposit"},"status":"completed","preview":{"binding":{"quote":{"provider":"cctp"}}}});
         let original = burn.clone();
@@ -3080,7 +3110,7 @@ mod tests {
             ("attestation_pending", "Waiting for Circle attestation"),
             (
                 "destination_gas_required",
-                "Destination ETH gas is required",
+                "Fund the destination wallet’s transaction fees",
             ),
             (
                 "processed_receipt_pending",

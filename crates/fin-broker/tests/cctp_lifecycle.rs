@@ -49,6 +49,11 @@ use std::{
 };
 
 sol! {
+ function isFjord() external view returns(bool);
+ function isIsthmus() external view returns(bool);
+ function isJovian() external view returns(bool);
+ function getL1FeeUpperBound(uint256 size) external view returns(uint256);
+ function getOperatorFee(uint256 gas) external view returns(uint256);
  function usdcToken() external view returns(address);
  function paused() external view returns(bool);
  function transfer(address to,uint256 value) external returns(bool);
@@ -88,7 +93,7 @@ fn block_hash(chain: u64) -> B256 {
     B256::repeat_byte(if chain == 1 { 0x11 } else { 0x22 })
 }
 fn block(chain: u64, number: u64) -> Value {
-    json!({"hash":format!("{:#x}",block_hash(chain)),"number":format!("{number:#x}"),"timestamp":"0x2000","baseFeePerGas":"0x3b9aca00"})
+    json!({"hash":format!("{:#x}",block_hash(chain)),"number":format!("{number:#x}"),"timestamp":"0x2000","baseFeePerGas":"0x3b9aca00","extraData":"0x000000000000000000"})
 }
 fn encoded<T: SolValue>(value: T) -> Value {
     json!(hex_bytes(&value.abi_encode()))
@@ -100,11 +105,22 @@ fn event<E: SolEvent>(chain: u64, emitter: &str, index: u64, event: E) -> Value 
 fn attester() -> PrivateKeySigner {
     format!("0x{}", "44".repeat(32)).parse().unwrap()
 }
-fn source_message(call: &depositForBurnCall, sender: Address) -> Vec<u8> {
+fn remote_messenger(destination: u32) -> B256 {
+    if destination == 5 {
+        B256::from_slice(
+            &bs58::decode(fin_bridge::cctp::solana::TOKEN_MESSENGER_MINTER)
+                .into_vec()
+                .unwrap(),
+        )
+    } else {
+        address(TOKEN_MESSENGER).unwrap().into_word()
+    }
+}
+fn source_message(call: &depositForBurnCall, sender: Address, chain: u64) -> Vec<u8> {
     let mut b = vec![0u8; 376];
     for (offset, value) in [
         (0, 1u32),
-        (4, 0),
+        (4, fin_bridge::cctp::domain(chain).unwrap()),
         (8, call.destinationDomain),
         (140, call.minFinalityThreshold),
         (148, 1),
@@ -113,7 +129,7 @@ fn source_message(call: &depositForBurnCall, sender: Address) -> Vec<u8> {
     }
     for (offset, word) in [
         (44, address(TOKEN_MESSENGER).unwrap().into_word()),
-        (76, address(TOKEN_MESSENGER).unwrap().into_word()),
+        (76, remote_messenger(call.destinationDomain)),
         (108, call.destinationCaller),
         (152, call.burnToken.into_word()),
         (184, call.mintRecipient),
@@ -262,8 +278,20 @@ impl Rpc {
         if selector == messageBodyVersionCall::SELECTOR || selector == versionCall::SELECTOR {
             return Ok(encoded(1u32));
         }
+        if selector == isFjordCall::SELECTOR {
+            return Ok(encoded(true));
+        }
+        if selector == isIsthmusCall::SELECTOR || selector == isJovianCall::SELECTOR {
+            return Ok(encoded(false));
+        }
+        if selector == getL1FeeUpperBoundCall::SELECTOR || selector == getOperatorFeeCall::SELECTOR
+        {
+            return Ok(encoded(U256::ZERO));
+        }
         if selector == remoteTokenMessengersCall::SELECTOR {
-            return Ok(encoded(address(TOKEN_MESSENGER)?.into_word()));
+            return Ok(encoded(remote_messenger(
+                remoteTokenMessengersCall::abi_decode(&raw).unwrap().domain,
+            )));
         }
         if selector == localDomainCall::SELECTOR {
             return Ok(encoded(domain(self.chain)?));
@@ -294,7 +322,7 @@ impl Rpc {
             return Ok(encoded(U256::from(6)));
         }
         if selector == balanceOfCall::SELECTOR {
-            return Ok(encoded(if self.chain == 1 {
+            return Ok(encoded(if self.chain != 42161 {
                 s.source_balance
             } else {
                 s.destination_balance
@@ -364,14 +392,14 @@ impl EvmRpc for Rpc {
             "eth_getCode" => json!("0x6000"),
             "eth_getBalance" => json!(if self.chain == 42161 && s.gas_missing {
                 "0x0".to_owned()
-            } else if self.chain == 1 && s.source_gas_balance.is_some() {
+            } else if self.chain != 42161 && s.source_gas_balance.is_some() {
                 format!("{:#x}", s.source_gas_balance.unwrap())
             } else {
                 "0x56bc75e2d63100000".to_owned()
             }),
             "eth_blockNumber" => json!(format!(
                 "{:#x}",
-                if self.chain == 1 {
+                if self.chain != 42161 {
                     s.source_head.unwrap_or(110)
                 } else {
                     110
@@ -460,7 +488,7 @@ impl EvmRpc for Rpc {
                         }
                         s.source_balance -= call.amount;
                         s.allowance -= call.amount;
-                        let raw = source_message(&call, sender);
+                        let raw = source_message(&call, sender, self.chain);
                         s.source_message = Some(raw.clone());
                         s.source_tx = Some(tx_hash.clone());
                         logs.push(event(
@@ -481,7 +509,7 @@ impl EvmRpc for Rpc {
                                 depositor: sender,
                                 mintRecipient: call.mintRecipient,
                                 destinationDomain: call.destinationDomain,
-                                destinationTokenMessenger: address(TOKEN_MESSENGER)?.into_word(),
+                                destinationTokenMessenger: remote_messenger(call.destinationDomain),
                                 destinationCaller: call.destinationCaller,
                                 maxFee: call.maxFee,
                                 minFinalityThreshold: call.minFinalityThreshold,
@@ -551,11 +579,11 @@ impl EvmRpc for Rpc {
                     log["transactionHash"] = json!(tx_hash);
                 }
                 let tx = json!({"hash":tx_hash,"from":lower_address(sender),"to":lower_address(envelope.to().unwrap()),"value":format!("{:#x}",envelope.value()),"input":hex_bytes(envelope.input()),"nonce":format!("{:#x}",envelope.nonce()),"gas":format!("{:#x}",envelope.gas_limit()),"chainId":format!("{:#x}",self.chain),"type":"0x2","maxFeePerGas":format!("{:#x}",envelope.max_fee_per_gas()),"maxPriorityFeePerGas":format!("{:#x}",envelope.max_priority_fee_per_gas().unwrap()),"accessList":[],"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain))});
-                let receipt = json!({"transactionHash":tx_hash,"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain)),"status":if reverted{"0x0"}else{"0x1"},"gasUsed":"0x7530","effectiveGasPrice":"0x3b9aca00","logs":logs});
+                let receipt = json!({"transactionHash":tx_hash,"blockNumber":"0x64","blockHash":format!("{:#x}",block_hash(self.chain)),"status":if reverted{"0x0"}else{"0x1"},"gasUsed":"0x7530","effectiveGasPrice":"0x3b9aca00","l1Fee":"0x0","logs":logs});
                 s.transactions
                     .insert((self.chain, tx_hash.clone()), (tx, receipt));
                 *s.broadcasts.entry(self.chain).or_default() += 1;
-                if self.chain == 1
+                if self.chain != 42161
                     && let Some(balance) = s.source_gas_balance.as_mut()
                 {
                     *balance -= U256::from(30_000_000_000_000u64);
@@ -667,6 +695,7 @@ struct Harness {
     engine: Arc<Engine>,
     runtime: Arc<fin_broker::BrokerRuntime>,
     client: tokio::sync::OnceCell<Client>,
+    solana: Option<Arc<solana::SolanaFixture>>,
 }
 impl Harness {
     fn new() -> Self {
@@ -688,12 +717,24 @@ impl Harness {
         approvals: Arc<Approvals>,
         iris: Arc<Iris>,
     ) -> Self {
+        Self::build_with_solana(temp, chain, approvals, iris, None)
+    }
+    fn build_with_solana(
+        temp: tempfile::TempDir,
+        chain: Arc<Mutex<ChainState>>,
+        approvals: Arc<Approvals>,
+        iris: Arc<Iris>,
+        solana: Option<Arc<solana::SolanaFixture>>,
+    ) -> Self {
         let signer = Arc::new(LocalEnvelopeSigner::from_private_key(&"11".repeat(32)).unwrap());
         let wallet = lower_address(signer.address());
         let valuator = Arc::new(SharedUsdValuator::with_source(Arc::new(Prices)));
         let mut wallets = BTreeMap::new();
         let mut observers = BTreeMap::new();
-        for chain_id in [1, 42161] {
+        for chain_id in [1, 42161]
+            .into_iter()
+            .chain(solana.is_some().then_some(8453))
+        {
             let rpc = Arc::new(Rpc {
                 chain: chain_id,
                 state: chain.clone(),
@@ -754,9 +795,19 @@ impl Harness {
             wallets[&42161].clone(),
             hl_transport,
         ));
+        let binance = solana
+            .as_ref()
+            .and_then(|s| s.binance.get())
+            .map(|b| b.adapter(wallets[&8453].clone()));
         let bridge = Arc::new(
             BridgeAdapter::with_providers(vec![provider], wallets, observers, valuator.clone())
-                .unwrap(),
+                .unwrap()
+                .with_solana_wallets(
+                    solana
+                        .as_ref()
+                        .map(|fixture| BTreeMap::from([("model-solana".into(), fixture.wallet())]))
+                        .unwrap_or_default(),
+                ),
         );
         let shared = Store::open(temp.path().join("cctp.sqlite"))
             .unwrap()
@@ -774,7 +825,13 @@ impl Harness {
             },
             fin_broker::RuntimeDependencies {
                 store: Store::open(temp.path().join("cctp.sqlite")).unwrap(),
-                adapters: vec![router, bridge.clone(), hl],
+                adapters: {
+                    let mut adapters: Vec<Arc<dyn Adapter>> = vec![router, bridge.clone(), hl];
+                    if let Some(binance) = binance {
+                        adapters.push(binance);
+                    }
+                    adapters
+                },
                 authorizer: approvals.clone(),
                 valuator,
                 bridge: Some(bridge.clone()),
@@ -793,6 +850,7 @@ impl Harness {
             engine,
             runtime,
             client: tokio::sync::OnceCell::new(),
+            solana,
         }
     }
     fn restart(self) -> Self {
@@ -801,9 +859,10 @@ impl Harness {
             iris,
             chain,
             approvals,
+            solana,
             ..
         } = self;
-        Self::build(temp, chain, approvals, iris)
+        Self::build_with_solana(temp, chain, approvals, iris, solana)
     }
     fn bounds(&self) -> BridgeBounds {
         let mut fees: Vec<_> = [1, 42161]
@@ -1044,7 +1103,7 @@ impl Harness {
             }
             op = self.operation_status(&op.id).await;
         }
-        assert_eq!(op.status, Status::Completed, "{:?}", op.error);
+        assert_eq!(op.status, Status::Completed, "{op:?}");
         op
     }
     async fn status(&self, id: &str) -> Value {
@@ -1620,7 +1679,11 @@ impl Client {
             value
         } else {
             let response = Box::pin(self.runtime.handle(request)).await;
-            assert!(response.ok, "broker failed: {:?}", response.error);
+            assert!(
+                response.ok,
+                "broker failed for {args:?}: {:?}",
+                response.error
+            );
             response.result.unwrap()
         }
     }
@@ -2116,3 +2179,6 @@ async fn rejected_mint_candidate_releases_plan_claim_atomically_and_preserves_or
         BTreeMap::from([(1, 2), (42161, 1)])
     );
 }
+
+#[path = "support/cctp_solana_lifecycle.rs"]
+mod solana;

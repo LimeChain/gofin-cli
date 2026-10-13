@@ -57,7 +57,8 @@ Do not deploy new bridge contracts or token wrappers to fill coverage gaps.
 
 Fin implements direct CCTP V2 transfers in both directions between Ethereum,
 Arbitrum One and Base: six directed routes, each with explicit standard or fast
-mode. Source and destination must be different. Only native USDC is accepted;
+mode. Each of those EVM networks can also send native USDC to an enrolled Solana
+mainnet-beta wallet. Solana is a destination only in this provider. Source and destination must be different. Only native USDC is accepted;
 USDC.e, swaps, hooks, forwarding services and legacy V1 transactions are outside
 this provider. Circle's [domain inventory](https://developers.circle.com/cctp/concepts/supported-chains-and-domains)
 and [deployment registry](https://developers.circle.com/cctp/references/contract-addresses)
@@ -69,7 +70,7 @@ were reviewed for these identities:
 | Arbitrum One | 42161 | 3 | `0xaf88d065e77c8cc2239327c5edb3a432268e5831` | Source/destination; standard and fast |
 | Base | 8453 | 6 | `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913` | Source/destination; standard and fast |
 | Robinhood Chain | 4663 | None published | No reviewed Circle-native CCTP token | Unavailable: no Circle domain/deployment in the reviewed registry |
-| Solana | Not implemented by Fin's wallet/bridge runtime | 5 | Not enabled by this adapter | Circle supports CCTP, but Fin lacks an SVM signer, transaction and receipt adapter |
+| Solana | `solana:mainnet-beta` (no EVM chain ID) | 5 | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | Destination from the three reviewed EVM sources; existing USDC ATA and enrolled Solana signer required |
 
 Each supported EVM route uses TokenMessengerV2
 `0x28b5a0e9c621a5badaa536219b3a228c8168cf5d` and MessageTransmitterV2
@@ -78,8 +79,8 @@ from EVM chain IDs. Mode binds the minimum finality threshold (standard 2000,
 fast 1000); changing mode is not an ordinary quote refresh. Circle's required
 source attestation finality and Fin's configured source/destination receipt
 policy must both hold. Fees come from Circle's route-specific fee response,
-use exact upward rounding and stay below the approved maximum. Gas is ETH on
-both source and destination and has separate chain-qualified caps.
+use exact upward rounding and stay below the approved maximum. EVM gas is ETH with separate chain-qualified caps. A Solana destination uses SOL
+with distinct caps for transaction fees and permanent CCTP nonce-account rent.
 
 Quote through `bridge.quotes` with `provider: "cctp"`, exact source and destination
 native-USDC identities, `allowedRefundAssets: []`, and optional
@@ -91,8 +92,10 @@ names. Each financial write is an explicit `bridge.transfer` execution under
 the active sequential plan. Status/attestation polling never submits a mint.
 
 The plan binds networks/domains, exact token addresses, wallets and recipient,
-source debit, mode, fee bounds and destination receipt floor. Both networks need
-an enrolled compatible signing wallet and sufficient ETH. Approval precedes
+source debit, mode, fee bounds and destination receipt floor. EVM destinations use
+the same reusable EVM signer. Solana destinations bind a separate enrolled signer,
+its owner address, exact native-USDC ATA and destination caller. Both networks need
+pre-funded native fees. Approval precedes
 future funding; actual balance, allowance, gas and transaction checks happen
 when the respective step becomes eligible. A burn remains intermediate.
 Fin persists its canonical receipt and message identity, validates attested
@@ -101,13 +104,50 @@ against destination attester configuration, then prepares the original mint.
 Only canonical destination `MessageReceived` and native-USDC mint evidence
 establish the receipt. Balance deltas never correlate transfers.
 
-Delayed attestations remain pending. Insufficient destination gas requires ETH
-at the approved wallet before explicitly retrying an unsubmitted mint. Response
+Delayed attestations remain pending. Insufficient destination gas requires the
+destination native token at the approved wallet before explicitly retrying an unsubmitted mint. Response
 loss or restart reconciles the original transaction/message; neither permits a
 new burn. Already-used nonces require the original destination proof. Expired or
 revoked plans permit reconciliation but block every new write, including mint.
 A replacement revision preserves prior consumption and must receive fresh
 approval. No background task refreshes financial consent.
+
+### EVM to Solana in one funding plan
+
+Use the same `bridge.routes`, `bridge.quotes`, `bridge.transfer`, `bridge.status`
+and `bridge.recovery` operations. Omit EVM destination fields and supply
+`solanaDestination: {"network":"solana:mainnet-beta","wallet":"solana-wallet","mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}`.
+`recipient` is that wallet's exact, case-sensitive owner address. The broker derives
+and verifies its existing native-USDC associated token account; the burn's mint
+recipient is that token account. A route cannot combine EVM and Solana destination
+identities. Existing EVM quote/step JSON remains compatible.
+
+For exchange funding, one named plan contains the subaccount-to-master transfer,
+master withdrawal to the EVM wallet, all returned bridge allowance/reset stages,
+burn and Solana mint. Attach the withdrawal's verified native-USDC receipt to the
+burn's principal dependency. Existing ETH and SOL pay native fees independently.
+Binance withdrawal `amount` includes its fee: a 10-USDC debit with a 0.20-USDC fee
+funds at most a 9.80-USDC burn. Fix the downstream amount to the guaranteed receipt
+and disclose any remainder if a lower withdrawal fee delivers more.
+
+The source burn binds Circle domain 5, the deployed Solana receiver program,
+recipient token account and destination caller. Mint uses the protected Solana
+runtime's frozen message, signer, blockhash lifetime, simulation and durable
+signature-before-broadcast journal. Completion requires a finalized transaction
+with the exact receive instruction, CCTP message/mint CPI events and native-USDC
+credit to the bound account. A used-nonce PDA or unrelated balance increase is
+insufficient. Nonce rent has no reviewed reclaim path and is a permanent cost.
+Reconciliation records actual SOL fee/rent separately from the USDC protocol fee.
+For Fin submissions, these costs must settle on the original mint operation before
+bridge credit completes. A mint executed outside Fin retains its verified native
+cost observations in the receipt proof, marked external; it does not consume or
+expand a Fin plan grant. Historical receipt discovery precedes current program
+readiness checks, so a later pause or account closure does not erase valid evidence.
+
+Use `fin execute ... --json --stream` for each eligible plan step and
+`fin status ... --json --stream` while pending. Relay only observed milestones;
+status polling never performs a mint. Protected installation/update and native
+approval remain human Terminal actions; disposable automatic approval is separate.
 
 For Hyperliquid, Ethereum or Base funds first mint to the approved owner's
 Arbitrum wallet; a separate `hyperliquid.account.deposit` then sends native USDC

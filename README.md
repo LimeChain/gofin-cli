@@ -402,7 +402,10 @@ CCTP V2 supports native USDC in all six directions between Ethereum, Arbitrum On
 and Base, using explicit standard or fast mode. Source allowance/burn and
 destination mint are separate writes. ETH gas is required on both networks;
 USDC fees reduce the destination receipt. Robinhood has no reviewed Circle
-CCTP deployment. Solana has Circle support but no Fin SVM execution adapter.
+CCTP deployment. The three reviewed EVM sources also support Solana mainnet-beta
+destinations using a separate enrolled signer and existing native-USDC associated
+token account. Solana mint requires SOL transaction fees and permanent nonce rent;
+Solana-source CCTP is not implemented.
 See the [exact route matrix and recovery contract](docs/bridge-design.md#cctp-native-usdc-and-hyperliquid-funding).
 
 This example selects the CCTP provider for 10 USDC from Ethereum to Arbitrum:

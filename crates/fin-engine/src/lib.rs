@@ -5977,7 +5977,36 @@ fn transfer_principal(record: &OperationRecord) -> Result<Option<fin_domain::Tra
     }))
 }
 
+fn canonical_base58(value: &str, length: usize) -> bool {
+    value.len() <= 88
+        && bs58::decode(value)
+            .into_vec()
+            .is_ok_and(|bytes| bytes.len() == length && bs58::encode(bytes).into_string() == value)
+}
+
 fn bridge_event_identity_matches(evidence: &Value, transfer_id: &str, evidence_id: &str) -> bool {
+    if evidence["network"]
+        .as_str()
+        .is_some_and(|network| network.starts_with("solana:"))
+    {
+        let signature = evidence["transaction_hash"]
+            .as_str()
+            .filter(|value| canonical_base58(value, 64));
+        let index = evidence["instruction_index"].as_u64();
+        let canonical = signature
+            .zip(index)
+            .map(|(signature, index)| format!("solana:mainnet-beta:{signature}:{index}"));
+        return evidence["network"] == "solana:mainnet-beta"
+            && evidence["receipt_scope"] == "instruction"
+            && evidence.get("chain_id").is_none()
+            && evidence.get("log_index").is_none()
+            && evidence["transfer_id"].as_str() == Some(transfer_id)
+            && evidence["evidence_id"].as_str() == Some(evidence_id)
+            && canonical.as_deref() == Some(evidence_id)
+            && evidence
+                .get("correlation")
+                .is_some_and(|value| !value.is_null());
+    }
     let chain_id = evidence
         .get("chain_id")
         .and_then(|value| {
@@ -6037,6 +6066,17 @@ fn bridge_event_identity_matches(evidence: &Value, transfer_id: &str, evidence_i
 }
 
 fn bridge_evidence_matches_resource(evidence: &Value, resource: &ResourceId) -> bool {
+    if resource.0.starts_with("solana:") {
+        return resource
+            .0
+            .strip_prefix("solana:mainnet-beta:")
+            .is_some_and(|owner| {
+                canonical_base58(owner, 32)
+                    && evidence["network"] == "solana:mainnet-beta"
+                    && evidence.get("chain_id").is_none()
+                    && evidence["recipient"].as_str() == Some(owner)
+            });
+    }
     let Some(rest) = resource.0.strip_prefix("ethereum:") else {
         return true;
     };
@@ -6063,6 +6103,12 @@ fn bridge_evidence_matches_resource(evidence: &Value, resource: &ResourceId) -> 
 fn valid_bridge_target(target: &fin_domain::BridgeSettlementTarget) -> bool {
     if target.minimum_atoms.integer().is_zero() {
         return false;
+    }
+    if let Some(owner) = target.resource.0.strip_prefix("solana:mainnet-beta:") {
+        return canonical_base58(owner, 32)
+            && target.asset.network == "solana:mainnet-beta"
+            && ((target.asset.reference == "native" && target.asset.decimals == 9)
+                || canonical_base58(&target.asset.reference, 32));
     }
     let Some(rest) = target.resource.0.strip_prefix("ethereum:") else {
         return false;
@@ -26598,6 +26644,73 @@ mod tests {
     }
 
     #[test]
+    fn bridge_solana_receipt_identity_and_target_are_exact() {
+        let owner = bs58::encode([7u8; 32]).into_string();
+        let signature = bs58::encode([9u8; 64]).into_string();
+        let evidence_id = format!("solana:mainnet-beta:{signature}:0");
+        let evidence = json!({
+            "transfer_id":"SYNTHETIC-solana-transfer", "evidence_id":evidence_id,
+            "network":"solana:mainnet-beta", "receipt_scope":"instruction",
+            "transaction_hash":signature, "instruction_index":0,
+            "recipient":owner, "correlation":"SYNTHETIC-cctp-nonce"
+        });
+        let resource = ResourceId(format!("solana:mainnet-beta:{owner}"));
+        assert!(bridge_event_identity_matches(
+            &evidence,
+            "SYNTHETIC-solana-transfer",
+            &evidence_id
+        ));
+        assert!(bridge_evidence_matches_resource(&evidence, &resource));
+        for (field, value) in [
+            ("network", json!("solana:devnet")),
+            ("receipt_scope", json!("transaction")),
+            ("instruction_index", json!(1)),
+            (
+                "transaction_hash",
+                json!(bs58::encode([9u8; 32]).into_string()),
+            ),
+            ("chain_id", json!(8453)),
+            ("log_index", json!(0)),
+            ("correlation", Value::Null),
+        ] {
+            let mut invalid = evidence.clone();
+            invalid[field] = value;
+            assert!(
+                !bridge_event_identity_matches(&invalid, "SYNTHETIC-solana-transfer", &evidence_id),
+                "{field}"
+            );
+        }
+        let other = ResourceId(format!(
+            "solana:mainnet-beta:{}",
+            bs58::encode([8u8; 32]).into_string()
+        ));
+        assert!(!bridge_evidence_matches_resource(&evidence, &other));
+        assert!(!bridge_evidence_matches_resource(
+            &evidence,
+            &ResourceId(format!("solana:devnet:{owner}"))
+        ));
+        let target = fin_domain::BridgeSettlementTarget {
+            resource,
+            asset: asset(
+                "solana:mainnet-beta",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                6,
+            ),
+            minimum_atoms: quantity("9800000"),
+        };
+        assert!(valid_bridge_target(&target));
+        let mut invalid = target.clone();
+        invalid.asset.network = "solana:devnet".into();
+        assert!(!valid_bridge_target(&invalid));
+        invalid = target.clone();
+        invalid.asset.reference = "USDC".into();
+        assert!(!valid_bridge_target(&invalid));
+        invalid = target;
+        invalid.minimum_atoms = quantity("0");
+        assert!(!valid_bridge_target(&invalid));
+    }
+
+    #[test]
     fn transfer_principal_carries_only_source_bound_neutral_locator() {
         let mut operation = record(vec![], vec![]);
         let amount = Amount {
@@ -26609,7 +26722,8 @@ mod tests {
             message_hash: None,
             scheme: "SYNTHETIC-message-v1".into(),
             source_evidence_id: source_evidence_id.clone(),
-            destination_chain_id: 42161,
+            destination_network: None,
+            destination_chain_id: Some(42161),
             transaction_hash: format!("0x{}", "b".repeat(64)),
             proof: json!({"message_index":"42"}),
         };

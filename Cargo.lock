@@ -2044,9 +2044,13 @@ version = "0.2.0-beta.1"
 dependencies = [
  "alloy",
  "async-trait",
+ "base64 0.22.1",
+ "bs58",
  "chrono",
+ "ed25519-dalek",
  "fin-domain",
  "fin-evm",
+ "fin-solana",
  "hex",
  "num-bigint",
  "num-traits",
@@ -2054,6 +2058,8 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "solana-pubkey 3.0.0",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2190,6 +2196,7 @@ name = "fin-engine"
 version = "0.2.0-beta.1"
 dependencies = [
  "async-trait",
+ "bs58",
  "chrono",
  "fin-authorization",
  "fin-domain",
@@ -2442,6 +2449,7 @@ dependencies = [
 name = "fin-store"
 version = "0.2.0-beta.1"
 dependencies = [
+ "bs58",
  "chrono",
  "fin-domain",
  "hex",

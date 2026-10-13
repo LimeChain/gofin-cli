@@ -8,9 +8,19 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BridgeRoutesInput {
     pub source: BridgeAssetInput,
-    pub destination_chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_chain_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_destination: Option<SolanaRouteDestination>,
     #[serde(default)]
     pub destination_asset: Option<BridgeAssetInput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SolanaRouteDestination {
+    pub network: String,
+    pub mint: String,
 }
 
 /// The broker supplies independently observed precision, never API symbols.

@@ -144,7 +144,8 @@ impl BridgeProvider for Erc20Provider {
         let approve = BridgeStep {
             ordinal: 0,
             kind: BridgeStepKind::Approval,
-            call: EvmCall {
+            solana_mint: None,
+            call: Some(EvmCall {
                 chain_id: source.chain_id,
                 to: approval.token.clone(),
                 value: q("0"),
@@ -159,7 +160,7 @@ impl BridgeProvider for Erc20Provider {
                         .abi_encode()
                     )
                 ),
-            },
+            }),
             expected_sender: request.intent.source_address.clone(),
             maximum_debit: vec![],
             dependencies: vec![],
@@ -167,7 +168,8 @@ impl BridgeProvider for Erc20Provider {
         let deposit = BridgeStep {
             ordinal: 1,
             kind: BridgeStepKind::Deposit,
-            call: EvmCall {
+            solana_mint: None,
+            call: Some(EvmCall {
                 chain_id: source.chain_id,
                 to: DEPOSITORY.into(),
                 value: q("0"),
@@ -184,7 +186,7 @@ impl BridgeProvider for Erc20Provider {
                         .abi_encode()
                     )
                 ),
-            },
+            }),
             expected_sender: request.intent.source_address.clone(),
             maximum_debit: vec![source.amount(request.intent.amount.clone())],
             dependencies: vec![0],
@@ -254,7 +256,7 @@ impl BridgeProvider for Erc20Provider {
             candidates: vec![BridgeEvidenceCandidate {
                 order_id: transfer.order_id.clone(),
                 kind: EvidenceKind::DestinationFill,
-                chain_id: transfer.destination_chain_id,
+                chain_id: transfer.evm_destination_chain_id()?,
                 transaction_hash: DESTINATION_TX.into(),
                 correlation: transfer.provider_request_id.clone(),
             }],

@@ -1540,14 +1540,17 @@ pub fn build_applications_with_network_transports(
                 )
             })
             .collect();
-        let bridge = Arc::new(BridgeAdapter::with_observers(
-            ethereum_adapters
-                .values()
-                .map(|adapter| (adapter.config.chain_id, adapter.clone()))
-                .collect(),
-            bridge_observers,
-            binance_prices.clone(),
-        )?);
+        let bridge = Arc::new(
+            BridgeAdapter::with_observers(
+                ethereum_adapters
+                    .values()
+                    .map(|adapter| (adapter.config.chain_id, adapter.clone()))
+                    .collect(),
+                bridge_observers,
+                binance_prices.clone(),
+            )?
+            .with_solana_wallets(solana_wallets.clone()),
+        );
         adapters.push(bridge.clone());
         Some(bridge)
     };

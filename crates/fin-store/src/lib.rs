@@ -46,7 +46,7 @@ pub mod nonces;
 mod progress;
 pub mod unresolved_consumption;
 
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Maximum journal schema understood by this binary. Exporting this contract
 /// requires neither opening a journal nor loading credentials.
@@ -1328,6 +1328,15 @@ impl Store {
             // older executors. The marker migration preserves every existing row.
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch("PRAGMA user_version=17;")?;
+            tx.commit()?;
+        }
+        let migrated_version: i64 =
+            conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if migrated_version == 17 {
+            // Cross-VM destination locators and Solana mint signatures are not
+            // safe for older executors. Retain every existing journal byte.
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch("PRAGMA user_version=18;")?;
             tx.commit()?;
         }
         Ok(())
@@ -7719,24 +7728,28 @@ fn bridge_transit_transition_allowed(
 
 fn valid_transit_locator(transit: &fin_domain::TransitResource) -> bool {
     transit.destination_locator.as_ref().is_none_or(|locator| {
+        let evm = locator.destination_chain_id.is_some_and(|chain| chain > 0)
+            && locator.destination_network.is_none();
+        let solana = locator.destination_chain_id.is_none()
+            && locator.destination_network.as_deref() == Some("solana:mainnet-beta");
         locator.source_evidence_id == transit.evidence_id
             && !locator.scheme.trim().is_empty()
-            && locator.destination_chain_id > 0
             && if locator.scheme == "base_withdrawal_message" {
-                locator.transaction_hash.is_empty()
-                    && locator.destination_chain_id == 1
+                evm && locator.transaction_hash.is_empty()
+                    && locator.destination_chain_id == Some(1)
                     && locator
                         .message_hash
                         .as_deref()
                         .is_some_and(valid_evm_transaction_hash)
             } else if locator.scheme == "cctp_v2_message" {
-                locator.transaction_hash.is_empty()
+                (evm || solana)
+                    && locator.transaction_hash.is_empty()
                     && locator
                         .message_hash
                         .as_deref()
                         .is_some_and(valid_evm_transaction_hash)
             } else {
-                locator.message_hash.is_none()
+                evm && locator.message_hash.is_none()
                     && valid_evm_transaction_hash(&locator.transaction_hash)
             }
     })
@@ -7748,13 +7761,26 @@ fn valid_evm_transaction_hash(value: &str) -> bool {
         && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn valid_solana_transaction_signature(value: &str) -> bool {
+    (64..=88).contains(&value.len())
+        && bs58::decode(value)
+            .into_vec()
+            .is_ok_and(|bytes| bytes.len() == 64 && bs58::encode(bytes).into_string() == value)
+}
+
 fn settlement_locator_matches(
     transit: Option<&fin_domain::TransitResource>,
     proof: &fin_domain::BridgeSettlementProof,
 ) -> bool {
-    let Some(locator) = transit.and_then(|transit| transit.destination_locator.as_ref()) else {
+    let Some(transit) = transit else {
         return true;
     };
+    let Some(locator) = transit.destination_locator.as_ref() else {
+        return true;
+    };
+    if !valid_transit_locator(transit) {
+        return false;
+    }
     let chain_id = proof.evidence.get("chain_id").and_then(|value| {
         value
             .as_str()
@@ -7765,6 +7791,15 @@ fn settlement_locator_matches(
         .evidence
         .get("transaction_hash")
         .and_then(Value::as_str);
+    let network_matches = if let Some(chain) = locator.destination_chain_id {
+        chain_id == Some(chain)
+            && proof.evidence.get("network").is_none_or(|network| {
+                network.as_str() == Some(format!("ethereum:{chain}").as_str())
+            })
+    } else {
+        proof.evidence.get("chain_id").is_none()
+            && proof.evidence["network"].as_str() == locator.destination_network.as_deref()
+    };
     let locator_matches = if locator.scheme == "base_withdrawal_message" {
         transaction_hash.is_some_and(valid_evm_transaction_hash)
             && locator.message_hash.as_deref().is_some_and(|message| {
@@ -7773,21 +7808,23 @@ fn settlement_locator_matches(
                     .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
             })
     } else if locator.scheme == "cctp_v2_message" {
-        transaction_hash.is_some_and(valid_evm_transaction_hash)
-            && locator.message_hash.as_deref().is_some_and(|message| {
-                proof.evidence["message_hash"]
-                    .as_str()
-                    .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
-            })
-            && proof.evidence["source_evidence_id"].as_str()
-                == Some(locator.source_evidence_id.as_str())
+        transaction_hash.is_some_and(if locator.destination_chain_id.is_some() {
+            valid_evm_transaction_hash
+        } else {
+            valid_solana_transaction_signature
+        }) && locator.message_hash.as_deref().is_some_and(|message| {
+            proof.evidence["message_hash"]
+                .as_str()
+                .is_some_and(|observed| observed.eq_ignore_ascii_case(message))
+        }) && proof.evidence["source_evidence_id"].as_str()
+            == Some(locator.source_evidence_id.as_str())
     } else {
         transaction_hash
             .filter(|hash| valid_evm_transaction_hash(hash))
             .is_some_and(|hash| hash.eq_ignore_ascii_case(&locator.transaction_hash))
     };
     proof.outcome == fin_domain::BridgeSettlementOutcome::Destination
-        && chain_id == Some(locator.destination_chain_id)
+        && network_matches
         && locator_matches
 }
 
@@ -9780,7 +9817,7 @@ fn validate_base_recovery_append(
         .and_then(|transit| transit.destination_locator.as_ref())
         .ok_or_else(invalid)?;
     if locator.scheme != "base_withdrawal_message"
-        || locator.destination_chain_id != 1
+        || locator.destination_chain_id != Some(1)
         || !locator.transaction_hash.is_empty()
         || !valid_transit_locator(old.transit.as_ref().ok_or_else(invalid)?)
     {

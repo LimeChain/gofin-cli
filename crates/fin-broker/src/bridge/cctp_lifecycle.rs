@@ -47,7 +47,7 @@ fn historical_mint_attestation(
     transaction: &Value,
     source_attestations: &[cctp::CctpAttestation],
 ) -> fin_domain::Result<cctp::CctpAttestation> {
-    let chain = quote.intent.destination_chain_id;
+    let chain = quote.intent.evm_destination_chain_id()?;
     let sender = fin_evm::address(&quote.intent.source_address)?;
     if !receipt.success
         || fin_evm::hash(transaction["hash"].as_str().unwrap_or_default())? != receipt.hash
@@ -110,10 +110,9 @@ impl BridgeAdapter {
         alias: &str,
         transfer: &BridgeTransferRecord,
     ) -> fin_domain::Result<()> {
-        for chain in [
-            quote.intent.source.chain_id,
-            quote.intent.destination_chain_id,
-        ] {
+        for chain in
+            std::iter::once(quote.intent.source.chain_id).chain(quote.intent.destination_chain_id)
+        {
             let wallet = self.wallet(alias, chain)?;
             let sender = wallet.address.as_deref().ok_or_else(internal_error)?;
             if !wallet.signing_enabled || !sender.eq_ignore_ascii_case(&quote.intent.source_address)
@@ -139,6 +138,10 @@ impl BridgeAdapter {
                     "Fund this wallet's gas separately, then resume the original transfer; do not repeat a settled burn.",
                 ));
             }
+        }
+        if quote.intent.solana_destination.is_some() {
+            self.validate_cctp_solana_gas(quote, bounds, transfer)
+                .await?;
         }
         Ok(())
     }
@@ -180,6 +183,11 @@ impl BridgeAdapter {
                 "CCTP mint requires its original transfer under exact or named-plan authority.",
             ));
         }
+        if saved.quote.intent.solana_destination.is_some() {
+            return self
+                .prepare_cctp_solana_stage(input, record, saved, step, link, requested)
+                .await;
+        }
         let locator = cctp_locator(record)?;
         let bounds: BridgeBounds =
             serde_json::from_value(record.approved_bounds.clone().ok_or_else(internal_error)?)
@@ -192,7 +200,7 @@ impl BridgeAdapter {
         let alias = record.metadata["wallet_alias"]
             .as_str()
             .ok_or_else(internal_error)?;
-        let chain = saved.quote.intent.destination_chain_id;
+        let chain = saved.quote.intent.evm_destination_chain_id()?;
         let wallet = self.wallet(alias, chain)?;
         let sender = wallet.address.as_deref().ok_or_else(internal_error)?;
         if !wallet.signing_enabled
@@ -227,7 +235,12 @@ impl BridgeAdapter {
         provider
             .verify_attestation(chain, &attestation.message, &attestation.attestation)
             .await?;
-        step.call = cctp::mint_call(chain, &attestation.message, &attestation.attestation)?;
+        step.call = Some(cctp::mint_call(
+            chain,
+            &attestation.message,
+            &attestation.attestation,
+        )?);
+        let call = step.evm_call()?;
         let runtime = &self
             .wallet_adapters
             .get(&chain)
@@ -236,9 +249,9 @@ impl BridgeAdapter {
         let transaction = runtime
             .prepare(
                 fin_evm::address(sender)?,
-                fin_evm::address(&step.call.to)?,
+                fin_evm::address(&call.to)?,
                 fin_evm::alloy::primitives::U256::ZERO,
-                fin_evm::rpc_bytes(&json!(step.call.data))?,
+                fin_evm::rpc_bytes(&json!(call.data))?,
                 fin_evm::u256(&maximum_gas_cap(&bounds, chain)?)?,
             )
             .await?
@@ -323,7 +336,7 @@ impl BridgeAdapter {
         let provider = self.cctp_provider()?;
         provider
             .verify_attestation(
-                quote.intent.destination_chain_id,
+                quote.intent.evm_destination_chain_id()?,
                 &attestation.message,
                 &attestation.attestation,
             )
@@ -331,13 +344,13 @@ impl BridgeAdapter {
         let message = cctp::decode_message(&attestation.message)?;
         require_unexpired_attestation(
             &provider,
-            quote.intent.destination_chain_id,
+            quote.intent.evm_destination_chain_id()?,
             &message,
             "submission",
         )
         .await?;
         if provider
-            .nonce_used(quote.intent.destination_chain_id, &message.nonce)
+            .nonce_used(quote.intent.evm_destination_chain_id()?, &message.nonce)
             .await?
         {
             return Err(error(
@@ -348,7 +361,7 @@ impl BridgeAdapter {
             ));
         }
         let call = cctp::mint_call(
-            quote.intent.destination_chain_id,
+            quote.intent.evm_destination_chain_id()?,
             &attestation.message,
             &attestation.attestation,
         )?;
@@ -391,7 +404,7 @@ impl BridgeAdapter {
     }
 }
 
-fn cctp_locator(
+pub(super) fn cctp_locator(
     record: &BridgeTransferRecord,
 ) -> fin_domain::Result<&fin_domain::BridgeDestinationLocator> {
     record
@@ -409,7 +422,7 @@ fn cctp_locator(
         })
 }
 
-fn validate_attestation(
+pub(super) fn validate_attestation(
     quote: &BridgeQuote,
     locator: &fin_domain::BridgeDestinationLocator,
     attestation: &cctp::CctpAttestation,
@@ -419,6 +432,12 @@ fn validate_attestation(
             .map_err(|_| FinError::validation("CCTP source proof is malformed."))?;
     let metadata = quote.cctp.as_ref().ok_or_else(internal_error)?;
     if locator.destination_chain_id != quote.intent.destination_chain_id
+        || locator.destination_network.as_deref()
+            != quote
+                .intent
+                .solana_destination
+                .as_ref()
+                .map(|_| "solana:mainnet-beta")
         || locator.message_hash.as_deref() != Some(source.immutable_message_hash.as_str())
         || cctp::immutable_message_hash(&source.raw_message)? != source.immutable_message_hash
         || locator.proof["source_transaction_hash"]
@@ -467,6 +486,11 @@ pub(super) fn verify_source(
         scheme: "cctp_v2_message".into(),
         source_evidence_id: evidence_id.clone(),
         destination_chain_id: quote.intent.destination_chain_id,
+        destination_network: quote
+            .intent
+            .solana_destination
+            .as_ref()
+            .map(|_| "solana:mainnet-beta".into()),
         transaction_hash: String::new(),
         message_hash: Some(source.immutable_message_hash.clone()),
         proof: json!({"source":source,"source_transaction_hash":tx_hash,"source_block_number":receipt.block_number,"source_block_hash":format!("{:#x}",receipt.block_hash)}),
@@ -517,7 +541,7 @@ pub(super) fn verify_mint_step(
 }
 
 impl BridgeAdapter {
-    async fn cctp_attestation(
+    pub(super) async fn cctp_attestation(
         &self,
         quote: &BridgeQuote,
         locator: &fin_domain::BridgeDestinationLocator,
@@ -555,7 +579,7 @@ impl BridgeAdapter {
         saved_attestations: &[cctp::CctpAttestation],
     ) -> fin_domain::Result<Option<Value>> {
         let locator = cctp_locator(transfer)?;
-        let chain = saved.quote.intent.destination_chain_id;
+        let chain = saved.quote.intent.evm_destination_chain_id()?;
         let runtime = self.observers.get(&chain).ok_or_else(internal_error)?;
         let (confirmations, finalized) = self
             .confirmation_rules
@@ -659,8 +683,13 @@ impl BridgeAdapter {
         transfer: &BridgeTransferRecord,
         saved: &SavedQuote,
     ) -> fin_domain::Result<Value> {
+        if saved.quote.intent.solana_destination.is_some() {
+            return self
+                .reconcile_cctp_solana_external(engine, transfer, saved)
+                .await;
+        }
         let locator = cctp_locator(transfer)?;
-        let chain = saved.quote.intent.destination_chain_id;
+        let chain = saved.quote.intent.evm_destination_chain_id()?;
         let runtime = self.observers.get(&chain).ok_or_else(internal_error)?;
         let provider = self.cctp_provider()?;
         let operations = engine.operations()?;
@@ -884,10 +913,14 @@ impl BridgeAdapter {
             }
         }
         let mut refreshed = false;
-        if let Some(attestation) = self.cctp_attestation(&saved.quote, locator).await? {
+        if saved.quote.intent.solana_destination.is_some() {
+            refreshed = self
+                .refresh_cctp_solana_attestation(&saved.quote, locator)
+                .await?;
+        } else if let Some(attestation) = self.cctp_attestation(&saved.quote, locator).await? {
             let message = validate_attestation(&saved.quote, locator, &attestation)?;
             let provider = self.cctp_provider()?;
-            let chain = saved.quote.intent.destination_chain_id;
+            let chain = saved.quote.intent.evm_destination_chain_id()?;
             if provider.nonce_used(chain, &message.nonce).await? {
                 return Err(error(
                     "CCTP_ALREADY_PROCESSED",
@@ -1039,7 +1072,8 @@ mod tests {
             wallet: fin_domain::ResourceId("wallet".into()),
             source_address: sender.into(),
             source: source.clone(),
-            destination_chain_id: 8453,
+            destination_chain_id: Some(8453),
+            solana_destination: None,
             destination_assets: vec![destination.clone()],
             recipient: recipient.into(),
             refund_to: sender.into(),
@@ -1097,7 +1131,8 @@ mod tests {
         let locator = fin_domain::BridgeDestinationLocator {
             scheme: "cctp_v2_message".into(),
             source_evidence_id: "source-proof".into(),
-            destination_chain_id: 8453,
+            destination_chain_id: Some(8453),
+            destination_network: None,
             transaction_hash: String::new(),
             message_hash: Some(immutable),
             proof: json!({"source":source_proof,"source_transaction_hash":source_tx}),

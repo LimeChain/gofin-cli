@@ -33,7 +33,10 @@ pub(super) fn validate_recovery_append(
     let prior = old.quote_revisions.last().ok_or_else(invalid)?;
     let revision = next.quote_revisions.last().ok_or_else(invalid)?;
     if prior.provider != "cctp"
-        || prior.payload["quote"]["intent"]["destination_chain_id"] != locator.destination_chain_id
+        || prior.payload["quote"]["intent"]["destination_chain_id"]
+            != json!(locator.destination_chain_id)
+        || prior.payload["quote"]["intent"]["solana_destination"]["network"]
+            != json!(locator.destination_network)
         || next.quote_revisions[..old.quote_revisions.len()] != old.quote_revisions
         || revision.provider != prior.provider
         || revision.route_id != prior.route_id
@@ -131,12 +134,28 @@ pub(super) fn validate_recovery_append(
         .get(usize::from(parent_ordinal))
         .ok_or_else(invalid)?
         .clone();
+    let evm_scope = locator.destination_chain_id.is_some()
+        && expected_call["solana_mint"].is_null()
+        && expected_call["call"]["chain_id"] == json!(locator.destination_chain_id)
+        && expected_call["call"]["value"] == "0"
+        && expected_call["call"]["data"] == "0x"
+        && expected_call["expected_sender"] == prior.payload["quote"]["intent"]["source_address"];
+    let solana_scope = locator.destination_network.as_deref() == Some("solana:mainnet-beta")
+        && expected_call["call"].is_null()
+        && expected_call["solana_mint"]["destination"]
+            == prior.payload["quote"]["intent"]["solana_destination"]
+        && expected_call["solana_mint"]["destination"]["network"] == "solana:mainnet-beta"
+        && expected_call["expected_sender"]
+            == prior.payload["quote"]["intent"]["solana_destination"]["wallet_address"]
+        && expected_call["solana_mint"]["message_transmitter"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+        && expected_call["solana_mint"]["token_messenger_minter"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty());
     if expected_call["kind"] != "mint"
-        || expected_call["call"]["chain_id"] != locator.destination_chain_id
-        || expected_call["call"]["value"] != "0"
-        || expected_call["call"]["data"] != "0x"
         || expected_call["maximum_debit"] != json!([])
-        || expected_call["expected_sender"] != prior.payload["quote"]["intent"]["source_address"]
+        || !(evm_scope || solana_scope)
     {
         return Err(invalid());
     }
@@ -356,6 +375,115 @@ mod tests {
             assert_eq!(store.bridge_transfer(&old.id).unwrap().unwrap(), old);
         }
     }
+    fn solana_parent() -> BridgeTransferRecord {
+        let mut record = parent();
+        let locator = record
+            .transit
+            .as_mut()
+            .unwrap()
+            .destination_locator
+            .as_mut()
+            .unwrap();
+        locator.destination_chain_id = None;
+        locator.destination_network = Some("solana:mainnet-beta".into());
+        let payload = &mut record.quote_revisions[0].payload;
+        payload["quote"]["intent"]
+            .as_object_mut()
+            .unwrap()
+            .remove("destination_chain_id");
+        payload["quote"]["intent"]["solana_destination"] = json!({"network":"solana:mainnet-beta","wallet_address":"SYNTHETIC-owner","recipient_token_account":"SYNTHETIC-ATA"});
+        payload["plan"]["steps"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("call");
+        payload["plan"]["steps"][1]["solana_mint"] = json!({"destination":payload["quote"]["intent"]["solana_destination"],"message_transmitter":"SYNTHETIC-transmitter","token_messenger_minter":"SYNTHETIC-messenger"});
+        payload["plan"]["steps"][1]["expected_sender"] = json!("SYNTHETIC-owner");
+        record
+    }
+
+    #[test]
+    fn solana_locator_requires_exact_network_and_full_signature() {
+        let record = solana_parent();
+        let transit = record.transit.as_ref().unwrap();
+        assert!(valid_transit_locator(transit));
+        let signature = bs58::encode([7u8; 64]).into_string();
+        let proof = fin_domain::BridgeSettlementProof {
+            transfer_id: record.id.clone(),
+            outcome: fin_domain::BridgeSettlementOutcome::Destination,
+            evidence_id: "SYNTHETIC-mint".into(),
+            effects: vec![],
+            evidence: json!({"network":"solana:mainnet-beta","transaction_hash":signature,"message_hash":HASH,"source_evidence_id":"SYNTHETIC-source-evidence"}),
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            proof_digest: "SYNTHETIC-proof".into(),
+        };
+        assert!(settlement_locator_matches(Some(transit), &proof));
+        for (key, value) in [
+            ("network", json!("solana:devnet")),
+            ("transaction_hash", json!(TX)),
+            (
+                "transaction_hash",
+                json!(bs58::encode([7u8; 32]).into_string()),
+            ),
+            ("chain_id", json!(1)),
+            ("message_hash", json!(TX)),
+            ("source_evidence_id", json!("unrelated")),
+        ] {
+            let mut bad = proof.clone();
+            bad.evidence[key] = value;
+            assert!(!settlement_locator_matches(Some(transit), &bad), "{key}");
+        }
+        let mut mixed = transit.clone();
+        mixed
+            .destination_locator
+            .as_mut()
+            .unwrap()
+            .destination_chain_id = Some(8453);
+        assert!(!valid_transit_locator(&mixed));
+    }
+
+    #[test]
+    fn solana_recovery_preserves_destination_and_original_burn() {
+        let old = solana_parent();
+        let next = recovery(&old);
+        assert!(validate_recovery_append(&old, &next).is_ok());
+        for key in ["network", "wallet_address", "recipient_token_account"] {
+            let mut bad = next.clone();
+            bad.quote_revisions[1].payload["plan"]["steps"][2]["solana_mint"]["destination"][key] =
+                json!("changed");
+            bad.quote_revisions[1].quote_hash =
+                fin_domain::binding_hash(&bad.quote_revisions[1].payload).unwrap();
+            assert!(validate_recovery_append(&old, &bad).is_err());
+        }
+    }
+
+    #[test]
+    fn v17_interrupted_upgrade_retains_evm_and_solana_pending_records() {
+        for mut old in [parent(), solana_parent()] {
+            old.id = "SYNTHETIC-cctp".into();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("journal.sqlite");
+            {
+                let mut store = Store::open(&path).unwrap();
+                seed(&mut store, &old);
+                store.conn.pragma_update(None, "user_version", 17).unwrap();
+                store
+                    .conn
+                    .execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=18;")
+                    .unwrap();
+            }
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.bridge_transfer(&old.id).unwrap().unwrap(), old);
+            assert_eq!(
+                store
+                    .conn
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+            assert_eq!(store.list_records().unwrap().len(), 2);
+        }
+    }
+
     #[test]
     fn v16_marker_upgrade_and_interrupted_migration_preserve_pending_identity() {
         let dir = tempfile::tempdir().unwrap();

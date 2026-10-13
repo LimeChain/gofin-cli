@@ -29,7 +29,7 @@ impl BridgeAdapter {
         let saved = self.saved_quote(&original)?;
         if saved.quote.provider != "base_canonical"
             || saved.quote.intent.source.chain_id != 8453
-            || saved.quote.intent.destination_chain_id != 1
+            || saved.quote.intent.destination_chain_id != Some(1)
             || original.grant_id.is_some()
             || !matches!(
                 original.state,
@@ -284,12 +284,13 @@ fn append_recovery_pair(
         let step = BridgeStep {
             ordinal,
             kind,
-            call: EvmCall {
+            solana_mint: None,
+            call: Some(EvmCall {
                 chain_id: 1,
                 to: fin_bridge::base_canonical::PORTAL.into(),
                 value: Quantity::zero(),
                 data: "0x".into(),
-            },
+            }),
             expected_sender: saved.quote.intent.source_address.clone(),
             maximum_debit: vec![],
             dependencies: dependencies.clone(),
@@ -358,7 +359,8 @@ mod tests {
             wallet: fin_domain::ResourceId(format!("ethereum:8453:{owner}")),
             source_address: owner.clone(),
             source: source.clone(),
-            destination_chain_id: 1,
+            solana_destination: None,
+            destination_chain_id: Some(1),
             destination_assets: vec![destination.clone()],
             recipient: owner.clone(),
             refund_to: owner.clone(),
@@ -375,7 +377,8 @@ mod tests {
         .map(|(index, kind)| BridgeStep {
             ordinal: index as u8,
             kind,
-            call: EvmCall {
+            solana_mint: None,
+            call: Some(EvmCall {
                 chain_id: if index == 0 { 8453 } else { 1 },
                 to: fin_bridge::base_canonical::PORTAL.into(),
                 value: Quantity::zero(),
@@ -384,7 +387,7 @@ mod tests {
                 } else {
                     "0x".into()
                 },
-            },
+            }),
             expected_sender: owner.clone(),
             maximum_debit: if index == 0 {
                 vec![source.amount(Quantity::from_u64(100))]

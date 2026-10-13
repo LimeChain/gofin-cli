@@ -19,8 +19,14 @@ num-bigint.workspace = true
 num-traits.workspace = true
 fin-domain.workspace = true
 fin-evm.workspace = true
+fin-solana = { path = "../fin-solana" }
+base64 = "0.22.1"
+bs58 = "0.5.1"
+sha2.workspace = true
+solana-pubkey3 = { package = "solana-pubkey", version = "=3.0.0", features = ["curve25519"] }
 
 [dev-dependencies]
+ed25519-dalek.workspace = true
 tempfile.workspace = true
 
 [lints]

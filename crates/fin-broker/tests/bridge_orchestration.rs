@@ -327,7 +327,8 @@ impl Harness {
                     chain_id: 1,
                     token: None,
                 },
-                destination_chain_id: 42161,
+                solana_destination: None,
+                destination_chain_id: Some(42161),
                 destination_assets: vec![BridgeAssetInput {
                     chain_id: 42161,
                     token: None,

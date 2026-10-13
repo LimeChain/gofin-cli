@@ -71,6 +71,42 @@ Circle and Hyperliquid services are synthetic.
 These automated checks use controlled services and do not establish live financial
 writes or native Touch ID. Separate live-development evidence is recorded below.
 
+### EVM to Solana verification
+
+The Solana destination uses the existing protected signer and finalized receipt
+runtime. It supports native USDC from Ethereum, Base and Arbitrum in Standard
+(default) and Fast mode. Reverse Solana-source routes remain unimplemented.
+
+```sh
+cargo test --locked -p fin-broker --test cctp_lifecycle solana::
+cargo test --locked -p fin-engine --lib bridge_solana_receipt_identity_and_target_are_exact
+```
+
+The six Solana lifecycle cases passed through an actual CLI binary and broker
+socket on 2026-10-13. The named Binance subaccount → master → Base → Solana
+workflow uses one synthetic approval: 10 USDC gross, a 0.20-USDC withdrawal fee,
+a verified 9.80-USDC Base receipt, and a 9.80-USDC Standard CCTP mint. Only that
+verified withdrawal receipt unlocks the burn. The fixture uses the
+real Binance, Ethereum, CCTP and Solana adapters with controlled exchange, RPC,
+Circle and pricing transports. Other Solana lifecycle fixtures cover response
+loss and restart without replay, missing finalized receipt despite a used nonce,
+wrong token credit/events, inadequate gas and revoked authority. Protocol tests
+cover exact programs, accounts, packet size, attesters and finalized receipt costs.
+
+These are **synthetic** checks. The three-network Anvil harness above exercises
+EVM destinations only; it does not establish a Solana fork or live mint. The
+protected Binance → Base → Solana scenario remains **not run** until the human
+updates the installed runtime and approves its concrete named plan. Read-only
+account/network checks do not establish financial execution or native approval.
+
+For that human scenario, inspect the net withdrawal amount, exact Base owner and
+Solana owner/USDC token account, finite ETH gas and SOL gas/nonce-account funding
+caps, Standard mode and plan expiry. Submit each eligible step explicitly with
+`--json --stream`. Source inclusion unlocks attestation preparation; only the
+verified source handoff unlocks mint, and only finalized native-USDC receipt
+completes the plan. Recover an interrupted attempt by its saved identity. Do not
+reburn, substitute an unrelated balance or interpret a used nonce as final credit.
+
 ### Live-development route verification — 2026-10-13
 
 All six directed routes passed in both modes through the public CLI, named-plan

@@ -210,7 +210,7 @@ impl RelayProvider {
         let body = json!({
             "user": intent.source_address,
             "originChainId": intent.source.chain_id,
-            "destinationChainId": intent.destination_chain_id,
+            "destinationChainId": intent.evm_destination_chain_id()?,
             "originCurrency": source_currency,
             "destinationCurrency": currency(dest),
             "amount": intent.amount.as_str(),
@@ -669,7 +669,7 @@ fn validate_quote_bounds(quote: &BridgeQuote, bounds: &BridgeBounds) -> Result<(
     validate_minimum_ratio(
         &quote.intent.source,
         &crate::EvmAsset {
-            chain_id: quote.intent.destination_chain_id,
+            chain_id: quote.intent.evm_destination_chain_id()?,
             token: if quote.expected_receipt.asset.reference == "native" {
                 None
             } else {
@@ -735,15 +735,15 @@ fn validate_prepared_calls(
             ensure(
                 approval.kind == BridgeStepKind::Approval
                     && approval.ordinal == 0
-                    && approval.call.chain_id == intent.source.chain_id
-                    && parse_address(&approval.call.to)? == token_addr
+                    && approval.evm_call()?.chain_id == intent.source.chain_id
+                    && parse_address(&approval.evm_call()?.to)? == token_addr
                     && parse_address(&approval.expected_sender)? == depositor
-                    && approval.call.value.is_zero(),
+                    && approval.evm_call()?.value.is_zero(),
                 "BRIDGE_ORDER_INVALID",
                 "prepare",
                 "Prepared approval is outside the exact source token, signer or chain.",
             )?;
-            let bytes = parse_calldata(&approval.call.data)?;
+            let bytes = parse_calldata(&approval.evm_call()?.data)?;
             ensure(
                 bytes
                     == IERC20Bridge::approveCall {
@@ -781,11 +781,11 @@ fn validate_prepared_calls(
     ensure(
         deposit.kind == BridgeStepKind::Deposit
             && deposit.ordinal == offset as u8
-            && deposit.call.chain_id == intent.source.chain_id
-            && parse_address(&deposit.call.to)? == depository
+            && deposit.evm_call()?.chain_id == intent.source.chain_id
+            && parse_address(&deposit.evm_call()?.to)? == depository
             && parse_address(&deposit.expected_sender)? == depositor
-            && parse_u256(&deposit.call.value)? == value
-            && parse_calldata(&deposit.call.data)? == expected,
+            && parse_u256(&deposit.evm_call()?.value)? == value
+            && parse_calldata(&deposit.evm_call()?.data)? == expected,
         "BRIDGE_ORDER_INVALID",
         "prepare",
         "Prepared deposit call differs from Relay's reviewed depository, asset, exact amount or canonical order ID.",
@@ -801,13 +801,13 @@ fn validate_intent(
         validate_latest_protocol_deadline(deadline)?;
     }
     ensure(
-        intent.source.chain_id != intent.destination_chain_id,
+        intent.source.chain_id != intent.evm_destination_chain_id()?,
         "BRIDGE_ROUTE_UNAVAILABLE",
         "validation",
         "Source and destination chains must differ.",
     )?;
     config.chain(intent.source.chain_id)?;
-    config.chain(intent.destination_chain_id)?;
+    config.chain(intent.evm_destination_chain_id()?)?;
     let source_addr = parse_address(&intent.source_address)?;
     let recipient_addr = parse_address(&intent.recipient)?;
     let refund_addr = parse_address(&intent.refund_to)?;
@@ -853,7 +853,7 @@ fn validate_intent(
     )?;
     for asset in &intent.destination_assets {
         ensure(
-            asset.chain_id == intent.destination_chain_id,
+            asset.chain_id == intent.evm_destination_chain_id()?,
             "INVALID_INPUT",
             "validation",
             "Every destination asset must belong to the requested destination chain.",
@@ -900,7 +900,7 @@ fn validate_intent(
     for asset in &intent.allowed_refund_assets {
         ensure(
             asset.chain_id == intent.source.chain_id
-                || asset.chain_id == intent.destination_chain_id,
+                || asset.chain_id == intent.evm_destination_chain_id()?,
             "BRIDGE_BOUNDS_INVALID",
             "validation",
             "Refund assets must be on the source or destination chain.",
@@ -953,7 +953,7 @@ fn validate_intent(
     for fee in &bounds.fee_caps {
         ensure(
             fee.asset.network == format!("ethereum:{}", intent.source.chain_id)
-                || fee.asset.network == format!("ethereum:{}", intent.destination_chain_id),
+                || fee.asset.network == format!("ethereum:{}", intent.evm_destination_chain_id()?),
             "BRIDGE_BOUNDS_INVALID",
             "validation",
             "Fee cap asset must be on the source or destination network.",
@@ -1047,7 +1047,7 @@ fn parse_order_response_at(
     ensure(
         field_string(output_order, &["chainId"])?
             == config
-                .chain(request.intent.destination_chain_id)?
+                .chain(request.intent.evm_destination_chain_id()?)?
                 .protocol_chain_id,
         "BRIDGE_ORDER_INVALID",
         "quote",
@@ -1116,7 +1116,7 @@ fn parse_order_response_at(
     )?;
     validate_router_extra_data(
         config,
-        request.intent.destination_chain_id,
+        request.intent.evm_destination_chain_id()?,
         field_string(output_order, &["extraData"])?,
     )?;
     let deadline = field_u64(output_order, &["deadline"])?;
@@ -1327,12 +1327,13 @@ fn parse_transaction_steps(
             out.push(BridgeStep {
                 ordinal: 0,
                 kind: BridgeStepKind::Approval,
-                call: EvmCall {
+                solana_mint: None,
+                call: Some(EvmCall {
                     chain_id: intent.source.chain_id,
                     to: address_string(token),
                     value: Quantity::zero(),
                     data: hex_data(bytes),
-                },
+                }),
                 expected_sender: field_string(tx, &["from"])?.to_ascii_lowercase(),
                 maximum_debit: vec![],
                 dependencies: vec![],
@@ -1384,12 +1385,13 @@ fn parse_transaction_steps(
     out.push(BridgeStep {
         ordinal,
         kind: BridgeStepKind::Deposit,
-        call: EvmCall {
+        solana_mint: None,
+        call: Some(EvmCall {
             chain_id: intent.source.chain_id,
             to: address_string(depository),
             value: deposit_value,
             data: hex_data(bytes),
-        },
+        }),
         expected_sender: field_string(deposit_tx, &["from"])?.to_ascii_lowercase(),
         maximum_debit: vec![intent.source.amount(gross.clone())],
         dependencies: if ordinal > 0 { vec![0] } else { vec![] },
@@ -1750,7 +1752,7 @@ fn hex_data(bytes: Vec<u8>) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 fn fixed_scope_digest(intent: &BridgeIntent, config: &ReviewedConfig) -> Result<String> {
-    let fixed = json!({"provider":"relay","wallet":intent.wallet,"source_address":intent.source_address.to_ascii_lowercase(),"source":intent.source,"destination_chain_id":intent.destination_chain_id,"destination_assets":intent.destination_assets,"recipient":intent.recipient.to_ascii_lowercase(),"refund_to":intent.refund_to.to_ascii_lowercase(),"allowed_refund_assets":intent.allowed_refund_assets,"reviewed_source_depository":config.chain(intent.source.chain_id)?.depository.to_ascii_lowercase(),"reviewed_destination_depository":config.chain(intent.destination_chain_id)?.depository.to_ascii_lowercase(),"source_router_v3":config.chain(intent.source.chain_id)?.router_v3,"destination_router_v3":config.chain(intent.destination_chain_id)?.router_v3});
+    let fixed = json!({"provider":"relay","wallet":intent.wallet,"source_address":intent.source_address.to_ascii_lowercase(),"source":intent.source,"destination_chain_id":intent.evm_destination_chain_id()?,"destination_assets":intent.destination_assets,"recipient":intent.recipient.to_ascii_lowercase(),"refund_to":intent.refund_to.to_ascii_lowercase(),"allowed_refund_assets":intent.allowed_refund_assets,"reviewed_source_depository":config.chain(intent.source.chain_id)?.depository.to_ascii_lowercase(),"reviewed_destination_depository":config.chain(intent.evm_destination_chain_id()?)?.depository.to_ascii_lowercase(),"source_router_v3":config.chain(intent.source.chain_id)?.router_v3,"destination_router_v3":config.chain(intent.evm_destination_chain_id()?)?.router_v3});
     let encoded = serde_json::to_vec(&fixed)
         .map_err(|_| invalid_order("fixed scope cannot be serialized"))?;
     Ok(format!("0x{}", hex::encode(keccak256(encoded))))
@@ -1815,9 +1817,9 @@ fn parse_evidence_candidates(
                 .ok_or_else(|| invalid_status("malformed destinationChainId"))
         })
         .transpose()?
-        .unwrap_or(transfer.destination_chain_id);
+        .unwrap_or(transfer.evm_destination_chain_id()?);
     ensure(
-        origin == transfer.source_chain_id && destination == transfer.destination_chain_id,
+        origin == transfer.source_chain_id && destination == transfer.evm_destination_chain_id()?,
         "BRIDGE_RESPONSE_INVALID",
         "reconcile",
         "Relay status chain identities differ from the saved transfer.",
@@ -1896,9 +1898,10 @@ fn append_hash_candidates(
         .ok_or_else(|| invalid_status("transaction hashes must be an array"))?;
     let allowed_chain = match kind {
         EvidenceKind::SourceDeposit => chain_id == transfer.source_chain_id,
-        EvidenceKind::DestinationFill => chain_id == transfer.destination_chain_id,
+        EvidenceKind::DestinationFill => chain_id == transfer.evm_destination_chain_id()?,
         EvidenceKind::Refund => {
-            chain_id == transfer.source_chain_id || chain_id == transfer.destination_chain_id
+            chain_id == transfer.source_chain_id
+                || chain_id == transfer.evm_destination_chain_id()?
         }
     };
     ensure(
@@ -1974,7 +1977,8 @@ mod tests {
             order_id: Some(format!("0x{}", "11".repeat(32))),
             provider_request_id: Some(format!("0x{}", "22".repeat(32))),
             source_chain_id: 1,
-            destination_chain_id: 42161,
+            destination_network: None,
+            destination_chain_id: Some(42161),
             destination_locator: None,
         }
     }
@@ -2015,7 +2019,8 @@ mod tests {
                 token: None,
                 decimals: 18,
             },
-            destination_chain_id: 42161,
+            solana_destination: None,
+            destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
                 chain_id: 42161,
                 token: None,
@@ -2152,7 +2157,8 @@ mod tests {
                 token: None,
                 decimals: 18,
             },
-            destination_chain_id: 42161,
+            solana_destination: None,
+            destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
                 chain_id: 42161,
                 token: None,
@@ -2196,7 +2202,7 @@ mod tests {
             .timestamp() as u64;
         assert_eq!(quote.protocol_steps[0].kind, BridgeStepKind::Deposit);
         assert_eq!(
-            quote.protocol_steps[0].call.value.as_str(),
+            quote.protocol_steps[0].evm_call().unwrap().value.as_str(),
             "3000000000000000"
         );
         let provider = RelayProvider::new(config.clone()).unwrap();
@@ -2252,7 +2258,8 @@ mod tests {
             assert!(parse_order_response_at(&malformed, &request, &config, fixture_now).is_err());
         }
         let mut altered = quote.clone();
-        altered.protocol_steps[0].call.value = Quantity::new("3000000000000001").unwrap();
+        altered.protocol_steps[0].evm_call_mut().unwrap().value =
+            Quantity::new("3000000000000001").unwrap();
         assert!(
             provider
                 .prepare(
@@ -2279,7 +2286,8 @@ mod tests {
                 token: None,
                 decimals: 18,
             },
-            destination_chain_id: 42161,
+            solana_destination: None,
+            destination_chain_id: Some(42161),
             destination_assets: vec![crate::EvmAsset {
                 chain_id: 42161,
                 token: None,
@@ -2356,7 +2364,8 @@ mod tests {
                 token: None,
                 decimals: 18,
             },
-            destination_chain_id: 8453,
+            solana_destination: None,
+            destination_chain_id: Some(8453),
             destination_assets: vec![crate::EvmAsset {
                 chain_id: 8453,
                 token: None,

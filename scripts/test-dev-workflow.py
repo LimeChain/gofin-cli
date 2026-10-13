@@ -134,6 +134,7 @@ class DevWorkflowTests(unittest.TestCase):
             {'script': 'test-fork-runner.py', 'args': []},
             {'script': 'test-base-aave-fork-runner.py', 'args': []},
             {'script': 'test-amm-fork-runner.py', 'args': []},
+            {'script': 'test-cctp-fork-runner.py', 'args': []},
             {'script': 'test-dev-workflow.py', 'args': []},
         ]
         self.assertEqual(invocations, expected)

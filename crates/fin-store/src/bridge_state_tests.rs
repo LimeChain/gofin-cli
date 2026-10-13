@@ -286,7 +286,8 @@ fn source_derived_destination_locator_persists_and_cannot_be_rebound() {
         message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: source_evidence_id.into(),
-        destination_chain_id: 42161,
+        destination_chain_id: Some(42161),
+        destination_network: None,
         transaction_hash: format!("0x{}", "b".repeat(64)),
         proof: json!({"message_index":"42"}),
     };
@@ -952,7 +953,8 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
         message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: "SYNTHETIC-unrelated-source-proof".into(),
-        destination_chain_id: 42161,
+        destination_chain_id: Some(42161),
+        destination_network: None,
         transaction_hash: format!("0x{}", "a".repeat(64)),
         proof: json!({"message_index":"9"}),
     });
@@ -976,7 +978,8 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
         message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: invalid_hash_transit.evidence_id.clone(),
-        destination_chain_id: 42161,
+        destination_chain_id: Some(42161),
+        destination_network: None,
         transaction_hash: "0x1234".into(),
         proof: json!({"message_index":"9"}),
     });
@@ -1000,7 +1003,8 @@ fn boundary_source_proof_atomically_releases_lock_hands_off_budget_and_grant_usa
         message_hash: None,
         scheme: "SYNTHETIC-message-v1".into(),
         source_evidence_id: transit.evidence_id.clone(),
-        destination_chain_id: 42161,
+        destination_chain_id: Some(42161),
+        destination_network: None,
         transaction_hash: format!("0x{}", "b".repeat(64)),
         proof: json!({"message_index":"10"}),
     });

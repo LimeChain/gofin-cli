@@ -288,7 +288,12 @@ pub struct BridgeSettlementProof {
 pub struct BridgeDestinationLocator {
     pub scheme: String,
     pub source_evidence_id: String,
-    pub destination_chain_id: u64,
+    /// Legacy EVM destination identity. Exactly one destination identity is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_chain_id: Option<u64>,
+    /// Non-EVM destination network, currently only Solana mainnet-beta for CCTP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_network: Option<String>,
     pub transaction_hash: String,
     /// Deferred bridge messages do not determine a destination transaction hash.
     /// The scheme binds an immutable message digest instead; old locators omit it.

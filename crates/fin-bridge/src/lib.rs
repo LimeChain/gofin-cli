@@ -45,7 +45,11 @@ pub struct BridgeIntent {
     pub wallet: ResourceId,
     pub source_address: String,
     pub source: EvmAsset,
-    pub destination_chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_chain_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_destination: Option<SolanaDestination>,
+    #[serde(default)]
     pub destination_assets: Vec<EvmAsset>,
     pub recipient: String,
     pub refund_to: String,
@@ -203,7 +207,10 @@ pub struct EvmCall {
 pub struct BridgeStep {
     pub ordinal: u8,
     pub kind: BridgeStepKind,
-    pub call: EvmCall,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<EvmCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_mint: Option<SolanaMintSpec>,
     pub expected_sender: String,
     pub maximum_debit: Vec<Amount>,
     pub dependencies: Vec<u8>,
@@ -297,7 +304,11 @@ pub struct BridgeQuoteInput {
 pub struct BridgeQuoteIntentInput {
     pub wallet: String,
     pub source: BridgeAssetInput,
-    pub destination_chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_chain_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana_destination: Option<SolanaDestinationInput>,
+    #[serde(default)]
     pub destination_assets: Vec<BridgeAssetInput>,
     pub recipient: String,
     pub refund_to: String,
@@ -348,7 +359,10 @@ pub struct BridgeTransferRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
     pub source_chain_id: u64,
-    pub destination_chain_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_chain_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_network: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_locator: Option<fin_domain::BridgeDestinationLocator>,
 }
@@ -502,6 +516,122 @@ pub(crate) fn ensure(condition: bool, code: &str, stage: &str, message: &str) ->
             message,
             "Review the route or choose another supported quote.",
         ))
+    }
+}
+
+/// Explicit non-EVM destination; the recipient owner remains part of the parent intent.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SolanaDestinationInput {
+    pub network: String,
+    pub wallet: String,
+    pub mint: String,
+}
+
+/// Broker-resolved immutable destination scope. Public keys are case-sensitive.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaDestination {
+    pub network: String,
+    pub wallet: String,
+    pub wallet_resource: ResourceId,
+    pub wallet_address: String,
+    pub recipient: String,
+    pub asset: AssetId,
+    pub recipient_token_account: String,
+    pub destination_caller: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SolanaMintSpec {
+    pub destination: SolanaDestination,
+    pub message_transmitter: String,
+    pub token_messenger_minter: String,
+}
+
+impl BridgeTransferRef {
+    pub fn evm_destination_chain_id(&self) -> Result<u64> {
+        if self.destination_network.is_some() {
+            return Err(FinError::validation(
+                "This provider requires an EVM destination.",
+            ));
+        }
+        self.destination_chain_id
+            .ok_or_else(|| FinError::validation("An exact EVM destination chain is required."))
+    }
+}
+
+impl BridgeIntent {
+    /// EVM-only providers must reject a non-EVM destination before interpreting addresses.
+    pub fn evm_destination_chain_id(&self) -> Result<u64> {
+        if self.solana_destination.is_some() {
+            return Err(FinError::validation(
+                "This bridge path requires an EVM destination.",
+            ));
+        }
+        self.destination_chain_id
+            .ok_or_else(|| FinError::validation("An exact EVM destination chain is required."))
+    }
+    pub fn destination_resource(&self) -> Result<ResourceId> {
+        if let Some(destination) = &self.solana_destination {
+            return Ok(destination.wallet_resource.clone());
+        }
+        Ok(ResourceId(format!(
+            "ethereum:{}:{}",
+            self.evm_destination_chain_id()?,
+            self.recipient.to_ascii_lowercase()
+        )))
+    }
+    pub fn destination_network(&self) -> Result<String> {
+        if let Some(destination) = &self.solana_destination {
+            return Ok(destination.network.clone());
+        }
+        Ok(format!("ethereum:{}", self.evm_destination_chain_id()?))
+    }
+}
+
+impl BridgeStep {
+    pub fn evm_call(&self) -> Result<&EvmCall> {
+        if self.solana_mint.is_some() {
+            return Err(FinError::validation(
+                "This bridge stage uses Solana, not an EVM call.",
+            ));
+        }
+        self.call
+            .as_ref()
+            .ok_or_else(|| FinError::validation("The bridge stage lacks its exact EVM call."))
+    }
+    pub fn evm_call_mut(&mut self) -> Result<&mut EvmCall> {
+        if self.solana_mint.is_some() {
+            return Err(FinError::validation(
+                "This bridge stage uses Solana, not an EVM call.",
+            ));
+        }
+        self.call
+            .as_mut()
+            .ok_or_else(|| FinError::validation("The bridge stage lacks its exact EVM call."))
+    }
+    pub fn gas_asset(&self) -> Result<AssetId> {
+        if let Some(solana) = &self.solana_mint {
+            if self.call.is_some() || solana.destination.network != "solana:mainnet-beta" {
+                return Err(FinError::validation(
+                    "Bridge stage has ambiguous execution networks.",
+                ));
+            }
+            return Ok(AssetId {
+                network: solana.destination.network.clone(),
+                reference: "native".into(),
+                decimals: 9,
+            });
+        }
+        let call = self.evm_call()?;
+        Ok(EvmAsset {
+            chain_id: call.chain_id,
+            token: None,
+            decimals: 18,
+        }
+        .asset_id())
     }
 }
 

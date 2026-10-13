@@ -2,7 +2,7 @@
 name: fin
 description: Discover and use the local Fin financial CLI to inspect holdings, authorize named sequential plans, execute explicit steps, and recover uncertain outcomes. Use for Fin onboarding or financial work through Fin.
 metadata:
-  version: "1.5.3"
+  version: "1.5.4"
 ---
 
 Use Fin to carry out the human's financial tasks through its installed CLI.
@@ -191,14 +191,20 @@ before forming a request.
 
 For CCTP, explicitly select `provider: "cctp"` and optional
 `cctp: {"transferMode": "standard"}` or `"fast"`. Only native USDC between
-Ethereum (domain 0), Arbitrum (domain 3) and Base (domain 6) is supported.
+Ethereum (domain 0), Arbitrum (domain 3) and Base (domain 6), plus transfers from
+those EVM sources to Solana mainnet-beta (domain 5), is supported.
 Use `allowedRefundAssets: []` and a `refundTo` matching the source signer.
-Robinhood has no reviewed Circle CCTP domain; Solana has no Fin SVM adapter.
+Robinhood has no reviewed Circle CCTP domain. For Solana, omit destinationChainId
+and destinationAssets; specify solanaDestination with network solana:mainnet-beta,
+wallet alias and exact native-USDC mint. recipient must be the enrolled Solana
+wallet owner; its native-USDC ATA must already exist. The broker binds that ATA
+and the separate Solana signer. Solana sources are not implemented for CCTP.
 Do not substitute Relay or a differently represented token for a CCTP request.
 
 Include every returned CCTP allowance/reset, source `deposit` (burn), and
 **destination `mint`** as explicit stages in one expiring named plan. Review
-both networks' ETH gas caps, the exact USDC fee bound, net receipt and expected
+native gas caps (ETH on EVM, SOL on Solana), Solana nonce rent where applicable,
+the exact USDC fee bound, net receipt and expected
 waiting time. Even fast quotes budget standard fallback; these are estimates,
 not promises. Poll the original `bridge.status` while attestation is pending,
 then explicitly execute mint. A successful burn does not complete the transfer.
