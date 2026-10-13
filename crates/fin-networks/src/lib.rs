@@ -74,8 +74,11 @@ const NETWORKS: &[EvmNetwork] = &[
         chain_id: 4663,
         network_id: "ethereum:4663",
         display_name: "Robinhood Chain",
-        rpc_urls: &["https://rpc.mainnet.chain.robinhood.com"],
-        previous_rpc_urls: &[],
+        rpc_urls: &[
+            "https://rpc.mainnet.chain.robinhood.com",
+            "https://robinhood-rpc.publicnode.com",
+        ],
+        previous_rpc_urls: &["https://rpc.mainnet.chain.robinhood.com"],
         minimum_confirmations: 1,
         settlement_model: SettlementModel::SequencerInclusion,
     },
@@ -164,8 +167,12 @@ mod tests {
         assert_eq!(robinhood.minimum_confirmations, 1);
         assert_eq!(
             robinhood.rpc_urls,
-            ["https://rpc.mainnet.chain.robinhood.com"]
+            [
+                "https://rpc.mainnet.chain.robinhood.com",
+                "https://robinhood-rpc.publicnode.com"
+            ]
         );
+        assert_eq!(robinhood.previous_rpc_urls, [robinhood.rpc_urls[0]]);
         assert!(robinhood.uses_sequencer_inclusion());
         assert!(!supports_chain(10));
         assert!(by_network_id("ethereum:1").is_some());

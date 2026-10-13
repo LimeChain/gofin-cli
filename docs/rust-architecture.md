@@ -91,7 +91,7 @@ At protected configuration load, the broker derives missing reviewed networks
 and AMM deployments for any reusable `ConnectionConfig::Evm`, including
 read-only wallets. The validated effective config is in memory only: this
 overlay does not rewrite protected config, inspect credentials, or create
-financial authority. Exact previously shipped Base/Arbitrum single-RPC default
+financial authority. Exact previously shipped Base/Arbitrum/Robinhood single-RPC default
 lists gain their reviewed public fallback on startup/reload, including already
 configured legacy networks. Custom RPC lists and provider order, deployment
 overrides and asset scope win;

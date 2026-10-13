@@ -1860,16 +1860,10 @@ mod tests {
 
     #[test]
     fn shipped_rpc_defaults_gain_backups_without_rewriting_stored_config_or_network_scope() {
-        let mut stored = empty_config(
-            NetworkConfig::reviewed_evm_networks()
-                .into_iter()
-                .filter(|network| network.chain_id != 4663)
-                .collect(),
-            vec![],
-        );
+        let mut stored = empty_config(NetworkConfig::reviewed_evm_networks(), vec![]);
         for network in &mut stored.networks {
             if network.chain_id != 1 {
-                network.rpc_urls.truncate(1); // Previously shipped Base/Arbitrum defaults.
+                network.rpc_urls.truncate(1); // Previously shipped single-RPC rollup defaults.
                 network.confirmations = 9;
                 network.snapshot_tokens = vec!["0x1111111111111111111111111111111111111111".into()];
             }
@@ -1889,6 +1883,10 @@ mod tests {
                     "https://arb1.arbitrum.io/rpc",
                     "https://arb-one.api.pocket.network",
                     "https://arb-mainnet.g.alchemy.com/public",
+                ],
+                4663 => vec![
+                    "https://rpc.mainnet.chain.robinhood.com",
+                    "https://robinhood-rpc.publicnode.com",
                 ],
                 _ => unreachable!(),
             };
@@ -1910,7 +1908,7 @@ mod tests {
 
     #[test]
     fn custom_rpc_lists_and_provider_order_remain_authoritative() {
-        for chain_id in [1, 8453, 42161] {
+        for chain_id in [1, 8453, 42161, 4663] {
             let reviewed = NetworkConfig::reviewed_evm_networks()
                 .into_iter()
                 .find(|network| network.chain_id == chain_id)

@@ -3344,6 +3344,9 @@ mod http_rpc_tests {
             while std::time::Instant::now() < deadline {
                 match second.accept() {
                     Ok((mut stream, _)) => {
+                        // macOS can inherit the listener's nonblocking mode;
+                        // read_request expects a blocking fixture connection.
+                        stream.set_nonblocking(false).unwrap();
                         let request: Value =
                             serde_json::from_slice(&read_request(&mut stream)).unwrap();
                         let method = request["method"].as_str().unwrap().to_owned();

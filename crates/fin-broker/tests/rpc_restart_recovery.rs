@@ -105,6 +105,7 @@ impl EnvelopeSigner for Signer {
 // This state represents the external chain. It survives the broker's restart;
 // it is not passed to the broker as an operation cache or submission journal.
 struct Chain {
+    chain_id: u64,
     store_path: PathBuf,
     counters: Arc<Counters>,
     transaction: Mutex<Option<FrozenTransaction>>,
@@ -118,7 +119,7 @@ impl Chain {
         let method = request["method"].as_str().unwrap();
         let params = &request["params"];
         match method {
-            "eth_chainId" => json!("0x1"),
+            "eth_chainId" => json!(format!("{:#x}", self.chain_id)),
             "eth_blockNumber" => json!("0x65"),
             "eth_getCode" | "eth_call" => json!("0x"),
             "eth_getBalance" => {
@@ -158,7 +159,7 @@ impl Chain {
                 }
                 let transaction = self.transaction.lock().unwrap().clone().unwrap();
                 json!({"hash":original,"from":transaction.sender,"to":transaction.to,
-                    "nonce":format!("{:#x}",transaction.nonce),"chainId":"0x1","type":"0x2",
+                    "nonce":format!("{:#x}",transaction.nonce),"chainId":format!("{:#x}",self.chain_id),"type":"0x2",
                     "gas":format!("{:#x}",transaction.gas),
                     "value":format!("{:#x}",u256(&transaction.value).unwrap()),"input":transaction.calldata,
                     "maxFeePerGas":format!("{:#x}",u256(&transaction.max_fee_per_gas).unwrap()),
@@ -314,20 +315,30 @@ fn read_request(stream: &mut TcpStream) -> Value {
 fn broker(path: &Path, urls: Vec<String>, chain: Arc<Chain>) -> Arc<BrokerRuntime> {
     let signer = LocalEnvelopeSigner::from_private_key(TEST_KEY).unwrap();
     let address = lower_address(signer.address());
+    let chain_id = chain.chain_id;
+    let network = NetworkConfig::reviewed_evm_networks()
+        .into_iter()
+        .find(|network| network.chain_id == chain_id)
+        .unwrap();
+    let confirmations = network.confirmations;
     let asset = AssetId {
-        network: "ethereum:1".into(),
+        network: format!("ethereum:{chain_id}"),
         reference: "native".into(),
         decimals: 18,
     };
     let config = BrokerConfigV2 {
         version: 2,
-        networks: vec![NetworkConfig::ethereum_mainnet()],
-        deployments: vec![DeploymentConfig::ethereum_mainnet()],
+        networks: vec![network],
+        deployments: if chain_id == 1 {
+            vec![DeploymentConfig::ethereum_mainnet()]
+        } else {
+            vec![]
+        },
         connections: vec![ConnectionConfig::Ethereum {
             name: WALLET.into(),
-            resource: ResourceId(format!("ethereum:1:{address}")),
+            resource: ResourceId(format!("ethereum:{chain_id}:{address}")),
             credential_ref: Some("00000000-0000-4000-8000-000000000001".into()),
-            network: "ethereum:1".into(),
+            network: format!("ethereum:{chain_id}"),
             address: address.clone(),
             signing_enabled: true,
             assets: vec![asset],
@@ -336,9 +347,9 @@ fn broker(path: &Path, urls: Vec<String>, chain: Arc<Chain>) -> Arc<BrokerRuntim
         approver_uid: unsafe { libc::geteuid() },
         extensions: BTreeMap::new(),
     };
-    let rpc = HttpRpc::isolated_localhost_pool(urls, 1).unwrap();
+    let rpc = HttpRpc::isolated_localhost_pool(urls, chain_id).unwrap();
     let adapter = EthereumAdapter::new(
-        EthereumConfig::wallet_only(1, 2, vec![]),
+        EthereumConfig::wallet_only(chain_id, confirmations, vec![]),
         vec![WalletConnection {
             name: WALLET.into(),
             address,
@@ -346,7 +357,7 @@ fn broker(path: &Path, urls: Vec<String>, chain: Arc<Chain>) -> Arc<BrokerRuntim
         }],
         Arc::new(EvmRuntime::new(
             Arc::new(rpc),
-            1,
+            chain_id,
             Some(Arc::new(Signer {
                 inner: signer,
                 chain: chain.clone(),
@@ -482,12 +493,13 @@ impl Drop for Client {
     }
 }
 
-async fn restart_recovery(missing_receipts: bool) {
+async fn restart_recovery(chain_id: u64, missing_receipts: bool) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("journal.sqlite");
     let initial_balance = U256::from(100_000_000_000_000_000u64);
     let counters = Arc::new(Counters::default());
     let chain = Arc::new(Chain {
+        chain_id,
         store_path: path.clone(),
         counters: counters.clone(),
         transaction: Mutex::new(None),
@@ -503,7 +515,7 @@ async fn restart_recovery(missing_receipts: bool) {
     let request = OperationRequest {
         request_id: REQUEST_ID.into(),
         operation: "wallet.transfer".into(),
-        input: json!({"request_id":REQUEST_ID,"wallet":WALLET,"network":"ethereum","chain_id":1,"token":"native",
+        input: json!({"request_id":REQUEST_ID,"wallet":WALLET,"network":"ethereum","chain_id":chain_id,"token":"native",
             "amount":"0.001","recipient":RECIPIENT,"max_fee_eth":"0.001"}),
         run_id: None,
     };
@@ -627,7 +639,8 @@ async fn restart_recovery(missing_receipts: bool) {
         )
     );
     let health = &doctor["rpc_health"][0];
-    assert_eq!(health["chain_id"], 1);
+    assert_eq!(health["chain_id"], chain_id);
+    assert_eq!(health["read_timeout_ms"], 10000);
     assert_eq!(health["last_failover"]["selected_endpoint"], "rpc-2");
     assert_eq!(health["last_failover"]["outcome"], "ok");
     if missing_receipts {
@@ -647,7 +660,7 @@ async fn restart_recovery(missing_receipts: bool) {
         .iter()
         .find(|effect| effect["kind"] == "transfer")
         .unwrap();
-    assert_eq!(transfer["to"], format!("ethereum:1:{RECIPIENT}"));
+    assert_eq!(transfer["to"], format!("ethereum:{chain_id}:{RECIPIENT}"));
     assert_eq!(transfer["debit"]["atoms"], "1000000000000000");
     assert_eq!(transfer["credit"]["atoms"], "1000000000000000");
     let cost = effects
@@ -711,6 +724,15 @@ async fn restart_recovery(missing_receipts: bool) {
     assert_eq!(Store::open(&path).unwrap().list_records().unwrap().len(), 1);
     restarted.stop().await;
     for (endpoint, expected) in [(&primary, 1), (&backup, 0)] {
+        if chain_id == 4663 {
+            assert!(
+                endpoint.requests.lock().unwrap().iter().all(|request| {
+                    request["method"] != "eth_getBlockByNumber"
+                        || request["params"][0] != "finalized"
+                }),
+                "Robinhood recovery retains sequencer-inclusion settlement"
+            );
+        }
         assert_eq!(
             endpoint
                 .requests
@@ -727,10 +749,20 @@ async fn restart_recovery(missing_receipts: bool) {
 #[tokio::test]
 async fn lost_broadcast_recovers_after_broker_restart_from_sqlite_through_backup_without_resending()
 {
-    restart_recovery(false).await;
+    restart_recovery(1, false).await;
 }
 
 #[tokio::test]
 async fn responsive_primary_missing_receipt_recovers_through_backup_after_restart() {
-    restart_recovery(true).await;
+    restart_recovery(1, true).await;
+}
+
+#[tokio::test]
+async fn robinhood_rate_limited_primary_recovers_original_submission_after_restart() {
+    restart_recovery(4663, false).await;
+}
+
+#[tokio::test]
+async fn robinhood_missing_receipt_recovers_original_submission_after_restart() {
+    restart_recovery(4663, true).await;
 }

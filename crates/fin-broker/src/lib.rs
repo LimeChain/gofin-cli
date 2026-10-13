@@ -5088,8 +5088,8 @@ mod tests {
             address: "0x1111111111111111111111111111111111111111".into(),
             signing_enabled: false,
         });
-        // Persisted Base/Arbitrum rows still have the old single RPC defaults.
-        for chain_id in [8453, 42161] {
+        // Persisted rollup rows still have the old single RPC defaults.
+        for chain_id in [8453, 42161, 4663] {
             let mut network = NetworkConfig::reviewed_evm_networks()
                 .into_iter()
                 .find(|network| network.chain_id == chain_id)
@@ -5155,7 +5155,7 @@ mod tests {
         drop(store);
 
         let reviewed = enrollment::effective_protected_config(stored).unwrap();
-        for chain_id in [8453, 42161] {
+        for chain_id in [8453, 42161, 4663] {
             let before = runtime
                 .configuration()
                 .networks

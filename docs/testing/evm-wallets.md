@@ -7,19 +7,21 @@ Fin supports one reusable EVM address/signer across these reviewed networks:
 | Ethereum mainnet | 1 | ETH | `https://ethereum-rpc.publicnode.com` | `https://eth.drpc.org` |
 | Base | 8453 | ETH | `https://mainnet.base.org` | `https://base.drpc.org` |
 | Arbitrum One | 42161 | ETH | `https://arb1.arbitrum.io/rpc` | `https://arb-one.api.pocket.network`, then `https://arb-mainnet.g.alchemy.com/public` |
-| Robinhood Chain | 4663 | ETH | `https://rpc.mainnet.chain.robinhood.com` | — |
+| Robinhood Chain | 4663 | ETH | `https://rpc.mainnet.chain.robinhood.com` | `https://robinhood-rpc.publicnode.com` |
 
 ## Public RPC defaults
 
 The ordered defaults live in `fin-networks`. The existing Ethereum pair is
 retained; Base adds dRPC and Arbitrum adds Pocket Network, then Alchemy's public
-endpoint behind their existing primary. These endpoints require no Fin-owned or
+endpoint behind their existing primary. Robinhood adds PublicNode behind its
+official primary. These endpoints require no Fin-owned or
 user API key. Provider references:
 [PublicNode Ethereum](https://ethereum.publicnode.com/),
 [dRPC Ethereum](https://drpc.org/docs/ethereum-api),
 [dRPC Base](https://drpc.org/docs/base-api),
 [Pocket Network public endpoints](https://docs.pocket.network/developers/supported-chains/),
-[Alchemy Arbitrum public endpoint](https://www.alchemy.com/rpc/arbitrum).
+[Alchemy Arbitrum public endpoint](https://www.alchemy.com/rpc/arbitrum),
+[PublicNode Robinhood](https://robinhood.publicnode.com/).
 
 On 2026-10-12, Alchemy's keyless endpoint and the independently operated
 [Nodies public gateway](https://docs.nodies.app/rpc-services/pokt-public-rpc-endpoints)
@@ -45,7 +47,28 @@ cargo test --locked -p fin-broker --test public_rpc_archive -- --ignored
 It needs network access and public provider availability, uses no account or
 credentials, and never submits a transaction. Default tests remain synthetic.
 
-The protected broker refreshes an exact previously shipped Base/Arbitrum
+On 2026-10-13, the opt-in Robinhood test verified PublicNode through `HttpRpc`
+and typed `EvmRuntime` reads: correct chain, fresh latest state, recent canonical
+USDG code/balance/supply, and original historical transaction/receipt/block
+evidence compared with the official RPC. It also injects HTTP 429 through a
+loopback gateway and forwards only allowlisted reads to live PublicNode,
+verifying fallback, cooldown and the original receipt hash. The broker/SQLite
+restart fixtures exercise Robinhood's sequencer-inclusion policy with synthetic
+response loss and missing receipts; each retains one signature and one broadcast.
+
+```sh
+cargo test --locked -p fin-broker --test public_robinhood_rpc -- --ignored
+cargo test --locked -p fin-broker --test rpc_restart_recovery
+```
+
+PublicNode is a read fallback, not a guaranteed archive provider. Separate
+probes returned HTTP 403 or unavailable-state errors for some older contract
+state while older transaction receipts were available. Missing historical
+evidence remains unresolved; recovery never infers failure or resubmits from
+that absence. No account, enrollment, credentials or live writes are used by
+these checks, and the existing 10-second per-read budget remains unchanged.
+
+The protected broker refreshes an exact previously shipped Base/Arbitrum/Robinhood
 single-endpoint default list in its effective configuration on startup/reload.
 This applies to existing configured networks, including legacy wallets, without
 rewriting the saved config or changing network scope, credentials, limits,
