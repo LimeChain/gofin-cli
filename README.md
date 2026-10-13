@@ -1035,7 +1035,10 @@ not evidence those checks passed. Independent feasibility reads run in bounded
 batches. Each execution still validates current state before dispatch.
 
 Named-plan execution may refresh a proved-unsubmitted candidate up to twice for
-transient freshness, nonce or read failures while existing consent remains active.
+transient freshness, nonce or read failures, or a numeric USD attempt-ceiling
+change, while existing consent remains active. Fresh candidates pass all plan
+and protected policy limits again; price identity and malformed-bound failures
+do not qualify for automatic refresh.
 Internal candidates retain separate durable identities linked to the caller's
 original request ID. Reusing that ID returns or reconciles the latest recorded
 candidate; it does not start another retry series. Scope and budget violations,

@@ -2353,6 +2353,15 @@ fn validate_exact_plan_identity(
 }
 
 fn can_auto_refresh_plan_candidate(error: &FinError) -> bool {
+    // A new candidate may reprice within the existing plan and policy bounds.
+    // The shared code also reports identity and malformed-bound failures; those
+    // must not be retried as ordinary USD price movement.
+    if error.code == "VALUE_BOUND_EXCEEDED" {
+        return error
+            .details
+            .as_deref()
+            .is_some_and(|details| details["reason"].as_str() == Some("usd_ceiling_exceeded"));
+    }
     matches!(
         error.code.as_str(),
         "PREVIEW_EXPIRED"

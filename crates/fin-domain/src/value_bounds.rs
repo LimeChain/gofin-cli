@@ -149,30 +149,6 @@ fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -
     };
     let bounds: Ceiling = serde_json::from_value(raw.clone()).map_err(|_| invalid())?;
     let value = prepared.valuation.as_ref().ok_or_else(invalid)?;
-    for (field, actual, maximum) in [
-        (
-            "movement_usd_micros",
-            &value.movement_usd_micros,
-            &bounds.movement_usd_micros,
-        ),
-        (
-            "maximum_fee_usd_micros",
-            &value.maximum_fee_usd_micros,
-            &bounds.maximum_fee_usd_micros,
-        ),
-        (
-            "additional_allocation_usd_micros",
-            &value.additional_allocation_usd_micros,
-            &bounds.additional_allocation_usd_micros,
-        ),
-    ] {
-        if actual.integer() > maximum.integer() {
-            return Err(invalid().with_details(serde_json::json!({
-                "reason":"usd_ceiling_exceeded", "field":field,
-                "observed_usd_micros":actual, "maximum_usd_micros":maximum
-            })));
-        }
-    }
     if bounds.prices.is_empty() {
         return Err(invalid());
     }
@@ -196,6 +172,32 @@ fn check(prepared: &PreparedOperation, fresh: bool, at: chrono::DateTime<Utc>) -
         };
         if price.unit_atoms != expected.unit_atoms || identity(&price.source) != expected.source {
             return Err(invalid());
+        }
+    }
+    // Check identities before numeric ceilings: a price increase must never
+    // disguise a changed asset, unit or provider as recoverable price drift.
+    for (field, actual, maximum) in [
+        (
+            "movement_usd_micros",
+            &value.movement_usd_micros,
+            &bounds.movement_usd_micros,
+        ),
+        (
+            "maximum_fee_usd_micros",
+            &value.maximum_fee_usd_micros,
+            &bounds.maximum_fee_usd_micros,
+        ),
+        (
+            "additional_allocation_usd_micros",
+            &value.additional_allocation_usd_micros,
+            &bounds.additional_allocation_usd_micros,
+        ),
+    ] {
+        if actual.integer() > maximum.integer() {
+            return Err(invalid().with_details(serde_json::json!({
+                "reason":"usd_ceiling_exceeded", "field":field,
+                "observed_usd_micros":actual, "maximum_usd_micros":maximum
+            })));
         }
     }
     for price in value.prices.iter().filter(|_| fresh) {
@@ -493,6 +495,58 @@ mod tests {
         let mut corrupted = approved.clone();
         corrupted.binding[KEY]["unexpected"] = json!(true);
         assert!(validate(&corrupted).is_err());
+    }
+
+    #[test]
+    fn numeric_ceiling_details_require_valid_price_identities_and_bounds() {
+        let mut approved = fixture("1000000");
+        bind(&mut approved);
+        for change in ["none", "asset", "unit", "source", "duplicate", "missing"] {
+            // The same one-cent increase accompanies each identity violation.
+            let mut refreshed = fixture("1010000");
+            let prices = &mut refreshed.valuation.as_mut().unwrap().prices;
+            match change {
+                "asset" => prices[0].asset.reference = "SYNTHETIC-OTHER".into(),
+                "unit" => prices[0].unit_atoms = Quantity::new("1").unwrap(),
+                "source" => prices[0].source = "SYNTHETIC-OTHER".into(),
+                "duplicate" => prices.push(prices[0].clone()),
+                "missing" => prices.clear(),
+                _ => {}
+            }
+            let error = carry(&approved, &mut refreshed).unwrap_err();
+            assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
+            if change == "none" {
+                let details = error.details.unwrap();
+                assert_eq!(details["reason"], "usd_ceiling_exceeded");
+                assert_eq!(details["observed_usd_micros"], "1010000");
+                assert_eq!(details["maximum_usd_micros"], "1000000");
+            } else {
+                assert!(
+                    error.details.is_none(),
+                    "{change} must not qualify for refresh"
+                );
+            }
+        }
+        for change in ["missing", "malformed", "empty_prices", "duplicate_prices"] {
+            let mut invalid = approved.clone();
+            invalid.valuation.as_mut().unwrap().movement_usd_micros =
+                Quantity::new("1010000").unwrap();
+            match change {
+                "missing" => invalid.valuation = None,
+                "malformed" => invalid.binding[KEY]["movement_usd_micros"] = json!(null),
+                "empty_prices" => invalid.binding[KEY]["prices"] = json!([]),
+                _ => {
+                    let price = invalid.binding[KEY]["prices"][0].clone();
+                    invalid.binding[KEY]["prices"] = json!([price, price]);
+                }
+            }
+            let error = validate(&invalid).unwrap_err();
+            assert_eq!(error.code, "VALUE_BOUND_EXCEEDED");
+            assert!(
+                error.details.is_none(),
+                "{change} must not qualify for refresh"
+            );
+        }
     }
 
     #[test]

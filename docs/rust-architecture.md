@@ -416,7 +416,11 @@ financially started-step scope. Terminal never-submitted zero-effect attempts
 can be repaired by a freshly approved revision. Completed steps retain their
 historical specification and permission instead of regenerating execution
 permission against changed adapter metadata. Named steps refresh at most two
-proved-unsubmitted transient failures within one invocation and active authority;
+proved-unsubmitted transient failures within one invocation and active authority.
+Numeric USD attempt-ceiling changes also qualify, after validating priced
+asset/unit/provider identities; malformed bounds and identity changes do not.
+Every fresh candidate repeats plan and protected policy checks without widening
+existing authority or rebinding the failed attempt's ceiling. The
 durable logical-request linkage preserves idempotency of the latest candidate.
 Restart never replays work and releases unsubmitted bridge claims atomically with
 operation cancellation and reservations. Expired or revoked plans can still reconcile submitted attempts.
