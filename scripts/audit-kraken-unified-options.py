@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Explicit unified-to-native option inventory from pinned CCXT Rust sources.
 
-This audit writes only unified-options.{json,md}; it does not modify the existing
-CCXT metadata, endpoint inventory, schemas, or executable adapter behavior.
+Print audit totals, optionally saving the detailed JSON with --output PATH.
+CCXT metadata, endpoint inventory, schemas, and executable behavior are unchanged.
 """
 import argparse
 import hashlib
@@ -196,6 +196,7 @@ def map_option(client, method, name, operations, contracts):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--ccxt-source",type=Path)
+    parser.add_argument("--output",type=Path,help="Save the detailed JSON audit to PATH (default: print totals only)")
     args=parser.parse_args()
     source=args.ccxt_source
     if source is None:
@@ -275,14 +276,8 @@ def main():
     output["baseSource"]={"file":"ccxt-base-4.5.85/src/exchange_generated.rs","sha256":hashlib.sha256(base_text.encode()).hexdigest()}
     output["corrections"]=[{"scope":"krakenfutures.fetchIndexOHLCV","mapping":"params.price=index maps to native tick_type=spot, not index","source":"KrakenFutures fetch_ohlcv explicit native venue rename"},{"scope":"Spot/Futures.transfer_out","mapping":"The source delegates to transfer; empty prior nativeMethods is not an unmapped capability"},{"scope":"krakenfutures.fetchTradingFee/fetchTradingFees","mapping":"Current financial fee authority uses verified related Spot GetTradeVolume pair with aclass=futures_contract and fee_schedule=true, never deprecated Futures fee schedule."}]
     output["totals"]={"overrideMethods":len(output["overrides"]),"overrideDeclaredAndSignatureParameters":sum(len(e["parameters"]) for e in output["overrides"]),"inheritedAndEmulatedCapabilities":len(output["inheritedAndEmulated"])}
-    (DOCS/"unified-options.json").write_text(json.dumps(output,indent=2)+"\n")
-    lines=["# Kraken unified option translation inventory","",output["scope"],"","Every declared parameter in the 71 pinned overrides is listed in the machine inventory, along with source-signature arguments omitted from nearby comments, processed source options and inherited/emulated capability arguments. Pointers are checked against actual closed Fin input definitions. Quantities use explicit native units; Fin never applies CCXT precision rounding or treats arbitrary params as authority.","","Finite native request mapping is implemented separately from CCXT aliases, response normalization and automatic pagination. Native equivalent fields are marked explicit_native_input_required. Response filtering/pagination/endpoint composition is caller-side-required. Incomplete or unavailable native pointers remain explicit; this inventory does not claim those aliases are executable broker inputs.","","Current Futures fees require the related authenticated Spot GetTradeVolume route with futures_contract pair class. Deprecated Futures schedules are informational reads. Index candles use native spot. Transfer-out delegates preserve the product's exact direction and separately verified destination custody.","","```sh","python3 scripts/audit-kraken-unified-options.py","```","","| Client/method | Declared/signature option | Native pointer or caller behavior | Fin behavior | Units |","| --- | --- | --- | --- | --- |"]
-    for entry in output["overrides"]+output["inheritedAndEmulated"]:
-        for param in entry.get("parameters",[])+entry.get("processedUndeclaredOptions",[]):
-            mappings=", ".join(m["pointer"] for m in param.get("nativeMappings",[])) or param["kind"]
-            lines.append(f"| `{entry['client']}.{entry['method']}` | `{param['name']}` | {mappings}; {param['transform'].replace('|','/')} | `{param['finBehavior']}` | {param['units']} |")
-    lines += ["","The JSON includes every expanded closed native field for generic params declarations, exact source file hashes/line references, identity requirements and remaining alias limitations. These documents are source audit evidence; read fixtures and financial-family tests separately establish executable behavior. Read-only live and native Touch ID evidence do not follow from this audit."]
-    (DOCS/"unified-options.md").write_text("\n".join(lines)+"\n")
+    if args.output is not None:
+        args.output.write_text(json.dumps(output,indent=2)+"\n")
     print(json.dumps(output["totals"]))
 
 

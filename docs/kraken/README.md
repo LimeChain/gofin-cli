@@ -1,61 +1,154 @@
-# Kraken REST integration
+# Maintaining the Kraken integration
 
-Fin separates `kraken` (Spot and cross Margin) from `krakenfutures` (Derivatives). Each product has its own protected API-key reference, native account identity and operation schemas. The existing `exchange.markets` and `exchange.ticker` Kraken public-read names remain available. Native quantities and economic identities remain distinct across cash, margin liabilities, Earn positions, derivative collateral and contract exposure.
+`fin-kraken` provides separate `kraken` (Spot/Margin) and `krakenfutures`
+(Derivatives) profiles over `ExchangeAdapter`. Venue behavior belongs in these
+profiles; authorization, accounting, pricing, journals and presentation use shared
+Fin contracts. Existing `exchange.markets` and `exchange.ticker` reads remain available.
 
-The pinned CCXT/Rust baseline is **4.5.85**. [Source manifest](source-manifest.json) records exact official schema snapshots and source digests. The [capability matrix](capability-matrix.md), [evidence matrix](evidence-matrix.json), [verification report](verification.md) and extracted unified/capability bindings in [Spot](kraken-ccxt.json) and [Derivatives](krakenfutures-ccxt.json) cover aliases and inherited/emulated methods. Native endpoint inputs use generated closed Rust types from the official schemas. New Funding APIs and the Derivatives API-key permission read use narrow internal bindings. Deprecated methods retain explicit identities; Fin never changes the API version of a persisted request during recovery.
+## Source contracts and discovery
 
-WebSockets/token issuance, API-level 2FA, and assignment-program enrollment are excluded. Assignment reads and removal are included. Schema or endpoint reach is not evidence of live financial acceptance; consult the per-family verification status before selecting a workflow. Selected live acceptance covers a [SOL/USDC limit-order round trip](live-sol-usdc.md), a Base USDC deposit → ETH limit buy → ETH withdrawal development plan, and an Ethereum wallet swap → Kraken deposit → ETH limit buy → wallet withdrawal protected human plan. The latter completed under one native Touch ID approval after a native plan-parser fix. [Verification evidence](verification.md#selected-live-spot-acceptance) separates these scenarios and their remaining coverage limits; they do not establish every live family or option.
+CCXT/Rust is pinned to **4.5.85**. [source-manifest.json](source-manifest.json)
+records official schema snapshots and source digests. `contracts.json` is a compiled
+runtime input. `kraken-ccxt.json`, `krakenfutures-ccxt.json`, the five `*-rest.json`
+snapshots and `fixtures/` support generation and independent tests. Keep these
+files when changing documentation. Current Funding and the Futures API-key
+permission read use narrow internal bindings.
 
-## Enrollment
+Use `fin capabilities --json` and `fin schema OPERATION --json` for the operation
+and option inventory. Generated native inputs reject unknown fields, arbitrary
+paths/parameter bags, caller nonce and OTP. Deprecated API identities remain
+explicit, including during recovery.
+The unified-option audit describes native equivalents and caller-side composition;
+it does not make every CCXT alias an executable Fin operation.
 
-The human runs enrollment in their own terminal. Fin privately prompts for the product's key and Base64 secret; those values never belong in chat or `--input`.
+Legacy Spot and current Funding share a durable monotonic nonce per credential;
+Futures authentication is separate and nonce-optional. Preserve exact wire signing:
+Funding includes the query path, legacy Spot signs the URI path, and Futures uses
+GET queries and POST/PUT bodies with repeated form fields where required.
+
+## Enrollment and administration
+
+The human enrolls each product separately in their terminal. Fin privately prompts
+for the key and Base64 secret:
 
 ```sh
-fin connections add --provider kraken --name spot --account-id YOUR_KRAKEN_ACCOUNT_ID
-fin connections add --provider krakenfutures --name derivatives --account-id YOUR_KRAKEN_ACCOUNT_ID
+fin connections add --provider kraken --name spot --account-id PUBLIC_ACCOUNT_ID
+fin connections add --provider krakenfutures --name derivatives --account-id PUBLIC_ACCOUNT_ID
 fin connections list --json
+fin read kraken.get-account-balance --input '{"account":"spot"}' --json
 ```
 
-Spot's API-key identity response is checked against the supplied account ID when available. Derivatives' signed API-key check verifies its native account UUID or reported IIBAN; transfers correlate the native History UUID separately. Cross-product relationships use authoritative IIBAN evidence where available. Relationships that the venue cannot prove remain explicitly human-confirmed. Reuse the correct account ID only when the products truly belong to the same account; separate custody resources remain distinct. Missing permissions produce a safe actionable error. Fresh native configuration approval remains required in the installed protected runtime; automatic development approval is separate evidence.
+Spot checks authenticated key identity when available. Futures verifies its native
+UID/IIBAN; transfer History UUIDs stay distinct. Cross-product links use authoritative
+IIBAN evidence where available and disclose human-confirmed relationships.
 
-Inspect exact product-native inputs before invoking an operation:
+Spot optionally accepts `--default-wallet-account-id OWNED_WALLET_ID`. Authenticated
+ownership and the human-confirmed default-wallet relationship are different evidence.
+Only that selected wallet aliases Spot custody; names, types and balances never
+establish an alias. Current calls recheck active ownership. Updates, development
+reimports and re-enrollment preserve aliases and reject retargeting, including
+after connection removal.
+
+Administrative changes require separate configuration review and fresh Touch ID;
+financial plans cannot authorize them. Use a stable ID for recovery:
 
 ```sh
-fin schema kraken.get-account-balance --json
-fin read kraken.get-account-balance --input '{"account":"spot"}' --json
-fin schema krakenfutures.get-accounts --json
-fin schema kraken.add-order --json
+fin configure krakenfutures.set-self-trade-strategy \
+  --input '{"account":"derivatives","strategy":"REJECT_TAKER"}' --id self-trade-1
+fin status configuration:RETURNED_ATTEMPT_UUID --json
 ```
 
-Use the operation names returned by `fin capabilities --json` and `fin schema`; official `operationId` names are preserved in Fin's kebab-case catalog. Every financial write carries a stable Fin `requestId`, account/product identity and exact principal/fee/exposure controls. Unknown fields, raw API paths, caller-controlled nonce/OTP, and arbitrary parameter bags are rejected. Preview and execution use the existing financial engine, exact one-use approval or a named finite plan; administrative changes use [separate protected configuration](administration-and-exports.md).
+`configure --json` returns a structured human-terminal handoff. Configuration is
+journalled before dispatch. An uncertain response stays unknown; repeating its ID
+reconciles without resubmission. An empty page cannot prove deletion or justify
+repeating subaccount creation. Acknowledgment is not financial settlement.
 
-Kraken's plan-feasibility hook checks ordinary single spot cash orders and current/legacy withdrawals without requiring future balances. It reuses current market, permission, fee and recipient checks; account withdrawal limits, balances and execution-time observations remain deferred. Other request shapes return an explicit warning that venue feasibility is deferred. The shared plan engine invokes this hook during review and authorization; deferred checks remain mandatory at execution. Fee-currency flags such as `fciq` are preferences, so both traded assets need fee caps. Admission errors identify the failing asset, required fee, supplied cap and per-market rates. A base-volume buy's minimum receipt must also fit after its declared base-asset fee cap. Sells and quote-volume buys explicitly defer minimum-receipt feasibility; their output depends on execution prices and fees, and settlement still checks the declared bound.
+Export creation/removal also uses configuration authority. Retrieve ready exports
+with an explicit private, non-overwriting local destination:
 
-## Funding, settlement and recovery
+```sh
+fin read kraken.retrieve-export --input '{"account":"spot","id":"VENUE_REPORT_ID"}' \
+  --output ./kraken-trades.zip --json
+fin read krakenfutures.account-log-csv \
+  --input '{"account":"derivatives","conversion_details":false}' \
+  --output ./kraken-account-log.csv --json
+```
 
-Named Kraken plans use the shared bounded recovery path for numeric USD-ceiling drift. A proved-unsubmitted, zero-effect candidate may refresh at most twice under the same active approval, with fresh plan and policy checks. Changed price identities, malformed bounds, actual policy breaches and uncertain submissions do not gain retry permission; standalone exact approvals keep their original behavior.
+Downloads preserve exact bytes and validate length and SHA-256. Limits are 32 MiB
+per artifact, two artifacts/64 MiB including in-flight downloads, five-minute
+handles and 256 KiB chunks. The broker never receives the local path. The CLI
+publishes a private file without replacing existing files or symlinks.
 
-Current Funding workflows discover exact account-scoped method/network/address IDs and bind memo/tag, minimum, fee currency, and included-versus-additional fees. Kraken's EVM network labels resolve against Fin's shared reviewed network registry, so adding a reviewed Fin network does not require a second Kraken alias table; ambiguous or unsupported labels fail closed. Legacy discovery and recovery remain explicit. Wallet-originated deposits use an enrolled reviewed EVM network/asset and require correlated usable Kraken credit. Other deposit routes expose discovery/history without pretending that Fin can send funds from their source.
+## Financial and recovery invariants
 
-A matching legacy deposit with status `Settled` is pending additional Kraken confirmations; it grants no usable credit. `EarlyConfirmed` or `Success` still requires the exact correlated ledger and usable-balance evidence before completion. Held, returned, mismatched or unrecognized evidence remains unresolved and never permits resubmission.
+- Bind account, product, native market, assets, recipients, principal, fees and
+  exposure independently. Cash, margin liabilities, derivative collateral/contracts,
+  PnL/funding and Earn positions retain distinct quantities. Price exact native
+  market identities with independent USD observations, never symbol parity.
+- Persist submission identity before dispatch. Lost responses, partial batches,
+  edits and cancellations reconcile without replay. Immutable deduplicated proofs
+  own fills; terminal status alone never releases unresolved reservations or erases
+  consumed costs. Additive migrations preserve approvals, submissions, proofs,
+  nonce state and cost watermarks without dispatch.
+- Amendments require fresh exact authority linked to the original fill owner;
+  legacy edits retain predecessor/successor identities. Value and reserve positive
+  increments separately without netting reductions. Child outcomes, revisions and
+  reservations commit atomically; unknown children retain allocation. Cancellation
+  grants no additional authority.
+- Parent-funded conditional legs require verified usable proceeds. Starting holdings
+  cover external initial principal and fees, while all legs count toward gross
+  turnover. Margin accounting retains full loan principal and rollover liabilities;
+  derivative contract exposure is not a cash balance.
+- Ordinary Spot cash orders and withdrawals receive plan-feasibility checks for
+  market, permissions, fees and recipients. Future balances and other shapes remain
+  explicitly deferred until execution. Fee-currency flags are preferences: cap both
+  traded assets and account for base fees in minimum receipts. Numeric USD drift
+  may refresh at most twice only for proved-unsubmitted, zero-effect candidates
+  within the same active authority. Uncertain writes, changed identities and actual
+  policy breaches gain no retry permission.
+- Funding binds exact method/network/address IDs, memo/tag, minimums, fee currency
+  and included-versus-additional costs. EVM routes resolve dynamically against the
+  shared reviewed network registry; ambiguous or unsupported labels fail closed.
+  Recovery retains the original Funding API version.
+- Wallet-funded deposits require the original source transaction, correlated Kraken
+  status and ledger evidence, and usable credit. `Settled` remains pending;
+  `EarlyConfirmed` or `Success` is eligible only with that evidence. A source receipt,
+  balance increase, empty history or elapsed time alone proves no usable credit.
+- Withdrawals require independent destination receipts by default. Unsupported
+  observers require explicit `verificationRequirement: "venue_only"` bound into
+  approval and plan scope. Results disclose unverified delivery and account only
+  for proven source debit and fees. An enrolled destination must resolve to the
+  exact network/address; external delivery does not create a Fin custody holding.
+- Serialize Earn mutations per account/strategy because status reports the last
+  request. Require allocation and ledger evidence. Noncash receipt sources allow
+  one finite substantive attempt; a new attempt after a short receipt needs fresh
+  authority. Proven excess costs remain consumed without authorizing more spend.
+- Dead-man switches configure only the explicitly approved timer. Never silently
+  renew them; distinguish venue acknowledgment from uncertain configuration.
 
-Withdrawals default to independent destination receipts. An unsupported observer requires explicit `verificationRequirement: "venue_only"` consent; approval and plan scope bind that choice. Such results disclose the unverified destination and book only proven source debit and costs. External destinations never become a Fin custody holding merely because delivery succeeded. An enrolled recipient needs correlated usable credit before it can enter accounting.
+## Limits and verification
 
-The optional withdrawal `destination` selects an enrolled wallet by connection name or exact chain-specific resource ID. Both forms must match the authenticated recipient address and resolved network; ambiguous or mismatched identities are rejected. Omitting the selector does not grant custody to an external address.
+WebSockets/token issuance, API-level 2FA and assignment-program enrollment are
+excluded; assignment reads and removal remain included. Endpoint reach does not
+establish live financial acceptance. Incomplete capabilities include tokenized
+base/rebased pricing without proven ticker units (`KRAKEN_TOKENIZED_QUOTE_UNIT_UNPROVEN`),
+non-USD derivative converted-fee accounting, negative collateral repayment/conversion,
+preferred fee-credit spending, other negative-currency liabilities, VIP credit-line
+liabilities and option-market financial support. New endpoints outside the pinned
+inventory do not imply support.
 
-Tokenized `base` and `rebased` views retain exact unit identities; Fin does not infer a conversion factor or count both as custody. The default price provider rejects them with `KRAKEN_TOKENIZED_QUOTE_UNIT_UNPROVEN` because the published ticker contract does not establish its exact unit denomination. [Source evidence and tests](tokenized-pricing.md) document this incomplete financial capability.
+Issued-child principal expansion beyond original generated credit/full loan,
+attached-conditional-parent amendments/legacy edits, and quote-volume market atomic
+amendments cannot currently preserve required authority. Legacy unpriced deposit fee
+overruns and unexpected address-setup fees without original authority stay unresolved.
 
-HTTP acknowledgment is not financial settlement. Fin persists the submission before sending it, never automatically retries a write, and reconciles lost responses under their original identity. Standing-order fills have immutable deduplicated receipt events and cumulative effects while unfinished reservations remain held. Cancellations own no duplicate fills; the original order remains their accounting owner. Earn requests are serialized by account/strategy and require status plus strategy allocation and coherent ledger evidence. An empty page, elapsed time, isolated balance change or unmatched amount is insufficient proof.
+Selected live evidence covers a SOL/USDC round trip, a development Base funding/trade
+round trip, and a human Ethereum swap/deposit/trade/withdrawal plan under native
+Touch ID. It does not establish every option, Futures, Earn, administration or
+export behavior. Keep synthetic, fork, live-read, live-write and native-approval
+evidence separate; private execution artifacts belong in ignored `.context/`.
 
-[Financial controls](financial-controls.md) define product-specific principal, fee and exposure ceilings, including whole-batch caps. [Unresolved consumption](unresolved-consumption.md) preserves proven costs independently of settlement, and [noncash receipt plans](non-cash-receipt-plans.md) describe finite Earn position sources.
-
-Dead-man switches configure the explicitly approved timer only. Fin never renews it silently; venue-side timer persistence is disclosed separately from verified financial effects.
-
-Parent-funded conditional cash orders use the shared ordered conversion contract: only initial principal and declared external fees require starting holdings, while each later leg must be covered by verified usable proceeds. Both legs still consume gross USD turnover. Native mixed mutation batches use [separate child ownership](compound-mutations.md); their source mapping, independent native options and financial-family fixtures are separately reported. Same-owner grouped edits/cancels and new-order combinations retain independent outcomes across restart. [Margin fee admission](margin-fee-admission.md) explains the checked fee estimate and the venue’s persistent rollover liability.
-
-## Reproducible synthetic development
-
-No installed configuration, credentials or mainnet writes are used by these checks:
+Regenerate contracts and fixtures, then run the affected checks:
 
 ```sh
 python3 scripts/generate-kraken-contracts.py
@@ -63,23 +156,18 @@ python3 scripts/audit-kraken-unified-options.py
 python3 docs/kraken/fixtures/build_read_fixtures.py
 python3 docs/kraken/fixtures/build_mutation_fixtures.py
 make catalog
-python3 scripts/generate-kraken-matrix.py
 cargo test --locked -p fin-exchange --all-features --lib
 cargo test --locked -p fin-kraken --lib
-cargo test --locked -p fin-store -p fin-engine -p fin-pricing --lib
-cargo test --locked -p fin-broker --example fin-dev-broker
-make dev-env-start DEV_ENV=kraken-synthetic
-make dev-env-cli DEV_ENV=kraken-synthetic ARGS='capabilities --json'
-make dev-env-stop DEV_ENV=kraken-synthetic
-make test-dev-env
 ```
 
-For separately authorized disposable-key development, fill the commented Kraken variables in `.env.fin-dev.example` into a gitignored credential file. Indexed Spot and Futures groups `1` through `8` support separate enrolled accounts; each group requires its key, secret and exact offline account ID, with an optional stable name. Reimport preserves identities and rejects name or custody reassignment. Import once into a stopped environment; do not shell-source or print that file:
+The option audit can save an on-demand JSON report with `--output /tmp/kraken-options.json`.
+Use the [testing guide](../testing/README.md) to select shared engine/store/pricing,
+broker, CLI, native presentation and lifecycle checks. `make test-dev-env` covers
+development lifecycle/recovery; rebuild both binaries after source changes with
+`make dev-env-stop` followed by `make dev-env-start` using the same `DEV_ENV`.
 
-```sh
-make dev-env-import DEV_ENV=kraken-live DEV_CREDENTIALS_FILE="$PWD/.env.fin-dev"
-make dev-env-start DEV_ENV=kraken-live DEV_MODE=live
-make dev-env-stop DEV_ENV=kraken-live
-```
-
-Live startup alone verifies no financial settlement. Live writes require independently selected scenarios, accounts, amounts, destinations, the shared $100 allocation including costs, and complete return paths. Production install/update, native Touch ID, read-only live, fork and live-write cases remain separate from synthetic evidence. Human checks are listed in the verification report and [administration/export guide](administration-and-exports.md).
+For disposable development enrollment, use the commented Kraken groups in
+`.env.fin-dev.example` and `make dev-env-import` into a stopped environment; never
+print or shell-source credentials. Follow the [live E2E skill](../../skills/fin-e2e/SKILL.md)
+for separately authorized live scenarios. Production installation, native approval,
+and account-specific configuration/export checks require their own observed evidence.
