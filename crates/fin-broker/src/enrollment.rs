@@ -1719,93 +1719,10 @@ fn preserve_default_wallet(
     Ok(())
 }
 fn public_connection(connection: &ConnectionConfig) -> Value {
-    match connection {
-        ConnectionConfig::Kraken {
-            name,
-            resource,
-            physical_identity,
-            physical_identity_verified,
-            default_wallet_account_id,
-            ..
-        } => {
-            let mut value = json!({"provider":"kraken","name":name,"resource":resource,"physical_identity":physical_identity,"identity_verification":if *physical_identity_verified{"venue_verified"}else{"human_confirmed"}});
-            if let Some(id) = default_wallet_account_id {
-                value["default_wallet_account_id"] = json!(id);
-                value["default_wallet_relationship_verification"] = json!("human_verified");
-            }
-            value
-        }
-        ConnectionConfig::KrakenFutures {
-            name,
-            resource,
-            physical_identity,
-            physical_identity_verified,
-            ..
-        } => {
-            json!({"provider":if matches!(connection,ConnectionConfig::Kraken{..}){"kraken"}else{"krakenfutures"},"name":name,"resource":resource,"physical_identity":physical_identity,"identity_verification":if *physical_identity_verified{"venue_verified"}else{"human_confirmed"}})
-        }
-        ConnectionConfig::CoinGecko {
-            name,
-            resource,
-            api_plan,
-            ..
-        } => json!({"provider":"coingecko","name":name,"resource":resource,"api_plan":api_plan}),
-        ConnectionConfig::Binance {
-            name,
-            resource,
-            role,
-            parent,
-            email,
-            wallet_type,
-            physical_identity,
-            ..
-        } => {
-            json!({"name":name,"provider":"binance","resource":resource,"role":role,"parent":parent,"email":email,"wallet_type":wallet_type,"physical_identity":physical_identity})
-        }
-        ConnectionConfig::Evm {
-            name,
-            resource,
-            address,
-            signing_enabled,
-            ..
-        } => {
-            json!({"name":name,"provider":"evm","resource":resource,"address":address,"signing_enabled":signing_enabled})
-        }
-        ConnectionConfig::Ethereum {
-            name,
-            resource,
-            network,
-            address,
-            signing_enabled,
-            ..
-        } => {
-            json!({"name":name,"provider":"ethereum","resource":resource,"network":network,"address":address,"signing_enabled":signing_enabled})
-        }
-        ConnectionConfig::Hyperliquid {
-            name,
-            resource,
-            owner,
-            execution_scope,
-            signing_enabled,
-            ..
-        } => {
-            json!({"name":name,"provider":"hyperliquid","resource":resource,"owner":owner,"execution_address":execution_scope.address().unwrap_or(owner),"execution_scope":execution_scope.kind(),"signing_enabled":signing_enabled})
-        }
-        ConnectionConfig::Solana {
-            name,
-            resource,
-            address,
-            signing_enabled,
-            network,
-            ..
-        } => {
-            json!({"name":name,"provider":"solana","resource":resource,"address":address,"network":network,"signing_enabled":signing_enabled})
-        }
-        ConnectionConfig::Jupiter { name, resource, .. } => {
-            json!({"name":name,"provider":"jupiter","resource":resource,"credential_configured":true})
-        }
-    }
+    serde_json::to_value(public_connection_contract(connection))
+        .expect("public enrollment connection is serializable")
 }
+
 fn immutable_identity(connection: &ConnectionConfig) -> Value {
     match connection {
         ConnectionConfig::Evm { name, address, .. }
@@ -1878,11 +1795,8 @@ fn outcome(
     warnings: Vec<String>,
     cleanup_warning: Option<&str>,
 ) -> Value {
-    use fin_discovery::enrollment_contract::{EnrollmentOutcome, PublicConnection};
-    let connection = connection.map(|connection| {
-        serde_json::from_value::<PublicConnection>(public_connection(connection))
-            .expect("reviewed safe connection output matches the shared contract")
-    });
+    use fin_discovery::enrollment_contract::EnrollmentOutcome;
+    let connection = connection.map(public_connection_contract);
     serde_json::to_value(EnrollmentOutcome {
         action: action.into(),
         connection,
@@ -1900,6 +1814,141 @@ fn outcome(
         .into(),
     })
     .expect("safe enrollment result serialization")
+}
+
+fn public_connection_contract(
+    connection: &ConnectionConfig,
+) -> fin_discovery::enrollment_contract::PublicConnection {
+    use fin_discovery::enrollment_contract::PublicConnection as Public;
+    match connection {
+        ConnectionConfig::Kraken {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            default_wallet_account_id,
+            ..
+        } => Public::Kraken {
+            name: name.clone(),
+            resource: resource.clone(),
+            physical_identity: physical_identity.clone(),
+            identity_verification: if *physical_identity_verified {
+                "venue_verified"
+            } else {
+                "human_confirmed"
+            }
+            .into(),
+            default_wallet_account_id: default_wallet_account_id.clone(),
+            default_wallet_relationship_verification: default_wallet_account_id
+                .as_ref()
+                .map(|_| "human_verified".into()),
+        },
+        ConnectionConfig::KrakenFutures {
+            name,
+            resource,
+            physical_identity,
+            physical_identity_verified,
+            ..
+        } => Public::KrakenFutures {
+            name: name.clone(),
+            resource: resource.clone(),
+            physical_identity: physical_identity.clone(),
+            identity_verification: if *physical_identity_verified {
+                "venue_verified"
+            } else {
+                "human_confirmed"
+            }
+            .into(),
+        },
+        ConnectionConfig::CoinGecko {
+            name,
+            resource,
+            api_plan,
+            ..
+        } => Public::CoinGecko {
+            name: name.clone(),
+            resource: resource.clone(),
+            api_plan: api_plan.clone(),
+        },
+        ConnectionConfig::Binance {
+            name,
+            resource,
+            role,
+            parent,
+            email,
+            wallet_type,
+            physical_identity,
+            ..
+        } => Public::Binance {
+            name: name.clone(),
+            resource: resource.clone(),
+            role: role.clone(),
+            parent: parent.clone(),
+            email: email.clone(),
+            wallet_type: wallet_type.clone(),
+            physical_identity: physical_identity.clone(),
+        },
+        ConnectionConfig::Evm {
+            name,
+            resource,
+            address,
+            signing_enabled,
+            ..
+        } => Public::Evm {
+            name: name.clone(),
+            resource: resource.clone(),
+            address: address.clone(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Ethereum {
+            name,
+            resource,
+            network,
+            address,
+            signing_enabled,
+            ..
+        } => Public::Ethereum {
+            name: name.clone(),
+            resource: resource.clone(),
+            network: network.clone(),
+            address: address.clone(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Hyperliquid {
+            name,
+            resource,
+            owner,
+            execution_scope,
+            signing_enabled,
+            ..
+        } => Public::Hyperliquid {
+            name: name.clone(),
+            resource: resource.clone(),
+            owner: owner.clone(),
+            execution_address: execution_scope.address().unwrap_or(owner).to_owned(),
+            execution_scope: execution_scope.kind().into(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Solana {
+            name,
+            resource,
+            address,
+            network,
+            signing_enabled,
+            ..
+        } => Public::Solana {
+            name: name.clone(),
+            resource: resource.clone(),
+            address: address.clone(),
+            network: network.clone(),
+            signing_enabled: *signing_enabled,
+        },
+        ConnectionConfig::Jupiter { name, resource, .. } => Public::Jupiter {
+            name: name.clone(),
+            resource: resource.clone(),
+            credential_configured: true,
+        },
+    }
 }
 fn reject_kraken_account_alias(
     config: &BrokerConfigV2,
@@ -2665,6 +2714,110 @@ mod tests {
             credential_ref: reference.into(),
             api_plan: plan.into(),
         }
+    }
+
+    #[test]
+    fn public_connection_mapping_preserves_expected_fields_for_every_provider() {
+        let secret = "11111111-1111-4111-8111-111111111111";
+        let cases = [
+            (
+                json!({"provider":"kraken","name":"spot","resource":"kraken:account:x","credential_ref":secret,"physical_identity":"x","physical_identity_verified":true,"default_wallet_account_id":"wallet-1"}),
+                json!({"provider":"kraken","name":"spot","resource":"kraken:account:x","physical_identity":"x","identity_verification":"venue_verified","default_wallet_account_id":"wallet-1","default_wallet_relationship_verification":"human_verified"}),
+            ),
+            (
+                json!({"provider":"krakenfutures","name":"futures","resource":"kraken:futures:x","credential_ref":secret,"physical_identity":"x","physical_identity_verified":false}),
+                json!({"provider":"krakenfutures","name":"futures","resource":"kraken:futures:x","physical_identity":"x","identity_verification":"human_confirmed"}),
+            ),
+            (
+                json!({"provider":"coingecko","name":"prices","resource":"market-data:coingecko","credential_ref":secret,"api_plan":"demo"}),
+                json!({"provider":"coingecko","name":"prices","resource":"market-data:coingecko","api_plan":"demo"}),
+            ),
+            (
+                json!({"provider":"binance","name":"main","resource":"binance:uid:x:SPOT","credential_ref":secret,"role":"main","parent":null,"email":null,"wallet_type":"SPOT","physical_identity":"x","physical_identity_verified":true}),
+                json!({"provider":"binance","name":"main","resource":"binance:uid:x:SPOT","role":"main","parent":null,"email":null,"wallet_type":"SPOT","physical_identity":"x"}),
+            ),
+            (
+                json!({"provider":"evm","name":"wallet","resource":"evm:wallet","credential_ref":secret,"address":"0x1111111111111111111111111111111111111111","signing_enabled":true}),
+                json!({"provider":"evm","name":"wallet","resource":"evm:wallet","address":"0x1111111111111111111111111111111111111111","signing_enabled":true}),
+            ),
+            (
+                json!({"provider":"ethereum","name":"legacy","resource":"ethereum:1:wallet","credential_ref":secret,"network":"ethereum:1","address":"0x1111111111111111111111111111111111111111","signing_enabled":false,"assets":[]}),
+                json!({"provider":"ethereum","name":"legacy","resource":"ethereum:1:wallet","network":"ethereum:1","address":"0x1111111111111111111111111111111111111111","signing_enabled":false}),
+            ),
+            (
+                json!({"provider":"hyperliquid","name":"hl","resource":"hyperliquid:wallet","owner":"0x1111111111111111111111111111111111111111","credential_ref":secret,"signing_enabled":true}),
+                json!({"provider":"hyperliquid","name":"hl","resource":"hyperliquid:wallet","owner":"0x1111111111111111111111111111111111111111","execution_address":"0x1111111111111111111111111111111111111111","execution_scope":"owner","signing_enabled":true}),
+            ),
+            (
+                json!({"provider":"solana","name":"sol","resource":"solana:mainnet-beta:wallet","address":"SyntheticAddress","credential_ref":null,"signing_enabled":false,"network":"solana:mainnet-beta"}),
+                json!({"provider":"solana","name":"sol","resource":"solana:mainnet-beta:wallet","address":"SyntheticAddress","network":"solana:mainnet-beta","signing_enabled":false}),
+            ),
+            (
+                json!({"provider":"solana","name":"sol-signer","resource":"solana:mainnet-beta:signer","address":"SyntheticSignerAddress","credential_ref":secret,"signing_enabled":true,"network":"solana:mainnet-beta"}),
+                json!({"provider":"solana","name":"sol-signer","resource":"solana:mainnet-beta:signer","address":"SyntheticSignerAddress","network":"solana:mainnet-beta","signing_enabled":true}),
+            ),
+            (
+                json!({"provider":"jupiter","name":"jupiter","resource":"jupiter:service","credential_ref":secret}),
+                json!({"provider":"jupiter","name":"jupiter","resource":"jupiter:service","credential_configured":true}),
+            ),
+        ];
+        for (raw, expected) in cases {
+            let connection: ConnectionConfig = serde_json::from_value(raw).unwrap();
+            let actual = public_connection(&connection);
+            assert_eq!(actual, expected);
+            serde_json::from_value::<fin_discovery::enrollment_contract::PublicConnection>(
+                actual.clone(),
+            )
+            .unwrap();
+            assert!(!actual.to_string().contains(secret));
+            assert!(actual.get("credential_ref").is_none());
+        }
+    }
+
+    #[test]
+    fn solana_and_jupiter_outcomes_are_typed_and_never_expose_protected_references() {
+        let secret_ref = "11111111-1111-4111-8111-111111111111";
+        let connections = [
+            ConnectionConfig::Solana {
+                name: "wallet-readonly".into(),
+                resource: ResourceId("solana:mainnet-beta:wallet".into()),
+                address: "SyntheticAddress".into(),
+                credential_ref: None,
+                signing_enabled: false,
+                network: "solana:mainnet-beta".into(),
+            },
+            ConnectionConfig::Solana {
+                name: "wallet-signer".into(),
+                resource: ResourceId("solana:mainnet-beta:signer".into()),
+                address: "SyntheticSignerAddress".into(),
+                credential_ref: Some(secret_ref.into()),
+                signing_enabled: true,
+                network: "solana:mainnet-beta".into(),
+            },
+            ConnectionConfig::Jupiter {
+                name: "jupiter-service".into(),
+                resource: ResourceId("jupiter:service".into()),
+                credential_ref: secret_ref.into(),
+            },
+        ];
+        for connection in &connections {
+            let output = outcome("add", Some(connection), vec![], vec![], None);
+            serde_json::from_value::<fin_discovery::enrollment_contract::EnrollmentOutcome>(
+                output.clone(),
+            )
+            .unwrap();
+            let public = &output["connection"];
+            assert_eq!(public, &public_connection(connection));
+            assert!(public.get("credential_ref").is_none());
+            assert!(!output.to_string().contains(secret_ref));
+            assert!(!output.to_string().contains("private_key"));
+        }
+        let readonly = outcome("add", Some(&connections[0]), vec![], vec![], None);
+        assert_eq!(readonly["connection"]["signing_enabled"], false);
+        let signer = outcome("add", Some(&connections[1]), vec![], vec![], None);
+        assert_eq!(signer["connection"]["signing_enabled"], true);
+        let jupiter = outcome("add", Some(&connections[2]), vec![], vec![], None);
+        assert_eq!(jupiter["connection"]["credential_configured"], true);
     }
 
     fn pricing_config(connection: ConnectionConfig) -> BrokerConfigV2 {

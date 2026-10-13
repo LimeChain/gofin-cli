@@ -2,7 +2,9 @@
 
 This guide defines verification of the implemented Solana and Jupiter adapters.
 The [automated verification report](solana-jupiter-report.md) records passing
-checks and remaining limitations. Live settlement and human approval remain unrun.
+checks and remaining limitations. The SOL/USDC spot named plan and cleanup passed
+live with automatic development approval. Other financial families remain
+live-unrun; updated protected-runtime recovery is pending.
 Use the compiled CLI's discovery for the implemented operation schemas.
 
 ## Scope and evidence
@@ -35,6 +37,7 @@ application effects. Missing history does not establish nonexecution.
 | JLP | Native mint and redemption; pool/account identity; fees and shares; finalized effects; swap purchase is not a substitute |
 | Perpetuals | Long/short; market/limit; increase/reduce/close; collateral; internal swaps; TP/SL; request/keeper lifecycle; PnL and fees |
 | Plans | Same real adapters behind synthetic transports; future-funded steps; cleanup; cumulative budget; original durable identity on recovery |
+| CEX funding | Binance and Kraken SOL/USDC deposits and withdrawals; finalized source/recipient effects; correlated usable venue credit; separate account funding; delayed credit, duplicates and restart; old EVM bindings |
 | Transport | Shared keyless throttling; separate execute bucket; rate-limit headers; priority for recovery; bounded response/deadline; no uncertain-write retries |
 | Pricing | Exact mint identity and numeric precision; native SOL mapping; block-derived freshness; missing/stale valuation remains explicit |
 | UX | Typed discovery/results/examples; human/JSON/redirected/no-color behavior; cancellation and expiry; focused EVM routing regressions |
@@ -48,6 +51,7 @@ cargo test --locked -p fin-solana -p fin-jupiter
 cargo test --locked --workspace
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
+make test-solana-cex-funding
 make test-dev-env
 ```
 
@@ -88,8 +92,16 @@ validation must establish its own extension coverage.
 
 ## Route and perpetual coverage limits
 
-Both swap API paths have synthetic settlement evidence, but this does not
-establish coverage of every transaction format those APIs may return. DFlow
+Both swap API paths have synthetic settlement evidence, including legacy and
+current `route_v2` / `shared_accounts_route_v2` exact-input envelopes. On
+2026-10-13 both Router and Meta-Aggregator passed live SOL-to-USDC previews,
+including transaction/account validation, fee checks and mainnet simulation.
+These were read-only previews; no signing, submission or live settlement was
+performed. The pinned current Jupiter IDL drives bounded argument decoding;
+account privileges, exact mints, input/output bounds and platform fees are
+validated separately. Exact-output envelopes are decoded but cannot satisfy an
+exact-input intent, and nonzero positive-slippage fees remain unsupported.
+This does not establish coverage of every format either API may return. DFlow
 transactions currently fail closed because the published IDL does not bind
 each action to the wallet source account, destination account, and intermediate
 route account graph. Dynamic routes, multi-action envelopes, nonzero
@@ -157,7 +169,15 @@ or recovery action, record the failure before developer diagnosis.
    pre-existing positions and accounts. Compare finalized evidence with the
    baseline before declaring restoration complete.
 
-Limit-order and JLP writes are **live-unrun** unless separately requested.
+The expanded scenario also includes Trigger creation/cancellation/fill, native
+JLP mint/redemption, perp collateral and standing-order management, and SOL/USDC
+CEX funding. Rehearse each materially different sequence and authorization mode
+first. For CEX legs, discover enabled routes, minimums, fees and saved withdrawal
+addresses through Fin; verify the return path and remaining gross budget before
+any movement. Kraken withdrawal whitelisting must be confirmed for the exact
+asset/network. Complete one exchange round trip at a time and preserve unrelated
+holdings and accounts. Limit-order, JLP and CEX writes remain **live-unrun** until
+their actual finalized effects and return legs are observed.
 If a case cannot proceed, record its precise blocker, any remaining exposure,
 reserved budget and exact cleanup operation status. Do not describe blocked
 restoration as completion. Stop/start preserves credentials and journal:

@@ -45,7 +45,17 @@ pub struct KrakenDestination {
     pub enrolled: bool,
     pub resource: ResourceId,
     pub address: String,
+    /// EVM chain identity. Zero for non-EVM destinations added by newer routes.
+    #[serde(default)]
     pub chain_id: u64,
+    /// Exact destination family. Existing persisted EVM bindings omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    /// Solana cluster and SPL mint, when the destination is on Solana.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint: Option<String>,
     pub asset: AssetId,
     pub confirmations: u32,
 }
@@ -3780,8 +3790,10 @@ pub struct KrakenDepositInput {
     pub account: String,
     pub wallet: String,
     pub method_id: String,
+    #[serde(default)]
     pub chain_id: u64,
     pub amount: String,
+    #[serde(default)]
     pub max_fee_eth: String,
     #[serde(default)]
     pub address_id: Option<String>,
@@ -3796,10 +3808,29 @@ pub struct KrakenDepositInput {
     pub max_deposit_fee: Option<String>,
     #[serde(default)]
     pub denomination: Option<FundingDenomination>,
+    /// Additive Solana source selector. EVM requests continue using chainId.
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// Explicit SPL mint; omitted for native SOL. Venue route must independently
+    /// match this identity, and no symbol is used to infer arbitrary mints.
+    #[serde(default)]
+    pub mint: Option<String>,
+    #[serde(default)]
+    pub max_fee_sol: Option<String>,
+    #[serde(default)]
+    pub max_account_funding_sol: Option<String>,
 }
 
 pub fn deposit_definition() -> Definition {
-    Definition{name:"kraken.deposit".into(),description:"Deposit an exact native/ERC20 asset from a protected reviewed EVM wallet into an existing claimed Kraken address. Correlated canonical source receipt, exact usable Kraken credit and ledger proof establish completion.".into(),kind:OperationKind::Write,execution_actor:ExecutionActor::AgentInvocable,input_schema:schema_for!(KrakenDepositInput).into(),output_schema:json!({"type":"object"}),error_schema:schema_for!(FinError).into(),examples:vec![json!({"requestId":"deposit-001","account":"kraken-spot","wallet":"wallet","methodId":"venue-method-id","chainId":1,"amount":"0.001","maxFeeEth":"0.0001"})],coverage:"Reviewed configured EVM chains and exact current Kraken currency methods; other funding sources retain discovery/status only.".into(),completion:"Exact source identity plus one usable transaction-correlated Kraken credit and ledger row.".into(),semantics:json!({"discoveryApi":"funding-v1-v2","creditCorrelationApi":"legacy-v0","addressClaim":"separately approved, never automatic","sourceReceiptAloneCompletes":false,"unknownOutcome":"reconcile original identity; never replay"})}
+    let mut input_schema = serde_json::to_value(schema_for!(KrakenDepositInput))
+        .expect("deposit input schema serializes");
+    input_schema["oneOf"] = json!([
+        {"title":"Reviewed EVM source","required":["chainId","maxFeeEth"],"not":{"anyOf":[{"required":["network"]},{"required":["cluster"]},{"required":["mint"]},{"required":["maxFeeSol"]},{"required":["maxAccountFundingSol"]}]}},
+        {"title":"Solana mainnet-beta source","required":["network","cluster","maxFeeSol"],"properties":{"network":{"const":"solana"},"cluster":{"const":"mainnet-beta"}},"not":{"anyOf":[{"required":["chainId"]},{"required":["maxFeeEth"]},{"required":["token"]},{"required":["denomination"]}]}}
+    ]);
+    Definition{name:"kraken.deposit".into(),description:"Deposit an exact native/ERC20 asset from a protected reviewed EVM wallet or native SOL or pinned mainnet USDC SPL from a protected Solana mainnet-beta wallet into an existing claimed Kraken address. Correlated finalized source receipt, exact usable Kraken credit and ledger proof establish completion.".into(),kind:OperationKind::Write,execution_actor:ExecutionActor::AgentInvocable,input_schema,output_schema:json!({"type":"object"}),error_schema:schema_for!(FinError).into(),examples:vec![json!({"requestId":"deposit-001","account":"kraken-spot","wallet":"wallet","methodId":"venue-method-id","chainId":1,"amount":"0.001","maxFeeEth":"0.0001"}),json!({"requestId":"deposit-sol-001","account":"kraken-spot","wallet":"sol-wallet","methodId":"venue-sol-method","network":"solana","cluster":"mainnet-beta","amount":"0.1","maxFeeSol":"0.00001"})],coverage:"Reviewed configured EVM chains and Solana mainnet-beta, using exact current Kraken currency methods, claimed addresses and asset routes.".into(),completion:"Exact source identity plus one usable transaction-correlated Kraken credit and ledger row.".into(),semantics:json!({"discoveryApi":"funding-v1-v2","creditCorrelationApi":"legacy-v0","addressClaim":"separately approved, never automatic","sourceReceiptAloneCompletes":false,"sourceNetworks":["reviewed EVM","solana:mainnet-beta"],"solanaAssets":["native SOL","pinned mainnet USDC mint"],"unknownOutcome":"reconcile original identity; never replay"})}
 }
 
 impl KrakenProfile {

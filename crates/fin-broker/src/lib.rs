@@ -19,10 +19,17 @@ pub mod kraken;
 mod kraken_aliases;
 mod kraken_deposit;
 mod kraken_pricing;
+#[cfg(test)]
+mod kraken_solana_funding_tests;
 mod policy;
 mod pricing;
 mod pricing_cache;
 mod public_submission;
+pub mod solana_cex;
+#[cfg(test)]
+mod solana_funding_tests;
+#[cfg(test)]
+mod test_support;
 mod wallet_router;
 pub use bridge::BridgeAdapter;
 pub use deposit::BinanceEthereumDepositAdapter;
@@ -1314,7 +1321,7 @@ pub fn build_applications_with_network_transports(
         )),
         None => source.clone(),
     };
-    let binance_prices = Arc::new(SharedUsdValuator::with_source(pricing_source));
+    let binance_prices = Arc::new(SharedUsdValuator::with_source(pricing_source.clone()));
     let wallet_prices = binance_prices.clone();
     let token_discovery = Arc::new(evm_public_data::PublicTokenDiscovery::new()?);
     let mut ethereum_adapters = BTreeMap::<String, Arc<fin_ethereum::EthereumAdapter>>::new();
@@ -1508,7 +1515,7 @@ pub fn build_applications_with_network_transports(
                 .clone(),
         )?));
         adapters.push(Arc::new(fin_jupiter::TriggerAdapter::with_price_source(
-            solana_wallets,
+            solana_wallets.clone(),
             jupiter_api
                 .as_ref()
                 .expect("API initialized with Solana wallet")
@@ -1684,7 +1691,7 @@ pub fn build_applications_with_network_transports(
         ));
         // Binance reads and enrollment do not require a wallet observer.
         // Payout preparation checks the selected configured chain separately.
-        let payout_verifier: Option<Arc<dyn fin_binance::BinanceRecipientVerifier>> =
+        let evm_payout_verifier: Option<Arc<dyn fin_binance::BinanceRecipientVerifier>> =
             if ethereum_adapters.is_empty() {
                 None
             } else {
@@ -1693,6 +1700,15 @@ pub fn build_applications_with_network_transports(
                         .values()
                         .map(|adapter| (adapter.config.chain_id, adapter.clone()))
                         .collect(),
+                )?))
+            };
+        let payout_verifier: Option<Arc<dyn fin_binance::BinanceRecipientVerifier>> =
+            if solana_wallets.is_empty() {
+                evm_payout_verifier
+            } else {
+                Some(Arc::new(solana_cex::SolanaCexPayoutVerifier::new(
+                    evm_payout_verifier,
+                    solana_wallets.clone(),
                 )?))
             };
         let adapter = Arc::new(fin_binance::BinanceAdapter::new(
@@ -1705,21 +1721,25 @@ pub fn build_applications_with_network_transports(
             payout_verifier,
         )?);
         adapters.push(adapter.clone());
-        if !ethereum_adapters.is_empty() {
-            adapters.push(Arc::new(BinanceEthereumDepositAdapter::with_networks(
-                adapter,
-                ethereum_adapters.values().cloned(),
-            )));
+        if !ethereum_adapters.is_empty() || !solana_wallets.is_empty() {
+            adapters.push(Arc::new(
+                BinanceEthereumDepositAdapter::with_networks(
+                    adapter,
+                    ethereum_adapters.values().cloned(),
+                )
+                .with_solana_wallets(solana_wallets.clone()),
+            ));
         }
     }
     adapters.extend(kraken::adapters(
         config,
         credentials.clone(),
-        Arc::new(kraken_pricing::KrakenCollateralPrices(source.clone())),
+        Arc::new(kraken_pricing::KrakenCollateralPrices(pricing_source)),
         ethereum_adapters
             .values()
             .map(|adapter| (adapter.config.chain_id, adapter.clone()))
             .collect(),
+        solana_wallets,
     )?);
     let valuator: Arc<dyn AssetValuator> = binance_prices;
     Ok(ProtectedApplications {
@@ -1736,6 +1756,26 @@ fn configured_binance_destinations(
 ) -> fin_domain::Result<Vec<fin_binance::EthereumDestination>> {
     let mut destinations = Vec::new();
     for connection in &config.connections {
+        if let ConnectionConfig::Solana {
+            name,
+            resource,
+            address,
+            ..
+        } = connection
+        {
+            // Retain the legacy destination record shape. The exact Solana
+            // resource plus venue network selects its observer; chain_id=0
+            // alone never identifies a network or grants receipt coverage.
+            destinations.push(fin_binance::EthereumDestination {
+                name: name.clone(),
+                resource: resource.clone(),
+                address: address.clone(),
+                chain_id: 0,
+                assets: BTreeMap::new(),
+                confirmations: 1,
+            });
+            continue;
+        }
         for network in &config.networks {
             let (name, address, resource, assets) = match connection {
                 ConnectionConfig::Ethereum {
@@ -5182,6 +5222,11 @@ mod tests {
     }
 
     struct UnusedCredentials;
+    impl fin_exchange::kraken::NonceAllocator for UnusedCredentials {
+        fn allocate(&self, _: &str, _: u64) -> Result<u64, fin_exchange::ccxt::CcxtError> {
+            panic!("composition must not dispatch authenticated Kraken requests")
+        }
+    }
     impl fin_exchange::ccxt::CredentialProvider for UnusedCredentials {
         fn credentials(
             &self,
@@ -5191,6 +5236,11 @@ mod tests {
         }
     }
     impl BrokerCredentialProvider for UnusedCredentials {
+        fn kraken_nonces(
+            &self,
+        ) -> fin_domain::Result<Arc<dyn fin_exchange::kraken::NonceAllocator>> {
+            Ok(Arc::new(Self))
+        }
         fn envelope_signer(
             &self,
             _: &fin_credentials::CredentialRef,
@@ -5899,6 +5949,59 @@ mod tests {
         assert!(!withdrawal.ok);
         assert_eq!(withdrawal.error.unwrap().code, "UNKNOWN_CONNECTION");
         assert!(runtime.handle(BrokerRequest::DaemonStop).await.ok);
+    }
+
+    #[test]
+    fn solana_only_cex_composition_keeps_exact_custody_and_one_deposit_definition() {
+        let address = "So11111111111111111111111111111111111111112";
+        let mut config = binance_only_config();
+        config.networks.clear();
+        config.deployments.clear();
+        config.connections.push(ConnectionConfig::Solana {
+            name: "synthetic-solana".into(),
+            resource: ResourceId(format!("solana:mainnet-beta:{address}")),
+            address: address.into(),
+            credential_ref: None,
+            signing_enabled: false,
+            network: "solana:mainnet-beta".into(),
+        });
+        config.connections.push(ConnectionConfig::Kraken {
+            default_wallet_account_id: None,
+            name: "synthetic-kraken".into(),
+            resource: ResourceId("kraken:account:synthetickraken".into()),
+            credential_ref: "550e8400-e29b-41d4-a716-446655440001".into(),
+            physical_identity: "synthetickraken".into(),
+            physical_identity_verified: true,
+        });
+        config.validate().unwrap();
+        let destinations = configured_binance_destinations(&config).unwrap();
+        assert_eq!(destinations.len(), 1);
+        assert_eq!(destinations[0].name, "synthetic-solana");
+        assert_eq!(destinations[0].address, address);
+        assert_eq!(
+            destinations[0].resource.0,
+            format!("solana:mainnet-beta:{address}")
+        );
+        assert!(destinations[0].assets.is_empty());
+        let applications = build_protected_applications(&config, Arc::new(UnusedCredentials))
+            .expect("Solana funding composition must not require an EVM observer");
+        let definitions = applications
+            .adapters
+            .iter()
+            .flat_map(|adapter| adapter.definitions())
+            .collect::<Vec<_>>();
+        for operation in [
+            "wallet.transfer",
+            "binance.deposit",
+            "binance.withdraw",
+            "kraken.deposit",
+        ] {
+            assert_eq!(
+                definitions.iter().filter(|d| d.name == operation).count(),
+                1,
+                "{operation} must have exactly one dispatcher"
+            );
+        }
     }
 
     #[test]

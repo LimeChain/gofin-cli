@@ -80,6 +80,62 @@ impl SolanaWalletAdapter {
         self.signer.clone()
     }
 
+    /// Dispatch one already prepared wallet transfer under a composite
+    /// operation's final revalidation and journal identity. The outer
+    /// candidate remains the only authority checked by the durable journal;
+    /// the child candidate supplies only the exact frozen Solana transaction.
+    /// Callers must bind the child recipient, asset and amount to the outer
+    /// candidate before constructing `validated`.
+    pub async fn submit_nested_revalidated(
+        &self,
+        validated: &fin_domain::RevalidatedOperation,
+        child: &PreparedOperation,
+        journal: Arc<dyn SubmissionJournal>,
+    ) -> Result<Submission> {
+        validated.assert_fresh()?;
+        if child.operation != "wallet.transfer"
+            || child.input.get("wallet").and_then(Value::as_str) != Some(self.name.as_str())
+            || child.input.get("network").and_then(Value::as_str) != Some("solana")
+            || child.input.get("cluster").and_then(Value::as_str) != Some(CLUSTER)
+        {
+            return Err(FinError::validation(
+                "The nested Solana candidate must be a transfer for this enrolled wallet on mainnet-beta.",
+            ));
+        }
+        fin_domain::value_bounds::validate_at(child, chrono::Utc::now())?;
+        if child
+            .checks
+            .iter()
+            .any(|check| check.status == fin_domain::CheckStatus::Failed)
+        {
+            return Err(FinError::validation(
+                "The nested Solana transfer candidate has a failed check.",
+            ));
+        }
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            failure(
+                "SOLANA_WALLET_READ_ONLY",
+                "dispatch",
+                "This enrolled wallet is read-only.",
+                "Enroll a protected Solana signer before dispatch.",
+            )
+        })?;
+        let frozen = self.freeze_prepared(child).await?;
+        if frozen.signer() != self.address {
+            return Err(failure(
+                "SOLANA_SIGNER_BINDING_MISMATCH",
+                "dispatch",
+                "The nested transaction does not use this enrolled wallet.",
+                "Prepare the child transfer again for the selected wallet.",
+            ));
+        }
+        self.runtime.validate_fee(&frozen).await?;
+        validated.assert_fresh()?;
+        self.runtime
+            .dispatch(&frozen, signer, validated.prepared(), journal)
+            .await
+    }
+
     pub async fn balances(&self) -> Result<Value> {
         let lamports = self
             .runtime

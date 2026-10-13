@@ -27,7 +27,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-pub use withdrawal::binance_evm_chain_id;
+pub use withdrawal::{binance_evm_chain_id, binance_solana_network};
 
 const SUB_TO_MASTER_RECV_WINDOW_MS: u64 = 5_000;
 
@@ -124,6 +124,11 @@ pub trait BinanceRecipientVerifier: Send + Sync {
             .strip_prefix("ethereum:")
             .and_then(|chain| chain.parse::<u64>().ok())
             .is_some_and(|chain| self.supports_chain(chain))
+    }
+    /// Validate recipient syntax without imposing a venue-specific address
+    /// family on the CLI adapter. The protected observer owns chain semantics.
+    fn valid_recipient(&self, _network: &str, _recipient: &str) -> bool {
+        true
     }
     async fn resolve_route_asset(
         &self,
@@ -385,15 +390,17 @@ impl BinanceProfile {
         }
         let mut destination_names = BTreeSet::new();
         for dest in &config.destinations {
-            if dest.chain_id == 0
-                || !valid_eth_address(&dest.address)
-                || dest.confirmations == 0
-                || !destination_names.insert((dest.name.clone(), dest.chain_id))
-            {
+            let solana = dest.chain_id == 0
+                && dest.resource.0 == format!("solana:mainnet-beta:{}", dest.address)
+                && valid_solana_address_shape(&dest.address)
+                && dest.assets.is_empty();
+            let evm =
+                dest.chain_id != 0 && valid_eth_address(&dest.address) && dest.confirmations > 0;
+            if !(solana || evm) || !destination_names.insert((dest.name.clone(), dest.chain_id)) {
                 return Err(error(
                     "INVALID_DESTINATION",
                     "setup",
-                    "EVM destinations require a unique name/chain, valid address, and positive confirmation count.",
+                    "Destinations require a unique route, valid EVM identity or Solana mainnet-beta wallet identity, and supported metadata.",
                 ));
             }
         }
@@ -1106,10 +1113,13 @@ impl BinanceProfile {
         }
         if let Some(tx) = &input.tx_hash {
             records.retain(|record| {
-                record
-                    .tx_id
-                    .as_deref()
-                    .is_some_and(|value| value.eq_ignore_ascii_case(tx))
+                record.tx_id.as_deref().is_some_and(|value| {
+                    if input.network.as_deref() == Some("SOL") {
+                        value == tx
+                    } else {
+                        value.eq_ignore_ascii_case(tx)
+                    }
+                })
             });
         }
         if let Some(order) = &input.withdraw_order_id {
@@ -1833,6 +1843,7 @@ struct DepositAddressInput {
 struct HistoryInput {
     account: String,
     coin: Option<String>,
+    network: Option<String>,
     start_time: Option<u64>,
     end_time: Option<u64>,
     tx_hash: Option<String>,
@@ -2267,6 +2278,14 @@ fn valid_eth_address(value: &str) -> bool {
         && value[2..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn valid_solana_address_shape(value: &str) -> bool {
+    if !(32..=44).contains(&value.len()) {
+        return false;
+    }
+    let mut decoded = [0u8; 32];
+    bs58::decode(value).onto(&mut decoded).is_ok() && bs58::encode(decoded).into_string() == value
+}
+
 #[async_trait]
 impl ExchangeProfile for BinanceProfile {
     async fn prepare_plan_permission(
@@ -2323,16 +2342,18 @@ impl ExchangeProfile for BinanceProfile {
     fn authorization_identities(&self) -> Vec<ConnectionMetadata> {
         let mut identities = self.connections();
         // Named withdrawal aliases are protected routing configuration too.
-        // Keep them out of public discovery, but bind the alias, exact EVM
+        // Keep them out of public discovery, but bind the alias, exact chain
         // route/address, and token identity map with the Binance account.
         identities.extend(self.config.destinations.iter().map(|destination| {
+            let solana = destination.chain_id == 0
+                && destination.resource.0 == format!("solana:mainnet-beta:{}", destination.address);
             ConnectionMetadata {
                 name: destination.name.clone(),
-                provider: "binance-ethereum-destination".into(),
+                provider: if solana { "binance-solana-destination" } else { "binance-ethereum-destination" }.into(),
                 resource: destination.resource.clone(),
                 role: Some("deposit-destination".into()),
                 parent: None,
-                network: Some(format!("ethereum:{}", destination.chain_id)),
+                network: Some(if solana { "solana:mainnet-beta".into() } else { format!("ethereum:{}", destination.chain_id) }),
                 address: Some(destination.address.clone()),
                 credential_ref: None,
                 signing_enabled: false,
@@ -2340,7 +2361,7 @@ impl ExchangeProfile for BinanceProfile {
                 // configuration. The plan binding hashes this metadata, so
                 // remapping an alias forces fresh authorization.
                 details: json!({
-                    "identity_kind":"binance_ethereum_deposit_destination",
+                    "identity_kind":if solana {"binance_solana_withdrawal_destination"} else {"binance_ethereum_deposit_destination"},
                     "chain_id":destination.chain_id,
                     "confirmations":destination.confirmations,
                     "assets":destination.assets,
@@ -2444,6 +2465,7 @@ impl ExchangeProfile for BinanceProfile {
                 let input = HistoryInput {
                     account: account.name.clone(),
                     coin: None,
+                    network: None,
                     start_time: Some(start_90d),
                     end_time: Some(end),
                     tx_hash: None,

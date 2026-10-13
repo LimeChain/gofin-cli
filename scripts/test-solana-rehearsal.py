@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import base64
 import hashlib
 import os
 from pathlib import Path
@@ -30,6 +31,9 @@ OUTPUT_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PYUSD_MINT = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
 USDC_MINT = OUTPUT_MINT
 JLP_MINT = "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4"
+ORDER_ENGINE_PROGRAM = "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH"
+ORDER_ENGINE_MAKER = "Gymcte79ALGtFrWybRxqb7M7uRjnbjgaHjGgQf1v4qB8"
+JUPITER_V6_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 
 
 def decode_cli_output(stdout: str, args: list[str]) -> dict:
@@ -196,6 +200,241 @@ def future_funded_plan(wallet_address: str) -> str:
         },
         separators=(",", ":"),
     )
+
+
+def native_sol_roundtrip_plan(wallet_address: str) -> str:
+    resource = f"solana:mainnet-beta:{wallet_address}"
+    sol = {"network": "solana:mainnet-beta", "reference": "native", "decimals": 9}
+    usdc = {"network": "solana:mainnet-beta", "reference": OUTPUT_MINT, "decimals": 6}
+
+    def exact_scope(
+        maximum_debits: list[dict],
+        maximum_costs: list[dict],
+        possible_credits: list[dict],
+    ) -> dict:
+        return {
+            "mode": "exact",
+            "maximum_debits": maximum_debits,
+            "maximum_costs": maximum_costs,
+            "possible_credits": possible_credits,
+        }
+
+    def debit(asset: dict, atoms: str) -> dict:
+        return {"resource": resource, "amount": {"asset": asset, "atoms": atoms}}
+
+    def cost(atoms: str) -> dict:
+        return {
+            "location": {"kind": "cash", "resource": resource},
+            "amount": {"asset": sol, "atoms": atoms},
+            "treatment": "additional_debit",
+        }
+
+    def credit(asset: dict) -> dict:
+        return {"resource": resource, "asset": asset}
+
+    return json.dumps(
+        {
+            "version": 1,
+            "name": "Synthetic native SOL swap round trip with temporary WSOL",
+            "steps": [
+                {
+                    "step_id": "native-in",
+                    "operation": "jupiter.swap",
+                    "input": json.loads(swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)),
+                    "permitted_variations": exact_scope(
+                        [debit(sol, "22039280")], [cost("10000")], [credit(usdc)]
+                    ),
+                    "completion": {"operation_succeeded": True},
+                    "funding_dependencies": [],
+                },
+                {
+                    "step_id": "native-out",
+                    "operation": "jupiter.swap",
+                    "input": json.loads(swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native")),
+                    "permitted_variations": exact_scope(
+                        [debit(usdc, "2000000"), debit(sol, "2039280")],
+                        [cost("10000")],
+                        [credit(sol)],
+                    ),
+                    "completion": {"operation_succeeded": True},
+                    "funding_dependencies": [
+                        {
+                            "producing_step_id": "native-in",
+                            "resource": resource,
+                            "asset": usdc,
+                            "funding_scope": "principal_only",
+                        }
+                    ],
+                },
+            ],
+            "aggregate_bounds": {
+                "maximum_debits": [
+                    {"resource": resource, "amount": {"asset": sol, "atoms": "24078560"}},
+                    {"resource": resource, "amount": {"asset": usdc, "atoms": "2000000"}},
+                ],
+                "maximum_costs": [
+                    {
+                        "location": {"kind": "cash", "resource": resource},
+                        "amount": {"asset": sol, "atoms": "20000"},
+                        "treatment": "additional_debit",
+                    }
+                ],
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
+def exact_swap_plan(wallet_address: str, name: str, step_id: str, swap: dict) -> str:
+    resource = f"solana:mainnet-beta:{wallet_address}"
+
+    def asset_for(mint: str) -> dict:
+        return {
+            "network": "solana:mainnet-beta",
+            "reference": "native" if mint == "native" else mint,
+            "decimals": 9 if mint == "native" else 6,
+        }
+
+    input_asset = asset_for(swap["input_mint"])
+    output_asset = asset_for(swap["output_mint"])
+    debit_rows = [{
+        "resource": resource,
+        "amount": {"asset": input_asset, "atoms": swap["amount_atoms"]},
+    }]
+    if swap["input_mint"] == "native":
+        debit_rows.append({
+            "resource": resource,
+            "amount": {"asset": asset_for("native"), "atoms": "2039280"},
+        })
+    costs = [{
+        "location": {"kind": "cash", "resource": resource},
+        "amount": {"asset": asset_for("native"), "atoms": "10000"},
+        "treatment": "additional_debit",
+    }]
+    scope = {
+        "mode": "exact",
+        "maximum_debits": debit_rows,
+        "maximum_costs": costs,
+        "possible_credits": [{"resource": resource, "asset": output_asset}],
+    }
+    aggregate_debits = list(debit_rows)
+    if swap["input_mint"] == "native":
+        aggregate_debits = [{
+            "resource": resource,
+            "amount": {
+                "asset": asset_for("native"),
+                "atoms": str(int(swap["amount_atoms"]) + 2_039_280),
+            },
+        }]
+        scope["maximum_debits"] = aggregate_debits
+    return json.dumps({
+        "version": 1,
+        "name": name,
+        "steps": [{
+            "step_id": step_id,
+            "operation": "jupiter.swap",
+            "input": swap,
+            "permitted_variations": scope,
+            "completion": {"operation_succeeded": True},
+            "funding_dependencies": [],
+        }],
+        "aggregate_bounds": {
+            "maximum_debits": aggregate_debits,
+            "maximum_costs": costs,
+        },
+    }, separators=(",", ":"))
+
+
+def exact_swap_roundtrip_plan(
+    wallet_address: str, name: str, first: dict, second: dict
+) -> str:
+    resource = f"solana:mainnet-beta:{wallet_address}"
+
+    def asset_for(mint: str) -> dict:
+        return {
+            "network": "solana:mainnet-beta",
+            "reference": "native" if mint == "native" else mint,
+            "decimals": 9 if mint == "native" else 6,
+        }
+
+    def scope(swap: dict) -> dict:
+        return {
+            "mode": "exact",
+            "maximum_debits": [{
+                "resource": resource,
+                "amount": {
+                    "asset": asset_for(swap["input_mint"]),
+                    "atoms": swap["amount_atoms"],
+                },
+            }],
+            "maximum_costs": [{
+                "location": {"kind": "cash", "resource": resource},
+                "amount": {"asset": asset_for("native"), "atoms": "10000"},
+                "treatment": "additional_debit",
+            }],
+            "possible_credits": [{
+                "resource": resource,
+                "asset": asset_for(swap["output_mint"]),
+            }],
+        }
+
+    first_asset = asset_for(first["output_mint"])
+    return json.dumps({
+        "version": 1,
+        "name": name,
+        "steps": [
+            {
+                "step_id": "convert-out",
+                "operation": "jupiter.swap",
+                "input": first,
+                "permitted_variations": scope(first),
+                "completion": {"operation_succeeded": True},
+                "funding_dependencies": [],
+            },
+            {
+                "step_id": "convert-back",
+                "operation": "jupiter.swap",
+                "input": second,
+                "permitted_variations": scope(second),
+                "completion": {"operation_succeeded": True},
+                "funding_dependencies": [{
+                    "producing_step_id": "convert-out",
+                    "resource": resource,
+                    "asset": first_asset,
+                    "funding_scope": "principal_only",
+                }],
+            },
+        ],
+        "aggregate_bounds": {
+            "maximum_debits": [
+                {"resource": resource, "amount": {"asset": asset_for(first["input_mint"]), "atoms": first["amount_atoms"]}},
+                {"resource": resource, "amount": {"asset": asset_for(second["input_mint"]), "atoms": second["amount_atoms"]}},
+            ],
+            "maximum_costs": [{
+                "location": {"kind": "cash", "resource": resource},
+                "amount": {"asset": asset_for("native"), "atoms": "20000"},
+                "treatment": "additional_debit",
+            }],
+        },
+    }, separators=(",", ":"))
+
+
+def prepared_binding(record: dict) -> dict:
+    return (
+        record.get("binding")
+        or (record.get("preview") or {}).get("binding")
+        or (record.get("prepared") or {}).get("binding")
+        or {}
+    )
+
+
+def base58_bytes(value: str) -> bytes:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    number = 0
+    for character in value:
+        number = number * 58 + alphabet.index(character)
+    payload = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
+    return b"\0" * (len(value) - len(value.lstrip("1"))) + payload
 
 
 def jlp_plan(wallet_address: str) -> str:
@@ -412,6 +651,28 @@ def account_funding_deltas(record: dict) -> list[str]:
         if effect.get("kind") == "position_change"
         and str(effect.get("position", "")).startswith("account-funding:")
     ]
+
+
+def cash_debit_atoms(record: dict) -> list[str]:
+    effects = (record.get("effects") or {}).get("effects") or []
+    return [
+        str((effect.get("amount") or {}).get("atoms"))
+        for effect in effects
+        if effect.get("kind") == "cash_debit"
+    ]
+
+
+def conversion_atoms(record: dict) -> tuple[str, str]:
+    effects = (record.get("effects") or {}).get("effects") or []
+    conversion = next(
+        (effect for effect in effects if effect.get("kind") == "conversion"), None
+    )
+    if conversion is None:
+        return "", ""
+    return (
+        str((conversion.get("spent") or {}).get("atoms", "")),
+        str((conversion.get("received") or {}).get("atoms", "")),
+    )
 
 
 def pending_request_pnl_deltas(record: dict) -> list[str]:
@@ -904,6 +1165,9 @@ def main() -> int:
             os.environ,
             FIN_DEV_STATE_HOME=str(state_home),
             FIN_DEV_SOLANA_FIXTURE_STATE=str(state_home / "solana-fixture-ledger.json"),
+            FIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT="auto_spot_v2",
+            FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE=str(state_home / "remove-wsol-ata"),
+            FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE=str(state_home / "next-meta-router"),
             FIN_DEV_SOLANA_PERPS_LIMIT_FILL_FILE=str(state_home / "perps-limit-fill-request"),
             FIN_DEV_SOLANA_PERPS_TPSL_FILL_FILE=str(state_home / "perps-tpsl-fill-request"),
             FIN_DEV_SOLANA_TRIGGER_FILL_FILE=str(state_home / "trigger-fill-request"),
@@ -2101,13 +2365,317 @@ def main() -> int:
             records["unwrap"] = unwrap
             if unwrap.get("status") != "completed" or not unwrap.get("effects", {}).get("proof_digest"):
                 raise AssertionError(f"The partial unwrap did not settle from its closed temporary-account proof: {json.dumps(unwrap, sort_keys=True)}")
-            router_native_in = call(
+            native_plan_input = native_sol_roundtrip_plan(balance["wallet"])
+            native_plan_preview = call(
                 environment_name,
-                ["execute", "--input", swap_input("router", "20000000", "1990000", "native"),
-                 "--id", "solana-router-native-in", "--json", "jupiter.swap"],
+                ["plans", "preview", "--input", native_plan_input, "--json"],
                 env,
             )
-            records["router_native_in"] = router_native_in
+            if not native_plan_preview.get("review_hash"):
+                raise AssertionError("Native SOL round-trip plan preview omitted its review hash.")
+            native_plan_approval = call(
+                environment_name,
+                ["plans", "authorize", "--input", native_plan_input,
+                 "--id", "solana-native-roundtrip-plan",
+                 "--review-hash", native_plan_preview["review_hash"], "--json"],
+                env,
+            )
+            native_plan_id = native_plan_approval.get("plan_id") or native_plan_approval.get("id")
+            if not native_plan_id:
+                raise AssertionError("Native SOL round-trip plan authorization omitted its durable plan ID.")
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            native_plan_in = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input",
+                 json.dumps(json.loads(native_plan_input)["steps"][0]["input"]),
+                 "--id", "solana-native-plan-in", "--plan", native_plan_id,
+                 "--step", "native-in", "--json"],
+                env,
+            )
+            records["native_plan_in"] = native_plan_in
+            native_plan_out = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input",
+                 json.dumps(json.loads(native_plan_input)["steps"][1]["input"]),
+                 "--id", "solana-native-plan-out", "--plan", native_plan_id,
+                 "--step", "native-out", "--json"],
+                env,
+            )
+            records["native_plan_out"] = native_plan_out
+            if any(record.get("status") != "completed" for record in (native_plan_in, native_plan_out)):
+                raise AssertionError(
+                    "The authorized Meta native-in→Router native-out plan did not settle both legs: "
+                    + json.dumps([native_plan_in, native_plan_out], sort_keys=True)
+                )
+
+            # A public preview informs the human, but does not pin the router
+            # for a later named-plan execution. The second candidate is a real
+            # synthetic JupiterZ Fill instruction, including its maker signer,
+            # native WSOL account creation, and same-transaction close.
+            route_switch_input = json.loads(
+                swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
+            )
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            preview_metis = call(
+                environment_name,
+                ["preview", "jupiter.swap", "--input", json.dumps(route_switch_input), "--json"],
+                env,
+            )
+            if prepared_binding(preview_metis).get("router") != "metis":
+                raise AssertionError("The first public preview did not return the expected Metis candidate.")
+            route_switch_plan = exact_swap_plan(
+                balance["wallet"], "Synthetic router-flexible native swap", "swap", route_switch_input
+            )
+            route_switch_preview = call(
+                environment_name, ["plans", "preview", "--input", route_switch_plan, "--json"], env
+            )
+            route_switch_approval = call(
+                environment_name,
+                ["plans", "authorize", "--input", route_switch_plan, "--id",
+                 "solana-router-flexible-native-plan", "--review-hash",
+                 route_switch_preview["review_hash"], "--json"],
+                env,
+            )
+            route_switch_id = route_switch_approval.get("plan_id") or route_switch_approval.get("id")
+            if not route_switch_id:
+                raise AssertionError("Router-flexible named plan omitted its durable plan ID.")
+            # Exact authority binds the economic input. Tampered spend,
+            # recipient mint, and minimum output must all fail before submit.
+            for suffix, field, value in (
+                ("spend", "amount_atoms", "20000001"),
+                ("recipient", "output_mint", PYUSD_MINT),
+                ("floor", "minimum_output_atoms", "1989999"),
+            ):
+                tampered = dict(route_switch_input)
+                tampered[field] = value
+                rejected = call_pending(
+                    environment_name,
+                    ["execute", "jupiter.swap", "--input", json.dumps(tampered),
+                     "--id", f"solana-router-flexible-tampered-{suffix}", "--plan", route_switch_id,
+                     "--step", "swap", "--json"],
+                    env,
+                )
+                rejection = rejected.get("error", {})
+                if rejection.get("code") != "PLAN_STEP_SCOPE_MISMATCH":
+                    raise AssertionError(
+                        f"Tampered {suffix} was not rejected by the exact named-plan binding: "
+                        + json.dumps(rejected, sort_keys=True)
+                    )
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
+            switch_rpc_before = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
+                "rpc_method_counts", {}
+            )
+            route_switch_native = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input", json.dumps(route_switch_input),
+                 "--id", "solana-router-flexible-native", "--plan", route_switch_id,
+                 "--step", "swap", "--json"],
+                env,
+            )
+            records["route_switch_native"] = route_switch_native
+            if route_switch_native.get("status") != "completed":
+                raise AssertionError(
+                    "Exact named-plan execution did not accept the fresh JupiterZ candidate after Metis preview: "
+                    + json.dumps(route_switch_native, sort_keys=True)
+                )
+            route_binding = prepared_binding(route_switch_native)
+            if route_binding.get("router") != "jupiterz":
+                raise AssertionError("Execution reused the preview router instead of the fresh JupiterZ candidate.")
+            if route_binding.get("fee_payer") != ORDER_ENGINE_MAKER:
+                raise AssertionError("JupiterZ did not retain the remote maker as network-fee sponsor.")
+            if not any(
+                account.get("payer") == balance["wallet"]
+                and account.get("refund_authority") == balance["wallet"]
+                and int(account.get("lamports", 0)) == 2_039_280
+                for account in route_binding.get("funding_accounts", [])
+            ):
+                raise AssertionError("Sponsored JupiterZ did not fund the wallet-owned temporary ATA from the wallet.")
+            if conversion_atoms(route_switch_native) != ("20000000", "2000000"):
+                raise AssertionError("Fresh JupiterZ settlement did not prove the approved native principal and output.")
+            if account_funding_deltas(route_switch_native) or cash_debit_atoms(route_switch_native) != ["0"]:
+                raise AssertionError("Fresh JupiterZ native create+close did not settle as exactly zero net rent.")
+            sponsored_evidence = (route_switch_native.get("effects") or {}).get("evidence") or {}
+            sponsored_proof = sponsored_evidence.get("proof") or {}
+            if sponsored_evidence.get("network_fee_lamports") != 5_000 or sponsored_proof.get("fee_lamports") != 5_000:
+                raise AssertionError("JupiterZ finalized evidence omitted the 5,000-lamport sponsor-paid network fee.")
+            proof_keys = sponsored_proof.get("account_keys", [])
+            sponsor_index = proof_keys.index(ORDER_ENGINE_MAKER)
+            sponsor_pre = sponsored_proof["pre_balances_lamports"][sponsor_index]
+            sponsor_post = sponsored_proof["post_balances_lamports"][sponsor_index]
+            if sponsor_pre - sponsor_post != 5_000:
+                raise AssertionError("JupiterZ finalized account balances did not charge 5,000 lamports to its sponsor.")
+            route_proof = route_switch_native.get("settlement_proof", route_switch_native.get("effects", {}))
+            route_tx = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
+            route_wire = base64.b64decode(route_tx["wire"])
+            if base58_bytes(ORDER_ENGINE_PROGRAM) not in route_wire:
+                raise AssertionError("Synthetic JupiterZ settlement transaction omitted the actual OrderEngine program key.")
+            switch_rpc_after = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text()).get(
+                "rpc_method_counts", {}
+            )
+            rpc_delta = {
+                method: count - switch_rpc_before.get(method, 0)
+                for method, count in switch_rpc_after.items()
+                if count - switch_rpc_before.get(method, 0)
+            }
+            # Whole execute includes one candidate review and the final
+            # dispatch guard: one simulation, a review fee plus fresh fee, and
+            # one current-height check. A second simulation means the frozen
+            # review was repeated inside submit_revalidated.
+            if (
+                rpc_delta.get("getFeeForMessage") != 2
+                or rpc_delta.get("getBlockHeight") != 1
+                or rpc_delta.get("simulateTransaction") != 1
+            ):
+                raise AssertionError(f"Unexpected cached-review/dispatch RPC counts: {rpc_delta}")
+
+            # OrderEngine also supports the IDL's optional native endpoints.
+            # This named plan exercises both directions directly: there is no
+            # WSOL ATA creation, close, or rent movement on either leg.
+            direct_native_in_input = json.loads(
+                swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT)
+            )
+            direct_native_out_input = json.loads(
+                swap_input("meta_aggregator", "2000000", "19900000", OUTPUT_MINT, "native")
+            )
+            direct_native_plan = exact_swap_roundtrip_plan(
+                balance["wallet"], "Synthetic JupiterZ direct-native roundtrip",
+                direct_native_in_input, direct_native_out_input,
+            )
+            direct_native_plan_preview = call(
+                environment_name,
+                ["plans", "preview", "--input", direct_native_plan, "--json"],
+                env,
+            )
+            direct_native_approval = call(
+                environment_name,
+                ["plans", "authorize", "--input", direct_native_plan,
+                 "--id", "solana-jupiterz-direct-native-plan",
+                 "--review-hash", direct_native_plan_preview["review_hash"], "--json"],
+                env,
+            )
+            direct_native_id = direct_native_approval.get("plan_id") or direct_native_approval.get("id")
+            if not direct_native_id:
+                raise AssertionError("Direct-native JupiterZ plan omitted its durable ID.")
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_input")
+            direct_native_in = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input", json.dumps(direct_native_in_input),
+                 "--id", "solana-jupiterz-direct-native-in", "--plan", direct_native_id,
+                 "--step", "convert-out", "--json"],
+                env,
+            )
+            records["jupiterz_direct_native_in"] = direct_native_in
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz_native_output")
+            direct_native_out = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input", json.dumps(direct_native_out_input),
+                 "--id", "solana-jupiterz-direct-native-out", "--plan", direct_native_id,
+                 "--step", "convert-back", "--json"],
+                env,
+            )
+            records["jupiterz_direct_native_out"] = direct_native_out
+            for label, record, native_side, expected_conversion, expected_wallet_delta in (
+                ("input", direct_native_in, "input", ("20000000", "2000000"), -20_000_000),
+                ("output", direct_native_out, "output", ("2000000", "20000000"), 20_000_000),
+            ):
+                if record.get("status") != "completed":
+                    raise AssertionError(f"JupiterZ direct-native {label} step did not settle: {json.dumps(record, sort_keys=True)}")
+                binding = prepared_binding(record)
+                if binding.get("fee_payer") != ORDER_ENGINE_MAKER:
+                    raise AssertionError(f"JupiterZ direct-native {label} did not use its remote maker fee payer.")
+                direct_flag = f"rfq_native_{native_side}_direct"
+                if binding.get(direct_flag) is not True:
+                    raise AssertionError(f"JupiterZ direct-native {label} binding omitted {direct_flag}.")
+                if binding.get("account_funding_lamports") != 0 or binding.get("funding_accounts"):
+                    raise AssertionError(f"JupiterZ direct-native {label} unexpectedly funded a temporary account.")
+                if binding.get("closed_wrapped_native_accounts"):
+                    raise AssertionError(f"JupiterZ direct-native {label} unexpectedly closed a WSOL account.")
+                if conversion_atoms(record) != expected_conversion:
+                    raise AssertionError(f"JupiterZ direct-native {label} did not prove exact approved quantities.")
+                effects = record.get("effects", {}).get("effects", [])
+                if any(effect.get("kind") == "cash_debit" and int((effect.get("amount") or {}).get("atoms", "0")) != 0 for effect in effects):
+                    raise AssertionError(f"JupiterZ direct-native {label} charged wallet cash for sponsored fee or rent.")
+                evidence = record.get("effects", {}).get("evidence", {})
+                proof = evidence.get("proof", {})
+                if evidence.get("network_fee_lamports") != 5_000 or proof.get("fee_lamports") != 5_000:
+                    raise AssertionError(f"JupiterZ direct-native {label} omitted its 5,000-lamport sponsor fee proof.")
+                program_instruction = next(
+                    (instruction for instruction in proof.get("message_instructions", [])
+                     if instruction.get("program_id") == ORDER_ENGINE_PROGRAM),
+                    None,
+                )
+                sentinel_index = 2 if native_side == "input" else 4
+                sentinel = (program_instruction or {}).get("accounts", [])[sentinel_index]
+                if sentinel.get("address") != ORDER_ENGINE_PROGRAM or sentinel.get("signer") or sentinel.get("writable"):
+                    raise AssertionError(f"JupiterZ direct-native {label} did not encode the readonly optional-account sentinel.")
+                keys = proof.get("account_keys", [])
+                wallet_index = keys.index(balance["wallet"])
+                wallet_delta = proof["post_balances_lamports"][wallet_index] - proof["pre_balances_lamports"][wallet_index]
+                if wallet_delta != expected_wallet_delta:
+                    raise AssertionError(f"JupiterZ direct-native {label} wallet SOL delta included fee or rent: {wallet_delta}.")
+
+            # Exercise the reverse router transition on a token-only return:
+            # preview JupiterZ, then execute the same exact plan against Metis.
+            reverse_input = json.loads(swap_input("meta_aggregator", "2000000", "1990000", PYUSD_MINT, OUTPUT_MINT))
+            reverse_back_input = json.loads(
+                swap_input("meta_aggregator", "2000000", "1990000", OUTPUT_MINT, PYUSD_MINT)
+            )
+            reverse_plan = exact_swap_roundtrip_plan(
+                balance["wallet"], "Synthetic reverse router-flexible swap", reverse_input, reverse_back_input
+            )
+            reverse_preview = call(
+                environment_name,
+                ["plans", "preview", "--input", reverse_plan, "--json"],
+                env,
+            )
+            reverse_approval = call(
+                environment_name,
+                ["plans", "authorize", "--input", reverse_plan, "--id",
+                 "solana-router-flexible-reverse-plan", "--review-hash", reverse_preview["review_hash"], "--json"],
+                env,
+            )
+            reverse_id = reverse_approval.get("plan_id") or reverse_approval.get("id")
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("jupiterz")
+            preview_jupiterz = call(
+                environment_name,
+                ["preview", "jupiter.swap", "--input", json.dumps(reverse_input), "--json"],
+                env,
+            )
+            if prepared_binding(preview_jupiterz).get("router") != "jupiterz":
+                raise AssertionError("The reverse public preview did not return JupiterZ.")
+            Path(env["FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE"]).write_text("metis")
+            route_switch_metis = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input", json.dumps(reverse_input),
+                 "--id", "solana-router-flexible-metis", "--plan", reverse_id,
+                 "--step", "convert-out", "--json"],
+                env,
+            )
+            records["route_switch_metis"] = route_switch_metis
+            if route_switch_metis.get("status") != "completed" or prepared_binding(route_switch_metis).get("router") != "metis":
+                raise AssertionError(
+                    "Exact named-plan execution did not accept the fresh Metis candidate after JupiterZ preview: "
+                    + json.dumps(route_switch_metis, sort_keys=True)
+                )
+            metis_tx = json.loads(Path(env["FIN_DEV_SOLANA_FIXTURE_STATE"]).read_text())["transactions"][-1]
+            if base58_bytes(JUPITER_V6_PROGRAM) not in base64.b64decode(metis_tx["wire"]):
+                raise AssertionError("Fresh Metis settlement transaction omitted the Jupiter v6 program key.")
+            route_switch_return = call(
+                environment_name,
+                ["execute", "jupiter.swap", "--input", json.dumps(reverse_back_input),
+                 "--id", "solana-router-flexible-return", "--plan", reverse_id,
+                 "--step", "convert-back", "--json"],
+                env,
+            )
+            records["route_switch_return"] = route_switch_return
+            if route_switch_return.get("status") != "completed":
+                raise AssertionError("Reverse route-switch roundtrip did not complete its return leg.")
+            if conversion_atoms(route_switch_return) != ("2000000", "2000000"):
+                raise AssertionError("Reverse route-switch return did not settle its exact approved quantities.")
+            # Both native directions begin without a user WSOL ATA. Native
+            # output must create and close one just like the native-input path.
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             router_native_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("router", "2000000", "19900000", OUTPUT_MINT, "native"),
@@ -2120,18 +2688,7 @@ def main() -> int:
                     "Router USDC→native SOL swap did not settle: "
                     + json.dumps(router_native_out, sort_keys=True)
                 )
-            meta_native_in = call(
-                environment_name,
-                ["execute", "--input", swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT),
-                 "--id", "solana-meta-native-in", "--json", "jupiter.swap"],
-                env,
-            )
-            records["meta_native_in"] = meta_native_in
-            if meta_native_in.get("status") != "completed":
-                raise AssertionError(
-                    "Meta native SOL→USDC swap did not settle: "
-                    + json.dumps(meta_native_in, sort_keys=True)
-                )
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
             meta_native_out = call(
                 environment_name,
                 ["execute", "--input", swap_input("meta_aggregator", "2000000", "19900000", OUTPUT_MINT, "native"),
@@ -2143,6 +2700,35 @@ def main() -> int:
                 raise AssertionError(
                     "Meta USDC→native SOL swap did not settle: "
                     + json.dumps(meta_native_out, sort_keys=True)
+                )
+            # Exercise the real native-input transaction shape: the user's WSOL
+            # ATA is absent, so Jupiter creates it, funds it from wallet SOL,
+            # swaps the exact amount, and closes it in the same transaction.
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            router_native_in = call(
+                environment_name,
+                ["execute", "--input", swap_input("router", "20000000", "1990000", "native"),
+                 "--id", "solana-router-native-in", "--json", "jupiter.swap"],
+                env,
+            )
+            records["router_native_in"] = router_native_in
+            if router_native_in.get("status") != "completed":
+                raise AssertionError(
+                    "Router native SOL→USDC swap did not settle with a temporary WSOL ATA: "
+                    + json.dumps(router_native_in, sort_keys=True)
+                )
+            Path(env["FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE"]).touch()
+            meta_native_in = call(
+                environment_name,
+                ["execute", "--input", swap_input("meta_aggregator", "20000000", "1990000", "native", OUTPUT_MINT),
+                 "--id", "solana-meta-native-in", "--json", "jupiter.swap"],
+                env,
+            )
+            records["meta_native_in"] = meta_native_in
+            if meta_native_in.get("status") != "completed":
+                raise AssertionError(
+                    "Meta native SOL→USDC swap did not settle with a temporary WSOL ATA: "
+                    + json.dumps(meta_native_in, sort_keys=True)
                 )
             pyusd_router_in = call(
                 environment_name,
@@ -2201,7 +2787,7 @@ def main() -> int:
             )
             if wallet_token_amount(restored_balances, PYUSD_MINT) != initial_pyusd_atoms:
                 raise AssertionError("The PYUSD round trip did not restore its original token balance.")
-            expected_usdc_after_plan = initial_usdc_atoms + 2_000_000
+            expected_usdc_after_plan = initial_usdc_atoms + 4_000_000
             actual_usdc_after_plan = wallet_token_amount(restored_balances, OUTPUT_MINT)
             if actual_usdc_after_plan != expected_usdc_after_plan:
                 raise AssertionError(
@@ -2209,10 +2795,25 @@ def main() -> int:
                     f"initial={initial_usdc_atoms}, expected_after_plan={expected_usdc_after_plan}, "
                     f"snapshot={actual_usdc_after_plan}."
                 )
-            if not any(delta == "2039280" for delta in account_funding_deltas(meta_native_in)):
-                raise AssertionError("Meta's native-input transaction did not prove the newly funded WSOL ATA rent.")
-            if not any(delta == "-2039280" for delta in account_funding_deltas(meta_native_out)):
-                raise AssertionError("Meta's native-output transaction did not prove the closed WSOL ATA rent refund.")
+            for label, record, expected_spent, expected_received in (
+                ("Router native input", router_native_in, "20000000", "2000000"),
+                ("Meta native input", meta_native_in, "20000000", "2000000"),
+                ("Router native output", router_native_out, "2000000", "20000000"),
+                ("Meta native output", meta_native_out, "2000000", "20000000"),
+                ("Named-plan Meta native input", native_plan_in, "20000000", "2000000"),
+                ("Named-plan Router native output", native_plan_out, "2000000", "20000000"),
+            ):
+                if account_funding_deltas(record):
+                    raise AssertionError(f"{label} retained a rent position after its temporary ATA closed.")
+                if cash_debit_atoms(record) != ["0"]:
+                    raise AssertionError(f"{label} did not emit exactly the approved zero-net-rent debit.")
+                if not has_network_fee(record) or network_fee_lamports(record) != 5_000:
+                    raise AssertionError(f"{label} did not settle the exact 5,000-lamport network fee.")
+                if conversion_atoms(record) != (expected_spent, expected_received):
+                    raise AssertionError(
+                        f"{label} did not prove exact principal consumption and output: "
+                        f"{conversion_atoms(record)}."
+                    )
             for record in (
                 router_native_in, router_native_out, meta_native_in, meta_native_out,
                 pyusd_router_in, pyusd_router_out, pyusd_meta_in, pyusd_meta_out,
@@ -2251,8 +2852,11 @@ def main() -> int:
                 plan_wrap, plan_swap, extra_wrap, unwrap,
                 router_native_in, router_native_out, meta_native_in, meta_native_out,
                 pyusd_router_in, pyusd_router_out, pyusd_meta_in, pyusd_meta_out,
+                native_plan_in, native_plan_out,
+                route_switch_native, route_switch_metis, route_switch_return,
+                direct_native_in, direct_native_out,
             )
-            if len(fixture_before_restart.get("transactions", [])) != 13:
+            if len(fixture_before_restart.get("transactions", [])) != 20:
                 raise AssertionError("The fixture did not record each planned transaction exactly once.")
             for record in all_completed:
                 if record.get("status") != "completed" or not record.get("effects", {}).get("proof_digest"):
@@ -2389,6 +2993,14 @@ def main() -> int:
                 "router": actual[4:6],
                 "meta": actual[6:8],
             }
+            evidence["native_sol_named_plan_roundtrip"] = actual[12:14]
+            evidence["router_flexible_named_plans"] = {
+                "preview_metis_execute_jupiterz": actual[14],
+                "preview_jupiterz_execute_metis_and_return": actual[15:17],
+                "tampered_spend_recipient_floor_rejected": True,
+                "execute_rpc_counts": rpc_delta,
+            }
+            evidence["jupiterz_direct_native_named_plan"] = actual[17:19]
             evidence["pyusd_token_2022_round_trips"] = {
                 "router": actual[8:10],
                 "meta": actual[10:12],
@@ -2433,6 +3045,11 @@ def main() -> int:
                     (failure_dir / "stop-output.txt").write_text(
                         stop_result.stderr or stop_result.stdout, encoding="utf-8"
                     )
+                broker_logs = sorted(
+                    state_home.rglob("broker-*.log"), key=lambda path: path.stat().st_mtime
+                )
+                if broker_logs:
+                    shutil.copyfile(broker_logs[-1], failure_dir / "synthetic-broker.log")
                 backup_stopped_journal(state_home, environment_name, failure_dir)
                 print(f"Sanitized synthetic failure evidence: {failure_dir}", file=sys.stderr)
 

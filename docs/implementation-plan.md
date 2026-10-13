@@ -136,12 +136,39 @@ agent-selected between Meta-Aggregator and Router. Trigger V1 escrow orders,
 native JLP liquidity and JLP-backed perpetuals are in scope; lending/borrowing,
 custodial Trigger V2, DCA and GUM markets are deferred.
 
+Current Jupiter route arguments are decoded from the version-pinned published
+IDL with bounded nested Borsh traversal. V2 exact-input and legacy envelopes
+have separate account validation; exact-output instructions cannot fulfill an
+exact-input intent. Platform fee accounts bind the quote's input/output mint,
+and nonzero positive-slippage fees require a future explicit intent contract.
+Optional empty blockhash-route expiry strings do not relax RFQ expiry checks.
+
 Use frozen legacy/v0 messages, verified lookup tables and exact signer slots.
 Persist submission identities before dispatch, including provider request IDs
 and known signatures for sponsored messages. Confirmed inclusion is progress;
 terminal settlement requires finalized transaction and application evidence.
 Blockhash expiry or missing history never authorizes replay. Account funding,
 network fees and token transfer fees have distinct accounting meanings.
+Solana RPC transport retries only an explicit read-method allowlist and simulation,
+up to three attempts within the existing 20-second total request deadline.
+Submission and unknown methods retain a single 20-second attempt. Retry-After
+cannot extend that deadline, message identity, quote expiry or approval scope.
+Safe HTTP status, numeric RPC code and validation stages aid diagnosis without
+exposing request parameters, response bodies or transaction bytes.
+
+Fresh Meta candidates may select a different underlying router within the same
+approved financial scope. The router selected by a previous preview is not an
+additional authorization restriction. Each concrete candidate still binds its
+own immutable message and provider identity for signing and recovery.
+
+Jupiter swap submission reuses a fully reviewed frozen transaction through a
+bounded, one-shot in-process cache, only when handed an engine-revalidated
+operation. Its key includes exact input, financial intent, adapter binding and
+original timestamps; broker-added valuation and presentation do not change that
+transaction identity. A missing or expired entry falls back to full validation.
+Cache hits retain fresh fee, lifetime, approval and dispatch-journal checks, and
+never refresh a blockhash or extend consent. Nothing in this cache is persisted
+or trusted during restart recovery.
 
 Implementation is split between Luna agents for runtime, broker integration
 and Jupiter adapters, with integration review and verification in the parent
@@ -157,10 +184,27 @@ not discard a locally known transaction identity. Synthetic transports are
 internal typed dependencies; production requests cannot override endpoints.
 The [verification guide](testing/solana-jupiter.md) tracks acceptance scope.
 
+Enrollment review metadata and success output share one exhaustive typed public
+connection conversion, including Solana and Jupiter. New provider support must
+cover native approval presentation and human/machine success rendering; missing
+output variants must fail compilation rather than panic after credentials save.
+
 Solana submission references bind the serialized message hash across RPC and
 Jupiter landing paths. Provider request IDs and chain signatures remain in the
 versioned binding; changing the provider ID must not permit accounting for one
 transaction twice. Recovery continues to accept older persisted references.
+
+Binance and Kraken funding reuse the existing deposit and withdrawal operations
+for native SOL and canonical mainnet USDC. A shared Solana recipient verifier
+checks finalized transaction instructions and exact owner/mint balance effects;
+the broker composes it above existing EVM observers. Managed deposits retain
+their original child message and signature under the outer operation identity,
+then require correlated usable exchange credit. USDC deposits currently select
+the source associated token account. Network fees and actual refundable account
+funding remain separate. Additive optional binding fields omit their defaults
+so persisted EVM identities retain their serialized form; no journal reset or
+credential re-enrollment is required. The public CLI funding target covers both
+assets and venues, including future-funded plans and restart without rebroadcast.
 
 Perpetual position size and locked margin retain the protocol's exact USD
 accounting units, with market identity on each position. These are nontransferable

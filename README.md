@@ -271,7 +271,9 @@ CoinGecko native-ETH and exact network/contract token path.
 
 Solana mainnet-beta wallets and Jupiter adapters are implemented in this checkout.
 Automated verification passes; live settlement and human Touch ID verification remain
-pending. See the [verification report](docs/testing/solana-jupiter-report.md) and
+pending. Both Router and Meta-Aggregator passed live read-only SOL-to-USDC
+previews, including current V2 transaction validation and simulation.
+See the [verification report](docs/testing/solana-jupiter-report.md) and
 [scenario guide](docs/testing/solana-jupiter.md) for coverage and limitations. The public CLI
 synthetic rehearsal exercises Router/Meta swaps, wallet recovery, market Perps,
 limit-order placement/update/restart/fill/cancel, TP/SL update/cancel/keeper settlement,
@@ -301,6 +303,13 @@ Financial operations use explicit Solana network/cluster inputs and require
 Fin authorization. Confirmed inclusion is progress; terminal settlement requires
 finalized transaction and application-effect evidence. Token-2022 support is
 reported by extension and operation, not inferred from its token program alone.
+
+Meta-Aggregator may choose a different underlying router when preparing a fresh
+candidate. Fin checks the approved assets, recipient, spending, minimum output,
+fees and permissions for that candidate; the preview's router name is not an
+execution restriction. Signed or uncertain submissions retain their original
+transaction identity for recovery. The SOL/USDC Meta/Router named-plan round trip
+and cleanup have [verified live development evidence](docs/testing/solana-jupiter-report.md#disposable-spot-recovery-e2e--passed-2026-10-13).
 
 The synthetic Router/Meta fixture is explicitly selected in development mode:
 
@@ -690,7 +699,7 @@ proved failure only with complete matching history absent and unchanged source
 and destination balances. Other uncertain failures remain reserved. Always check
 the original `fin status OPERATION_ID --json` before creating another request.
 
-## Binance deposits from EVM wallets
+## Binance deposits from EVM and Solana wallets
 
 `binance.deposit` sends an exact native or ERC20 amount into the selected main
 account or subaccount using that account's own credentials. A standalone
@@ -711,9 +720,25 @@ minimum, balances, exact contract and token precision. ERC20 requests must name
 the contract reported for that exact Binance network. Native ETH uses
 `"token":"native"`. Legacy inputs without route fields still select ETH on
 Ethereum mainnet. Binance routes are dynamic; source execution currently needs
-an explicitly mapped, configured Fin EVM network. An advertised Binance route
+an explicitly mapped, configured Fin EVM network or the Solana `SOL` route below. An advertised Binance route
 alone does not establish source-chain support. Memo/tag routes and non-unit
 asset denominations are refused rather than silently translated.
+
+Solana mainnet-beta supports native SOL and canonical USDC through the same
+operation. Select Binance's `network: "SOL"`, an enrolled Solana wallet, and
+`maxFeeSol`. For USDC, supply its exact mint as `token`; bound refundable token
+account creation separately with `maxAccountFundingSol` when needed. Omit EVM
+`chainId` and `maxFeeEth` fields:
+
+```sh
+fin execute binance.deposit --dry-run --input '{"requestId":"deposit-sol-001","account":"binance-sub","wallet":"dev-solana-wallet","coin":"USDC","network":"SOL","token":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","amount":"2","maxFeeSol":"0.0001","maxAccountFundingSol":"0.003"}' --json
+```
+
+These quantities are preview examples, not venue minimums or fee estimates.
+Completion requires finalized Solana source effects and transaction-correlated
+usable exchange credit. Keep the original operation ID while credit is pending.
+Managed USDC deposits currently spend from the wallet's associated token account;
+holdings in other token accounts remain visible through wallet discovery.
 
 Approval binds the source wallet, destination account, chain, exact asset,
 Binance address, amount and native fee cap. Human deposit summaries show account
@@ -915,10 +940,12 @@ make dev-env-stop DEV_ENV=live
 make dev-env-start DEV_ENV=live DEV_MODE=live
 ```
 
-Live mode uses real Binance/EVM adapters and can move real funds with automatic
+Live mode uses real exchange and wallet adapters and can move real funds with automatic
 development approval. It keeps the engine's financial limits and settlement
 checks. Imports support a Binance master and optional subaccount using HMAC,
-RSA or Ed25519, plus up to two EVM wallet keys. Wallet addresses are derived
+RSA or Ed25519, Kraken product credentials, up to two EVM wallet keys and one
+Solana wallet key. Use `DEV_IMPORT_FLAGS='--provider solana'` to select only the
+Solana key from a combined file. Wallet addresses are derived
 automatically. Import is offline when public UIDs and the subaccount email are
 supplied. Add `DEV_IMPORT_FLAGS=--discover-identities` to import with read-only
 Binance identity checks; a missing or ambiguous subaccount association requires
@@ -1321,6 +1348,10 @@ permissions and Travel Rule eligibility; it has no coin/network allowlist.
 Named reusable EVM wallets select their chain using the Binance network identifier
 (for example `ARBITRUM`). Independent receipt observers currently cover configured
 reviewed EVM chains and standard native/ERC-20 assets. For a Binance withdrawal
+on `SOL`, configured Solana observers verify native SOL and canonical USDC with
+finalized transaction effects, including credits to non-associated token
+accounts owned by the recipient. Addresses, mints and signatures retain case.
+For a Binance withdrawal
 that live metadata can map to Arbitrum One (`42161`) or Robinhood Chain (`4663`),
 one canonical sequencer-included block is sufficient when the original hash,
 chain, recipient, asset and expected amount match. Binance's Robinhood network

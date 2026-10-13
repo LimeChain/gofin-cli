@@ -1361,15 +1361,10 @@ impl SolanaRuntime {
             .map_err(|_| invalid_transaction())?;
         let result = self.rpc.request("simulateTransaction", json!([STANDARD.encode(wire),{"encoding":"base64","sigVerify":false,"replaceRecentBlockhash":false,"commitment":"confirmed"}])).await?;
         let value = result.get("value").ok_or_else(parse_error)?;
-        let err = !value.get("err").is_none_or(Value::is_null);
+        let err = simulation_error_value(value);
         let units_consumed = value.get("unitsConsumed").and_then(Value::as_u64);
-        if err {
-            return Err(failure(
-                "SOLANA_SIMULATION_FAILED",
-                "prepare",
-                "The transaction simulation failed on mainnet-beta.",
-                "Refresh the operation and review the returned transaction before approving it.",
-            ));
+        if let Some(err) = err {
+            return Err(simulation_failed(err));
         }
         if units_consumed.is_some_and(|units| units > 1_400_000) {
             return Err(failure(
@@ -1425,13 +1420,8 @@ impl SolanaRuntime {
             )
             .await?;
         let value = result.get("value").ok_or_else(parse_error)?;
-        if !value.get("err").is_none_or(Value::is_null) {
-            return Err(failure(
-                "SOLANA_SIMULATION_FAILED",
-                "prepare",
-                "The transaction simulation failed on mainnet-beta.",
-                "Refresh the operation and review the returned transaction before approving it.",
-            ));
+        if let Some(err) = simulation_error_value(value) {
+            return Err(simulation_failed(err));
         }
         let units_consumed = value.get("unitsConsumed").and_then(Value::as_u64);
         if units_consumed.is_some_and(|units| units > 1_400_000) {
@@ -1819,8 +1809,8 @@ impl SolanaRuntime {
             required_signatures: tx.signatures.iter().map(ToString::to_string).collect(),
             pre_balances_lamports,
             post_balances_lamports,
-            pre_token_balances: value_array(meta.get("preTokenBalances"))?,
-            post_token_balances: value_array(meta.get("postTokenBalances"))?,
+            pre_token_balances: token_balance_array(meta.get("preTokenBalances"))?,
+            post_token_balances: token_balance_array(meta.get("postTokenBalances"))?,
             loaded_addresses,
             inner_instructions: value_array(meta.get("innerInstructions"))?,
             log_messages: string_array(meta.get("logMessages"))?,
@@ -2426,6 +2416,61 @@ impl SolanaRuntime {
     }
 }
 
+/// Convert simulation errors into a small, non-sensitive diagnostic. Solana's
+/// error value is provider-controlled, so never copy its string, logs, or
+/// arbitrary nested fields into the public error.
+fn simulation_error_value(value: &Value) -> Option<&Value> {
+    value.get("err").filter(|err| !err.is_null())
+}
+
+fn simulation_failed(error: &Value) -> fin_domain::FinError {
+    let (category, instruction_index, custom_code) = if let Some(text) = error.as_str() {
+        let category = match text {
+            "BlockhashNotFound" => "blockhash_not_found",
+            "AccountNotFound" => "account_not_found",
+            "InsufficientFundsForFee" => "insufficient_funds_for_fee",
+            "InvalidAccountForFee" => "invalid_account_for_fee",
+            "AlreadyProcessed" => "already_processed",
+            _ => "unknown",
+        };
+        (category, None, None)
+    } else if let Some(parts) = error
+        .get("InstructionError")
+        .and_then(Value::as_array)
+        .filter(|parts| parts.len() == 2)
+    {
+        let index = parts[0].as_u64().filter(|index| *index <= u32::MAX as u64);
+        let custom = parts[1]
+            .get("Custom")
+            .and_then(Value::as_u64)
+            .filter(|code| *code <= u32::MAX as u64);
+        let category = if custom.is_some() {
+            "instruction_custom"
+        } else {
+            "instruction_error"
+        };
+        (category, index, custom)
+    } else {
+        ("unknown", None, None)
+    };
+
+    let mut details = serde_json::Map::new();
+    details.insert("simulation_error_kind".into(), json!(category));
+    if let Some(index) = instruction_index {
+        details.insert("instruction_index".into(), json!(index));
+    }
+    if let Some(code) = custom_code {
+        details.insert("custom_error_code".into(), json!(code));
+    }
+    failure(
+        "SOLANA_SIMULATION_FAILED",
+        "prepare",
+        "The transaction simulation failed on mainnet-beta.",
+        "Refresh the operation and review the returned transaction before approving it.",
+    )
+    .with_details(Value::Object(details))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SimulationResult {
@@ -2560,6 +2605,21 @@ fn value_array(value: Option<&Value>) -> Result<Vec<Value>> {
         .ok_or_else(pending_evidence_error)
 }
 
+/// Keep authoritative token-account identity and integer atom amounts from
+/// finalized RPC metadata while dropping floating/string UI display fields.
+/// Older serialized proofs remain deserializable; normalization is performed
+/// only when crossing the trusted RPC response boundary.
+fn token_balance_array(value: Option<&Value>) -> Result<Vec<Value>> {
+    let mut balances = value_array(value)?;
+    for row in &mut balances {
+        if let Some(ui_amount) = row.get_mut("uiTokenAmount").and_then(Value::as_object_mut) {
+            ui_amount.remove("uiAmount");
+            ui_amount.remove("uiAmountString");
+        }
+    }
+    Ok(balances)
+}
+
 fn string_array(value: Option<&Value>) -> Result<Vec<String>> {
     value
         .and_then(Value::as_array)
@@ -2628,6 +2688,44 @@ fn invalid_lookup_index() -> FinError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simulation_error_details_are_bounded_and_redacted() {
+        let custom = simulation_failed(&json!({"InstructionError":[3,{"Custom":6001}]}));
+        assert_eq!(custom.code, "SOLANA_SIMULATION_FAILED");
+        assert_eq!(
+            custom.details.as_deref().unwrap(),
+            &json!({
+                "simulation_error_kind":"instruction_custom",
+                "instruction_index":3,
+                "custom_error_code":6001
+            })
+        );
+
+        let blockhash = simulation_failed(&json!("BlockhashNotFound"));
+        assert_eq!(
+            blockhash.details.as_deref().unwrap(),
+            &json!({"simulation_error_kind":"blockhash_not_found"})
+        );
+
+        let unknown = simulation_failed(&json!({
+            "arbitrary":"wallet-secret-like text",
+            "logs":["private account mapping"],
+            "nested":{"Custom":6001}
+        }));
+        assert_eq!(
+            unknown.details.as_deref().unwrap(),
+            &json!({"simulation_error_kind":"unknown"})
+        );
+        assert!(!unknown.to_string().contains("wallet-secret-like text"));
+        assert!(!unknown.to_string().contains("private account mapping"));
+    }
+
+    #[test]
+    fn absent_simulation_error_is_not_a_failure() {
+        assert!(simulation_error_value(&json!({"err":null})).is_none());
+        assert!(simulation_error_value(&json!({})).is_none());
+    }
 
     struct TransferHookRpc {
         owner: String,
@@ -3540,6 +3638,88 @@ mod tests {
         assert!(!verify_signatures(&tx));
         assert!(
             SolanaRuntime::missing_signers(&"A".repeat(MAX_TRANSACTION_BYTES * 2 + 1)).is_err()
+        );
+    }
+
+    #[test]
+    fn finalized_token_proof_drops_ui_floats_but_keeps_exact_atoms_and_digestable_evidence() {
+        let raw = json!([
+            {"accountIndex":0,"mint":"mint","owner":"wallet","programId":crate::token::TOKEN_PROGRAM_ID,
+             "uiTokenAmount":{"amount":"9007199254740992","decimals":6,"uiAmount":9007199254.740992,"uiAmountString":"9007199254.740992"}}
+        ]);
+        let pre = token_balance_array(Some(&raw)).unwrap();
+        let post_raw = json!([
+            {"accountIndex":0,"mint":"mint","owner":"wallet","programId":crate::token::TOKEN_PROGRAM_ID,
+             "uiTokenAmount":{"amount":"9007199254740993","decimals":6,"uiAmount":9007199254.740993,"uiAmountString":"9007199254.740993"}}
+        ]);
+        let post = token_balance_array(Some(&post_raw)).unwrap();
+        assert_eq!(pre[0]["uiTokenAmount"]["amount"], "9007199254740992");
+        assert_eq!(post[0]["uiTokenAmount"]["amount"], "9007199254740993");
+        assert_eq!(post[0]["uiTokenAmount"]["decimals"], 6);
+        assert!(pre[0]["uiTokenAmount"].get("uiAmount").is_none());
+        assert!(post[0]["uiTokenAmount"].get("uiAmountString").is_none());
+
+        let proof = FinalizedReceiptProof {
+            signature: "synthetic-signature".into(),
+            slot: 1,
+            fee_lamports: 0,
+            failed: false,
+            message_sha256: "00".repeat(32),
+            account_keys: vec!["token-account".into()],
+            message_instructions: Vec::new(),
+            required_signatures: Vec::new(),
+            pre_balances_lamports: vec![0],
+            post_balances_lamports: vec![0],
+            pre_token_balances: pre,
+            post_token_balances: post,
+            loaded_addresses: json!({"writable":[],"readonly":[]}),
+            inner_instructions: Vec::new(),
+            log_messages: Vec::new(),
+            error: None,
+        };
+        assert_eq!(
+            proof
+                .token_delta_verified("wallet", "mint", crate::token::TOKEN_PROGRAM_ID, 6)
+                .unwrap()
+                .as_str(),
+            "1"
+        );
+
+        let mut bundle = fin_domain::VerifiedEffects {
+            evidence_version: 1,
+            submission: Submission {
+                kind: "solana.transaction".into(),
+                reference: "synthetic-signature".into(),
+                data: json!({}),
+            },
+            effects: Vec::new(),
+            evidence: json!({"proof":proof}),
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            proof_digest: String::new(),
+        };
+        bundle.proof_digest = fin_domain::verified_effect_digest(&bundle).unwrap();
+        assert_eq!(bundle.proof_digest.len(), 64);
+        let mut unrelated_float = bundle.clone();
+        unrelated_float.evidence["unrelated_display_value"] = json!(1.25);
+        assert!(fin_domain::verified_effect_digest(&unrelated_float).is_err());
+
+        let mut tampered =
+            serde_json::from_value::<FinalizedReceiptProof>(bundle.evidence["proof"].clone())
+                .unwrap();
+        tampered.post_token_balances[0]["uiTokenAmount"]["amount"] = json!("9007199254740994");
+        assert_eq!(
+            tampered
+                .token_delta_verified("wallet", "mint", crate::token::TOKEN_PROGRAM_ID, 6)
+                .unwrap()
+                .as_str(),
+            "2",
+            "the exact atom field, not uiAmount, controls accounting"
+        );
+        tampered.post_token_balances[0]["uiTokenAmount"]["amount"] = json!("not-an-integer");
+        assert!(
+            tampered
+                .token_delta_verified("wallet", "mint", crate::token::TOKEN_PROGRAM_ID, 6)
+                .is_err()
         );
     }
 }

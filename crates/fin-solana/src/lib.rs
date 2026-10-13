@@ -5,12 +5,16 @@
 //! adapters remain responsible for decoding and validating the financial
 //! meaning of every instruction before they freeze a transaction.
 
+pub mod funding;
 pub mod key;
 pub mod rpc;
 pub mod token;
 pub mod transaction;
 pub mod wallet;
 
+pub use funding::{
+    AmountBounds, ExternalPayoutEvidence, ExternalPayoutRequest, ExternalPayoutStatus,
+};
 pub use key::SolanaSigner;
 pub use rpc::{HttpRpc, SolanaRpc};
 pub use transaction::{

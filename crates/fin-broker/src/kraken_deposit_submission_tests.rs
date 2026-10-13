@@ -1,8 +1,42 @@
-// Real deposit/engine/EVM submission using only synthetic keys and local transports.
+// Real deposit/engine submission using only synthetic keys and local transports.
 use super::*;
+use crate::test_support::solana::SolanaFundingFixture;
 use fin_domain::{ApprovalAudit, AuthorizationChallenge, Authorizer, OperationRequest};
 use fin_evm::{EnvelopeSigner, LocalEnvelopeSigner, alloy::primitives::Bytes};
 use std::sync::atomic::AtomicUsize;
+
+pub(super) fn signed_solana_adapter() -> (KrakenEvmDepositAdapter, Arc<Venue>, SolanaFundingFixture)
+{
+    let (mut base, venue) = adapter();
+    venue.solana_source.store(true, Ordering::SeqCst);
+    let fixture = SolanaFundingFixture::new("fixture-solana", 10_000_000_000, 0);
+    *venue.solana_rpc.lock().unwrap() = Some(fixture.rpc());
+    let wallet = fixture.wallet();
+    let kraken = base.kraken.clone();
+    base = KrakenEvmDepositAdapter::with_solana(
+        kraken,
+        BTreeMap::new(),
+        BTreeMap::from([("fixture-solana".into(), wallet.clone())]),
+    );
+    (base, venue, fixture)
+}
+
+pub(super) fn signed_solana_usdc_adapter()
+-> (KrakenEvmDepositAdapter, Arc<Venue>, SolanaFundingFixture) {
+    let (mut base, venue) = adapter();
+    venue.solana_source.store(true, Ordering::SeqCst);
+    venue.solana_usdc.store(true, Ordering::SeqCst);
+    let fixture = SolanaFundingFixture::new("fixture-solana", 10_000_000_000, 2_000_000);
+    fixture.register_token_owner("11111111111111111111111111111111");
+    *venue.solana_rpc.lock().unwrap() = Some(fixture.rpc());
+    let kraken = base.kraken.clone();
+    base = KrakenEvmDepositAdapter::with_solana(
+        kraken,
+        BTreeMap::new(),
+        BTreeMap::from([("fixture-solana".into(), fixture.wallet())]),
+    );
+    (base, venue, fixture)
+}
 
 struct Signer {
     inner: LocalEnvelopeSigner,
@@ -51,6 +85,7 @@ struct Journal {
     revoked: Arc<AtomicBool>,
     candidates: AtomicUsize,
     saved: Mutex<Vec<Submission>>,
+    dispatch_evidence: Mutex<Vec<Value>>,
 }
 impl SubmissionJournal for Journal {
     fn assert_authorized(&self) -> Result<()> {
@@ -76,6 +111,24 @@ impl SubmissionJournal for Journal {
         self.saved.lock().unwrap().push(submission.clone());
         Ok(())
     }
+    fn persist_dispatch_evidence(&self, submission: &Submission, evidence: &Value) -> Result<()> {
+        if !self
+            .saved
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|saved| saved == submission)
+        {
+            return Err(FinError::validation(
+                "Synthetic dispatch evidence preceded its submission identity.",
+            ));
+        }
+        self.dispatch_evidence
+            .lock()
+            .unwrap()
+            .push(evidence.clone());
+        Ok(())
+    }
 }
 fn journal(prepared: &PreparedOperation, revoked: Arc<AtomicBool>) -> Arc<Journal> {
     Arc::new(Journal {
@@ -83,6 +136,7 @@ fn journal(prepared: &PreparedOperation, revoked: Arc<AtomicBool>) -> Arc<Journa
         revoked,
         candidates: AtomicUsize::new(0),
         saved: Mutex::new(vec![]),
+        dispatch_evidence: Mutex::new(vec![]),
     })
 }
 struct Approval;
@@ -107,6 +161,173 @@ fn simulations(venue: &Venue) -> usize {
         .iter()
         .filter(|m| *m == "eth_estimateGas")
         .count()
+}
+
+#[tokio::test]
+async fn kraken_solana_funding_source_waits_for_correlated_usable_credit_after_restart() {
+    let (adapter, venue, fixture) = signed_solana_adapter();
+    let input = json!({"requestId":"synthetic-sol-deposit-001","account":"fixture-spot","wallet":"fixture-solana","methodId":"00000000-0000-0000-0000-000000000001","network":"solana","cluster":"mainnet-beta","amount":"0.1","maxFeeSol":"0.00001"});
+    let prepared = adapter.prepare("kraken.deposit", &input).await.unwrap();
+    assert_eq!(prepared.binding["source_kind"], "solana");
+    assert_eq!(
+        prepared.binding["source_asset"]["network"],
+        fin_solana::NETWORK
+    );
+    assert_eq!(prepared.binding["source_asset"]["reference"], "native");
+    assert_eq!(
+        prepared.binding["address"],
+        "11111111111111111111111111111111"
+    );
+    let fresh = adapter.revalidate(&prepared).await.unwrap();
+    let validated = RevalidatedOperation::after_revalidation(
+        fresh.clone(),
+        Arc::new(fin_domain::clock::SystemClock),
+    )
+    .unwrap();
+    let journal = journal(&fresh, Arc::new(AtomicBool::new(false)));
+    let submission = adapter
+        .submit_revalidated(&validated, journal)
+        .await
+        .unwrap();
+    let signature = fixture.last_signature().unwrap();
+    *venue.solana_signature.lock().unwrap() = Some(signature.clone());
+    assert!(signature.len() > 80, "Solana signature should be base58");
+    assert_eq!(submission.data["wallet_signature"], signature);
+
+    let record = OperationRecord {
+        id: "synthetic-sol-deposit-record".into(),
+        request_id: "synthetic-sol-deposit-001".into(),
+        fingerprint: "synthetic-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "kraken.deposit".into(),
+        input,
+        status: Status::Pending,
+        created_at: now(),
+        updated_at: now(),
+        preview: Some(fresh),
+        approval: None,
+        submission: Some(submission),
+        dispatch_evidence: None,
+        position_baseline: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    let pending = adapter.reconcile(&record).await.unwrap();
+    assert_ne!(
+        pending.status,
+        Status::Completed,
+        "finalized source alone cannot settle the deposit"
+    );
+
+    // Reconstruct the venue adapter from the same durable source wallet and
+    // immutable operation record. Reconciliation reads the original signature.
+    let restarted = KrakenEvmDepositAdapter::with_solana(
+        adapter.kraken.clone(),
+        BTreeMap::new(),
+        BTreeMap::from([("fixture-solana".into(), fixture.wallet())]),
+    );
+    venue.credit.store(true, Ordering::SeqCst);
+    let completed = restarted.reconcile(&record).await.unwrap();
+    assert_eq!(completed.status, Status::Completed, "{completed:?}");
+    assert_eq!(
+        completed.verified.unwrap().submission.reference,
+        record.submission.unwrap().reference
+    );
+}
+
+#[tokio::test]
+async fn kraken_solana_funding_usdc_source_preserves_ata_rent_and_exact_mint() {
+    let (adapter, venue, fixture) = signed_solana_usdc_adapter();
+    let input = json!({"requestId":"synthetic-sol-usdc-deposit-001","account":"fixture-spot","wallet":"fixture-solana","methodId":"00000000-0000-0000-0000-000000000001","network":"solana","cluster":"mainnet-beta","mint":crate::test_support::solana::USDC_MINT,"amount":"1","maxFeeSol":"0.00001","maxAccountFundingSol":"0.01"});
+    let prepared = adapter.prepare("kraken.deposit", &input).await.unwrap();
+    assert_eq!(
+        prepared.binding["source_asset"]["reference"],
+        crate::test_support::solana::USDC_MINT
+    );
+    assert_eq!(
+        prepared.binding["inner_input"]["max_account_funding_sol"],
+        "0.01"
+    );
+    let fresh = adapter.revalidate(&prepared).await.unwrap();
+    let validated = RevalidatedOperation::after_revalidation(
+        fresh.clone(),
+        Arc::new(fin_domain::clock::SystemClock),
+    )
+    .unwrap();
+    let submission = adapter
+        .submit_revalidated(
+            &validated,
+            journal(&fresh, Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap();
+    let signature = fixture.last_signature().unwrap();
+    assert_eq!(submission.data["wallet_signature"], signature);
+    assert!(fixture.rpc().send_count() == 1);
+    assert!(fixture.token_balance("11111111111111111111111111111111") >= 1_000_000);
+    *venue.solana_signature.lock().unwrap() = Some(signature);
+    let record = OperationRecord {
+        id: "synthetic-sol-usdc-record".into(),
+        request_id: "synthetic-sol-usdc-deposit-001".into(),
+        fingerprint: "synthetic-fingerprint".into(),
+        fingerprint_version: 1,
+        operation: "kraken.deposit".into(),
+        input,
+        status: Status::Pending,
+        created_at: now(),
+        updated_at: now(),
+        preview: Some(fresh),
+        approval: None,
+        submission: Some(submission),
+        dispatch_evidence: None,
+        position_baseline: None,
+        effects: None,
+        last_reconciliation_evidence: None,
+        error: None,
+        run_id: None,
+    };
+    assert_ne!(
+        adapter.reconcile(&record).await.unwrap().status,
+        Status::Completed
+    );
+    venue.credit.store(true, Ordering::SeqCst);
+    let complete = adapter.reconcile(&record).await.unwrap();
+    assert_eq!(complete.status, Status::Completed, "{complete:?}");
+    let effects = complete.verified.unwrap().effects;
+    assert!(effects.iter().any(|effect| matches!(effect, FinancialEffect::Transfer { to, debit, credit, .. }
+        if to.0 == "kraken:fixture-spot" && debit.asset.reference == crate::test_support::solana::USDC_MINT && credit.asset.reference == "USDC")));
+    assert!(effects.iter().any(
+        |effect| matches!(effect, FinancialEffect::Transfer { to, debit, .. }
+        if to.0.starts_with("solana:mainnet-beta:account:") && debit.asset.reference == "native")
+    ));
+}
+
+#[tokio::test]
+async fn kraken_solana_funding_rejects_malformed_networks_and_mixed_source_fields_before_venue_reads()
+ {
+    let (adapter, venue, _) = signed_solana_adapter();
+    let valid = json!({"requestId":"synthetic-sol-invalid","account":"fixture-spot","wallet":"fixture-solana","methodId":"00000000-0000-0000-0000-000000000001","network":"solana","cluster":"mainnet-beta","amount":"0.1","maxFeeSol":"0.00001"});
+    let cases = [
+        json!({"cluster":"devnet"}),
+        json!({"network":"solana-testnet"}),
+        json!({"chainId":1}),
+        json!({"maxFeeEth":"0.01"}),
+        json!({"mint":"not-a-solana-mint"}),
+    ];
+    for (i, patch) in cases.into_iter().enumerate() {
+        let mut input = valid.clone();
+        for (key, value) in patch.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        input["requestId"] = json!(format!("synthetic-sol-invalid-{i}"));
+        assert!(
+            adapter.prepare("kraken.deposit", &input).await.is_err(),
+            "{input}"
+        );
+    }
+    assert!(venue.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

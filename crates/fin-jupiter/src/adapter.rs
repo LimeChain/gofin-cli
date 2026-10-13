@@ -2,7 +2,11 @@
 //! transaction proposal; every instruction is frozen and reviewed before it
 //! can reach the signing/journaling path.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -27,6 +31,7 @@ use fin_solana::{
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use solana_pubkey3::Pubkey;
 use zeroize::Zeroizing;
 
@@ -39,6 +44,8 @@ use crate::{
 const OP_QUOTE: &str = "jupiter.quote";
 const OP_SWAP: &str = "jupiter.swap";
 const REQUEST_DEADLINE: Duration = Duration::from_secs(20);
+const FROZEN_CACHE_TTL: Duration = Duration::from_secs(30);
+const FROZEN_CACHE_CAPACITY: usize = 4;
 const ORDER_ENGINE_PROGRAM: &str = "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH";
 const OKX_ROUTER_PROGRAM: &str = "proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u";
 const DFLOW_PROGRAM: &str = crate::dflow::PROGRAM;
@@ -48,6 +55,59 @@ pub struct JupiterAdapter {
     wallets: BTreeMap<String, Arc<SolanaWalletAdapter>>,
     api: Arc<dyn JupiterApi>,
     prices: Arc<dyn UsdPriceSource>,
+    revalidated_frozen: OneShotCache<FrozenTransaction>,
+}
+
+struct CachedCandidate<T> {
+    key: [u8; 32],
+    cached_at: Instant,
+    value: T,
+}
+
+struct OneShotCache<T> {
+    entries: Mutex<VecDeque<CachedCandidate<T>>>,
+}
+
+impl<T> Default for OneShotCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+impl<T> OneShotCache<T> {
+    fn insert(&self, key: [u8; 32], value: T) {
+        self.insert_at(key, value, Instant::now());
+    }
+
+    fn insert_at(&self, key: [u8; 32], value: T, now: Instant) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.retain(|entry| {
+            now.saturating_duration_since(entry.cached_at) < FROZEN_CACHE_TTL && entry.key != key
+        });
+        while entries.len() >= FROZEN_CACHE_CAPACITY {
+            entries.pop_front();
+        }
+        entries.push_back(CachedCandidate {
+            key,
+            cached_at: now,
+            value,
+        });
+    }
+
+    fn take(&self, key: [u8; 32]) -> Option<T> {
+        self.take_at(key, Instant::now())
+    }
+
+    fn take_at(&self, key: [u8; 32], now: Instant) -> Option<T> {
+        let mut entries = self.entries.lock().ok()?;
+        entries.retain(|entry| now.saturating_duration_since(entry.cached_at) < FROZEN_CACHE_TTL);
+        let index = entries.iter().position(|entry| entry.key == key)?;
+        entries.remove(index).map(|entry| entry.value)
+    }
 }
 
 impl JupiterAdapter {
@@ -106,7 +166,23 @@ impl JupiterAdapter {
             wallets,
             api,
             prices,
+            revalidated_frozen: OneShotCache::default(),
         })
+    }
+
+    fn cache_frozen_candidate(&self, prepared: &PreparedOperation, frozen: FrozenTransaction) {
+        let Some(key) = frozen_candidate_cache_key(prepared) else {
+            return;
+        };
+        self.revalidated_frozen.insert(key, frozen);
+    }
+
+    fn take_cached_frozen_candidate(
+        &self,
+        prepared: &PreparedOperation,
+    ) -> Option<FrozenTransaction> {
+        self.revalidated_frozen
+            .take(frozen_candidate_cache_key(prepared)?)
     }
 
     fn wallet(&self, input: &Value) -> Result<Arc<SolanaWalletAdapter>> {
@@ -257,6 +333,7 @@ impl JupiterAdapter {
                     .map(ApiInstruction::normalize)
                     .collect::<Result<Vec<_>>>()?;
                 let hash_bytes: Vec<u8> = built.blockhash_with_metadata.blockhash;
+                let _informational_fetch_time = built.blockhash_with_metadata.fetched_at;
                 if hash_bytes.len() != 32 {
                     return Err(bad_provider_response());
                 }
@@ -279,7 +356,7 @@ impl JupiterAdapter {
                     lookup_tables,
                     blockhash: Some(blockhash),
                     actual_slippage_bps: built.slippage_bps,
-                    platform_fee_bps: u16::from(route_fee),
+                    platform_fee_bps: route_fee,
                     platform_fee_mint: None,
                 })
             }
@@ -342,7 +419,14 @@ impl JupiterAdapter {
                 )
                 .await?
         };
-        validate_frozen_intent(intent, wallet, &frozen, candidate).await?;
+        validate_frozen_intent(intent, wallet, &frozen, candidate)
+            .await
+            .map_err(|error| {
+                validation_router_context(
+                    validation_stage_if_unreviewed(error, "frozen_instruction_review"),
+                    candidate.router.as_deref(),
+                )
+            })?;
         runtime.validate_fee(&frozen).await?;
         if simulate {
             runtime.simulate(&frozen).await?;
@@ -562,7 +646,7 @@ impl Adapter for JupiterAdapter {
                 .mul_div_ceil(&native_price.usd_micros_per_unit, &native_price.unit_atoms)?;
         let submission_data = json!({"wallet_address":wallet.address(),"fee_payer":frozen.fee_payer(),"route":intent.route,"request_id":candidate.request_id,"router":candidate.router,"message_sha256":frozen.message_sha256(),"last_valid_block_height":frozen.last_valid_block_height(),"provider_expire_at":frozen.provider_expire_at(),"recent_blockhash":frozen.recent_blockhash(),"transaction_base64":candidate.tx_base64,"instructions":candidate.instructions,"lookup_tables":candidate.lookup_tables,"blockhash":candidate.blockhash,"actual_slippage_bps":candidate.actual_slippage_bps,"platform_fee_bps":candidate.platform_fee_bps,"platform_fee_mint":candidate.platform_fee_mint,"input_atoms":input_atoms.to_string(),"expected_output_atoms":candidate.expected_output_atoms.to_string(),"minimum_output_atoms":minimum_atoms.to_string(),"maximum_network_fee_lamports":intent.maximum_network_fee_lamports.to_string(),"input_token_program":input_token_program,"output_token_program":output_token_program,"account_funding_lamports":auxiliary.account_funding_lamports,"funding_accounts":auxiliary.funding_accounts,"wrapped_native_lamports":auxiliary.wrapped_native_lamports,"closed_wrapped_native_accounts":auxiliary.closed_wrapped_native_accounts,"closed_wrapped_native_refunds":auxiliary.closed_wrapped_native_refunds,"rfq_native_input_direct":rfq_native_input_direct,"rfq_native_output_direct":rfq_native_output_direct,"dflow_native_input_direct":dflow_native_input_direct,"dflow_native_output_direct":dflow_native_output_direct});
         let _ = signer;
-        Ok(PreparedOperation {
+        let prepared = PreparedOperation {
             operation:operation.into(),input:input.clone(),binding:submission_data,
             summary:format!("Swap {} atoms of {} for at least {} atoms of {} on Solana mainnet-beta.",input_atoms,input_asset.reference,minimum_atoms,output_asset.reference),
             checks:vec![check("Exact mint and amount binding"),check("Actual Jupiter instruction and account review"),check("Maximum network fee"),check("Simulation"),check("Blockhash expiry")],warnings:vec!["Settlement is reported only after the finalized transaction proves the exact token effects.".into()],
@@ -594,7 +678,9 @@ impl Adapter for JupiterAdapter {
                 }
                 expected
             },locks:vec![resource]},action_deadline:None,operation_version:1,
-        })
+        };
+        self.cache_frozen_candidate(&prepared, frozen);
+        Ok(prepared)
     }
 
     async fn prepare_boundaries(
@@ -832,6 +918,7 @@ impl Adapter for JupiterAdapter {
                 "Prepare a fresh candidate within active plan or boundary authority; otherwise request new approval. Do not replay the expired transaction.",
             ));
         }
+        self.cache_frozen_candidate(prepared, frozen);
         Ok(prepared.clone())
     }
 
@@ -890,9 +977,26 @@ impl Adapter for JupiterAdapter {
         let wallet = self.wallet(&prepared.input)?;
         let signer = wallet.signer().ok_or_else(unknown_operation)?;
         let candidate = Candidate::from_binding(&prepared.binding)?;
-        let frozen = self
-            .freeze_candidate(&intent, &wallet, &candidate, false)
-            .await?;
+        let frozen = match self.take_cached_frozen_candidate(prepared) {
+            Some(frozen)
+                if cached_frozen_matches(prepared, &candidate, signer.address(), &frozen) =>
+            {
+                wallet.runtime().validate_fee(&frozen).await?;
+                frozen
+            }
+            Some(_) => {
+                return Err(FinError::new(
+                    "JUPITER_MESSAGE_CHANGED",
+                    "dispatch",
+                    "The cached frozen transaction no longer matches the revalidated candidate.",
+                    "Keep the operation unresolved and prepare a fresh candidate within active authority.",
+                ));
+            }
+            None => {
+                self.freeze_candidate(&intent, &wallet, &candidate, false)
+                    .await?
+            }
+        };
         if prepared.binding["message_sha256"].as_str() != Some(frozen.message_sha256()) {
             return Err(FinError::new(
                 "JUPITER_MESSAGE_CHANGED",
@@ -1106,6 +1210,43 @@ impl Candidate {
     }
 }
 
+fn cached_frozen_matches(
+    prepared: &PreparedOperation,
+    candidate: &Candidate,
+    signer: &str,
+    frozen: &FrozenTransaction,
+) -> bool {
+    let maximum_fee = prepared
+        .binding
+        .get("maximum_network_fee_lamports")
+        .and_then(Value::as_str)
+        .and_then(|value| parse_atoms(value).ok());
+    let expected_expire_at = prepared
+        .binding
+        .get("provider_expire_at")
+        .and_then(Value::as_str);
+    prepared
+        .binding
+        .get("message_sha256")
+        .and_then(Value::as_str)
+        == Some(frozen.message_sha256())
+        && prepared.binding.get("fee_payer").and_then(Value::as_str) == Some(frozen.fee_payer())
+        && candidate.request_id.as_deref() == frozen.provider_request_id()
+        && prepared
+            .binding
+            .get("recent_blockhash")
+            .and_then(Value::as_str)
+            == Some(frozen.recent_blockhash())
+        && prepared
+            .binding
+            .get("last_valid_block_height")
+            .and_then(Value::as_u64)
+            == frozen.last_valid_block_height()
+        && expected_expire_at == frozen.provider_expire_at()
+        && maximum_fee == Some(frozen.maximum_network_fee_lamports())
+        && frozen.signer() == signer
+}
+
 fn bounded_expiry(candidate: &Candidate) -> Result<String> {
     let preview_deadline = Utc::now() + ChronoDuration::seconds(20);
     if let Some(provider_expire_at) = &candidate.provider_expire_at {
@@ -1150,6 +1291,18 @@ struct RouterBuildResponse {
 struct BlockhashMetadata {
     blockhash: Vec<u8>,
     last_valid_block_height: u64,
+    /// Informational only; transaction validity remains bound to the exact
+    /// returned blockhash and last-valid block height.
+    #[serde(default)]
+    fetched_at: Option<BlockhashFetchTime>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockhashFetchTime {
+    #[serde(rename = "secs_since_epoch")]
+    _secs_since_epoch: i64,
+    #[serde(rename = "nanos_since_epoch")]
+    _nanos_since_epoch: i32,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1236,7 +1389,8 @@ async fn validate_frozen_intent(
         expected_wrap,
         intent.maximum_account_funding_lamports,
     )
-    .await?;
+    .await
+    .map_err(|error| validation_stage_if_unreviewed(error, "auxiliary_instructions"))?;
     let mut route: Option<(&NormalizedInstruction, SwapRouteInstruction)> = None;
     let mut rfq_maker: Option<String> = None;
     let mut account_funding = 0u64;
@@ -1246,13 +1400,18 @@ async fn validate_frozen_intent(
             .decode(&ix.data_base64)
             .map_err(|_| bad_provider_response())?;
         match ix.program_id.as_str() {
-            swap::COMPUTE_BUDGET_PROGRAM => validate_compute_budget(&data)?,
+            swap::COMPUTE_BUDGET_PROGRAM => validate_compute_budget(&data)
+                .map_err(|error| validation_stage_if_unreviewed(error, "compute_budget"))?,
             swap::JUPITER_V6_PROGRAM => {
                 if route.is_some() {
                     return Err(unsafe_instruction());
                 }
-                let decoded = swap::decode_swap_instruction(&data)?;
-                swap::validate_order_instruction(intent, &decoded)?;
+                let decoded = swap::decode_swap_instruction(&data).map_err(|error| {
+                    validation_stage_if_unreviewed(error, "jupiter_route_instruction")
+                })?;
+                swap::validate_order_instruction(intent, &decoded).map_err(|error| {
+                    validation_stage_if_unreviewed(error, "jupiter_route_instruction")
+                })?;
                 if decoded.slippage_bps < candidate.actual_slippage_bps
                     || decoded.slippage_bps > intent.maximum_slippage_bps
                 {
@@ -1265,7 +1424,8 @@ async fn validate_frozen_intent(
                     return Err(unsafe_instruction());
                 }
                 validate_order_engine_fill(intent, candidate, wallet, ix, &data, &auxiliary)
-                    .await?;
+                    .await
+                    .map_err(|error| validation_stage_if_unreviewed(error, "rfq_route_accounts"))?;
                 rfq_maker = ix.accounts.get(1).map(|account| account.address.clone());
                 route = Some((ix, SwapRouteInstruction::Rfq));
             }
@@ -1273,17 +1433,29 @@ async fn validate_frozen_intent(
                 if route.is_some() || candidate.router.as_deref() != Some("dflow") {
                     return Err(unsafe_instruction());
                 }
-                let decoded = crate::dflow::decode_swap(&data)?;
-                crate::dflow::require_reviewed_format(&decoded)?;
-                validate_dflow_swap_accounts(wallet, ix, &decoded, intent, &auxiliary).await?;
+                let decoded = crate::dflow::decode_swap(&data).map_err(|error| {
+                    validation_stage_if_unreviewed(error, "dflow_route_instruction")
+                })?;
+                crate::dflow::require_reviewed_format(&decoded).map_err(|error| {
+                    validation_stage_if_unreviewed(error, "dflow_route_instruction")
+                })?;
+                validate_dflow_swap_accounts(wallet, ix, &decoded, intent, &auxiliary)
+                    .await
+                    .map_err(|error| {
+                        validation_stage_if_unreviewed(error, "dflow_route_accounts")
+                    })?;
                 route = Some((ix, SwapRouteInstruction::Dflow(decoded)));
             }
             OKX_ROUTER_PROGRAM => {
                 if route.is_some() || candidate.router.as_deref() != Some("okx") {
                     return Err(unsafe_instruction());
                 }
-                let decoded = decode_okx_swap(&data, intent, candidate)?;
-                validate_okx_swap_accounts(wallet, ix, &decoded, intent, &auxiliary).await?;
+                let decoded = decode_okx_swap(&data, intent, candidate).map_err(|error| {
+                    validation_stage_if_unreviewed(error, "okx_route_instruction")
+                })?;
+                validate_okx_swap_accounts(wallet, ix, &decoded, intent, &auxiliary)
+                    .await
+                    .map_err(|error| validation_stage_if_unreviewed(error, "okx_route_accounts"))?;
                 route = Some((ix, SwapRouteInstruction::Okx));
             }
             swap::ASSOCIATED_TOKEN_PROGRAM => {
@@ -1338,8 +1510,8 @@ async fn validate_frozen_intent(
     }
     match decoded {
         SwapRouteInstruction::Jupiter(decoded) => {
-            if u16::from(decoded.platform_fee_bps) != candidate.platform_fee_bps {
-                return Err(unsafe_instruction());
+            if decoded.platform_fee_bps != candidate.platform_fee_bps {
+                return Err(unsafe_instruction_at("platform-fee quote binding"));
             }
             validate_route_token_accounts(
                 wallet,
@@ -1349,12 +1521,17 @@ async fn validate_frozen_intent(
                 &auxiliary,
                 candidate.platform_fee_mint.as_deref(),
             )
-            .await?;
+            .await
+            .map_err(|error| validation_stage_if_unreviewed(error, "jupiter_route_accounts"))?;
             if let Some((destination, amount)) = native_transfer {
                 let source_index = match decoded.variant {
                     swap::SwapInstructionVariant::SharedExactIn
                     | swap::SwapInstructionVariant::SharedExactOut
                     | swap::SwapInstructionVariant::SharedTokenLedgerExactIn => 3,
+                    swap::SwapInstructionVariant::ExactInV2
+                    | swap::SwapInstructionVariant::ExactOutV2 => 1,
+                    swap::SwapInstructionVariant::SharedExactInV2
+                    | swap::SwapInstructionVariant::SharedExactOutV2 => 2,
                     _ => 2,
                 };
                 if intent.input_mint != "native"
@@ -1652,7 +1829,7 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
             swap::COMPUTE_BUDGET_PROGRAM => validate_compute_budget(&data)?,
             swap::ASSOCIATED_TOKEN_PROGRAM => {
                 if data.len() != 1 || data[0] > 1 || ix.accounts.len() != 6 {
-                    return Err(unsafe_instruction());
+                    return Err(unsafe_instruction_at("associated-token instruction layout"));
                 }
                 let a = &ix.accounts;
                 validate_associated_create_accounts(
@@ -1661,7 +1838,10 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                     wallet.address(),
                     allowed_mints,
                     allowed_ata_authorities,
-                )?;
+                )
+                .map_err(|error| {
+                    validation_stage_if_unreviewed(error, "associated-token account graph")
+                })?;
                 if let Some(account) = wallet
                     .runtime()
                     .rpc()
@@ -1674,21 +1854,39 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                     .filter(|v| !v.is_null())
                 {
                     if account.get("owner").and_then(Value::as_str) != Some(a[5].address.as_str()) {
-                        return Err(unsafe_instruction());
+                        return Err(unsafe_instruction_at(
+                            "associated-token existing account program",
+                        ));
                     }
                     let bytes = fin_solana::token::decode_rpc_account_data(
-                        account.get("data").ok_or_else(unsafe_instruction)?,
-                    )?;
+                        account.get("data").ok_or_else(|| {
+                            unsafe_instruction_at("associated-token existing account data")
+                        })?,
+                    )
+                    .map_err(|error| {
+                        validation_stage_if_unreviewed(
+                            error,
+                            "associated-token existing account data",
+                        )
+                    })?;
                     let parsed = fin_solana::token::parse_token_account(
                         &a[5].address,
                         &a[1].address,
                         &bytes,
-                    )?;
+                    )
+                    .map_err(|error| {
+                        validation_stage_if_unreviewed(
+                            error,
+                            "associated-token existing account layout",
+                        )
+                    })?;
                     if parsed.token_owner != a[2].address
                         || parsed.mint != a[3].address
                         || parsed.state != "initialized"
                     {
-                        return Err(unsafe_instruction());
+                        return Err(unsafe_instruction_at(
+                            "associated-token existing account identity",
+                        ));
                     }
                 } else {
                     let mint_info = wallet
@@ -1702,17 +1900,30 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                     let mint_account = mint_info
                         .get("value")
                         .filter(|value| !value.is_null())
-                        .ok_or_else(unsafe_instruction)?;
+                        .ok_or_else(|| unsafe_instruction_at("associated-token mint existence"))?;
                     if mint_account.get("owner").and_then(Value::as_str)
                         != Some(a[5].address.as_str())
                     {
-                        return Err(unsafe_instruction());
+                        return Err(unsafe_instruction_at(
+                            "associated-token mint program binding",
+                        ));
                     }
                     let mint_data = fin_solana::token::decode_rpc_account_data(
-                        mint_account.get("data").ok_or_else(unsafe_instruction)?,
-                    )?;
+                        mint_account.get("data").ok_or_else(|| {
+                            unsafe_instruction_at("associated-token mint account data")
+                        })?,
+                    )
+                    .map_err(|error| {
+                        validation_stage_if_unreviewed(error, "associated-token mint account data")
+                    })?;
                     let account_len =
-                        fin_solana::token::required_token_account_len(&a[5].address, &mint_data)?;
+                        fin_solana::token::required_token_account_len(&a[5].address, &mint_data)
+                            .map_err(|error| {
+                                validation_stage_if_unreviewed(
+                                    error,
+                                    "associated-token rent layout",
+                                )
+                            })?;
                     let rent = wallet
                         .runtime()
                         .rpc()
@@ -1722,11 +1933,11 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         )
                         .await?
                         .as_u64()
-                        .ok_or_else(unsafe_instruction)?;
+                        .ok_or_else(|| unsafe_instruction_at("associated-token rent response"))?;
                     effects.account_funding_lamports = effects
                         .account_funding_lamports
                         .checked_add(rent)
-                        .ok_or_else(unsafe_instruction)?;
+                        .ok_or_else(|| unsafe_instruction_at("associated-token rent total"))?;
                     effects.created_token_accounts.push(CreatedTokenAccount {
                         address: a[1].address.clone(),
                         mint: a[3].address.clone(),
@@ -1743,31 +1954,37 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
             }
             swap::SYSTEM_PROGRAM => {
                 if data.len() != 12
-                    || u32::from_le_bytes(data[..4].try_into().map_err(|_| unsafe_instruction())?)
-                        != 2
+                    || u32::from_le_bytes(
+                        data[..4]
+                            .try_into()
+                            .map_err(|_| unsafe_instruction_at("native transfer envelope"))?,
+                    ) != 2
                     || ix.accounts.len() != 2
                     || ix.accounts[0].address != wallet.address()
                     || !ix.accounts[0].signer
                 {
-                    return Err(unsafe_instruction());
+                    return Err(unsafe_instruction_at("native transfer envelope"));
                 }
-                let amount =
-                    u64::from_le_bytes(data[4..12].try_into().map_err(|_| unsafe_instruction())?);
+                let amount = u64::from_le_bytes(
+                    data[4..12]
+                        .try_into()
+                        .map_err(|_| unsafe_instruction_at("native transfer envelope"))?,
+                );
                 if expected_native_wrap_lamports != Some(amount)
                     || ix.accounts[1].address != native_ata
                 {
-                    return Err(unsafe_instruction());
+                    return Err(unsafe_instruction_at("native wrap amount/account binding"));
                 }
                 effects.wrapped_native_lamports = effects
                     .wrapped_native_lamports
                     .checked_add(amount)
-                    .ok_or_else(unsafe_instruction)?;
+                    .ok_or_else(|| unsafe_instruction_at("native wrap amount total"))?;
             }
             fin_solana::token::TOKEN_PROGRAM_ID | fin_solana::token::TOKEN_2022_PROGRAM_ID => {
                 if data == [17] {
                     if ix.accounts.first().map(|a| a.address.as_str()) != Some(native_ata.as_str())
                     {
-                        return Err(unsafe_instruction());
+                        return Err(unsafe_instruction_at("native sync account binding"));
                     }
                 } else if data == [9] && ix.accounts.len() == 3 {
                     let account = ix.accounts[0].address.as_str();
@@ -1776,7 +1993,7 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         || ix.accounts[2].address != wallet.address()
                         || !ix.accounts[2].signer
                     {
-                        return Err(unsafe_instruction());
+                        return Err(unsafe_instruction_at("native close account graph"));
                     }
                     let info = wallet
                         .runtime()
@@ -1791,23 +2008,30 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         closed_rent = value
                             .get("lamports")
                             .and_then(Value::as_u64)
-                            .ok_or_else(unsafe_instruction)?;
+                            .ok_or_else(|| unsafe_instruction_at("native close account state"))?;
                         let bytes = fin_solana::token::decode_rpc_account_data(
-                            value.get("data").ok_or_else(unsafe_instruction)?,
-                        )?;
+                            value.get("data").ok_or_else(|| {
+                                unsafe_instruction_at("native close account state")
+                            })?,
+                        )
+                        .map_err(|error| {
+                            validation_stage_if_unreviewed(error, "native close account state")
+                        })?;
                         let parsed = fin_solana::token::parse_token_account(
-                            value
-                                .get("owner")
-                                .and_then(Value::as_str)
-                                .ok_or_else(unsafe_instruction)?,
+                            value.get("owner").and_then(Value::as_str).ok_or_else(|| {
+                                unsafe_instruction_at("native close account state")
+                            })?,
                             &native_ata,
                             &bytes,
-                        )?;
+                        )
+                        .map_err(|error| {
+                            validation_stage_if_unreviewed(error, "native close account state")
+                        })?;
                         if parsed.token_owner != wallet.address()
                             || parsed.mint != swap::WRAPPED_SOL_MINT
                             || parsed.amount_atoms != 0
                         {
-                            return Err(unsafe_instruction());
+                            return Err(unsafe_instruction_at("native close account state"));
                         }
                     } else if let Some(created) = effects
                         .funding_accounts
@@ -1831,7 +2055,7 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
                         .closed_wrapped_native_accounts
                         .push(native_ata.clone());
                 } else {
-                    return Err(unsafe_instruction());
+                    return Err(unsafe_instruction_at("unsupported token setup instruction"));
                 }
             }
             MEMO_PROGRAM if data.len() > 566 => return Err(unsafe_instruction()),
@@ -1850,7 +2074,7 @@ pub(crate) async fn validate_auxiliary_instructions_with_authorities(
     if expected_native_wrap_lamports.is_some()
         && effects.wrapped_native_lamports != expected_native_wrap_lamports.unwrap_or_default()
     {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at("native wrap amount total"));
     }
     Ok(effects)
 }
@@ -1878,33 +2102,61 @@ fn validate_associated_create_accounts(
     allowed_authorities: &[String],
 ) -> Result<()> {
     if accounts.len() != 6 {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at("associated-token account count"));
     }
     let [payer_meta, ata, authority, mint, system, token_program] = accounts else {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at("associated-token account count"));
     };
-    if payer_meta.address != payer
-        || !payer_meta.signer
-        || !payer_meta.writable
-        || ata.signer
-        || !ata.writable
-        || !allowed_authorities
-            .iter()
-            .any(|allowed| allowed == &authority.address)
-        || (authority.signer && authority.address != wallet)
-        || mint.signer
-        || system.address != swap::SYSTEM_PROGRAM
-        || system.signer
-        || system.writable
-        || !allowed_mints.iter().any(|allowed| allowed == &mint.address)
-        || (token_program.address != fin_solana::token::TOKEN_PROGRAM_ID
-            && token_program.address != fin_solana::token::TOKEN_2022_PROGRAM_ID)
-        || token_program.signer
-        || token_program.writable
-        || associated_address(&authority.address, &token_program.address, &mint.address)?
-            != ata.address
+    // JupiterZ may use a remote transaction fee payer while the enrolled
+    // wallet independently funds an associated-token account it creates.
+    // Account funding is attributed to this actual payer below and wallet
+    // funding remains subject to the approved cap.
+    if payer_meta.address != payer && payer_meta.address != wallet {
+        return Err(unsafe_instruction_at("associated-token payer identity"));
+    }
+    if !payer_meta.signer || !payer_meta.writable {
+        return Err(unsafe_instruction_at("associated-token payer privileges"));
+    }
+    if ata.signer || !ata.writable {
+        return Err(unsafe_instruction_at("associated-token address privileges"));
+    }
+    if !allowed_authorities
+        .iter()
+        .any(|allowed| allowed == &authority.address)
     {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at(
+            "associated-token authority membership",
+        ));
+    }
+    if authority.signer && authority.address != wallet {
+        return Err(unsafe_instruction_at("associated-token authority signer"));
+    }
+    if mint.signer {
+        return Err(unsafe_instruction_at("associated-token mint privileges"));
+    }
+    if system.address != swap::SYSTEM_PROGRAM || system.signer || system.writable {
+        return Err(unsafe_instruction_at("associated-token system program"));
+    }
+    if !allowed_mints.iter().any(|allowed| allowed == &mint.address) {
+        return Err(unsafe_instruction_at("associated-token mint binding"));
+    }
+    if token_program.address != fin_solana::token::TOKEN_PROGRAM_ID
+        && token_program.address != fin_solana::token::TOKEN_2022_PROGRAM_ID
+    {
+        return Err(unsafe_instruction_at(
+            "associated-token token program identity",
+        ));
+    }
+    if token_program.signer || token_program.writable {
+        return Err(unsafe_instruction_at(
+            "associated-token token program privileges",
+        ));
+    }
+    if associated_address(&authority.address, &token_program.address, &mint.address)
+        .map_err(|error| validation_stage_if_unreviewed(error, "associated-token PDA derivation"))?
+        != ata.address
+    {
+        return Err(unsafe_instruction_at("associated-token PDA binding"));
     }
     Ok(())
 }
@@ -1978,6 +2230,113 @@ fn validate_token_setup(wallet: &str, ix: &NormalizedInstruction, data: &[u8]) -
     Err(unsafe_instruction())
 }
 
+fn validate_order_engine_account_privileges(
+    accounts: &[NormalizedAccountMeta],
+    input_mint: &str,
+    output_mint: &str,
+) -> Result<()> {
+    if accounts.len() < 7 {
+        return Err(unsafe_instruction_at("RFQ account count"));
+    }
+    for (index, account) in accounts[2..6].iter().enumerate() {
+        let native_endpoint = if index < 2 {
+            input_mint == "native"
+        } else {
+            output_mint == "native"
+        };
+        if account.address == ORDER_ENGINE_PROGRAM {
+            // Anchor's optional-account sentinel is the invoked program ID.
+            // An optional account may be absent only for an endpoint explicitly
+            // requested as native; explicit WSOL requests remain SPL swaps.
+            // The sentinel itself is readonly/nonsigner.
+            if !native_endpoint || account.signer || account.writable {
+                return Err(unsafe_instruction_at(
+                    "RFQ native optional account privileges",
+                ));
+            }
+        } else if !account.writable || account.signer {
+            return Err(unsafe_instruction_at("RFQ token account privileges"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DecodedOrderEngineFill {
+    input_amount: u64,
+    output_amount: u64,
+    expire_at: i64,
+    fee_bps: Option<u16>,
+    flags: u8,
+    integrator_fee_bps: u16,
+}
+
+fn decode_order_engine_fill_data(data: &[u8]) -> Result<DecodedOrderEngineFill> {
+    const DISC: [u8; 8] = [168, 96, 183, 163, 92, 10, 40, 160];
+    if data.len() != 32 && data.len() != 37 {
+        return Err(unsafe_instruction_at_with_details(
+            "RFQ instruction data length",
+            json!({"data_len_bytes": data.len().min(4096), "data_len_truncated": data.len() > 4096}),
+        ));
+    }
+    if data[..8] != DISC {
+        return Err(unsafe_instruction_at("RFQ instruction discriminator"));
+    }
+    let input_amount = u64::from_le_bytes(
+        data[8..16]
+            .try_into()
+            .map_err(|_| unsafe_instruction_at("RFQ input amount encoding"))?,
+    );
+    let output_amount = u64::from_le_bytes(
+        data[16..24]
+            .try_into()
+            .map_err(|_| unsafe_instruction_at("RFQ output amount encoding"))?,
+    );
+    let expire_at = i64::from_le_bytes(
+        data[24..32]
+            .try_into()
+            .map_err(|_| unsafe_instruction_at("RFQ expiry encoding"))?,
+    );
+    let (fee_bps, flags, integrator_fee_bps) = if data.len() == 37 {
+        (
+            Some(u16::from_le_bytes([data[32], data[33]])),
+            data[34],
+            u16::from_le_bytes([data[35], data[36]]),
+        )
+    } else {
+        // The published on-chain IDL's legacy Fill args end after expire_at.
+        // Metadata-free fills are only valid when no fee was quoted.
+        (None, 0, 0)
+    };
+    Ok(DecodedOrderEngineFill {
+        input_amount,
+        output_amount,
+        expire_at,
+        fee_bps,
+        flags,
+        integrator_fee_bps,
+    })
+}
+
+fn validate_order_engine_fill_metadata(
+    fill: DecodedOrderEngineFill,
+    expected_fee_bps: u16,
+) -> Result<()> {
+    if fill.fee_bps.unwrap_or_default() != expected_fee_bps {
+        return Err(unsafe_instruction_at("RFQ fee binding"));
+    }
+    // Bit 0 would mark exact-output; bits 2..7 are reserved. Bit 1 only selects
+    // the side for an integrator fee, so either value is harmless when that
+    // separately encoded fee is zero.
+    if fill.flags & 0b0000_0001 != 0 || fill.flags & 0b1111_1100 != 0 {
+        return Err(unsafe_instruction_at("RFQ mode or fee permission flags"));
+    }
+    if fill.integrator_fee_bps != 0 {
+        return Err(unsafe_instruction_at("RFQ integrator fee binding"));
+    }
+    Ok(())
+}
+
 async fn validate_order_engine_fill(
     intent: &SwapIntent,
     candidate: &Candidate,
@@ -1986,57 +2345,91 @@ async fn validate_order_engine_fill(
     data: &[u8],
     auxiliary: &AuxiliaryEffects,
 ) -> Result<()> {
-    const DISC: [u8; 8] = [168, 96, 183, 163, 92, 10, 40, 160];
     const ORDER_ENGINE_PROGRAM: &str = "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH";
-    if data.len() != 32
-        || data[..8] != DISC
-        || ix.program_id != ORDER_ENGINE_PROGRAM
-        || ix.accounts.len() != 11
-        || ix.accounts[0].address != wallet.address()
-        || !ix.accounts[0].signer
-        || !ix.accounts[1].signer
-        || !ix.accounts[0].writable
-        || !ix.accounts[1].writable
-        || ix.accounts[10].address != swap::SYSTEM_PROGRAM
-        || ix.accounts[10].signer
-        || ix.accounts[10].writable
-        || ix.accounts[2..6]
-            .iter()
-            .any(|account| !account.writable || account.signer)
-        || ix.accounts[6..10]
-            .iter()
-            .any(|account| account.signer || account.writable)
-    {
-        return Err(unsafe_instruction());
+    if ix.program_id != ORDER_ENGINE_PROGRAM {
+        return Err(unsafe_instruction_at("RFQ program identity"));
     }
-    let input = u64::from_le_bytes(data[8..16].try_into().map_err(|_| unsafe_instruction())?);
-    let output = u64::from_le_bytes(data[16..24].try_into().map_err(|_| unsafe_instruction())?);
-    let expire = i64::from_le_bytes(data[24..32].try_into().map_err(|_| unsafe_instruction())?);
+    let fill = decode_order_engine_fill_data(data)?;
+    if ix.accounts.len() != 11 {
+        return Err(unsafe_instruction_at_with_details(
+            "RFQ account count",
+            json!({"account_count": ix.accounts.len().min(256), "account_count_truncated": ix.accounts.len() > 256}),
+        ));
+    }
+    if ix.accounts[0].address != wallet.address() {
+        return Err(unsafe_instruction_at("RFQ taker identity"));
+    }
+    for index in [0usize, 1] {
+        let account = &ix.accounts[index];
+        if !account.signer || !account.writable {
+            return Err(unsafe_instruction_at_with_details(
+                "RFQ taker and maker privileges",
+                json!({"account_index": index, "signer": account.signer, "writable": account.writable}),
+            ));
+        }
+    }
+    if ix.accounts[10].address != swap::SYSTEM_PROGRAM {
+        return Err(unsafe_instruction_at("RFQ system program identity"));
+    }
+    if ix.accounts[10].signer || ix.accounts[10].writable {
+        return Err(unsafe_instruction_at_with_details(
+            "RFQ system program privileges",
+            json!({"account_index": 10, "signer": ix.accounts[10].signer, "writable": ix.accounts[10].writable}),
+        ));
+    }
+    for index in 6..10 {
+        let account = &ix.accounts[index];
+        if account.signer || account.writable {
+            return Err(unsafe_instruction_at_with_details(
+                "RFQ fixed account privileges",
+                json!({"account_index": index, "signer": account.signer, "writable": account.writable}),
+            ));
+        }
+    }
+    validate_order_engine_account_privileges(
+        &ix.accounts,
+        &intent.input_mint,
+        &intent.output_mint,
+    )?;
+    validate_order_engine_fill_metadata(fill, candidate.platform_fee_bps)?;
     let (_, minimum) = swap::validate_intent(intent)?;
-    if input
+    if fill.input_amount
         != intent
             .amount_atoms
             .parse::<u64>()
-            .map_err(|_| unsafe_instruction())?
-        || output < minimum
-        || expire <= Utc::now().timestamp()
+            .map_err(|_| unsafe_instruction_at("RFQ input amount binding"))?
+    {
+        return Err(unsafe_instruction_at("RFQ input amount binding"));
+    }
+    if fill.output_amount < minimum {
+        return Err(unsafe_instruction_at("RFQ minimum output binding"));
+    }
+    if fill.expire_at <= Utc::now().timestamp()
         || candidate
             .provider_expire_at
             .as_deref()
             .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.timestamp())
-            != Some(expire)
-        || ix.accounts[6].address != candidate_mint(&intent.input_mint)?
-        || ix.accounts[8].address != candidate_mint(&intent.output_mint)?
+            != Some(fill.expire_at)
     {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at("RFQ expiry binding"));
     }
     let input_mint = candidate_mint(&intent.input_mint)?;
     let output_mint = candidate_mint(&intent.output_mint)?;
+    if candidate
+        .platform_fee_mint
+        .as_deref()
+        .is_some_and(|fee_mint| fee_mint != input_mint && fee_mint != output_mint)
+    {
+        return Err(unsafe_instruction_at("RFQ fee mint binding"));
+    }
+    if ix.accounts[6].address != input_mint || ix.accounts[8].address != output_mint {
+        return Err(unsafe_instruction_at("RFQ mint binding"));
+    }
     let input_program = finalized_mint_program(wallet, &input_mint).await?;
     let output_program = finalized_mint_program(wallet, &output_mint).await?;
     if ix.accounts[7].address != input_program || ix.accounts[9].address != output_program {
-        return Err(unsafe_instruction());
+        return Err(unsafe_instruction_at("RFQ token program binding"));
     }
     for (index, mint, owner, may_be_new) in [
         (2usize, input_mint.as_str(), wallet.address(), true),
@@ -2072,14 +2465,15 @@ async fn validate_order_engine_fill(
                 mint == swap::WRAPPED_SOL_MINT,
                 auxiliary,
             )
-            .await?;
+            .await
+            .map_err(|error| validation_stage_if_unreviewed(error, "RFQ wallet token account"))?;
             let expected_program = if index == 2 {
                 input_program.as_str()
             } else {
                 output_program.as_str()
             };
             if program != expected_program {
-                return Err(unsafe_instruction());
+                return Err(unsafe_instruction_at("RFQ wallet token program"));
             }
         } else {
             validate_owned_token_account(
@@ -2093,7 +2487,8 @@ async fn validate_order_engine_fill(
                     &output_program
                 },
             )
-            .await?;
+            .await
+            .map_err(|error| validation_stage_if_unreviewed(error, "RFQ maker token account"))?;
         }
     }
     Ok(())
@@ -2471,6 +2866,17 @@ async fn validate_route_token_accounts(
     auxiliary: &AuxiliaryEffects,
     fee_mint: Option<&str>,
 ) -> Result<()> {
+    let v2 = matches!(
+        decoded.variant,
+        swap::SwapInstructionVariant::ExactInV2
+            | swap::SwapInstructionVariant::SharedExactInV2
+            | swap::SwapInstructionVariant::ExactOutV2
+            | swap::SwapInstructionVariant::SharedExactOutV2
+    );
+    if v2 {
+        return validate_route_token_accounts_v2(wallet, ix, decoded, intent, auxiliary, fee_mint)
+            .await;
+    }
     let shared = matches!(
         decoded.variant,
         swap::SwapInstructionVariant::SharedExactIn
@@ -2653,6 +3059,201 @@ async fn validate_route_token_accounts(
         validate_non_wallet_fee_account(wallet, fee_address, fee_mint).await?;
     }
     Ok(())
+}
+
+async fn validate_route_token_accounts_v2(
+    wallet: &SolanaWalletAdapter,
+    ix: &NormalizedInstruction,
+    decoded: &DecodedSwapInstruction,
+    intent: &SwapIntent,
+    auxiliary: &AuxiliaryEffects,
+    fee_mint: Option<&str>,
+) -> Result<()> {
+    use swap::SwapInstructionVariant as V;
+    let shared = matches!(decoded.variant, V::SharedExactInV2 | V::SharedExactOutV2);
+    let (
+        source,
+        destination,
+        source_mint,
+        destination_mint,
+        source_program,
+        destination_program,
+        event,
+        program,
+        authority,
+    ) = if shared {
+        (2, 5, 6, 7, 8, 9, 10, 11, Some(0))
+    } else {
+        (1, 2, 3, 4, 5, 6, 8, 9, None)
+    };
+    if ix.accounts.len() <= program {
+        return Err(unsafe_instruction_at("required account positions"));
+    }
+    let account = |index: usize| ix.accounts.get(index).ok_or_else(unsafe_instruction);
+    let sentinel = swap::JUPITER_V6_PROGRAM;
+    validate_v2_account_privileges(&ix.accounts, wallet.address(), shared)?;
+    if account(event)?.address != "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"
+        || account(event)?.signer
+        || account(event)?.writable
+        || account(program)?.address != swap::JUPITER_V6_PROGRAM
+        || account(program)?.signer
+        || account(program)?.writable
+    {
+        return Err(unsafe_instruction_at(
+            "Jupiter event/program identity or privileges",
+        ));
+    }
+    if account(source_mint)?.address != candidate_mint(&intent.input_mint)?
+        || account(destination_mint)?.address != candidate_mint(&intent.output_mint)?
+    {
+        return Err(unsafe_instruction_at("source/destination mint binding"));
+    }
+    let source_address = account(source)?.address.as_str();
+    let destination_address = account(destination)?.address.as_str();
+    let source_token_program = validate_token_account(
+        wallet,
+        source_address,
+        &candidate_mint(&intent.input_mint)?,
+        true,
+        intent.input_mint == "native",
+        auxiliary,
+    )
+    .await?;
+    let destination_token_program = validate_token_account(
+        wallet,
+        destination_address,
+        &candidate_mint(&intent.output_mint)?,
+        false,
+        false,
+        auxiliary,
+    )
+    .await?;
+    let input_mint_program =
+        finalized_mint_program(wallet, &candidate_mint(&intent.input_mint)?).await?;
+    let output_mint_program =
+        finalized_mint_program(wallet, &candidate_mint(&intent.output_mint)?).await?;
+    if account(source_program)?.address != source_token_program
+        || account(destination_program)?.address != destination_token_program
+        || source_token_program != input_mint_program
+        || destination_token_program != output_mint_program
+    {
+        return Err(unsafe_instruction_at(
+            "token program versus finalized mint identity",
+        ));
+    }
+    if let Some(authority_index) = authority {
+        let authority_id = decoded.authority_id.ok_or_else(unsafe_instruction)?;
+        if authority_id >= 16 {
+            return Err(unsafe_instruction_at("shared authority id"));
+        }
+        let program_key = Pubkey::try_from(sentinel).map_err(|_| unsafe_instruction())?;
+        let expected =
+            Pubkey::find_program_address(&[&b"authority"[..], &[authority_id]], &program_key)
+                .0
+                .to_string();
+        if account(authority_index)?.address != expected
+            || account(authority_index)?.signer
+            || account(authority_index)?.writable
+        {
+            return Err(unsafe_instruction_at("shared authority PDA"));
+        }
+        validate_program_token_account(
+            wallet,
+            &account(3)?.address,
+            &expected,
+            &candidate_mint(&intent.input_mint)?,
+        )
+        .await?;
+        validate_program_token_account(
+            wallet,
+            &account(4)?.address,
+            &expected,
+            &candidate_mint(&intent.output_mint)?,
+        )
+        .await?;
+    } else if account(0)?.address != wallet.address() {
+        return Err(unsafe_instruction_at("transfer authority"));
+    }
+    // The V2 IDL's fixed account prefix ends at slot 9 for route_v2 and slot
+    // 11 for shared_accounts_route_v2. Jupiter places platformFeeAccount at
+    // the start of the remaining-account suffix; route/pool metas follow it.
+    if !shared && account(7)?.address != sentinel {
+        return Err(unsafe_instruction_at("optional destination account slot"));
+    }
+    let fee_account = validate_v2_platform_fee_meta(
+        &ix.accounts,
+        shared,
+        decoded.platform_fee_bps,
+        fee_mint,
+        &candidate_mint(&intent.input_mint)?,
+        &candidate_mint(&intent.output_mint)?,
+    )?;
+    if let (Some(fee_account), Some(fee_mint)) = (fee_account, fee_mint) {
+        validate_non_wallet_fee_account(wallet, &fee_account.address, fee_mint).await?;
+    }
+    Ok(())
+}
+
+fn validate_v2_account_privileges(
+    accounts: &[NormalizedAccountMeta],
+    wallet: &str,
+    shared: bool,
+) -> Result<()> {
+    let (authority, source, destination) = if shared { (1, 2, 5) } else { (0, 1, 2) };
+    let account = |index: usize| accounts.get(index).ok_or_else(unsafe_instruction);
+    if has_foreign_route_signer(accounts, wallet) {
+        return Err(unsafe_instruction_at("foreign signer scope"));
+    }
+    if account(authority)?.address != wallet
+        || !account(authority)?.signer
+        || !account(source)?.writable
+        || !account(destination)?.writable
+    {
+        return Err(unsafe_instruction_at(
+            "wallet authority or token-account privileges",
+        ));
+    }
+    if shared && (!account(3)?.writable || !account(4)?.writable) {
+        return Err(unsafe_instruction_at(
+            "shared program token-account privileges",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_v2_platform_fee_meta<'a>(
+    accounts: &'a [NormalizedAccountMeta],
+    shared: bool,
+    fee_bps: u16,
+    fee_mint: Option<&str>,
+    input_mint: &str,
+    output_mint: &str,
+) -> Result<Option<&'a NormalizedAccountMeta>> {
+    if fee_bps == 0 {
+        if fee_mint.is_some() {
+            return Err(unsafe_instruction_at("fee mint without platform fee"));
+        }
+        return Ok(None);
+    }
+    let fee_mint = fee_mint.ok_or_else(|| unsafe_instruction_at("missing platform-fee mint"))?;
+    if fee_mint != input_mint && fee_mint != output_mint {
+        return Err(unsafe_instruction_at(
+            "platform-fee mint differs from swap mints",
+        ));
+    }
+    // route_v2 has ten fixed accounts and shared_accounts_route_v2 has twelve.
+    // Fee account is the first remaining account, ahead of route pool metas.
+    let fee_index = if shared { 12 } else { 10 };
+    let fee_account = accounts.get(fee_index).ok_or_else(|| {
+        unsafe_instruction_at("platform-fee account is missing from remaining accounts")
+    })?;
+    if !fee_account.writable
+        || fee_account.signer
+        || fee_account.address == swap::JUPITER_V6_PROGRAM
+    {
+        return Err(unsafe_instruction_at("platform-fee account privileges"));
+    }
+    Ok(Some(fee_account))
 }
 
 fn has_foreign_route_signer(accounts: &[NormalizedAccountMeta], wallet: &str) -> bool {
@@ -2917,6 +3518,50 @@ fn unsafe_instruction() -> FinError {
         "The provider transaction contains an instruction or account effect outside the reviewed swap envelope.",
         "Request a transaction whose complete instruction set and exact token accounts can be verified.",
     )
+}
+
+fn validation_stage_if_unreviewed(mut error: FinError, validation_stage: &'static str) -> FinError {
+    if error.code == "JUPITER_INSTRUCTION_UNREVIEWED" && error.details.is_none() {
+        error.details = Some(Box::new(json!({"validation_stage": validation_stage})));
+    }
+    error
+}
+
+fn validation_router_context(mut error: FinError, router: Option<&str>) -> FinError {
+    if error.code != "JUPITER_INSTRUCTION_UNREVIEWED" {
+        return error;
+    }
+    let router = match router {
+        Some("metis") => "metis",
+        Some("jupiterz") => "jupiterz",
+        Some("dflow") => "dflow",
+        Some("okx") => "okx",
+        _ => "unknown",
+    };
+    let mut details = error
+        .details
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    details.insert("router".into(), json!(router));
+    error.details = Some(Box::new(Value::Object(details)));
+    error
+}
+
+fn unsafe_instruction_at(validation_stage: &'static str) -> FinError {
+    FinError::new(
+        "JUPITER_INSTRUCTION_UNREVIEWED",
+        "prepare",
+        format!("The Jupiter route failed {validation_stage} validation."),
+        "Request a fresh transaction and review the reported validation stage.",
+    )
+    .with_details(json!({"validation_stage": validation_stage}))
+}
+
+fn unsafe_instruction_at_with_details(validation_stage: &'static str, details: Value) -> FinError {
+    let mut details = details.as_object().cloned().unwrap_or_default();
+    details.insert("validation_stage".into(), json!(validation_stage));
+    unsafe_instruction().with_details(Value::Object(details))
 }
 
 struct MetaExecuteSender {
@@ -3336,7 +3981,24 @@ fn verify_swap_effects(
                 .checked_add(f.lamports)
                 .ok_or_else(bad_provider_response)
         })?;
-    if wallet_rent_net > 0 {
+    let has_matching_wallet_funding_debit = wallet_rent_gross > 0
+        && preview.intent.expected.iter().any(|constraint| {
+            matches!(
+                constraint,
+                EffectConstraint::Debit {
+                    resource: expected_resource,
+                    asset: expected_asset,
+                    maximum_debit,
+                } if expected_resource == &resource
+                    && expected_asset == &native
+                    && maximum_debit == &fin_domain::Quantity::from_u64(wallet_rent_gross)
+            )
+        });
+    // Keep the debit expectation satisfiable for temporary wrapped-SOL
+    // accounts that were funded and closed in this same transaction. The
+    // finalized account and wallet balance checks establish that net rent is zero;
+    // only the immutable, matching preview constraint justifies emitting zero.
+    if wallet_rent_net > 0 || (wallet_rent_net == 0 && has_matching_wallet_funding_debit) {
         effects.push(fin_domain::FinancialEffect::CashDebit {
             resource: resource.clone(),
             amount: Amount {
@@ -3944,6 +4606,28 @@ fn normalize_asset(mint: &str) -> String {
     }
 }
 
+fn frozen_candidate_cache_key(prepared: &PreparedOperation) -> Option<[u8; 32]> {
+    let mut binding = prepared.binding.clone();
+    if let Some(binding) = binding.as_object_mut() {
+        binding.remove(fin_domain::financial_plans::PLAN_METADATA_KEY);
+        binding.remove(fin_domain::boundaries::BOUNDARY_METADATA_KEY);
+    }
+    // Key every transaction-affecting input and the original preview lifetime.
+    // Valuation and presentation may be enriched by the engine after revalidation;
+    // authority/freshness are independently checked by its handoff and journal.
+    let encoded = serde_json::to_vec(&(
+        &prepared.operation,
+        prepared.operation_version,
+        &prepared.input,
+        binding,
+        &prepared.intent,
+        &prepared.observed_at,
+        &prepared.expires_at,
+    ))
+    .ok()?;
+    Some(Sha256::digest(encoded).into())
+}
+
 fn parse_atoms(value: &str) -> Result<u64> {
     if value.is_empty() || value.len() > 20 || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad_provider_response());
@@ -3975,6 +4659,337 @@ fn bad_provider_response() -> FinError {
         "Jupiter returned incomplete or invalid transaction data.",
         "Request a fresh quote and review its exact transaction before approval.",
     )
+}
+
+#[cfg(test)]
+mod validation_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn unreviewed_diagnostics_add_only_stage_and_allowlisted_router() {
+        let error = validation_router_context(
+            validation_stage_if_unreviewed(unsafe_instruction(), "jupiter_route_accounts"),
+            Some("metis"),
+        );
+        assert_eq!(error.code, "JUPITER_INSTRUCTION_UNREVIEWED");
+        assert_eq!(
+            error.details.as_deref().unwrap(),
+            &json!({"validation_stage":"jupiter_route_accounts","router":"metis"})
+        );
+    }
+
+    #[test]
+    fn diagnostics_preserve_specific_stage_and_do_not_modify_other_errors() {
+        let specific = unsafe_instruction_at("platform-fee quote binding");
+        let specific = validation_router_context(
+            validation_stage_if_unreviewed(specific, "fallback"),
+            Some("unexpected-provider-value"),
+        );
+        assert_eq!(
+            specific.details.as_deref().unwrap(),
+            &json!({"validation_stage":"platform-fee quote binding","router":"unknown"})
+        );
+
+        let unrelated = validation_stage_if_unreviewed(bad_provider_response(), "fallback");
+        assert_eq!(unrelated.code, "JUPITER_RESPONSE_INVALID");
+        assert!(unrelated.details.is_none());
+    }
+
+    #[test]
+    fn rfq_diagnostic_details_only_include_bounded_shape_and_privileges() {
+        let error = unsafe_instruction_at_with_details(
+            "RFQ fixed account privileges",
+            json!({"account_index": 8, "signer": false, "writable": true}),
+        );
+        assert_eq!(
+            error.details.as_deref().unwrap(),
+            &json!({
+                "validation_stage":"RFQ fixed account privileges",
+                "account_index":8,
+                "signer":false,
+                "writable":true
+            })
+        );
+        let serialized = serde_json::to_string(error.details.as_deref().unwrap()).unwrap();
+        assert!(!serialized.contains("address"));
+        assert!(!serialized.contains("instruction_data"));
+    }
+}
+
+#[cfg(test)]
+mod order_engine_privilege_tests {
+    use super::*;
+
+    #[test]
+    fn native_optional_sentinel_is_readonly_and_spl_accounts_remain_writable() {
+        let meta = |address: &str, signer, writable| NormalizedAccountMeta {
+            address: address.to_owned(),
+            signer,
+            writable,
+        };
+        let mut accounts = vec![meta("account", false, true); 11];
+        accounts[2] = meta(ORDER_ENGINE_PROGRAM, false, false);
+        accounts[3] = meta("input-maker-account", false, true);
+        accounts[4] = meta("output-wallet-account", false, true);
+        accounts[5] = meta("output-maker-account", false, true);
+        accounts[6] = meta("input-mint", false, false);
+
+        assert!(
+            validate_order_engine_account_privileges(&accounts, "native", "output-mint",).is_ok()
+        );
+
+        let mut native_output = accounts.clone();
+        native_output[2] = meta("input-wallet-account", false, true);
+        native_output[4] = meta(ORDER_ENGINE_PROGRAM, false, false);
+        assert!(
+            validate_order_engine_account_privileges(&native_output, "input-mint", "native",)
+                .is_ok()
+        );
+
+        // An explicit WSOL SPL request does not authorize the native sentinel.
+        assert!(
+            validate_order_engine_account_privileges(
+                &accounts,
+                swap::WRAPPED_SOL_MINT,
+                "output-mint",
+            )
+            .is_err()
+        );
+
+        let mut maker_sentinel = accounts.clone();
+        maker_sentinel[3] = meta(ORDER_ENGINE_PROGRAM, false, false);
+        assert!(
+            validate_order_engine_account_privileges(&maker_sentinel, "native", "output-mint",)
+                .is_ok()
+        );
+
+        let mut writable_sentinel = accounts.clone();
+        writable_sentinel[2].writable = true;
+        assert!(
+            validate_order_engine_account_privileges(&writable_sentinel, "native", "output-mint",)
+                .is_err()
+        );
+
+        let mut readonly_spl_account = accounts.clone();
+        readonly_spl_account[4].writable = false;
+        assert!(
+            validate_order_engine_account_privileges(
+                &readonly_spl_account,
+                "native",
+                "output-mint",
+            )
+            .is_err()
+        );
+
+        let mut sentinel_signer = accounts;
+        sentinel_signer[2].signer = true;
+        assert!(
+            validate_order_engine_account_privileges(&sentinel_signer, "native", "output-mint",)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod order_engine_fill_data_tests {
+    use super::*;
+
+    fn fill_data(metadata: Option<(u16, u8, u16)>) -> Vec<u8> {
+        let mut data = vec![168, 96, 183, 163, 92, 10, 40, 160];
+        data.extend_from_slice(&1_000u64.to_le_bytes());
+        data.extend_from_slice(&2_000u64.to_le_bytes());
+        data.extend_from_slice(&1_800_000_000i64.to_le_bytes());
+        if let Some((fee_bps, flags, integrator_fee_bps)) = metadata {
+            data.extend_from_slice(&fee_bps.to_le_bytes());
+            data.push(flags);
+            data.extend_from_slice(&integrator_fee_bps.to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn fill_decoder_consumes_pinned_legacy_and_current_metadata_formats() {
+        let legacy = decode_order_engine_fill_data(&fill_data(None)).unwrap();
+        assert_eq!(legacy.input_amount, 1_000);
+        assert_eq!(legacy.output_amount, 2_000);
+        assert_eq!(legacy.expire_at, 1_800_000_000);
+        assert_eq!(legacy.fee_bps, None);
+        validate_order_engine_fill_metadata(legacy, 0).unwrap();
+        assert!(validate_order_engine_fill_metadata(legacy, 1).is_err());
+
+        let zero_fee = decode_order_engine_fill_data(&fill_data(Some((0, 0, 0)))).unwrap();
+        validate_order_engine_fill_metadata(zero_fee, 0).unwrap();
+        let at_approved_max = decode_order_engine_fill_data(&fill_data(Some((2, 0, 0)))).unwrap();
+        validate_order_engine_fill_metadata(at_approved_max, 2).unwrap();
+        assert!(validate_order_engine_fill_metadata(at_approved_max, 1).is_err());
+
+        let output_fee_side = decode_order_engine_fill_data(&fill_data(Some((0, 2, 0)))).unwrap();
+        validate_order_engine_fill_metadata(output_fee_side, 0).unwrap();
+    }
+
+    #[test]
+    fn fill_decoder_rejects_unknown_lengths_and_unapproved_metadata() {
+        let mut extra_trailing_byte = fill_data(Some((0, 0, 0)));
+        extra_trailing_byte.push(0);
+        assert!(decode_order_engine_fill_data(&extra_trailing_byte).is_err());
+        assert!(decode_order_engine_fill_data(&fill_data(None)[..31]).is_err());
+
+        for flags in [1, 4, 255] {
+            let decoded = decode_order_engine_fill_data(&fill_data(Some((0, flags, 0)))).unwrap();
+            assert!(validate_order_engine_fill_metadata(decoded, 0).is_err());
+        }
+        let integrator_fee = decode_order_engine_fill_data(&fill_data(Some((0, 0, 1)))).unwrap();
+        assert!(validate_order_engine_fill_metadata(integrator_fee, 0).is_err());
+
+        let mut wrong_discriminator = fill_data(None);
+        wrong_discriminator[0] ^= 1;
+        assert!(decode_order_engine_fill_data(&wrong_discriminator).is_err());
+    }
+}
+
+#[cfg(test)]
+mod frozen_candidate_cache_tests {
+    use super::*;
+
+    fn prepared() -> PreparedOperation {
+        PreparedOperation {
+            operation: OP_SWAP.into(),
+            input: json!({"wallet":"wallet-a","amount_atoms":"100"}),
+            binding: json!({"message_sha256":"message-a","request_id":"request-a","transaction_base64":"unsigned-tx"}),
+            summary: "synthetic swap".into(),
+            checks: vec![],
+            warnings: vec![],
+            observed_at: "2026-10-13T10:00:00Z".into(),
+            expires_at: "2026-10-13T10:00:20Z".into(),
+            valuation: None,
+            intent: FinancialIntent::default(),
+            operation_version: 1,
+            action_deadline: None,
+        }
+    }
+
+    #[test]
+    fn cache_key_binds_candidate_input_intent_and_freshness() {
+        let base = prepared();
+        let key = frozen_candidate_cache_key(&base).unwrap();
+
+        let mut changed_input = base.clone();
+        changed_input.input["amount_atoms"] = json!("101");
+        assert_ne!(frozen_candidate_cache_key(&changed_input), Some(key));
+
+        let mut changed_message = base.clone();
+        changed_message.binding["message_sha256"] = json!("message-b");
+        assert_ne!(frozen_candidate_cache_key(&changed_message), Some(key));
+
+        let mut changed_intent = base.clone();
+        changed_intent
+            .intent
+            .locks
+            .push(ResourceId("solana:wallet-a".into()));
+        assert_ne!(frozen_candidate_cache_key(&changed_intent), Some(key));
+
+        let mut changed_expiry = base.clone();
+        changed_expiry.expires_at = "2026-10-13T10:00:19Z".into();
+        assert_ne!(frozen_candidate_cache_key(&changed_expiry), Some(key));
+
+        let mut broker_marked = base;
+        broker_marked.binding[fin_domain::financial_plans::PLAN_METADATA_KEY] =
+            json!({"plan_id":"plan"});
+        broker_marked.binding[fin_domain::boundaries::BOUNDARY_METADATA_KEY] =
+            json!({"authorization_id":"boundary"});
+        assert_eq!(frozen_candidate_cache_key(&broker_marked), Some(key));
+
+        let mut enriched = broker_marked;
+        enriched.valuation = Some(Valuation {
+            movement_usd_micros: fin_domain::Quantity::zero(),
+            maximum_fee_usd_micros: fin_domain::Quantity::zero(),
+            additional_allocation_usd_micros: fin_domain::Quantity::zero(),
+            observed_at: "2026-10-13T10:00:01Z".into(),
+            source: "engine-enrichment".into(),
+            prices: vec![],
+        });
+        enriched.summary = "presentation enrichment".into();
+        assert_eq!(frozen_candidate_cache_key(&enriched), Some(key));
+    }
+
+    #[test]
+    fn one_shot_cache_is_bounded_expires_monotonically_and_consumes_once() {
+        let cache = OneShotCache::default();
+        let now = Instant::now();
+        let key = |index: u8| [index; 32];
+        for index in 0..FROZEN_CACHE_CAPACITY as u8 {
+            cache.insert_at(key(index), index, now);
+        }
+        cache.insert_at(key(4), 4, now);
+        assert_eq!(cache.take_at(key(0), now), None);
+        assert_eq!(cache.take_at(key(1), now), Some(1));
+        assert_eq!(cache.take_at(key(1), now), None);
+
+        cache.insert_at(key(5), 5, now);
+        assert_eq!(
+            cache.take_at(key(5), now + FROZEN_CACHE_TTL),
+            None,
+            "an expired cache entry must be discarded"
+        );
+    }
+}
+
+#[cfg(test)]
+mod router_build_response_tests {
+    use super::*;
+
+    #[test]
+    fn router_build_accepts_informational_fetched_at_metadata() {
+        let response: RouterBuildResponse = serde_json::from_value(json!({
+            "inputMint": "So11111111111111111111111111111111111111112",
+            "outputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "inAmount": "18000000",
+            "outAmount": "12345",
+            "otherAmountThreshold": "12000",
+            "swapMode": "ExactIn",
+            "slippageBps": 50,
+            "computeBudgetInstructions": [],
+            "setupInstructions": [],
+            "swapInstruction": {"programId": "11111111111111111111111111111111", "accounts": [], "data": ""},
+            "cleanupInstruction": null,
+            "otherInstructions": [],
+            "tipInstruction": null,
+            "addressesByLookupTableAddress": {},
+            "blockhashWithMetadata": {
+                "blockhash": vec![7u8; 32],
+                "lastValidBlockHeight": 1000,
+                "fetchedAt": {"secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 123_000_000}
+            }
+        }))
+        .expect("current Swap API V2 blockhash metadata shape should deserialize");
+
+        assert_eq!(response.blockhash_with_metadata.blockhash, vec![7; 32]);
+        assert_eq!(
+            response.blockhash_with_metadata.last_valid_block_height,
+            1000
+        );
+        assert!(response.blockhash_with_metadata.fetched_at.is_some());
+    }
+
+    #[test]
+    fn router_build_keeps_fetched_at_optional_and_metadata_strict() {
+        let without_fetch_time = serde_json::from_value::<BlockhashMetadata>(json!({
+            "blockhash": vec![9u8; 32],
+            "lastValidBlockHeight": 1001
+        }))
+        .unwrap();
+        assert!(without_fetch_time.fetched_at.is_none());
+
+        assert!(
+            serde_json::from_value::<BlockhashMetadata>(json!({
+                "blockhash": vec![9u8; 32],
+                "lastValidBlockHeight": 1001,
+                "fetchedAt": {"secs_since_epoch": 1, "nanos_since_epoch": 0},
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4128,6 +5143,96 @@ mod valuation_tests {
     }
 
     #[test]
+    fn v2_route_account_privileges_and_platform_fee_prefix_are_bound() {
+        use fin_solana::transaction::NormalizedAccountMeta as Meta;
+
+        let wallet = "wallet";
+        let input = "input-mint";
+        let output = "output-mint";
+        let fee = "fee-token-account";
+        let other = "route-pool-account";
+        let meta = |address: &str, signer, writable| Meta {
+            address: address.to_owned(),
+            signer,
+            writable,
+        };
+
+        // route_v2 fixed prefix has ten accounts; first remaining account is
+        // the fee account, while later route accounts may be readonly.
+        let mut route = vec![meta(other, false, false); 12];
+        route[0] = meta(wallet, true, true);
+        route[1] = meta("source", false, true);
+        route[2] = meta("destination", false, true);
+        route[10] = meta(fee, false, true);
+        assert!(validate_v2_account_privileges(&route, wallet, false).is_ok());
+        let fee_meta = validate_v2_platform_fee_meta(&route, false, 2, Some(output), input, output)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fee_meta.address, fee);
+
+        let mut wrong_fee_slot = route.clone();
+        wrong_fee_slot[10] = meta("route-pool-account", false, true);
+        wrong_fee_slot[11] = meta(fee, false, true);
+        assert_eq!(
+            validate_v2_platform_fee_meta(&wrong_fee_slot, false, 2, Some(output), input, output)
+                .unwrap()
+                .unwrap()
+                .address,
+            "route-pool-account"
+        );
+        // Account identity/mint is checked against finalized token-account
+        // data by validate_non_wallet_fee_account in the async validator.
+        assert!(
+            validate_v2_platform_fee_meta(&route, false, 2, Some("foreign-mint"), input, output)
+                .is_err()
+        );
+        assert!(validate_v2_platform_fee_meta(&route, false, 2, None, input, output).is_err());
+
+        let mut readonly_fee = route.clone();
+        readonly_fee[10].writable = false;
+        assert!(
+            validate_v2_platform_fee_meta(&readonly_fee, false, 2, Some(output), input, output)
+                .is_err()
+        );
+        let mut fee_signer = route.clone();
+        fee_signer[10].signer = true;
+        assert!(
+            validate_v2_platform_fee_meta(&fee_signer, false, 2, Some(output), input, output)
+                .is_err()
+        );
+
+        let mut readonly_user_source = route.clone();
+        readonly_user_source[1].writable = false;
+        assert!(validate_v2_account_privileges(&readonly_user_source, wallet, false).is_err());
+        let mut foreign_signer = route.clone();
+        foreign_signer[11].signer = true;
+        assert!(validate_v2_account_privileges(&foreign_signer, wallet, false).is_err());
+
+        // shared_accounts_route_v2 has twelve fixed accounts; fee is first
+        // after those, with both shared token accounts writable.
+        let mut shared = vec![meta(other, false, false); 14];
+        shared[1] = meta(wallet, true, true);
+        shared[2] = meta("source", false, true);
+        shared[3] = meta("program-source", false, true);
+        shared[4] = meta("program-destination", false, true);
+        shared[5] = meta("destination", false, true);
+        shared[12] = meta(fee, false, true);
+        assert!(validate_v2_account_privileges(&shared, wallet, true).is_ok());
+        assert_eq!(
+            validate_v2_platform_fee_meta(&shared, true, 2, Some(input), input, output)
+                .unwrap()
+                .unwrap()
+                .address,
+            fee
+        );
+        for index in [3, 4] {
+            let mut tampered = shared.clone();
+            tampered[index].writable = false;
+            assert!(validate_v2_account_privileges(&tampered, wallet, true).is_err());
+        }
+    }
+
+    #[test]
     fn associated_account_graph_binds_system_program_payer_and_authority() {
         use fin_solana::transaction::NormalizedAccountMeta as Meta;
 
@@ -4152,6 +5257,21 @@ mod valuation_tests {
         let authorities = vec![wallet.to_owned()];
         validate_associated_create_accounts(&valid, wallet, wallet, &mints, &authorities).unwrap();
 
+        // A sponsored transaction may have a distinct fee payer while the
+        // enrolled wallet funds its own exact ATA. Both must still be a
+        // writable signer, and the rest of the ATA account graph is unchanged.
+        let sponsor = "SysvarRent111111111111111111111111111111111";
+        let mut wallet_funded_ata = valid.clone();
+        wallet_funded_ata[0] = meta(wallet, true, true);
+        validate_associated_create_accounts(
+            &wallet_funded_ata,
+            sponsor,
+            wallet,
+            &mints,
+            &authorities,
+        )
+        .unwrap();
+
         let mut wrong_system = valid.clone();
         wrong_system[4].address = "SysvarRent111111111111111111111111111111111".into();
         assert!(
@@ -4166,27 +5286,33 @@ mod valuation_tests {
         );
 
         let mut wrong_payer = valid.clone();
-        wrong_payer[0].address = "SysvarRent111111111111111111111111111111111".into();
-        assert!(validate_associated_create_accounts(
+        wrong_payer[0].address = "Stake11111111111111111111111111111111111111".into();
+        let payer_error = validate_associated_create_accounts(
             &wrong_payer,
+            sponsor,
+            wallet,
+            &mints,
+            &authorities,
+        )
+        .unwrap_err();
+        assert_eq!(
+            payer_error.details.as_deref().unwrap(),
+            &json!({"validation_stage":"associated-token payer identity"})
+        );
+
+        let mut unapproved_authority = valid.clone();
+        unapproved_authority[2].address = "SysvarRent111111111111111111111111111111111".into();
+        let authority_error = validate_associated_create_accounts(
+            &unapproved_authority,
             wallet,
             wallet,
             &mints,
             &authorities,
         )
-        .is_err());
-
-        let mut unapproved_authority = valid.clone();
-        unapproved_authority[2].address = "SysvarRent111111111111111111111111111111111".into();
-        assert!(
-            validate_associated_create_accounts(
-                &unapproved_authority,
-                wallet,
-                wallet,
-                &mints,
-                &authorities,
-            )
-            .is_err()
+        .unwrap_err();
+        assert_eq!(
+            authority_error.details.as_deref().unwrap(),
+            &json!({"validation_stage":"associated-token authority membership"})
         );
 
         let mut extra_signer = valid.clone();
@@ -4482,6 +5608,94 @@ mod valuation_tests {
                 .filter(|effect| matches!(effect, fin_domain::FinancialEffect::UsableCredit { .. }))
                 .count(),
             1
+        );
+        assert!(!verified.effects.iter().any(|effect| matches!(effect,
+            fin_domain::FinancialEffect::CashDebit { amount, .. } if amount.atoms.is_zero())));
+
+        // A temporary WSOL account created and closed in one transaction has
+        // gross rent funding but a zero net wallet debit. The immutable preview
+        // still includes the approved gross Debit constraint, so emit an exact
+        // zero CashDebit after the finalized account and wallet proofs validate.
+        let mut transient_record = record.clone();
+        let transient_preview = transient_record.preview.as_mut().unwrap();
+        transient_preview.binding["funding_accounts"] = json!([refund.clone()]);
+        transient_preview.binding["account_funding_lamports"] = json!(refund.lamports);
+        transient_preview.intent.debits = vec![ResourceAmount {
+            resource: resource.clone(),
+            amount: Amount {
+                asset: native.clone(),
+                atoms: fin_domain::Quantity::from_u64(refund.lamports),
+            },
+        }];
+        let conversion = transient_preview.intent.expected[0].clone();
+        transient_preview.intent.expected = vec![
+            conversion,
+            EffectConstraint::Debit {
+                resource: resource.clone(),
+                asset: native.clone(),
+                maximum_debit: fin_domain::Quantity::from_u64(refund.lamports),
+            },
+        ];
+        let mut transient_proof = proof.clone();
+        transient_proof.pre_balances_lamports[0] = 1_000_000_000;
+        transient_proof.post_balances_lamports[0] = 1_019_995_000;
+        transient_proof.pre_balances_lamports[2] = 0;
+        transient_proof.post_balances_lamports[2] = 0;
+        transient_proof
+            .pre_token_balances
+            .retain(|row| row["accountIndex"] != 2);
+        transient_proof
+            .post_token_balances
+            .retain(|row| row["accountIndex"] != 2);
+        let transient = verify_swap_effects(
+            &transient_record,
+            &submission,
+            "synthetic-signature",
+            42,
+            5_000,
+            &transient_proof,
+        )
+        .unwrap();
+        assert!(transient.effects.iter().any(|effect| matches!(effect,
+            fin_domain::FinancialEffect::CashDebit { resource: actual_resource, amount }
+                if actual_resource == &resource && amount.asset == native && amount.atoms.is_zero())));
+        assert!(transient.effects.iter().any(|effect| matches!(effect,
+            fin_domain::FinancialEffect::Cost { amount, .. } if amount.atoms.as_str() == "5000")));
+
+        let mut malformed = transient_proof.clone();
+        malformed.post_balances_lamports[2] = 1;
+        assert!(
+            verify_swap_effects(
+                &transient_record,
+                &submission,
+                "synthetic-signature",
+                42,
+                5_000,
+                &malformed,
+            )
+            .is_err()
+        );
+
+        let mut without_bound = transient_record.clone();
+        without_bound
+            .preview
+            .as_mut()
+            .unwrap()
+            .intent
+            .expected
+            .retain(|constraint| !matches!(constraint, EffectConstraint::Debit { .. }));
+        let unbound_effects = verify_swap_effects(
+            &without_bound,
+            &submission,
+            "synthetic-signature",
+            42,
+            5_000,
+            &transient_proof,
+        )
+        .unwrap();
+        assert!(
+            !unbound_effects.effects.iter().any(|effect| matches!(effect,
+            fin_domain::FinancialEffect::CashDebit { amount, .. } if amount.atoms.is_zero()))
         );
 
         let mut bad_output = proof.clone();

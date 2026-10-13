@@ -107,6 +107,17 @@ Wallet-funded Kraken deposits require correlated usable venue credit. A wallet t
 
 ## Solana and Jupiter
 
+Binance and Kraken funding can reuse an enrolled Solana mainnet-beta wallet.
+Discover the exact enabled SOL/USDC route, destination and minimums first.
+`binance.deposit` selects Binance `network: "SOL"`, an exact USDC `token` mint,
+and `maxFeeSol`; `kraken.deposit` selects `network: "solana"`,
+`cluster: "mainnet-beta"`, the discovered `methodId`, and an exact USDC `mint`.
+Native SOL omits the mint. Use `maxAccountFundingSol` to bound refundable account
+creation separately from fees. Do not supply EVM chain/fee fields on these routes.
+Withdrawals reuse the venue's existing operations and saved destination rules.
+Require finalized recipient effects; deposits also require correlated usable
+exchange credit. An uncertain source or delayed credit keeps its original ID.
+
 Inspect installed discovery before using `jupiter.*`; support depends on the
 installed build. Solana wallet requests select `"network":"solana"` and
 `"cluster":"mainnet-beta"`. Accounting uses `solana:mainnet-beta` and exact,

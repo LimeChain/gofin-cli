@@ -43,6 +43,73 @@ const SWAP_OUTPUT_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const PYUSD_MINT: &str = "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo";
 const ASSOCIATED_TOKEN_PROGRAM: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const WSOL_ACCOUNT_RENT_LAMPORTS: u64 = 2_039_280;
+const ROUTE_V2_DISCRIMINATOR: [u8; 8] = [187, 100, 250, 204, 49, 196, 175, 20];
+const SHARED_ROUTE_V2_DISCRIMINATOR: [u8; 8] = [209, 152, 83, 147, 124, 254, 216, 233];
+const ORDER_ENGINE_PROGRAM: &str = "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH";
+const ORDER_ENGINE_FILL_DISCRIMINATOR: [u8; 8] = [168, 96, 183, 163, 92, 10, 40, 160];
+const JUPITERZ_SYNTHETIC_MAKER: &str = "Gymcte79ALGtFrWybRxqb7M7uRjnbjgaHjGgQf1v4qB8";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureSwapLayout {
+    Legacy,
+    RouteV2,
+    SharedAccountsRouteV2,
+    JupiterZ,
+    JupiterZNativeInput,
+    JupiterZNativeOutput,
+}
+
+impl FixtureSwapLayout {
+    fn is_jupiterz(self) -> bool {
+        matches!(
+            self,
+            Self::JupiterZ | Self::JupiterZNativeInput | Self::JupiterZNativeOutput
+        )
+    }
+
+    fn selected(path: &str, amount: u64, input_mint: &str, output_mint: &str) -> Self {
+        match std::env::var("FIN_DEV_SOLANA_FIXTURE_JUPITER_LAYOUT").as_deref() {
+            Ok("route_v2") => Self::RouteV2,
+            Ok("shared_accounts_route_v2") => Self::SharedAccountsRouteV2,
+            Ok("auto_spot_v2")
+                if amount == 20_000_000
+                    && input_mint == SWAP_INPUT_MINT
+                    && output_mint == SWAP_OUTPUT_MINT =>
+            {
+                if path.starts_with("/swap/v2/build?") {
+                    Self::RouteV2
+                } else if path.starts_with("/swap/v2/order?") {
+                    Self::SharedAccountsRouteV2
+                } else {
+                    Self::Legacy
+                }
+            }
+            _ => Self::Legacy,
+        }
+    }
+}
+
+// Settlement uses the fixture's pinned IDL offsets and scenario values, so a
+// production decoder regression cannot also redefine what the fake RPC accepts.
+fn fixture_swap_fields(data: &[u8]) -> Option<(u64, u64, usize, usize)> {
+    if data.starts_with(&ROUTE_V2_DISCRIMINATOR) {
+        Some((
+            u64::from_le_bytes(data.get(8..16)?.try_into().ok()?),
+            u64::from_le_bytes(data.get(16..24)?.try_into().ok()?),
+            1,
+            2,
+        ))
+    } else if data.starts_with(&SHARED_ROUTE_V2_DISCRIMINATOR) {
+        Some((
+            u64::from_le_bytes(data.get(9..17)?.try_into().ok()?),
+            u64::from_le_bytes(data.get(17..25)?.try_into().ok()?),
+            2,
+            5,
+        ))
+    } else {
+        None
+    }
+}
 
 pub fn applications() -> Result<(BrokerConfigV2, fin_broker::ProtectedApplications)> {
     let (config, applications, _, _) = applications_with_fixture()?;
@@ -172,6 +239,8 @@ struct StoredTransaction {
 struct FixtureState {
     wallet: String,
     lamports: u64,
+    #[serde(default = "default_sponsor_lamports")]
+    sponsor_lamports: u64,
     #[serde(default)]
     blockhash_counter: u64,
     transactions: Vec<StoredTransaction>,
@@ -186,8 +255,14 @@ struct FixtureState {
     perps_state: Option<Value>,
     #[serde(default)]
     perps_getblock_fault: Option<String>,
+    #[serde(default)]
+    rpc_method_counts: BTreeMap<String, u64>,
     #[serde(skip)]
     meta_execution_in_progress: bool,
+}
+
+fn default_sponsor_lamports() -> u64 {
+    1_000_000_000
 }
 
 struct FixtureRpc(Mutex<FixtureState>);
@@ -344,19 +419,35 @@ fn transaction_swap_matches(
             if program.to_string() != fin_jupiter::swap::JUPITER_V6_PROGRAM {
                 return false;
             }
-            let Ok(decoded) = fin_jupiter::swap::decode_swap_instruction(&instruction.data) else {
-                return false;
-            };
-            if decoded.input_amount != Some(amount) {
+            let (actual_input, actual_output, source_index, destination_index) =
+                if let Some((input, _, source, destination)) =
+                    fixture_swap_fields(&instruction.data)
+                {
+                    let (_, output, _, _) = fixture_swap_fields(&instruction.data).unwrap();
+                    (input, output, source, destination)
+                } else {
+                    let Ok(decoded) = fin_jupiter::swap::decode_swap_instruction(&instruction.data)
+                    else {
+                        return false;
+                    };
+                    let shared = matches!(
+                        decoded.variant,
+                        fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
+                            | fin_jupiter::swap::SwapInstructionVariant::SharedExactOut
+                            | fin_jupiter::swap::SwapInstructionVariant::SharedTokenLedgerExactIn
+                    );
+                    (
+                        decoded.input_amount.unwrap_or_default(),
+                        decoded.quoted_output,
+                        if shared { 3 } else { 2 },
+                        if shared { 6 } else { 3 },
+                    )
+                };
+            if actual_input != amount
+                || swap_output_amount(amount, input_mint, output_mint).ok() != Some(actual_output)
+            {
                 return false;
             }
-            let shared = matches!(
-                decoded.variant,
-                fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
-                    | fin_jupiter::swap::SwapInstructionVariant::SharedExactOut
-                    | fin_jupiter::swap::SwapInstructionVariant::SharedTokenLedgerExactIn
-            );
-            let (source_index, destination_index) = if shared { (3, 6) } else { (2, 3) };
             let Some(source_index) = instruction
                 .accounts
                 .get(source_index)
@@ -508,10 +599,71 @@ fn token_balance(
     decimals: u8,
     amount: u64,
 ) -> Value {
-    json!({"accountIndex":index,"mint":mint,"owner":owner,"programId":token_program,"uiTokenAmount":{"amount":amount.to_string(),"decimals":decimals}})
+    // Solana RPC commonly returns both exact atoms and lossy display fields.
+    // Include both so settlement tests ensure accounting uses `amount`, never
+    // the floating-point UI representation.
+    let scale = 10u64.pow(u32::from(decimals));
+    let whole = amount / scale;
+    let fraction = amount % scale;
+    let ui_amount_string = if decimals == 0 {
+        whole.to_string()
+    } else {
+        let fractional = format!("{fraction:0width$}", width = usize::from(decimals));
+        let trimmed = fractional.trim_end_matches('0');
+        if trimmed.is_empty() {
+            whole.to_string()
+        } else {
+            format!("{whole}.{trimmed}")
+        }
+    };
+    let ui_amount = ui_amount_string.parse::<f64>().unwrap_or_default();
+    json!({"accountIndex":index,"mint":mint,"owner":owner,"programId":token_program,"uiTokenAmount":{"amount":amount.to_string(),"decimals":decimals,"uiAmount":ui_amount,"uiAmountString":ui_amount_string}})
 }
 
 impl FixtureRpc {
+    fn remove_wsol_ata_when_requested(&self) -> Result<()> {
+        let Some(path) = std::env::var_os("FIN_DEV_SOLANA_FIXTURE_REMOVE_WSOL_ATA_FILE") else {
+            return Ok(());
+        };
+        let path = std::path::PathBuf::from(path);
+        if !path.exists() {
+            return Ok(());
+        }
+        let mut state = self.0.lock().map_err(|_| fixture_state_error())?;
+        let address = fin_solana::associated_token_address(
+            &state.wallet,
+            SWAP_INPUT_MINT,
+            fin_solana::token::TOKEN_PROGRAM_ID,
+        )?;
+        state.account_data.remove(&address);
+        state.token_amounts.remove(&address);
+        self.persist_state(&state)?;
+        std::fs::remove_file(path).map_err(|_| fixture_state_error())?;
+        Ok(())
+    }
+
+    fn take_next_meta_router(&self) -> Result<Option<String>> {
+        let Some(path) = std::env::var_os("FIN_DEV_SOLANA_FIXTURE_NEXT_META_ROUTER_FILE") else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(path);
+        let Ok(value) = std::fs::read_to_string(&path) else {
+            return Ok(None);
+        };
+        std::fs::remove_file(&path).map_err(|_| fixture_state_error())?;
+        let value = value.trim();
+        if matches!(
+            value,
+            "metis" | "jupiterz" | "jupiterz_native_input" | "jupiterz_native_output"
+        ) {
+            Ok(Some(value.to_owned()))
+        } else {
+            Err(FinError::validation(
+                "The synthetic Meta router selector must be metis or jupiterz.",
+            ))
+        }
+    }
+
     pub(super) fn next_fixture_counter(&self) -> Result<u64> {
         let mut state = self.0.lock().map_err(|_| fixture_state_error())?;
         state.blockhash_counter = state
@@ -610,6 +762,7 @@ impl FixtureRpc {
         let mut state = FixtureState {
             wallet: wallet.to_owned(),
             lamports: 2_000_000_000,
+            sponsor_lamports: default_sponsor_lamports(),
             blockhash_counter: 0,
             transactions: Vec::new(),
             account_data,
@@ -624,6 +777,7 @@ impl FixtureRpc {
             lost_meta_response_consumed: false,
             perps_state: None,
             perps_getblock_fault: None,
+            rpc_method_counts: BTreeMap::new(),
             meta_execution_in_progress: false,
         };
         if let Some(path) = fixture_state_path()? {
@@ -779,18 +933,52 @@ impl FixtureRpc {
         let instructions = transaction.message.instructions();
         if let Some(ix) = instructions.iter().find(|ix| {
             keys.get(usize::from(ix.program_id_index))
-                .is_some_and(|key| key.to_string() == fin_jupiter::swap::JUPITER_V6_PROGRAM)
+                .is_some_and(|key| {
+                    key.to_string() == fin_jupiter::swap::JUPITER_V6_PROGRAM
+                        || key.to_string() == ORDER_ENGINE_PROGRAM
+                })
         }) {
-            let decoded = fin_jupiter::swap::decode_swap_instruction(&ix.data).map_err(|_| {
-                FinError::validation("The synthetic swap instruction is malformed.")
-            })?;
-            let shared = matches!(
-                decoded.variant,
-                fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
-                    | fin_jupiter::swap::SwapInstructionVariant::SharedExactOut
-                    | fin_jupiter::swap::SwapInstructionVariant::SharedTokenLedgerExactIn
-            );
-            let (source_meta, destination_meta) = if shared { (3, 6) } else { (2, 3) };
+            let is_jupiterz = keys
+                .get(usize::from(ix.program_id_index))
+                .is_some_and(|key| key.to_string() == ORDER_ENGINE_PROGRAM);
+            let decoded = (!is_jupiterz)
+                .then(|| fin_jupiter::swap::decode_swap_instruction(&ix.data).ok())
+                .flatten();
+            let v2_fields = fixture_swap_fields(&ix.data);
+            let (amount, output, source_meta, destination_meta) = if is_jupiterz {
+                if ix.data.len() != 37
+                    || ix.data[..8] != ORDER_ENGINE_FILL_DISCRIMINATOR
+                    || ix.data[32..] != [0, 0, 0, 0, 0]
+                {
+                    return Err(FinError::validation(
+                        "The synthetic JupiterZ Fill instruction is malformed.",
+                    ));
+                }
+                (
+                    u64::from_le_bytes(ix.data[8..16].try_into().unwrap_or_default()),
+                    u64::from_le_bytes(ix.data[16..24].try_into().unwrap_or_default()),
+                    2,
+                    4,
+                )
+            } else if let Some(fields) = v2_fields {
+                fields
+            } else {
+                let decoded = decoded.as_ref().ok_or_else(|| {
+                    FinError::validation("The synthetic swap instruction is malformed.")
+                })?;
+                let shared = matches!(
+                    decoded.variant,
+                    fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
+                        | fin_jupiter::swap::SwapInstructionVariant::SharedExactOut
+                        | fin_jupiter::swap::SwapInstructionVariant::SharedTokenLedgerExactIn
+                );
+                (
+                    decoded.input_amount.unwrap_or_default(),
+                    decoded.quoted_output,
+                    if shared { 3 } else { 2 },
+                    if shared { 6 } else { 3 },
+                )
+            };
             let source_index =
                 usize::from(*ix.accounts.get(source_meta).ok_or_else(|| {
                     FinError::validation("The synthetic swap source is missing.")
@@ -807,6 +995,8 @@ impl FixtureRpc {
                 .get(destination_index)
                 .ok_or_else(|| FinError::validation("The synthetic swap destination is missing."))?
                 .to_string();
+            let direct_native_input = is_jupiterz && source == ORDER_ENGINE_PROGRAM;
+            let direct_native_output = is_jupiterz && destination == ORDER_ENGINE_PROGRAM;
             let creates_source_ata = instructions.iter().any(|setup| {
                 setup.data == [1]
                     && keys
@@ -818,19 +1008,20 @@ impl FixtureRpc {
                         .and_then(|index| keys.get(usize::from(*index)))
                         .is_some_and(|key| key.to_string() == source)
             });
-            if !matches!(
-                decoded.variant,
-                fin_jupiter::swap::SwapInstructionVariant::ExactIn
-                    | fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
-            ) {
+            if !is_jupiterz
+                && v2_fields.is_none()
+                && !matches!(
+                    decoded.as_ref().map(|item| item.variant),
+                    Some(
+                        fin_jupiter::swap::SwapInstructionVariant::ExactIn
+                            | fin_jupiter::swap::SwapInstructionVariant::SharedExactIn
+                    )
+                )
+            {
                 return Err(FinError::validation(
                     "The synthetic swap instruction is not the reviewed exact-in layout.",
                 ));
             }
-            let amount = decoded
-                .input_amount
-                .ok_or_else(|| FinError::validation("The synthetic swap input is missing."))?;
-            let output = decoded.quoted_output;
             let mut state = self.0.lock().unwrap();
             let created_source_ata =
                 creates_source_ata && !state.account_data.contains_key(&source);
@@ -857,24 +1048,113 @@ impl FixtureRpc {
                     state.token_amounts.insert(source.clone(), 0);
                 }
             }
-            let source_before = *state.token_amounts.get(&source).ok_or_else(|| {
-                FinError::validation("The synthetic swap source account is absent.")
-            })?;
-            let destination_before = *state.token_amounts.get(&destination).ok_or_else(|| {
-                FinError::validation("The synthetic swap destination account is absent.")
-            })?;
-            let native_input = instructions.iter().any(|setup| {
-                let program = keys.get(usize::from(setup.program_id_index));
-                program.is_some_and(|key| key.to_string() == "11111111111111111111111111111111")
-                    && setup.data.len() == 12
-                    && u32::from_le_bytes(setup.data[..4].try_into().unwrap_or_default()) == 2
+            // Native-input Jupiter transactions can create their wrapped-SOL ATA in
+            // the same transaction, so validate the independently quoted output
+            // after materializing that synthetic account in fixture state.
+            let source_mint = if direct_native_input {
+                keys.get(usize::from(*ix.accounts.get(6).ok_or_else(|| {
+                    FinError::validation("The synthetic JupiterZ input mint is missing.")
+                })?))
+                .ok_or_else(|| {
+                    FinError::validation("The synthetic JupiterZ input mint is missing.")
+                })?
+                .to_string()
+            } else {
+                account_mint(&state.account_data, &source)?
+            };
+            let creates_destination_ata = instructions.iter().any(|setup| {
+                setup.data == [1]
+                    && keys
+                        .get(usize::from(setup.program_id_index))
+                        .is_some_and(|key| key.to_string() == ASSOCIATED_TOKEN_PROGRAM)
                     && setup
                         .accounts
                         .get(1)
                         .and_then(|index| keys.get(usize::from(*index)))
-                        .is_some_and(|key| key.to_string() == source)
+                        .is_some_and(|key| key.to_string() == destination)
             });
-            let native_output = instructions.iter().any(|cleanup| {
+            let created_destination_ata =
+                creates_destination_ata && !state.account_data.contains_key(&destination);
+            if creates_destination_ata {
+                let expected_destination = fin_solana::associated_token_address(
+                    &state.wallet,
+                    SWAP_INPUT_MINT,
+                    fin_solana::token::TOKEN_PROGRAM_ID,
+                )?;
+                if destination != expected_destination {
+                    return Err(FinError::validation(
+                        "The synthetic ATA creation does not target the wallet's native-output account.",
+                    ));
+                }
+                if created_destination_ata {
+                    let wallet_address = state.wallet.clone();
+                    state.account_data.insert(
+                        destination.clone(),
+                        (
+                            fin_solana::token::TOKEN_PROGRAM_ID.into(),
+                            wrapped_token_account_data(&wallet_address, 0),
+                        ),
+                    );
+                    state.token_amounts.insert(destination.clone(), 0);
+                }
+            }
+            let destination_mint = if direct_native_output {
+                keys.get(usize::from(*ix.accounts.get(8).ok_or_else(|| {
+                    FinError::validation("The synthetic JupiterZ output mint is missing.")
+                })?))
+                .ok_or_else(|| {
+                    FinError::validation("The synthetic JupiterZ output mint is missing.")
+                })?
+                .to_string()
+            } else {
+                account_mint(&state.account_data, &destination)?
+            };
+            if swap_output_amount(amount, &source_mint, &destination_mint)? != output {
+                return Err(FinError::validation(
+                    "The synthetic swap output is outside the fixture quote bound.",
+                ));
+            }
+            let source_before = if direct_native_input {
+                0
+            } else {
+                *state.token_amounts.get(&source).ok_or_else(|| {
+                    FinError::validation("The synthetic swap source account is absent.")
+                })?
+            };
+            let destination_before = if direct_native_output {
+                0
+            } else {
+                *state.token_amounts.get(&destination).ok_or_else(|| {
+                    FinError::validation("The synthetic swap destination account is absent.")
+                })?
+            };
+            let native_input = direct_native_input
+                || instructions.iter().any(|setup| {
+                    let program = keys.get(usize::from(setup.program_id_index));
+                    program.is_some_and(|key| key.to_string() == "11111111111111111111111111111111")
+                        && setup.data.len() == 12
+                        && u32::from_le_bytes(setup.data[..4].try_into().unwrap_or_default()) == 2
+                        && setup
+                            .accounts
+                            .get(1)
+                            .and_then(|index| keys.get(usize::from(*index)))
+                            .is_some_and(|key| key.to_string() == source)
+                });
+            let native_output = direct_native_output
+                || instructions.iter().any(|cleanup| {
+                    cleanup.data == [9]
+                        && keys
+                            .get(usize::from(cleanup.program_id_index))
+                            .is_some_and(|key| {
+                                key.to_string() == fin_solana::token::TOKEN_PROGRAM_ID
+                            })
+                        && cleanup
+                            .accounts
+                            .first()
+                            .and_then(|index| keys.get(usize::from(*index)))
+                            .is_some_and(|key| key.to_string() == destination)
+                });
+            let closes_source_ata = instructions.iter().any(|cleanup| {
                 cleanup.data == [9]
                     && keys
                         .get(usize::from(cleanup.program_id_index))
@@ -883,24 +1163,52 @@ impl FixtureRpc {
                         .accounts
                         .first()
                         .and_then(|index| keys.get(usize::from(*index)))
-                        .is_some_and(|key| key.to_string() == destination)
+                        .is_some_and(|key| key.to_string() == source)
             });
-            let source_after = if native_input {
+            if (created_source_ata && !closes_source_ata)
+                || (created_destination_ata && !native_output)
+            {
+                return Err(FinError::validation(
+                    "The synthetic temporary wrapped-SOL account must close in the swap transaction.",
+                ));
+            }
+            let source_after = if direct_native_input {
+                0
+            } else if native_input {
                 source_before
             } else {
                 source_before.checked_sub(amount).ok_or_else(|| {
                     FinError::validation("The synthetic swap source balance is insufficient.")
                 })?
             };
-            let destination_after = destination_before.checked_add(output).ok_or_else(|| {
-                FinError::validation("The synthetic swap output exceeds its exact balance range.")
-            })?;
-            let fee = 5_000u64;
+            let destination_after = if direct_native_output {
+                0
+            } else {
+                destination_before.checked_add(output).ok_or_else(|| {
+                    FinError::validation(
+                        "The synthetic swap output exceeds its exact balance range.",
+                    )
+                })?
+            };
+            let sponsored_fee = is_jupiterz
+                && keys
+                    .first()
+                    .is_some_and(|key| key.to_string() == JUPITERZ_SYNTHETIC_MAKER);
+            let fee = if sponsored_fee { 0 } else { 5_000u64 };
             let wallet_before = state.lamports;
+            let sponsor_before = state.sponsor_lamports;
             let native_in_lamports = if native_input { amount } else { 0 };
             let native_out_lamports = if native_output { output } else { 0 };
-            let closed_rent = if native_output { 2_039_280 } else { 0 };
+            let closed_rent = if (native_output && !direct_native_output) || closes_source_ata {
+                WSOL_ACCOUNT_RENT_LAMPORTS
+            } else {
+                0
+            };
             let account_funding_lamports = if created_source_ata {
+                WSOL_ACCOUNT_RENT_LAMPORTS
+            } else {
+                0
+            } + if created_destination_ata {
                 WSOL_ACCOUNT_RENT_LAMPORTS
             } else {
                 0
@@ -914,6 +1222,13 @@ impl FixtureRpc {
                 .ok_or_else(|| {
                     FinError::validation("The synthetic wallet swap delta overflows.")
                 })?;
+            let sponsor_after = if sponsored_fee {
+                sponsor_before.checked_sub(5_000).ok_or_else(|| {
+                    FinError::validation("The synthetic JupiterZ sponsor balance is insufficient.")
+                })?
+            } else {
+                sponsor_before
+            };
             let source_position = keys
                 .iter()
                 .position(|key| key.to_string() == source)
@@ -926,50 +1241,93 @@ impl FixtureRpc {
                 .ok_or_else(|| {
                 FinError::validation("The synthetic message omits its output account.")
             })?;
-            let input_mint = account_mint(&state.account_data, &source)?;
-            let output_mint = account_mint(&state.account_data, &destination)?;
-            let input_program = state
-                .account_data
-                .get(&source)
-                .map(|entry| entry.0.clone())
-                .ok_or_else(|| FinError::validation("The synthetic input account is absent."))?;
-            let output_program = state
-                .account_data
-                .get(&destination)
-                .map(|entry| entry.0.clone())
-                .ok_or_else(|| FinError::validation("The synthetic output account is absent."))?;
+            if sponsored_fee && !direct_native_input && !direct_native_output {
+                let wallet_key = state.wallet.clone();
+                let wallet_pays_created_ata = instructions.iter().any(|setup| {
+                    setup.data == [1]
+                        && keys
+                            .get(usize::from(setup.program_id_index))
+                            .is_some_and(|key| key.to_string() == ASSOCIATED_TOKEN_PROGRAM)
+                        && setup
+                            .accounts
+                            .first()
+                            .and_then(|index| keys.get(usize::from(*index)))
+                            .is_some_and(|key| key.to_string() == wallet_key)
+                });
+                if !wallet_pays_created_ata {
+                    return Err(FinError::validation(
+                        "The sponsored JupiterZ fixture must create the wallet-owned ATA with wallet funds.",
+                    ));
+                }
+            }
+            let input_mint = if direct_native_input {
+                source_mint.clone()
+            } else {
+                account_mint(&state.account_data, &source)?
+            };
+            let output_mint = if direct_native_output {
+                destination_mint.clone()
+            } else {
+                account_mint(&state.account_data, &destination)?
+            };
+            let input_program = if direct_native_input {
+                mint_profile(&source_mint).0.to_owned()
+            } else {
+                state
+                    .account_data
+                    .get(&source)
+                    .map(|entry| entry.0.clone())
+                    .ok_or_else(|| FinError::validation("The synthetic input account is absent."))?
+            };
+            let output_program = if direct_native_output {
+                mint_profile(&destination_mint).0.to_owned()
+            } else {
+                state
+                    .account_data
+                    .get(&destination)
+                    .map(|entry| entry.0.clone())
+                    .ok_or_else(|| {
+                        FinError::validation("The synthetic output account is absent.")
+                    })?
+            };
             let input_decimals = mint_profile(&input_mint).1;
             let output_decimals = mint_profile(&output_mint).1;
-            let mut pre_token_balances = vec![
-                token_balance(
+            let mut pre_token_balances = Vec::new();
+            if !direct_native_input && !created_source_ata {
+                pre_token_balances.push(token_balance(
                     source_position,
                     &input_mint,
                     &state.wallet,
                     &input_program,
                     input_decimals,
                     source_before,
-                ),
-                token_balance(
+                ));
+            }
+            if !direct_native_output && !created_destination_ata {
+                pre_token_balances.push(token_balance(
                     destination_position,
                     &output_mint,
                     &state.wallet,
                     &output_program,
                     output_decimals,
                     destination_before,
-                ),
-            ];
-            if created_source_ata {
-                pre_token_balances.remove(0);
+                ));
             }
-            let mut post_token_balances = vec![token_balance(
-                source_position,
-                &input_mint,
-                &state.wallet,
-                &input_program,
-                input_decimals,
-                source_after,
-            )];
-            if !native_output {
+            let mut post_token_balances = Vec::new();
+            if !direct_native_input && !closes_source_ata {
+                post_token_balances.push(token_balance(
+                    source_position,
+                    &input_mint,
+                    &state.wallet,
+                    &input_program,
+                    input_decimals,
+                    source_after,
+                ));
+            }
+            // Source and destination accounts can have different lifecycles:
+            // closing a temporary WSOL input must not hide the persistent
+            // destination token-account balance from settlement proof.
+            if !direct_native_output && !native_output {
                 post_token_balances.push(token_balance(
                     destination_position,
                     &output_mint,
@@ -986,14 +1344,24 @@ impl FixtureRpc {
                 .ok_or_else(|| {
                     FinError::validation("The synthetic transaction has no signature.")
                 })?;
-            state.token_amounts.insert(source, source_after);
-            if native_output {
+            if direct_native_input {
+                // Direct native input has no user WSOL token account.
+            } else if closes_source_ata {
+                state.account_data.remove(&source);
+                state.token_amounts.remove(&source);
+            } else {
+                state.token_amounts.insert(source, source_after);
+            }
+            if direct_native_output {
+                // Direct native output credits wallet SOL without a WSOL ATA.
+            } else if native_output {
                 state.account_data.remove(&destination);
                 state.token_amounts.remove(&destination);
             } else {
                 state.token_amounts.insert(destination, destination_after);
             }
             state.lamports = wallet_after;
+            state.sponsor_lamports = sponsor_after;
             let mut pre_balances = vec![0u64; keys.len()];
             let mut post_balances = vec![0u64; keys.len()];
             if let Some(wallet_index) = keys.iter().position(|key| key.to_string() == state.wallet)
@@ -1001,10 +1369,21 @@ impl FixtureRpc {
                 pre_balances[wallet_index] = wallet_before;
                 post_balances[wallet_index] = wallet_after;
             }
-            if created_source_ata {
+            if sponsored_fee {
+                let sponsor_index = keys
+                    .iter()
+                    .position(|key| key.to_string() == JUPITERZ_SYNTHETIC_MAKER)
+                    .ok_or_else(|| FinError::validation("The JupiterZ sponsor is missing."))?;
+                pre_balances[sponsor_index] = sponsor_before;
+                post_balances[sponsor_index] = sponsor_after;
+            }
+            if created_source_ata && !closes_source_ata {
                 post_balances[source_position] = WSOL_ACCOUNT_RENT_LAMPORTS;
             }
-            if native_output {
+            if created_destination_ata && !native_output {
+                post_balances[destination_position] = WSOL_ACCOUNT_RENT_LAMPORTS;
+            }
+            if native_output && !direct_native_output && !created_destination_ata {
                 pre_balances[destination_position] = 2_039_280;
                 post_balances[destination_position] = 0;
             }
@@ -1289,6 +1668,16 @@ fn meta_request_selector_matches(selector: &str, request_id: &str) -> bool {
 #[async_trait]
 impl SolanaRpc for FixtureRpc {
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.remove_wsol_ata_when_requested()?;
+        {
+            let mut state = self.0.lock().unwrap();
+            let count = state
+                .rpc_method_counts
+                .entry(method.to_owned())
+                .or_default();
+            *count = count.saturating_add(1);
+            self.persist_state(&state)?;
+        }
         if let Some(value) = perps::shared_account_info(self, method, &params)? {
             return Ok(value);
         }
@@ -1311,7 +1700,7 @@ impl SolanaRpc for FixtureRpc {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let state = self.0.lock().unwrap();
-                json!({"context":{"slot":100},"value":if address==state.wallet {state.lamports} else {0}})
+                json!({"context":{"slot":100},"value":if address==state.wallet {state.lamports} else if address==JUPITERZ_SYNTHETIC_MAKER {state.sponsor_lamports} else {0}})
             }
             "getEpochInfo" => {
                 json!({"epoch":1,"slotIndex":100,"slotsInEpoch":432000,"absoluteSlot":100,"blockHeight":100,"transactionCount":1})
@@ -1495,6 +1884,7 @@ impl FixtureJupiterApi {
         amount: u64,
         input_mint: &str,
         output_mint: &str,
+        layout: FixtureSwapLayout,
     ) -> Result<solana_instruction::Instruction> {
         use solana_instruction::{AccountMeta, Instruction};
         use solana_pubkey::Pubkey;
@@ -1537,20 +1927,141 @@ impl FixtureJupiterApi {
             .parse::<Pubkey>()
             .map_err(|_| FinError::validation("The Saber program address is invalid."))?;
         let output_amount = swap_output_amount(amount, input_mint, output_mint)?;
-        let shared = mint_profile(input_mint).0 == fin_solana::token::TOKEN_2022_PROGRAM_ID
-            || mint_profile(output_mint).0 == fin_solana::token::TOKEN_2022_PROGRAM_ID;
-        let mut data = if shared {
-            vec![193, 32, 155, 51, 65, 214, 156, 129, 0]
-        } else {
-            vec![229, 23, 203, 151, 122, 227, 173, 42]
+        let legacy_shared = layout == FixtureSwapLayout::Legacy
+            && (mint_profile(input_mint).0 == fin_solana::token::TOKEN_2022_PROGRAM_ID
+                || mint_profile(output_mint).0 == fin_solana::token::TOKEN_2022_PROGRAM_ID);
+        let v2_shared = layout == FixtureSwapLayout::SharedAccountsRouteV2;
+        let shared = legacy_shared || v2_shared;
+        let mut data = match layout {
+            FixtureSwapLayout::Legacy if legacy_shared => {
+                vec![193, 32, 155, 51, 65, 214, 156, 129, 0]
+            }
+            FixtureSwapLayout::Legacy => {
+                vec![229, 23, 203, 151, 122, 227, 173, 42]
+            }
+            FixtureSwapLayout::RouteV2 => ROUTE_V2_DISCRIMINATOR.to_vec(),
+            FixtureSwapLayout::SharedAccountsRouteV2 => {
+                [SHARED_ROUTE_V2_DISCRIMINATOR.as_slice(), &[0]].concat()
+            }
+            FixtureSwapLayout::JupiterZ
+            | FixtureSwapLayout::JupiterZNativeInput
+            | FixtureSwapLayout::JupiterZNativeOutput => {
+                return Err(FinError::validation(
+                    "JupiterZ uses the OrderEngine fill instruction, not a Jupiter route instruction.",
+                ));
+            }
         };
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&[0, 100, 0, 1]);
-        data.extend_from_slice(&amount.to_le_bytes());
-        data.extend_from_slice(&output_amount.to_le_bytes());
-        data.extend_from_slice(&50u16.to_le_bytes());
-        data.push(0);
-        let accounts = if shared {
+        match layout {
+            FixtureSwapLayout::Legacy => {
+                data.extend_from_slice(&1u32.to_le_bytes());
+                data.extend_from_slice(&[0, 100, 0, 1]);
+                data.extend_from_slice(&amount.to_le_bytes());
+                data.extend_from_slice(&output_amount.to_le_bytes());
+                data.extend_from_slice(&50u16.to_le_bytes());
+                data.push(0);
+            }
+            FixtureSwapLayout::RouteV2 | FixtureSwapLayout::SharedAccountsRouteV2 => {
+                data.extend_from_slice(&amount.to_le_bytes());
+                data.extend_from_slice(&output_amount.to_le_bytes());
+                data.extend_from_slice(&50u16.to_le_bytes());
+                data.extend_from_slice(&0u16.to_le_bytes());
+                data.extend_from_slice(&0u16.to_le_bytes());
+                data.extend_from_slice(&1u32.to_le_bytes());
+                data.push(38); // MeteoraDlmm, a no-payload variant in RoutePlanStepV2.
+                data.extend_from_slice(&10_000u16.to_le_bytes());
+                data.extend_from_slice(&[0, 1]);
+            }
+            FixtureSwapLayout::JupiterZ
+            | FixtureSwapLayout::JupiterZNativeInput
+            | FixtureSwapLayout::JupiterZNativeOutput => {
+                unreachable!("JupiterZ does not use a Jupiter route")
+            }
+        }
+        let accounts = if v2_shared {
+            let authority = Pubkey::find_program_address(&[b"authority", &[0]], &program).0;
+            let program_source = fin_solana::associated_token_address(
+                &authority.to_string(),
+                input_mint,
+                mint_profile(input_mint).0,
+            )?
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The shared route source account is invalid."))?;
+            let program_destination = fin_solana::associated_token_address(
+                &authority.to_string(),
+                output_mint,
+                mint_profile(output_mint).0,
+            )?
+            .parse::<Pubkey>()
+            .map_err(|_| {
+                FinError::validation("The shared route destination account is invalid.")
+            })?;
+            {
+                let mut state = self.rpc.0.lock().unwrap();
+                for (address, mint, token_program) in [
+                    (program_source, input_mint, mint_profile(input_mint).0),
+                    (
+                        program_destination,
+                        output_mint,
+                        mint_profile(output_mint).0,
+                    ),
+                ] {
+                    let address = address.to_string();
+                    if !state.account_data.contains_key(&address) {
+                        state.account_data.insert(
+                            address.clone(),
+                            (
+                                token_program.into(),
+                                token_account_data(mint, &authority.to_string(), 0),
+                            ),
+                        );
+                        state.token_amounts.insert(address, 0);
+                    }
+                }
+            }
+            let source_program = mint_profile(input_mint)
+                .0
+                .parse::<Pubkey>()
+                .map_err(|_| FinError::validation("The source token program is invalid."))?;
+            let destination_program = mint_profile(output_mint)
+                .0
+                .parse::<Pubkey>()
+                .map_err(|_| FinError::validation("The destination token program is invalid."))?;
+            vec![
+                AccountMeta::new_readonly(authority, false),
+                AccountMeta::new_readonly(wallet, true),
+                AccountMeta::new(input, false),
+                AccountMeta::new(program_source, false),
+                AccountMeta::new(program_destination, false),
+                AccountMeta::new(output, false),
+                AccountMeta::new_readonly(source_mint, false),
+                AccountMeta::new_readonly(destination_mint, false),
+                AccountMeta::new_readonly(source_program, false),
+                AccountMeta::new_readonly(destination_program, false),
+                AccountMeta::new_readonly(event_authority, false),
+                AccountMeta::new_readonly(program, false),
+            ]
+        } else if layout == FixtureSwapLayout::RouteV2 {
+            let source_program = mint_profile(input_mint)
+                .0
+                .parse::<Pubkey>()
+                .map_err(|_| FinError::validation("The source token program is invalid."))?;
+            let destination_program = mint_profile(output_mint)
+                .0
+                .parse::<Pubkey>()
+                .map_err(|_| FinError::validation("The destination token program is invalid."))?;
+            vec![
+                AccountMeta::new_readonly(wallet, true),
+                AccountMeta::new(input, false),
+                AccountMeta::new(output, false),
+                AccountMeta::new_readonly(source_mint, false),
+                AccountMeta::new_readonly(destination_mint, false),
+                AccountMeta::new_readonly(source_program, false),
+                AccountMeta::new_readonly(destination_program, false),
+                AccountMeta::new_readonly(program, false), // no optional destination account
+                AccountMeta::new_readonly(event_authority, false),
+                AccountMeta::new_readonly(program, false),
+            ]
+        } else if shared {
             let authority = Pubkey::find_program_address(&[b"authority", &[0]], &program).0;
             let program_source = fin_solana::associated_token_address(
                 &authority.to_string(),
@@ -1656,7 +2167,10 @@ impl FixtureJupiterApi {
         input_mint: &str,
         output_mint: &str,
         blockhash: solana_hash::Hash,
+        layout: FixtureSwapLayout,
+        expire_at: Option<i64>,
     ) -> Result<String> {
+        use ed25519_dalek::{Signer, SigningKey};
         use solana_message::{Message, VersionedMessage};
         use solana_pubkey::Pubkey;
         use solana_signature::Signature;
@@ -1666,7 +2180,10 @@ impl FixtureJupiterApi {
             .parse::<Pubkey>()
             .map_err(|_| FinError::validation("The synthetic wallet address is invalid."))?;
         let mut instructions = Vec::new();
-        if input_mint == SWAP_INPUT_MINT {
+        let mut closes_created_input_ata = false;
+        let native_input_direct = layout == FixtureSwapLayout::JupiterZNativeInput;
+        let native_output_direct = layout == FixtureSwapLayout::JupiterZNativeOutput;
+        if input_mint == SWAP_INPUT_MINT && !native_input_direct {
             let input_address = fin_solana::associated_token_address(
                 &self.wallet,
                 SWAP_INPUT_MINT,
@@ -1684,6 +2201,7 @@ impl FixtureJupiterApi {
             })?;
             if !input_exists {
                 instructions.push(create_wsol_ata_instruction(&wallet, &input_account)?);
+                closes_created_input_ata = true;
             }
             let mut transfer_data = 2u32.to_le_bytes().to_vec();
             transfer_data.extend_from_slice(&amount.to_le_bytes());
@@ -1707,8 +2225,40 @@ impl FixtureJupiterApi {
                 data: vec![17],
             });
         }
-        instructions.push(self.swap_instruction(amount, input_mint, output_mint)?);
-        if output_mint == SWAP_INPUT_MINT {
+        if output_mint == SWAP_INPUT_MINT && !native_output_direct {
+            let output_address = fin_solana::associated_token_address(
+                &self.wallet,
+                SWAP_INPUT_MINT,
+                fin_solana::token::TOKEN_PROGRAM_ID,
+            )?;
+            let output_exists = self
+                .rpc
+                .0
+                .lock()
+                .unwrap()
+                .account_data
+                .contains_key(&output_address);
+            if !output_exists {
+                let output_account = output_address.parse::<Pubkey>().map_err(|_| {
+                    FinError::validation("The synthetic wrapped-SOL account is invalid.")
+                })?;
+                instructions.push(create_wsol_ata_instruction(&wallet, &output_account)?);
+            }
+        }
+        let route_instruction = if layout.is_jupiterz() {
+            self.jupiterz_fill_instruction(
+                amount,
+                input_mint,
+                output_mint,
+                layout,
+                expire_at
+                    .ok_or_else(|| FinError::validation("JupiterZ fixture expiry is missing."))?,
+            )?
+        } else {
+            self.swap_instruction(amount, input_mint, output_mint, layout)?
+        };
+        instructions.push(route_instruction);
+        if output_mint == SWAP_INPUT_MINT && !native_output_direct {
             let output_account = fin_solana::associated_token_address(
                 &self.wallet,
                 SWAP_INPUT_MINT,
@@ -1727,10 +2277,39 @@ impl FixtureJupiterApi {
                 ],
                 data: vec![9],
             });
+        } else if closes_created_input_ata {
+            let input_account = fin_solana::associated_token_address(
+                &self.wallet,
+                SWAP_INPUT_MINT,
+                fin_solana::token::TOKEN_PROGRAM_ID,
+            )?
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The synthetic wrapped-SOL account is invalid."))?;
+            instructions.push(solana_instruction::Instruction {
+                program_id: fin_solana::token::TOKEN_PROGRAM_ID
+                    .parse()
+                    .map_err(|_| FinError::validation("The synthetic token program is invalid."))?,
+                accounts: vec![
+                    solana_instruction::AccountMeta::new(input_account, false),
+                    solana_instruction::AccountMeta::new(wallet, false),
+                    solana_instruction::AccountMeta::new_readonly(wallet, true),
+                ],
+                data: vec![9],
+            });
         }
-        let message = Message::new_with_blockhash(&instructions, Some(&wallet), &blockhash);
+        let maker =
+            Pubkey::new_from_array(SigningKey::from_bytes(&[92; 32]).verifying_key().to_bytes());
+        let fee_payer = if layout.is_jupiterz() {
+            &maker
+        } else {
+            &wallet
+        };
+        // JupiterZ's remote maker sponsors the network fee, while any native
+        // ATA create instruction above still names the wallet as its payer.
+        let message = Message::new_with_blockhash(&instructions, Some(fee_payer), &blockhash);
+        let signature_count = usize::from(message.header.num_required_signatures);
         let transaction = VersionedTransaction {
-            signatures: vec![Signature::default()],
+            signatures: (0..signature_count).map(|_| Signature::default()).collect(),
             message: VersionedMessage::Legacy(message),
         };
         let bytes = bincode::DefaultOptions::new()
@@ -1740,7 +2319,192 @@ impl FixtureJupiterApi {
             .with_limit(128 * 1024)
             .serialize(&transaction)
             .map_err(|_| FinError::validation("The synthetic order could not be serialized."))?;
-        Ok(STANDARD.encode(bytes))
+        let encoded = STANDARD.encode(bytes);
+        if layout.is_jupiterz() {
+            let mut transaction: VersionedTransaction = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_little_endian()
+                .reject_trailing_bytes()
+                .with_limit(128 * 1024)
+                .deserialize(&STANDARD.decode(&encoded).map_err(|_| {
+                    FinError::validation("The synthetic JupiterZ order could not be decoded.")
+                })?)
+                .map_err(|_| FinError::validation("The synthetic JupiterZ order is malformed."))?;
+            let message_bytes = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_little_endian()
+                .serialize(&transaction.message)
+                .map_err(|_| {
+                    FinError::validation("The synthetic JupiterZ message is malformed.")
+                })?;
+            let VersionedMessage::Legacy(message) = &transaction.message else {
+                return Err(FinError::validation(
+                    "The synthetic JupiterZ order must be legacy.",
+                ));
+            };
+            let maker_index = message
+                .account_keys
+                .iter()
+                .take(usize::from(message.header.num_required_signatures))
+                .position(|key| key == &maker)
+                .ok_or_else(|| FinError::validation("The JupiterZ maker signer is missing."))?;
+            transaction.signatures[maker_index] = Signature::from(
+                SigningKey::from_bytes(&[92; 32])
+                    .sign(&message_bytes)
+                    .to_bytes(),
+            );
+            let signed = bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_little_endian()
+                .serialize(&transaction)
+                .map_err(|_| {
+                    FinError::validation(
+                        "The synthetic JupiterZ signature could not be serialized.",
+                    )
+                })?;
+            return Ok(STANDARD.encode(signed));
+        }
+        Ok(encoded)
+    }
+
+    fn jupiterz_fill_instruction(
+        &self,
+        amount: u64,
+        input_mint: &str,
+        output_mint: &str,
+        layout: FixtureSwapLayout,
+        expire_at: i64,
+    ) -> Result<solana_instruction::Instruction> {
+        use ed25519_dalek::SigningKey;
+        use solana_instruction::{AccountMeta, Instruction};
+        use solana_pubkey::Pubkey;
+
+        let wallet = self
+            .wallet
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The synthetic wallet address is invalid."))?;
+        // A distinct remote maker signer is part of JupiterZ's Fill message.
+        let maker =
+            Pubkey::new_from_array(SigningKey::from_bytes(&[92; 32]).verifying_key().to_bytes());
+        let input_program = mint_profile(input_mint)
+            .0
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The JupiterZ input token program is invalid."))?;
+        let output_program = mint_profile(output_mint)
+            .0
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The JupiterZ output token program is invalid."))?;
+        let input_mint_key = input_mint
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The JupiterZ input mint is invalid."))?;
+        let output_mint_key = output_mint
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The JupiterZ output mint is invalid."))?;
+        let user_source = if layout == FixtureSwapLayout::JupiterZNativeInput {
+            ORDER_ENGINE_PROGRAM.parse::<Pubkey>().map_err(|_| {
+                FinError::validation("The JupiterZ native-input sentinel is invalid.")
+            })?
+        } else {
+            fin_solana::associated_token_address(
+                &wallet.to_string(),
+                input_mint,
+                mint_profile(input_mint).0,
+            )?
+            .parse::<Pubkey>()
+            .map_err(|_| FinError::validation("The JupiterZ user source account is invalid."))?
+        };
+        let maker_source = fin_solana::associated_token_address(
+            &maker.to_string(),
+            input_mint,
+            mint_profile(input_mint).0,
+        )?
+        .parse::<Pubkey>()
+        .map_err(|_| FinError::validation("The JupiterZ maker source account is invalid."))?;
+        let user_destination = if layout == FixtureSwapLayout::JupiterZNativeOutput {
+            ORDER_ENGINE_PROGRAM.parse::<Pubkey>().map_err(|_| {
+                FinError::validation("The JupiterZ native-output sentinel is invalid.")
+            })?
+        } else {
+            fin_solana::associated_token_address(
+                &wallet.to_string(),
+                output_mint,
+                mint_profile(output_mint).0,
+            )?
+            .parse::<Pubkey>()
+            .map_err(|_| {
+                FinError::validation("The JupiterZ user destination account is invalid.")
+            })?
+        };
+        let maker_destination = fin_solana::associated_token_address(
+            &maker.to_string(),
+            output_mint,
+            mint_profile(output_mint).0,
+        )?
+        .parse::<Pubkey>()
+        .map_err(|_| FinError::validation("The JupiterZ maker destination account is invalid."))?;
+        {
+            let mut state = self.rpc.0.lock().unwrap();
+            for (address, mint, owner, program) in [
+                (maker_source, input_mint_key, maker, input_program),
+                (maker_destination, output_mint_key, maker, output_program),
+            ] {
+                let address = address.to_string();
+                state
+                    .account_data
+                    .entry(address.clone())
+                    .or_insert_with(|| {
+                        (
+                            program.to_string(),
+                            token_account_data(&mint.to_string(), &owner.to_string(), 100_000_000),
+                        )
+                    });
+                state.token_amounts.entry(address).or_insert(100_000_000);
+            }
+        }
+        let output = swap_output_amount(amount, input_mint, output_mint)?;
+        let mut data = ORDER_ENGINE_FILL_DISCRIMINATOR.to_vec();
+        data.extend_from_slice(&amount.to_le_bytes());
+        data.extend_from_slice(&output.to_le_bytes());
+        data.extend_from_slice(&expire_at.to_le_bytes());
+        // Jupiter's OrderEngine Fill adds fee_bps (u16), flags (u8), and
+        // integrator_fee_bps (u16) after the IDL-defined arguments.
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.push(0); // exact-in, no integrator-fee-side bit set
+        data.extend_from_slice(&0u16.to_le_bytes());
+        Ok(Instruction {
+            program_id: ORDER_ENGINE_PROGRAM.parse::<Pubkey>().map_err(|_| {
+                FinError::validation("The JupiterZ OrderEngine program is invalid.")
+            })?,
+            accounts: vec![
+                AccountMeta::new(wallet, true),
+                AccountMeta::new(maker, true),
+                if layout == FixtureSwapLayout::JupiterZNativeInput {
+                    AccountMeta::new_readonly(user_source, false)
+                } else {
+                    AccountMeta::new(user_source, false)
+                },
+                AccountMeta::new(maker_source, false),
+                if layout == FixtureSwapLayout::JupiterZNativeOutput {
+                    AccountMeta::new_readonly(user_destination, false)
+                } else {
+                    AccountMeta::new(user_destination, false)
+                },
+                AccountMeta::new(maker_destination, false),
+                AccountMeta::new_readonly(input_mint_key, false),
+                AccountMeta::new_readonly(input_program, false),
+                AccountMeta::new_readonly(output_mint_key, false),
+                AccountMeta::new_readonly(output_program, false),
+                AccountMeta::new_readonly(
+                    "11111111111111111111111111111111"
+                        .parse::<Pubkey>()
+                        .map_err(|_| {
+                            FinError::validation("The synthetic system program is invalid.")
+                        })?,
+                    false,
+                ),
+            ],
+            data,
+        })
     }
 }
 
@@ -1756,6 +2520,9 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
         _priority: fin_jupiter::RequestPriority,
         _max_wait: Duration,
     ) -> Result<Value> {
+        // Provider fixture construction inspects account state directly before
+        // the adapter's RPC preflight, so consume this scenario marker here too.
+        self.rpc.remove_wsol_ata_when_requested()?;
         if let Some(value) = jlp::api_request(self, method.clone(), path, body.clone()).await? {
             return Ok(value);
         }
@@ -1788,7 +2555,9 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             let output_mint = query_parameter(path, "outputMint").unwrap_or(SWAP_OUTPUT_MINT);
             let output_amount = swap_output_amount(amount, input_mint, output_mint)?;
             let blockhash = self.rpc.next_fixture_blockhash()?;
-            let swap_instruction = self.swap_instruction(amount, input_mint, output_mint)?;
+            let layout = FixtureSwapLayout::selected(path, amount, input_mint, output_mint);
+            let swap_instruction =
+                self.swap_instruction(amount, input_mint, output_mint, layout)?;
             let accounts = swap_instruction
                 .accounts
                 .iter()
@@ -1803,6 +2572,7 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             let native_wrap = query_parameter(path, "wrapAndUnwrapSol") == Some("true")
                 && input_mint == SWAP_INPUT_MINT;
             let mut setup_instructions = Vec::new();
+            let mut input_cleanup_instruction = None;
             if native_wrap {
                 let source = fin_solana::associated_token_address(
                     &self.wallet,
@@ -1835,6 +2605,15 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
                         ],
                         "data":STANDARD.encode(create_wsol_ata_instruction(&payer, &account)?.data)
                     }));
+                    input_cleanup_instruction = Some(json!({
+                        "programId":fin_solana::token::TOKEN_PROGRAM_ID,
+                        "accounts":[
+                            {"pubkey":source,"isSigner":false,"isWritable":true},
+                            {"pubkey":self.wallet,"isSigner":false,"isWritable":true},
+                            {"pubkey":self.wallet,"isSigner":true,"isWritable":false}
+                        ],
+                        "data":STANDARD.encode([9u8])
+                    }));
                 }
                 setup_instructions.push(json!({
                     "programId":"11111111111111111111111111111111",
@@ -1849,6 +2628,40 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             }
             let native_unwrap = query_parameter(path, "wrapAndUnwrapSol") == Some("true")
                 && output_mint == SWAP_INPUT_MINT;
+            if native_unwrap {
+                let destination = fin_solana::associated_token_address(
+                    &self.wallet,
+                    SWAP_INPUT_MINT,
+                    fin_solana::token::TOKEN_PROGRAM_ID,
+                )?;
+                let destination_exists = self
+                    .rpc
+                    .0
+                    .lock()
+                    .unwrap()
+                    .account_data
+                    .contains_key(&destination);
+                if !destination_exists {
+                    let payer = self.wallet.parse::<solana_pubkey::Pubkey>().map_err(|_| {
+                        FinError::validation("The synthetic wallet address is invalid.")
+                    })?;
+                    let account = destination.parse::<solana_pubkey::Pubkey>().map_err(|_| {
+                        FinError::validation("The synthetic wrapped-SOL account is invalid.")
+                    })?;
+                    setup_instructions.push(json!({
+                        "programId":ASSOCIATED_TOKEN_PROGRAM,
+                        "accounts":[
+                            {"pubkey":self.wallet,"isSigner":true,"isWritable":true},
+                            {"pubkey":destination,"isSigner":false,"isWritable":true},
+                            {"pubkey":self.wallet,"isSigner":false,"isWritable":false},
+                            {"pubkey":SWAP_INPUT_MINT,"isSigner":false,"isWritable":false},
+                            {"pubkey":"11111111111111111111111111111111","isSigner":false,"isWritable":false},
+                            {"pubkey":fin_solana::token::TOKEN_PROGRAM_ID,"isSigner":false,"isWritable":false}
+                        ],
+                        "data":STANDARD.encode(create_wsol_ata_instruction(&payer, &account)?.data)
+                    }));
+                }
+            }
             let cleanup_instruction = if native_unwrap {
                 let destination = fin_solana::associated_token_address(
                     &self.wallet,
@@ -1861,7 +2674,7 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
                     "data":STANDARD.encode([9u8])
                 }))
             } else {
-                None
+                input_cleanup_instruction
             };
             return Ok(json!({
                 "inputMint":input_mint,
@@ -1895,18 +2708,31 @@ impl fin_jupiter::JupiterApi for FixtureJupiterApi {
             let output_mint = query_parameter(path, "outputMint").unwrap_or(SWAP_OUTPUT_MINT);
             let output_amount = swap_output_amount(amount, input_mint, output_mint)?;
             let blockhash = self.rpc.next_fixture_blockhash()?;
+            let router_selector = self
+                .rpc
+                .take_next_meta_router()?
+                .unwrap_or_else(|| "metis".to_owned());
+            let jupiterz = router_selector.starts_with("jupiterz");
+            let router = if jupiterz { "jupiterz" } else { "metis" };
+            let expire_at = jupiterz.then(|| chrono::Utc::now().timestamp() + 300);
+            let layout = match router_selector.as_str() {
+                "jupiterz_native_input" => FixtureSwapLayout::JupiterZNativeInput,
+                "jupiterz_native_output" => FixtureSwapLayout::JupiterZNativeOutput,
+                "jupiterz" => FixtureSwapLayout::JupiterZ,
+                _ => FixtureSwapLayout::selected(path, amount, input_mint, output_mint),
+            };
             let request_id =
                 format!("synthetic-order-{blockhash}-{amount}-{input_mint}-{output_mint}");
             return Ok(json!({
-                "transaction":self.order_transaction(amount, input_mint, output_mint, blockhash)?,
+                "transaction":self.order_transaction(amount, input_mint, output_mint, blockhash, layout, expire_at)?,
                 "requestId":request_id,
                 "outAmount":output_amount.to_string(),
-                "router":"metis",
+                "router":router,
                 "mode":"ExactIn",
-                "lastValidBlockHeight":1000,
+                "lastValidBlockHeight":if expire_at.is_some() { Value::Null } else { json!(1000) },
                 "feeBps":0,
                 "feeMint":null,
-                "expireAt":null
+                "expireAt":expire_at.map(|value| value.to_string())
             }));
         }
         if path == "/swap/v2/execute" && method == Method::POST {
@@ -2530,6 +3356,7 @@ mod focused_adapter_tests {
                 PYUSD_MINT,
                 SWAP_OUTPUT_MINT,
                 api.rpc.next_fixture_blockhash().unwrap(),
+                FixtureSwapLayout::Legacy,
             )
             .expect("exact target transaction");
         let independently_prepared = api
@@ -2538,6 +3365,7 @@ mod focused_adapter_tests {
                 PYUSD_MINT,
                 SWAP_OUTPUT_MINT,
                 api.rpc.next_fixture_blockhash().unwrap(),
+                FixtureSwapLayout::Legacy,
             )
             .expect("second independent transaction");
         assert_ne!(
