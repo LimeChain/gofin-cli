@@ -108,8 +108,9 @@ or wrong-chain evidence rejects that endpoint; a semantic contract revert seen
 before a winner fails the read closed. RPC reads have no overall or per-endpoint
 deadline and no HTTP total-response timeout. Further providers start when a
 failed or missing attempt releases a slot; a stalled pair waits for a response
-or caller cancellation. Separate snapshot, command and evidence deadlines can
-still cancel the caller's read. Typed state reads resolve one canonical hash
+or caller cancellation. Snapshot aggregation has no separate elapsed-time cutoff;
+the broker's 120-second outer read limit and command/evidence deadlines can still
+cancel the caller's read. Typed state reads resolve one canonical hash
 and retain it across racing header lookups, provider changes and shared-cache
 eviction. The bounded cache is not the authority for an in-flight request.
 Adapters continue to interpret original-envelope, receipt, financial effects and
@@ -509,11 +510,17 @@ bypass the broker's broad mutation gate. A busy execution queue causes operation
 and plan status to return durable progress promptly; reconciliation runs when
 available and is bounded as observation, never as financial dispatch. Revocation
 and submission admission are ordered by the store's atomic authority/CAS checks;
-revocation cannot recall an already admitted submission. Snapshot observers run
-concurrently with a 10-second evidence deadline and report partial coverage.
+revocation cannot recall an already admitted submission. The composite snapshot
+observer and EVM network router each admit at most four readers concurrently,
+without the former 10- and 8-second snapshot cutoffs. They wait for all selected
+readers to finish or for caller cancellation, preserve stable result ordering and
+abort their child tasks when dropped. An observer error, incomplete adapter
+evidence or unmatched scope selector can still produce partial coverage; elapsed
+time alone no longer produces a partial result at these aggregation layers.
+The broker's outer read request retains its 120-second deadline.
 Preparation/revalidation, reconciliation observations and external reads have
-120-second deadlines. The EVM snapshot observer separately retains its 8-second
-deadline. The RPC transport itself imposes no overall, per-endpoint or HTTP
+120-second deadlines. Binance's independent account-identity check retains its
+10-second bound. The RPC transport itself imposes no overall, per-endpoint or HTTP
 total-response timeout on reads; these higher-layer deadlines remain in force.
 Independent EVM reads overlap within each phase, with original request tags and
 final pending-nonce checks retained. The financial submission

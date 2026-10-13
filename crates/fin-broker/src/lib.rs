@@ -68,7 +68,7 @@ pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 const IPC_FRAME_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const IPC_CONFIGURATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const OBSERVER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const BINANCE_ACCOUNT_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 const BROKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_READ_OBSERVERS: usize = 4;
 pub const MAX_BROKER_CONNECTIONS: usize = 16;
@@ -1831,7 +1831,7 @@ impl BrokerRuntime {
                     )
                 })?;
             tokio::time::timeout(
-                OBSERVER_READ_TIMEOUT,
+                BINANCE_ACCOUNT_IDENTITY_TIMEOUT,
                 adapter.read("binance.account-identity", &json!({"account":name})),
             )
             .await
@@ -2660,11 +2660,7 @@ fn observer_label(adapter: &dyn Adapter, scope: &SnapshotScope) -> String {
 }
 
 impl CompositeObserver {
-    async fn observe(
-        &self,
-        scope: &SnapshotScope,
-        timeout: Duration,
-    ) -> fin_domain::Result<StateSnapshot> {
+    async fn observe(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
         let mut combined = StateSnapshot {
             state: FinancialState::default(),
             observed_at: now(),
@@ -2724,12 +2720,13 @@ impl CompositeObserver {
             let slots = slots.clone();
             observers.spawn(async move {
                 let label = observer_label(adapter.as_ref(), &scope);
-                let result = tokio::time::timeout(timeout, async {
-                    let _slot = slots.acquire_owned().await.expect("observer slots stay open");
-                    adapter.snapshot_scoped(&scope).await
-                }).await.unwrap_or_else(|_| Err(error("OBSERVER_READ_TIMEOUT", "snapshot",
-                        "The selected snapshot observer exceeded its read deadline.",
-                        "Retry the reported observer/network with a narrower scope; incomplete evidence cannot authorize a write.")));
+                // Limit simultaneous observers without cutting off a slow read.
+                // Dropping this JoinSet cancels running and queued observers.
+                let _slot = slots
+                    .acquire_owned()
+                    .await
+                    .expect("observer slots stay open");
+                let result = adapter.snapshot_scoped(&scope).await;
                 (index, label, result)
             });
         }
@@ -2854,12 +2851,11 @@ impl Adapter for CompositeObserver {
     }
 
     async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
-        self.observe(&SnapshotScope::default(), OBSERVER_READ_TIMEOUT)
-            .await
+        self.observe(&SnapshotScope::default()).await
     }
 
     async fn snapshot_scoped(&self, scope: &SnapshotScope) -> fin_domain::Result<StateSnapshot> {
-        self.observe(scope, OBSERVER_READ_TIMEOUT).await
+        self.observe(scope).await
     }
 
     async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
@@ -3866,6 +3862,7 @@ fn record_reserves_resource(value: &Value, resource: &ResourceId) -> fin_domain:
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod snapshot_read_tests;
     use fin_domain::boundaries::BoundaryAuthorizationRequest;
     use fin_domain::{
         Amount, OperationKind, OperationRequest, PreparedOperation, Quantity, ResourceAmount,
@@ -6833,34 +6830,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_observers_run_concurrently_and_timeout_with_named_partial_coverage() {
+    async fn snapshot_observers_run_concurrently_and_report_errors_with_named_partial_coverage() {
         let adapters = ["fast.rpc", "slow.rpc"]
             .into_iter()
             .map(|name| {
                 Arc::new(DelayedObserver {
                     name,
                     delay: Duration::from_millis(if name == "fast.rpc" { 10 } else { 180 }),
-                    fail: false,
+                    fail: name == "slow.rpc",
                     started: Arc::new(tokio::sync::Notify::new()),
                     calls: Arc::new(AtomicUsize::new(0)),
                 }) as Arc<dyn Adapter>
             })
             .collect();
         let runtime = delayed_runtime(adapters);
-        let start = std::time::Instant::now();
         let snapshot = runtime
             .observer
-            .observe(&SnapshotScope::default(), Duration::from_millis(40))
+            .observe(&SnapshotScope::default())
             .await
             .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(130));
         assert!(!snapshot.complete);
         assert!(snapshot.coverage.contains(&"fast.rpc".into()));
         assert!(
             snapshot
                 .pending
                 .iter()
-                .any(|pending| pending.contains("slow.rpc@slow.rpc:OBSERVER_READ_TIMEOUT"))
+                .any(|pending| pending.contains("slow.rpc@slow.rpc:SYNTHETIC_RPC_FAILED"))
         );
         assert!(!snapshot.coverage.contains(&"slow.rpc".into()));
         // Machine partial results retain the normal stable response shape.
@@ -7072,7 +7067,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_deadline_includes_waiting_for_bounded_slots() {
+    async fn cancelling_snapshot_aborts_active_observers_and_queued_slots() {
+        struct ActiveObserver(Arc<AtomicUsize>);
+        impl Drop for ActiveObserver {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        struct TrackedObserver {
+            inner: DelayedObserver,
+            active: Arc<AtomicUsize>,
+            peak: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl Adapter for TrackedObserver {
+            fn definitions(&self) -> Vec<Definition> {
+                self.inner.definitions()
+            }
+            fn connections(&self) -> Vec<fin_domain::ConnectionMetadata> {
+                self.inner.connections()
+            }
+            async fn snapshot(&self) -> fin_domain::Result<StateSnapshot> {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+                let _active = ActiveObserver(self.active.clone());
+                self.inner.snapshot().await
+            }
+            async fn read(&self, operation: &str, input: &Value) -> fin_domain::Result<Value> {
+                self.inner.read(operation, input).await
+            }
+            async fn prepare(
+                &self,
+                operation: &str,
+                input: &Value,
+            ) -> fin_domain::Result<PreparedOperation> {
+                self.inner.prepare(operation, input).await
+            }
+            async fn revalidate(
+                &self,
+                prepared: &PreparedOperation,
+            ) -> fin_domain::Result<PreparedOperation> {
+                self.inner.revalidate(prepared).await
+            }
+            async fn submit(
+                &self,
+                prepared: &PreparedOperation,
+                journal: Arc<dyn SubmissionJournal>,
+            ) -> fin_domain::Result<Submission> {
+                self.inner.submit(prepared, journal).await
+            }
+            async fn reconcile(
+                &self,
+                record: &OperationRecord,
+            ) -> fin_domain::Result<Reconciliation> {
+                self.inner.reconcile(record).await
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
         let runtime = delayed_runtime(
             [
                 "slow0.rpc",
@@ -7086,30 +7139,36 @@ mod tests {
             ]
             .into_iter()
             .map(|name| {
-                Arc::new(DelayedObserver {
-                    name,
-                    delay: Duration::from_secs(1),
-                    fail: false,
-                    started: Arc::new(tokio::sync::Notify::new()),
-                    calls: Arc::new(AtomicUsize::new(0)),
+                Arc::new(TrackedObserver {
+                    inner: DelayedObserver {
+                        name,
+                        delay: Duration::from_secs(1),
+                        fail: false,
+                        started: Arc::new(tokio::sync::Notify::new()),
+                        calls: calls.clone(),
+                    },
+                    active: active.clone(),
+                    peak: peak.clone(),
                 }) as Arc<dyn Adapter>
             })
             .collect(),
         );
-        let start = std::time::Instant::now();
-        let snapshot = runtime
-            .observer
-            .observe(&SnapshotScope::default(), Duration::from_millis(30))
-            .await
-            .unwrap();
-        assert!(start.elapsed() < Duration::from_millis(100));
-        assert!(!snapshot.complete);
+        // Only the caller cancels this read. The four waiting adapters must
+        // never start after cancellation, and all active futures must drop.
         assert!(
-            snapshot
-                .pending
-                .iter()
-                .all(|pending| pending.contains("OBSERVER_READ_TIMEOUT"))
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                runtime.observer.observe(&SnapshotScope::default()),
+            )
+            .await
+            .is_err()
         );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_READ_OBSERVERS);
+        assert_eq!(calls.load(Ordering::SeqCst), MAX_READ_OBSERVERS);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     #[test]

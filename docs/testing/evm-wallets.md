@@ -86,10 +86,16 @@ capability and evidence checks apply before accepting a response. There is no
 overall or per-endpoint RPC read deadline and no HTTP total-response timeout for
 reads. Later providers start only when a failed or missing attempt releases a
 slot. If both active providers stall, the read waits until one responds or its
-caller cancels it. Higher-level bounds remain separate: the broker snapshot
-observer retains its 10-second deadline, the EVM snapshot observer retains its
-8-second deadline, and preparation/revalidation, reconciliation observations and
-external-read stages retain their 120-second deadlines. Approval expiry is
+caller cancels it. The composite snapshot observer and EVM network router have no
+separate 10- or 8-second cutoff. Each aggregation layer admits at most four readers
+at once and waits for its selected readers to finish or for caller cancellation.
+Dropping aggregation aborts its child tasks; results remain in stable observer and
+network order. Actual errors, incomplete adapter evidence and missing scope
+selectors still report partial coverage, while a silent observer no longer causes
+a timed partial result at these layers. Higher-level bounds remain separate: the
+broker's outer read request, preparation/revalidation, reconciliation observations
+and external-read stages retain their 120-second deadlines. Binance's independent
+account-identity check retains its 10-second bound. Approval expiry is
 unchanged. A submitted transaction remains unresolved until its original
 identity can be reconciled; caller cancellation does not establish transaction
 failure.
@@ -148,9 +154,11 @@ remaining attempts and records a cancelled observation. This is independent
 of financial submission cancellation, whose original identity stays durable.
 
 Synthetic transport tests cover simultaneous reads, invalid-response rejection,
-missing evidence, bounded concurrency and loser cancellation. Broker/SQLite
-restart fixtures exercise the same transport through the Ethereum adapter and
-optional isolated CLI, preserving the original ID, hash, reservations and proof
+missing evidence, bounded concurrency and loser cancellation. Snapshot regressions
+cover reads beyond the former 8- and 10-second cutoffs, stable result ordering,
+partial coverage for actual failures and cancellation of child readers.
+Broker/SQLite restart fixtures exercise the same transport through the Ethereum
+adapter and optional isolated CLI, preserving the original ID, hash, reservations and proof
 with one signature and one broadcast. Public probes remain opt-in read-only
 checks; they do not establish live-write or native-approval evidence.
 

@@ -102,8 +102,9 @@ Keep ordinary preparation on adapter-selected state and installation-wide journa
 policy. Additive `SnapshotScope` selectors use physical resources, network IDs
 and exact assets; empty selectors retain the full view. Observer coverage remains
 explicit and incomplete evidence never substitutes for required write preflight.
-Read-only connections and snapshot observers run concurrently with finite bounds;
-mutations, reconciliation and runtime replacement retain a single ordering gate.
+Read-only connections and snapshot observers run concurrently with finite
+concurrency bounds; snapshot aggregation has no elapsed-time cutoff.
+Mutations, reconciliation and runtime replacement retain a single ordering gate.
 Configuration locks span dispatch so old policy cannot race protected maintenance.
 
 Progress observation heap-pins the financial execution future before wrapping it
@@ -111,13 +112,19 @@ in task-local and concurrent delivery state. Keeping the large composite future
 inline multiplied stack usage and crashed deposit revalidation on ordinary
 2 MiB workers in unoptimized macOS builds. Workflow regressions exercise public
 socket dispatch, progress delivery and real HTTP transport on that same stack
-budget. Validation, approval, timeout and recovery rules remain unchanged.
+budget. Financial validation, approval and recovery requirements remain unchanged.
 
-Higher-level evidence collection retains its own snapshot, preparation and
-reconciliation deadlines while financial dispatch and durable reconciliation
-keep their original identities. RPC reads have no overall or per-endpoint deadline
-and no HTTP total-response timeout. Start the first two eligible endpoints
-concurrently, with at most two attempts active. A failed or missing response
+The EVM router and composite observer wait for their selected snapshot readers to
+finish or for the caller to cancel; neither imposes the former 8- or 10-second
+cutoff. Each aggregation layer admits at most four readers at once, preserves
+stable result ordering and aborts its child tasks on cancellation. Actual observer
+errors, incomplete adapter evidence and unmatched scope selectors still produce
+partial coverage; a slow observer alone no longer produces a timed partial result.
+The broker's outer read deadline remains 120 seconds, and preparation and
+reconciliation retain their separate evidence deadlines. Financial dispatch and
+durable reconciliation keep their original identities. RPC reads have no overall
+or per-endpoint deadline and no HTTP total-response timeout. Start the first two
+eligible endpoints concurrently, with at most two attempts active. A failed or missing response
 releases its slot for the next configured provider. The first
 usable response to pass transport identity, shape, freshness and evidence checks
 wins; cancel the remaining attempts. Reject malformed or wrong-chain responses
